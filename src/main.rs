@@ -7,6 +7,7 @@ mod safety;
 mod scanner;
 
 use std::sync::mpsc;
+use std::path::PathBuf;
 
 use eframe::egui;
 
