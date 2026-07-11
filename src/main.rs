@@ -15,6 +15,8 @@ use scanner::{format_size, Recommend, ScanItem, Scanner};
 
 /// 后台扫描消息
 enum ScanMessage {
+    /// 扫描进度更新
+    Progress(f32),
     /// 扫描完成
     Done(Vec<ScanItem>, u64, u64), // (items, scan_time_ms, tab_index)
 }
@@ -51,18 +53,27 @@ fn main() -> eframe::Result {
 
             // 检查后台扫描结果
             if let Some(rx) = &SCAN_RX {
-                if let Ok(msg) = rx.try_recv() {
-                    if let Some(app) = &mut APP {
-                        match msg {
-                            ScanMessage::Done(items, time_ms, tab_idx) => {
+                loop {
+                    match rx.try_recv() {
+                        Ok(ScanMessage::Progress(p)) => {
+                            if let Some(app) = &mut APP {
+                                app.scan_progress = p;
+                            }
+                        }
+                        Ok(ScanMessage::Done(items, time_ms, tab_idx)) => {
+                            if let Some(app) = &mut APP {
                                 app.results[tab_idx as usize] = items;
                                 app.scan_states[tab_idx as usize] = ScanState::Done;
                                 app.scan_time_ms[tab_idx as usize] = time_ms;
+                                app.scan_progress = 1.0;
                                 let (total, free) = get_disk_info();
                                 app.disk_total = total;
                                 app.disk_free = free;
                             }
+                            SCAN_RX = None;
+                            break;
                         }
+                        Err(_) => break,
                     }
                 }
             }
@@ -277,7 +288,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
 
         if is_scanning {
-            // 扫描中：进度长条
+            // 扫描中：显示带百分比的进度长条
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.add(egui::Spinner::new().size(40.0));
@@ -286,13 +297,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 ui.add_space(5.0);
                 ui.label(egui::RichText::new(app.t("scanning_hint")).size(12.0).color(egui::Color32::GRAY));
                 ui.add_space(15.0);
-                // 扫描进度长条（不确定模式，动画效果）
-                let t = ctx.input(|i| i.time) as f32;
-                let progress = (t * 0.3).sin() * 0.5 + 0.5;
-                ui.add(egui::ProgressBar::new(progress)
+                // 真实进度百分比长条
+                let pct = (app.scan_progress * 100.0) as u32;
+                ui.add(egui::ProgressBar::new(app.scan_progress)
                     .desired_width(500.0)
                     .fill(egui::Color32::from_rgb(0, 200, 255))
-                    .text(app.t("scanning")));
+                    .text(format!("{}%", pct)));
             });
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if items.is_empty() {
@@ -492,10 +502,33 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     let tab = app.tab;
     let tab_idx = app.tab_index();
     app.scan_states[tab_idx] = ScanState::Scanning;
+    app.scan_progress = 0.0;
 
     let (tx, rx) = mpsc::channel();
     *scan_rx = Some(rx);
 
+    // 进度估算线程：每 200ms 发送进度更新
+    // 扫描通常 2-8 秒完成，用渐近曲线估算进度
+    let tx_progress = tx.clone();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let elapsed = start.elapsed().as_secs_f32();
+            // 渐近曲线：5秒内接近 90%，之后缓慢逼近 95%
+            let progress = if elapsed < 5.0 {
+                0.9 * (1.0 - (-elapsed / 2.5).exp())
+            } else {
+                0.9 + 0.05 * (1.0 - (-(elapsed - 5.0) / 5.0).exp())
+            };
+            // 如果通道关闭（扫描已完成），退出
+            if tx_progress.send(ScanMessage::Progress(progress.min(0.95))).is_err() {
+                break;
+            }
+        }
+    });
+
+    // 实际扫描线程
     std::thread::spawn(move || {
         let result = match tab {
             Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),

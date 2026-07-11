@@ -109,6 +109,8 @@ pub struct App {
     pub delete_done: usize,
     /// 删除进度：总项数
     pub delete_total: usize,
+    /// 扫描进度 (0.0 ~ 1.0)
+    pub scan_progress: f32,
 }
 
 impl App {
@@ -136,6 +138,7 @@ impl App {
             lang_en: false, // 默认中文
             delete_done: 0,
             delete_total: 0,
+            scan_progress: 0.0,
         }
     }
 
