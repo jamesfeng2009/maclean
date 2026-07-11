@@ -834,7 +834,8 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(440.0);
+            ui.set_min_width(480.0);
+            ui.set_max_width(520.0);
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 // 成功
@@ -855,15 +856,48 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                         egui::RichText::new("失败的项目已保留在列表中").size(12.0),
                     );
 
-                    // 列出失败的路径
+                    // 列出所有失败的路径（可滚动+复制）
                     ui.add_space(5.0);
-                    for (path, _) in app.failed_paths.iter().take(5) {
-                        let short = if path.len() > 60 { format!("...{}", &path[path.len()-57..]) } else { path.clone() };
-                        ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("  • {}", short)).size(11.0));
-                    }
-                    if app.failed_paths.len() > 5 {
-                        ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("  ...等 {} 项", app.failed_paths.len())).size(11.0));
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("失败列表:").size(12.0).color(egui::Color32::from_gray(170)));
+                        // 复制全部按钮
+                        let all_paths: String = app.failed_paths.iter()
+                            .map(|(p, c)| format!("[{}] {}", c, p))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if ui.button(egui::RichText::new("📋 复制全部").size(11.0)).clicked() {
+                            ui.output_mut(|o| o.copied_text = all_paths);
+                        }
+                    });
+
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .stick_to_bottom(false)
+                        .show(ui, |ui| {
+                            for (path, category) in &app.failed_paths {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(200, 100, 100),
+                                        egui::RichText::new("•").size(11.0),
+                                    );
+                                    ui.vertical(|ui| {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(200, 120, 100),
+                                            egui::RichText::new(category).size(11.0),
+                                        );
+                                        // 完整路径，可选中文本
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut path.as_str())
+                                                .desired_width(400.0)
+                                                .font(egui::TextStyle::Monospace)
+                                                .text_color(egui::Color32::from_gray(160))
+                                                .interactive(true),
+                                        );
+                                    });
+                                });
+                                ui.add_space(2.0);
+                            }
+                        });
 
                     // sudo 重试说明 + 按钮
                     ui.add_space(8.0);
