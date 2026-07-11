@@ -122,19 +122,16 @@ pub fn check_deletable(path: &str) -> (bool, String) {
             return (true, String::new());
         }
 
-        // 非 root 属主，但检查子目录是否有 root 属主文件
+        // 非 root 属主，快速检查第一层子项是否有 root 属主
         if meta.is_dir() {
-            let has_root_child = std::process::Command::new("find")
-                .arg(path)
-                .arg("-maxdepth").arg("1")
-                .arg("-user").arg("root")
-                .arg("-print")
-                .output()
-                .map(|o| !o.stdout.is_empty())
-                .unwrap_or(false);
-            
-            if has_root_child {
-                return (false, "目录含 root 属主文件，可能无法完全删除 (需关闭 SIP)".to_string());
+            if let Ok(entries) = std::fs::read_dir(p) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    if let Ok(child_meta) = entry.metadata() {
+                        if child_meta.uid() == 0 {
+                            return (false, "目录含 root 属主文件，可能无法完全删除 (需关闭 SIP)".to_string());
+                        }
+                    }
+                }
             }
         }
     }

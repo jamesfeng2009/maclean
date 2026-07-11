@@ -695,7 +695,7 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     });
 }
 
-/// 尽力删除：先直接删除，失败则递归逐个删除能删的，最后检查目录是否还存在
+/// 尽力删除：先 remove_dir_all，失败则用 rm -rf 命令，再失败就放弃
 fn best_effort_delete(path: &std::path::Path) -> bool {
     // 先尝试直接删除
     if path.is_dir() {
@@ -708,28 +708,12 @@ fn best_effort_delete(path: &std::path::Path) -> bool {
         }
     }
 
-    // 直接删除失败，递归逐个删除
-    if path.is_dir() {
-        // 尝试 chflags + chmod
-        let path_str = path.to_string_lossy().to_string();
-        let _ = std::process::Command::new("chflags")
-            .arg("-R").arg("nouchg").arg(&path_str)
-            .output();
-        let _ = std::process::Command::new("chmod")
-            .arg("-R").arg("u+rwx").arg(&path_str)
-            .output();
-
-        // 递归删除子项
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let child = entry.path();
-                let _ = best_effort_delete(&child);
-            }
-        }
-
-        // 再尝试删除目录本身
-        let _ = std::fs::remove_dir_all(path);
-    }
+    // 直接删除失败，用 rm -rf 命令（比递归快得多）
+    let path_str = path.to_string_lossy().to_string();
+    let result = std::process::Command::new("rm")
+        .arg("-rf")
+        .arg(&path_str)
+        .output();
 
     // 检查是否已删除
     !path.exists() && path.symlink_metadata().is_err()
