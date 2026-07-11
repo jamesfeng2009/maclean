@@ -104,18 +104,6 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
     <false/>
     <key>NSHumanReadableCopyright</key>
     <string>maclean - macOS 磁盘清理工具</string>
-    <key>NSDesktopFolderUsageDescription</key>
-    <string>maclean 需要访问桌面以扫描大文件</string>
-    <key>NSDocumentsFolderUsageDescription</key>
-    <string>maclean 需要访问文档文件夹以扫描大文件</string>
-    <key>NSDownloadsFolderUsageDescription</key>
-    <string>maclean 需要访问下载文件夹以扫描大文件</string>
-    <key>NSPicturesFolderUsageDescription</key>
-    <string>maclean 需要访问图片文件夹以扫描缓存</string>
-    <key>NSMusicFolderUsageDescription</key>
-    <string>maclean 需要访问音乐文件夹以扫描缓存</string>
-    <key>NSMoviesFolderUsageDescription</key>
-    <string>maclean 需要访问影片文件夹以扫描缓存</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>maclean 需要发送 AppleScript 以请求管理员权限删除文件</string>
 </dict>
