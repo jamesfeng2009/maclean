@@ -425,31 +425,26 @@ impl App {
     }
 
     /// 检测是否有完全磁盘访问权限
-    /// 通过尝试访问 TCC 保护的目录来判断
+    /// 通过尝试读取多个 TCC 保护目录来判断
     pub fn check_full_disk_access() -> bool {
-        // 尝试读取 ~/Library/Metadata 或 ~/Library/Containers 下的内容
-        // 如果没有完全磁盘访问权限，读取会失败
         let home = std::env::var("HOME").unwrap_or_default();
+
+        // 尝试多个 TCC 保护路径，任一可读即说明有 FDA
         let test_paths = [
             format!("{}/Library/Metadata", home),
+            format!("{}/Library/Safari", home),
             format!("{}/Library/Containers/com.apple.mail", home),
+            format!("{}/Library/Mail", home),
+            format!("{}/Library/Messages", home),
         ];
 
         for path in &test_paths {
             let p = std::path::Path::new(path);
             if p.exists() {
-                // 尝试读取目录内容
+                // 尝试 read_dir，如果能读取说明有 FDA
                 if std::fs::read_dir(p).is_ok() {
                     return true;
                 }
-            }
-        }
-
-        // 如果测试路径不存在，尝试读取其他 TCC 保护路径
-        let test_file = format!("{}/Library/Safari/Bookmarks.plist", home);
-        if std::path::Path::new(&test_file).exists() {
-            if std::fs::metadata(&test_file).is_ok() {
-                return true;
             }
         }
 

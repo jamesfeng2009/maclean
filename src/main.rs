@@ -660,6 +660,46 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     });
 }
 
+/// 尽力删除：先直接删除，失败则递归逐个删除能删的，最后检查目录是否还存在
+fn best_effort_delete(path: &std::path::Path) -> bool {
+    // 先尝试直接删除
+    if path.is_dir() {
+        if std::fs::remove_dir_all(path).is_ok() {
+            return !path.exists() && path.symlink_metadata().is_err();
+        }
+    } else {
+        if std::fs::remove_file(path).is_ok() {
+            return !path.exists() && path.symlink_metadata().is_err();
+        }
+    }
+
+    // 直接删除失败，递归逐个删除
+    if path.is_dir() {
+        // 尝试 chflags + chmod
+        let path_str = path.to_string_lossy().to_string();
+        let _ = std::process::Command::new("chflags")
+            .arg("-R").arg("nouchg").arg(&path_str)
+            .output();
+        let _ = std::process::Command::new("chmod")
+            .arg("-R").arg("u+rwx").arg(&path_str)
+            .output();
+
+        // 递归删除子项
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let child = entry.path();
+                let _ = best_effort_delete(&child);
+            }
+        }
+
+        // 再尝试删除目录本身
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    // 检查是否已删除
+    !path.exists() && path.symlink_metadata().is_err()
+}
+
 /// 启动后台删除线程（两阶段自动删除）
 /// 阶段1: 普通删除 (chflags + chmod + remove_dir_all)
 /// 阶段2: 对失败项自动 sudo 批量删除 (只弹一次密码框)
@@ -722,7 +762,7 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 continue;
             }
 
-            // 普通文件/目录删除
+            // 普通文件/目录删除 - 尽力删除模式
             let p = std::path::Path::new(path.as_str());
 
             if !p.exists() && !p.symlink_metadata().is_ok() {
@@ -742,36 +782,8 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 }
             }
 
-            // 先直接尝试删除（大多数情况不需要 chflags/chmod）
-            let result = if p.is_dir() {
-                std::fs::remove_dir_all(p)
-            } else {
-                std::fs::remove_file(p)
-            };
-
-            let deleted_ok = match result {
-                Ok(_) => {
-                    // 删除后验证
-                    !p.exists() && p.symlink_metadata().is_err()
-                }
-                Err(_) => {
-                    // 第一次删除失败，尝试 chflags + chmod 后重试
-                    if p.is_dir() {
-                        let _ = std::process::Command::new("chflags")
-                            .arg("-R").arg("nouchg").arg(path)
-                            .output();
-                        let _ = std::process::Command::new("chmod")
-                            .arg("-R").arg("u+rw").arg(path)
-                            .output();
-                        // 重试删除
-                        std::fs::remove_dir_all(p).is_ok()
-                            && !p.exists()
-                            && p.symlink_metadata().is_err()
-                    } else {
-                        false
-                    }
-                }
-            };
+            // 尽力删除：先直接删除，失败则递归逐个删除
+            let deleted_ok = best_effort_delete(p);
 
             if deleted_ok {
                 let _ = tx.send(DeleteMessage::Log(
@@ -1146,12 +1158,12 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
                         ui.colored_label(egui::Color32::RED, "❌");
-                        ui.label(egui::RichText::new(format!("删除失败 {} 项（已尝试管理员权限）", fail)).size(15.0).color(egui::Color32::RED));
+                        ui.label(egui::RichText::new(format!("删除失败 {} 项", fail)).size(15.0).color(egui::Color32::RED));
                     });
                     ui.add_space(3.0);
                     ui.colored_label(
                         egui::Color32::from_gray(150),
-                        egui::RichText::new("以下项目即使使用管理员权限也无法删除，可能被进程占用或受系统保护").size(12.0),
+                        egui::RichText::new("这些文件由 root 创建且带有 macOS 安全属性 (com.apple.provenance)，受 SIP 保护无法删除。").size(12.0),
                     );
 
                     // 引导用户授予完全磁盘访问权限
@@ -1177,11 +1189,15 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                             ui.add_space(3.0);
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 200, 200),
-                                egui::RichText::new("1. 系统设置 → 隐私与安全 → 完全磁盘访问 → 添加 maclean").size(11.0),
+                                egui::RichText::new("1. 终端执行: sudo rm -rf 路径 (可能仍失败)").size(11.0),
                             );
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 200, 200),
-                                egui::RichText::new("2. 终端手动删除: sudo rm -rf 路径").size(11.0),
+                                egui::RichText::new("2. 关闭SIP: 重启→按住Cmd+R→终端→csrutil disable→重启").size(11.0),
+                            );
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 200, 200),
+                                egui::RichText::new("3. 用项目工具删除: cd 项目目录 && npm run clean / npx rimraf .next").size(11.0),
                             );
                             ui.add_space(5.0);
                             if ui.button(egui::RichText::new("⚙️ 打开系统设置").size(12.0)).clicked() {
