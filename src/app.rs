@@ -1,12 +1,11 @@
 //! App 状态管理
 //!
-//! 管理 TUI 应用的全部状态，包括当前 Tab、扫描结果、选中状态等。
+//! 管理 egui GUI 应用的全部状态，包括当前 Tab、扫描结果、选中状态等。
 
 use std::path::Path;
 
 use crate::scanner::{self, ScanItem, Scanner};
 use crate::safety;
-use rust_i18n::t;
 
 /// Tab 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,13 +21,13 @@ pub enum Tab {
 }
 
 impl Tab {
-    /// 获取 Tab 的标题（国际化）
-    pub fn title(self) -> String {
+    /// 获取 Tab 的标题（直接返回中文 &'static str）
+    pub fn title(self) -> &'static str {
         match self {
-            Tab::DevCache => t!("tab_dev_cache").to_string(),
-            Tab::LargeFiles => t!("tab_large_files").to_string(),
-            Tab::AppCache => t!("tab_app_cache").to_string(),
-            Tab::Apfs => t!("tab_apfs").to_string(),
+            Tab::DevCache => "开发者缓存",
+            Tab::LargeFiles => "大文件",
+            Tab::AppCache => "App缓存",
+            Tab::Apfs => "APFS快照",
         }
     }
 
@@ -90,8 +89,6 @@ pub struct App {
     pub scan_states: [ScanState; 4],
     /// 列表选中索引
     pub list_index: usize,
-    /// 列表滚动偏移
-    pub scroll_offset: usize,
     /// 磁盘总空间（字节）
     pub disk_total: u64,
     /// 磁盘可用空间（字节）
@@ -106,6 +103,8 @@ pub struct App {
     pub should_quit: bool,
     /// 扫描耗时（毫秒）
     pub scan_time_ms: [u64; 4],
+    /// 语言切换（true=英文, false=中文）
+    pub lang_en: bool,
 }
 
 impl App {
@@ -123,7 +122,6 @@ impl App {
                 ScanState::Idle,
             ],
             list_index: 0,
-            scroll_offset: 0,
             disk_total,
             disk_free,
             logs: Vec::new(),
@@ -131,11 +129,12 @@ impl App {
             pending_delete: Vec::new(),
             should_quit: false,
             scan_time_ms: [0; 4],
+            lang_en: false, // 默认中文
         }
     }
 
     /// 获取当前 Tab 索引
-    fn tab_index(&self) -> usize {
+    pub fn tab_index(&self) -> usize {
         match self.tab {
             Tab::DevCache => 0,
             Tab::LargeFiles => 1,
@@ -151,7 +150,6 @@ impl App {
         }
         self.tab = self.tab.next();
         self.list_index = 0;
-        self.scroll_offset = 0;
     }
 
     /// 切换到上一个 Tab
@@ -161,7 +159,6 @@ impl App {
         }
         self.tab = self.tab.prev();
         self.list_index = 0;
-        self.scroll_offset = 0;
     }
 
     /// 获取当前 Tab 的扫描结果
@@ -178,7 +175,6 @@ impl App {
     pub fn move_up(&mut self) {
         if self.list_index > 0 {
             self.list_index -= 1;
-            self.adjust_scroll();
         }
     }
 
@@ -187,18 +183,6 @@ impl App {
         let len = self.current_items().len();
         if len > 0 && self.list_index < len - 1 {
             self.list_index += 1;
-            self.adjust_scroll();
-        }
-    }
-
-    /// 调整滚动偏移
-    fn adjust_scroll(&mut self) {
-        // 每页显示 15 行
-        let page_size = 15;
-        if self.list_index < self.scroll_offset {
-            self.scroll_offset = self.list_index;
-        } else if self.list_index >= self.scroll_offset + page_size {
-            self.scroll_offset = self.list_index - page_size + 1;
         }
     }
 
@@ -245,7 +229,6 @@ impl App {
         self.results[idx] = result.items;
         self.scan_states[idx] = ScanState::Done;
         self.list_index = 0;
-        self.scroll_offset = 0;
 
         // 刷新磁盘信息
         let (total, free) = get_disk_info();
@@ -269,7 +252,8 @@ impl App {
 
     /// 准备删除选中的项（进入确认状态）
     pub fn prepare_delete(&mut self) {
-        let selected: Vec<usize> = self.current_items()
+        let selected: Vec<usize> = self
+            .current_items()
             .iter()
             .enumerate()
             .filter(|(_, item)| item.selected)
@@ -285,6 +269,8 @@ impl App {
     }
 
     /// 确认删除
+    ///
+    /// 执行实际删除操作，包含安全校验。所有日志消息用中文 format! 生成。
     pub fn confirm_delete(&mut self) {
         self.confirm = ConfirmState::Deleting;
         let tab = self.tab;
@@ -296,7 +282,8 @@ impl App {
         let mut freed_bytes = 0u64;
 
         // 收集要删除的路径（倒序删除，避免索引变化问题）
-        let to_delete: Vec<(usize, String, String)> = self.pending_delete
+        let to_delete: Vec<(usize, String, String)> = self
+            .pending_delete
             .iter()
             .rev()
             .map(|&i| {
@@ -312,13 +299,15 @@ impl App {
             match safety::check_path_safety(path) {
                 safety::SafetyCheck::Danger(reason) => {
                     blocked_count += 1;
-                    self.logs.push(t!("log_blocked", path = path, reason = reason).to_string());
+                    self.logs
+                        .push(format!("⛔ 已拦截: {} - {}", path, reason));
                     safety::log_deletion(path, category, false, Some(&reason));
                     continue;
                 }
                 safety::SafetyCheck::Warning(reason) => {
                     blocked_count += 1;
-                    self.logs.push(t!("log_skipped", path = path, reason = reason).to_string());
+                    self.logs
+                        .push(format!("⚠️ 已跳过: {} - {}", path, reason));
                     safety::log_deletion(path, category, false, Some(&reason));
                     continue;
                 }
@@ -333,12 +322,12 @@ impl App {
                     match scanner::apfs::delete_snapshot(path) {
                         Ok(_) => {
                             deleted_count += 1;
-                            self.logs.push(t!("log_deleted_snapshot", path = path).to_string());
+                            self.logs.push(format!("✓ 已删除快照: {}", path));
                             safety::log_deletion(path, category, true, None);
                         }
                         Err(e) => {
                             failed_count += 1;
-                            self.logs.push(t!("log_delete_snapshot_fail", path = path, err = e).to_string());
+                            self.logs.push(format!("✗ 删除失败: {} - {}", path, e));
                             safety::log_deletion(path, category, false, Some(&e));
                         }
                     }
@@ -346,12 +335,12 @@ impl App {
                     match scanner::apfs::delete_simulator_runtime(path) {
                         Ok(_) => {
                             deleted_count += 1;
-                            self.logs.push(t!("log_deleted_runtime", path = path).to_string());
+                            self.logs.push(format!("✓ 已删除运行时: {}", path));
                             safety::log_deletion(path, category, true, None);
                         }
                         Err(e) => {
                             failed_count += 1;
-                            self.logs.push(t!("log_delete_runtime_fail", path = path, err = e).to_string());
+                            self.logs.push(format!("✗ 删除失败: {} - {}", path, e));
                             safety::log_deletion(path, category, false, Some(&e));
                         }
                     }
@@ -366,7 +355,7 @@ impl App {
             // 二次校验：删除前再次确认路径存在且不是符号链接
             if !p.exists() && !p.symlink_metadata().is_ok() {
                 failed_count += 1;
-                self.logs.push(t!("log_path_not_exist", path = path).to_string());
+                self.logs.push(format!("✗ 路径不存在: {}", path));
                 safety::log_deletion(path, category, false, Some("路径不存在"));
                 continue;
             }
@@ -375,7 +364,8 @@ impl App {
             if let Ok(meta) = p.symlink_metadata() {
                 if meta.file_type().is_symlink() {
                     blocked_count += 1;
-                    self.logs.push(t!("log_symlink_blocked", path = path).to_string());
+                    self.logs
+                        .push(format!("⛔ 拒绝删除符号链接: {}", path));
                     safety::log_deletion(path, category, false, Some("符号链接拒绝删除"));
                     continue;
                 }
@@ -391,12 +381,14 @@ impl App {
                 Ok(_) => {
                     deleted_count += 1;
                     freed_bytes += size;
-                    self.logs.push(t!("log_deleted", cat = category, path = path).to_string());
+                    self.logs
+                        .push(format!("✓ 已删除 [{}] {}", category, path));
                     safety::log_deletion(path, category, true, None);
                 }
                 Err(e) => {
                     failed_count += 1;
-                    self.logs.push(t!("log_delete_fail", cat = category, path = path, err = e.to_string()).to_string());
+                    self.logs
+                        .push(format!("✗ 删除失败 [{}] {} - {}", category, path, e));
                     safety::log_deletion(path, category, false, Some(&e.to_string()));
                 }
             }
@@ -407,13 +399,13 @@ impl App {
             self.results[idx].remove(*i);
         }
 
-        self.logs.push(t!(
-            "log_summary",
-            deleted = deleted_count,
-            blocked = blocked_count,
-            failed = failed_count,
-            freed = scanner::format_size(freed_bytes)
-        ).to_string());
+        self.logs.push(format!(
+            "清理完成: 删除 {} 项, 拦截 {} 项, 失败 {} 项, 释放 {}",
+            deleted_count,
+            blocked_count,
+            failed_count,
+            scanner::format_size(freed_bytes)
+        ));
 
         // 刷新磁盘信息
         let (total, free) = get_disk_info();
@@ -423,7 +415,6 @@ impl App {
         self.pending_delete.clear();
         self.confirm = ConfirmState::None;
         self.list_index = 0;
-        self.scroll_offset = 0;
     }
 
     /// 取消删除
@@ -436,9 +427,102 @@ impl App {
     pub fn quit(&mut self) {
         self.should_quit = true;
     }
+
+    /// 切换中英文语言
+    pub fn toggle_lang(&mut self) {
+        self.lang_en = !self.lang_en;
+    }
+
+    /// 根据当前语言返回 UI 文本
+    ///
+    /// 简单的 key-value 映射，不依赖外部 i18n 库。
+    /// `lang_en == true` 时返回英文，否则返回中文。
+    pub fn t(&self, key: &str) -> &'static str {
+        if self.lang_en {
+            match key {
+                // Tab 标题
+                "tab_dev_cache" => "Dev Cache",
+                "tab_large_files" => "Large Files",
+                "tab_app_cache" => "App Cache",
+                "tab_apfs" => "APFS Snapshots",
+                // 按钮
+                "scan" => "Scan",
+                "delete" => "Delete",
+                "select_all" => "Select All",
+                "deselect_all" => "Deselect All",
+                "confirm_delete" => "Confirm Delete",
+                "cancel" => "Cancel",
+                // 磁盘信息
+                "disk_used" => "Used",
+                "disk_free" => "Free",
+                "disk_total" => "Total",
+                // 扫描状态
+                "scanning" => "Scanning...",
+                "press_r_to_scan" => "Click Scan to start",
+                "items_found" => "found",
+                "items_selected" => "selected",
+                "items" => "items",
+                "total" => "total",
+                // 列表
+                "category" => "Category",
+                "size" => "Size",
+                "path" => "Path",
+                "unknown" => "unknown",
+                "no_items_hint" => "No items yet - click Scan to find cleanable files",
+                "click_to_start" => "Click to start",
+                // 删除确认
+                "about_to_delete" => "About to delete",
+                "irreversible" => "This operation is irreversible!",
+                "cleaning" => "Cleaning",
+                "cleaning_in_progress" => "Cleaning in progress...",
+                _ => "",
+            }
+        } else {
+            match key {
+                // Tab 标题
+                "tab_dev_cache" => "开发者缓存",
+                "tab_large_files" => "大文件",
+                "tab_app_cache" => "App缓存",
+                "tab_apfs" => "APFS快照",
+                // 按钮
+                "scan" => "扫描",
+                "delete" => "删除",
+                "select_all" => "全选",
+                "deselect_all" => "取消全选",
+                "confirm_delete" => "确认删除",
+                "cancel" => "取消",
+                // 磁盘信息
+                "disk_used" => "已用",
+                "disk_free" => "可用",
+                "disk_total" => "总量",
+                // 扫描状态
+                "scanning" => "扫描中...",
+                "press_r_to_scan" => "点击「扫描」开始",
+                "items_found" => "找到",
+                "items_selected" => "已选",
+                "items" => "项",
+                "total" => "共计",
+                // 列表
+                "category" => "类别",
+                "size" => "大小",
+                "path" => "路径",
+                "unknown" => "未知",
+                "no_items_hint" => "暂无数据 - 点击「扫描」查找可清理文件",
+                "click_to_start" => "点击开始",
+                // 删除确认
+                "about_to_delete" => "即将删除",
+                "irreversible" => "此操作不可逆！",
+                "cleaning" => "清理中",
+                "cleaning_in_progress" => "正在执行清理...",
+                _ => "",
+            }
+        }
+    }
 }
 
 /// 获取磁盘信息（总量、可用）
+///
+/// 执行 `df -k /` 命令，解析输出获取磁盘总量和可用空间（字节）。
 fn get_disk_info() -> (u64, u64) {
     let output = std::process::Command::new("df")
         .arg("-k")
@@ -450,10 +534,9 @@ fn get_disk_info() -> (u64, u64) {
         for line in stdout.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
-                if let (Ok(total_kb), Ok(free_kb)) = (
-                    parts[1].parse::<u64>(),
-                    parts[3].parse::<u64>(),
-                ) {
+                if let (Ok(total_kb), Ok(free_kb)) =
+                    (parts[1].parse::<u64>(), parts[3].parse::<u64>())
+                {
                     return (total_kb * 1024, free_kb * 1024);
                 }
             }

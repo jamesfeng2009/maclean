@@ -1,18 +1,15 @@
 [package]
 name = "maclean"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "macOS 磁盘清理 TUI 工具 - 专注开发者缓存与深度清理"
+description = "macOS 磁盘清理 GUI 工具 - 专注开发者缓存与深度清理"
 
 [dependencies]
-ratatui = { version = "0.28", features = ["crossterm"] }
-crossterm = "0.28"
+eframe = "0.29"
+egui = "0.29"
 walkdir = "2.5"
 rayon = "1.10"
-sysinfo = "0.32"
 dirs = "5.0"
-unicode-width = "0.2"
-rust-i18n = "3"
 
 [profile.release]
 opt-level = 3
