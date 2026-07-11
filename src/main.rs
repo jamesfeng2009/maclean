@@ -664,10 +664,21 @@ fn start_sudo_delete(failed_paths: Vec<(String, String)>, delete_rx: &mut Option
 
     std::thread::spawn(move || {
         for (path, category) in &failed_paths {
-            // 使用 osascript 弹出系统授权窗口，以管理员权限执行 rm -rf
+            // 转义单引号：每个 ' 替换为 '\''
+            let escaped_path = path.replace("'", "'\\''");
+
+            // 三步删除：去标志 → 改权限 → 删除
+            // chflags -R nouchg：去除 immutable 标志
+            // chmod -R u+rw：确保可读写
+            // rm -rf：强制递归删除
+            let cmd = format!(
+                "chflags -R nouchg '{}'; chmod -R u+rw '{}'; rm -rf '{}'",
+                escaped_path, escaped_path, escaped_path
+            );
+
             let script = format!(
-                "do shell script \"rm -rf '{}'\" with administrator privileges",
-                path.replace("'", "'\\''")
+                "do shell script \"{}\" with administrator privileges",
+                cmd.replace("\"", "\\\"")
             );
 
             let result = std::process::Command::new("osascript")
@@ -694,7 +705,8 @@ fn start_sudo_delete(failed_paths: Vec<(String, String)>, delete_rx: &mut Option
                     let err_msg = if stderr.contains("User canceled") || stderr.contains("user canceled") {
                         "用户取消授权".to_string()
                     } else {
-                        stderr.to_string()
+                        // 截取关键错误信息
+                        stderr.lines().last().unwrap_or(&stderr).to_string()
                     };
                     let _ = tx.send(DeleteMessage::Log(
                         format!("✗ sudo 删除失败: {} - {}", path, err_msg), path.clone(), category.clone(), false));
