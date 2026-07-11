@@ -1,0 +1,6 @@
+#!/bin/bash
+# preinstall - 安装前检查
+# 确保目录存在
+mkdir -p /usr/local/bin
+mkdir -p /usr/local/share/doc/maclean
+exit 0

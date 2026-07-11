@@ -1,0 +1,5 @@
+#!/bin/bash
+# postinstall - 安装后设置权限
+# 设置可执行文件权限
+chmod 755 /usr/local/bin/maclean
+exit 0
