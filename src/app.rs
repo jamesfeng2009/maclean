@@ -105,6 +105,10 @@ pub struct App {
     pub scan_time_ms: [u64; 4],
     /// 语言切换（true=英文, false=中文）
     pub lang_en: bool,
+    /// 删除进度：已完成的项数
+    pub delete_done: usize,
+    /// 删除进度：总项数
+    pub delete_total: usize,
 }
 
 impl App {
@@ -130,6 +134,8 @@ impl App {
             should_quit: false,
             scan_time_ms: [0; 4],
             lang_en: false, // 默认中文
+            delete_done: 0,
+            delete_total: 0,
         }
     }
 
@@ -310,143 +316,50 @@ impl App {
         self.confirm = ConfirmState::Pending;
     }
 
-    /// 确认删除
-    ///
-    /// 执行实际删除操作，包含安全校验。所有日志消息用中文 format! 生成。
-    pub fn confirm_delete(&mut self) {
+    /// 确认删除 - 收集待删除项，返回路径列表供后台线程使用
+    pub fn confirm_delete(&mut self) -> Vec<(String, String)> {
         self.confirm = ConfirmState::Deleting;
-        let tab = self.tab;
         let idx = self.tab_index();
 
-        let mut deleted_count = 0u64;
-        let mut failed_count = 0u64;
-        let mut blocked_count = 0u64;
-        let mut freed_bytes = 0u64;
-
-        // 收集要删除的路径（倒序删除，避免索引变化问题）
-        let to_delete: Vec<(usize, String, String)> = self
+        // 收集要删除的路径和类别
+        let to_delete: Vec<(String, String)> = self
             .pending_delete
             .iter()
             .rev()
             .map(|&i| {
                 let item = &self.results[idx][i];
-                (i, item.path.clone(), item.category.clone())
+                (item.path.clone(), item.category.clone())
             })
             .collect();
 
-        for (i, path, category) in &to_delete {
-            // ================================================================
-            //  安全校验: 删除前对每个路径做最终安全检查
-            // ================================================================
-            match safety::check_path_safety(path) {
-                safety::SafetyCheck::Danger(reason) => {
-                    blocked_count += 1;
-                    self.logs
-                        .push(format!("⛔ 已拦截: {} - {}", path, reason));
-                    safety::log_deletion(path, category, false, Some(&reason));
-                    continue;
-                }
-                safety::SafetyCheck::Warning(reason) => {
-                    blocked_count += 1;
-                    self.logs
-                        .push(format!("⚠️ 已跳过: {} - {}", path, reason));
-                    safety::log_deletion(path, category, false, Some(&reason));
-                    continue;
-                }
-                safety::SafetyCheck::Safe => {
-                    // 通过安全检查，继续执行删除
-                }
+        self.delete_total = to_delete.len();
+        self.delete_done = 0;
+        self.logs.clear();
+        to_delete
+    }
+
+    /// 接收一条删除日志并更新进度
+    pub fn receive_delete_log(&mut self, log: String) {
+        self.logs.push(log);
+        self.delete_done += 1;
+    }
+
+    /// 删除完成后的收尾工作
+    pub fn finish_delete(&mut self) {
+        let idx = self.tab_index();
+
+        // 从结果列表中移除已删除的项（倒序删除避免索引偏移）
+        let mut indices: Vec<usize> = self.pending_delete.clone();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        for i in &indices {
+            if *i < self.results[idx].len() {
+                self.results[idx].remove(*i);
             }
-
-            // APFS 快照特殊处理
-            if tab == Tab::Apfs {
-                if category == "APFS快照" {
-                    match scanner::apfs::delete_snapshot(path) {
-                        Ok(_) => {
-                            deleted_count += 1;
-                            self.logs.push(format!("✓ 已删除快照: {}", path));
-                            safety::log_deletion(path, category, true, None);
-                        }
-                        Err(e) => {
-                            failed_count += 1;
-                            self.logs.push(format!("✗ 删除失败: {} - {}", path, e));
-                            safety::log_deletion(path, category, false, Some(&e));
-                        }
-                    }
-                } else if category == "模拟器运行时" {
-                    match scanner::apfs::delete_simulator_runtime(path) {
-                        Ok(_) => {
-                            deleted_count += 1;
-                            self.logs.push(format!("✓ 已删除运行时: {}", path));
-                            safety::log_deletion(path, category, true, None);
-                        }
-                        Err(e) => {
-                            failed_count += 1;
-                            self.logs.push(format!("✗ 删除失败: {} - {}", path, e));
-                            safety::log_deletion(path, category, false, Some(&e));
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // 普通文件/目录删除
-            let p = Path::new(path.as_str());
-            let size = self.results[idx][*i].size_bytes;
-
-            // 二次校验：删除前再次确认路径存在且不是符号链接
-            if !p.exists() && !p.symlink_metadata().is_ok() {
-                failed_count += 1;
-                self.logs.push(format!("✗ 路径不存在: {}", path));
-                safety::log_deletion(path, category, false, Some("路径不存在"));
-                continue;
-            }
-
-            // 拒绝删除符号链接（防止链接攻击）
-            if let Ok(meta) = p.symlink_metadata() {
-                if meta.file_type().is_symlink() {
-                    blocked_count += 1;
-                    self.logs
-                        .push(format!("⛔ 拒绝删除符号链接: {}", path));
-                    safety::log_deletion(path, category, false, Some("符号链接拒绝删除"));
-                    continue;
-                }
-            }
-
-            let result = if p.is_dir() {
-                std::fs::remove_dir_all(p)
-            } else {
-                std::fs::remove_file(p)
-            };
-
-            match result {
-                Ok(_) => {
-                    deleted_count += 1;
-                    freed_bytes += size;
-                    self.logs
-                        .push(format!("✓ 已删除 [{}] {}", category, path));
-                    safety::log_deletion(path, category, true, None);
-                }
-                Err(e) => {
-                    failed_count += 1;
-                    self.logs
-                        .push(format!("✗ 删除失败 [{}] {} - {}", category, path, e));
-                    safety::log_deletion(path, category, false, Some(&e.to_string()));
-                }
-            }
-        }
-
-        // 从结果列表中移除已删除的项
-        for (i, _, _) in &to_delete {
-            self.results[idx].remove(*i);
         }
 
         self.logs.push(format!(
-            "清理完成: 删除 {} 项, 拦截 {} 项, 失败 {} 项, 释放 {}",
-            deleted_count,
-            blocked_count,
-            failed_count,
-            scanner::format_size(freed_bytes)
+            "✅ 清理完成: 已处理 {} 项",
+            self.delete_total
         ));
 
         // 刷新磁盘信息
@@ -520,7 +433,8 @@ impl App {
                 "about_to_delete" => "About to delete",
                 "irreversible" => "This operation is irreversible!",
                 "cleaning" => "Cleaning",
-                "cleaning_in_progress" => "Cleaning in progress...",
+                "cleaning_in_progress" => "Cleaning in progress",
+                "cleaning_log" => "Latest logs:",
                 _ => "",
             }
         } else {
@@ -563,7 +477,8 @@ impl App {
                 "about_to_delete" => "即将删除",
                 "irreversible" => "此操作不可逆！",
                 "cleaning" => "清理中",
-                "cleaning_in_progress" => "正在执行清理...",
+                "cleaning_in_progress" => "正在执行清理",
+                "cleaning_log" => "最新日志：",
                 _ => "",
             }
         }

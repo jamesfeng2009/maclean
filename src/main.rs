@@ -19,6 +19,14 @@ enum ScanMessage {
     Done(Vec<ScanItem>, u64, u64), // (items, scan_time_ms, tab_index)
 }
 
+/// 后台删除消息
+enum DeleteMessage {
+    /// 单项删除日志
+    Log(String),
+    /// 全部删除完成
+    Done,
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -31,6 +39,7 @@ fn main() -> eframe::Result {
     eframe::run_simple_native("maclean", options, move |ctx, _frame| {
         static mut APP: Option<App> = None;
         static mut SCAN_RX: Option<mpsc::Receiver<ScanMessage>> = None;
+        static mut DELETE_RX: Option<mpsc::Receiver<DeleteMessage>> = None;
         static mut NEEDS_INIT: bool = true;
 
         unsafe {
@@ -58,8 +67,29 @@ fn main() -> eframe::Result {
                 }
             }
 
+            // 检查后台删除进度
+            if let Some(rx) = &DELETE_RX {
+                loop {
+                    match rx.try_recv() {
+                        Ok(DeleteMessage::Log(log)) => {
+                            if let Some(app) = &mut APP {
+                                app.receive_delete_log(log);
+                            }
+                        }
+                        Ok(DeleteMessage::Done) => {
+                            if let Some(app) = &mut APP {
+                                app.finish_delete();
+                            }
+                            DELETE_RX = None;
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+
             if let Some(app) = &mut APP {
-                render_gui(ctx, app, &mut SCAN_RX);
+                render_gui(ctx, app, &mut SCAN_RX, &mut DELETE_RX);
             }
         }
     })
@@ -142,7 +172,7 @@ fn recommend_badge(rec: &Recommend) -> &'static str {
 }
 
 /// 渲染 GUI 主界面
-fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     // ========== 顶部：标题栏 + 磁盘概览 ==========
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -247,18 +277,22 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
 
         if is_scanning {
-            // 扫描中：进度动画
+            // 扫描中：进度长条
+            ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
-                ui.add(egui::Spinner::new().size(60.0));
+                ui.add(egui::Spinner::new().size(40.0));
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(egui::Color32::from_rgb(0, 200, 255)));
+                ui.add_space(5.0);
+                ui.label(egui::RichText::new(app.t("scanning_hint")).size(12.0).color(egui::Color32::GRAY));
                 ui.add_space(15.0);
-                ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(18.0).color(egui::Color32::from_rgb(0, 200, 255)));
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(app.t("scanning_hint")).size(13.0).color(egui::Color32::GRAY));
-                ui.add_space(20.0);
+                // 扫描进度长条（不确定模式，动画效果）
                 let t = ctx.input(|i| i.time) as f32;
-                let progress = (t.sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-                ui.add(egui::ProgressBar::new(progress).desired_width(300.0).fill(egui::Color32::from_rgb(0, 200, 255)));
+                let progress = (t * 0.3).sin() * 0.5 + 0.5;
+                ui.add(egui::ProgressBar::new(progress)
+                    .desired_width(500.0)
+                    .fill(egui::Color32::from_rgb(0, 200, 255))
+                    .text(app.t("scanning")));
             });
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if items.is_empty() {
@@ -443,7 +477,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
         // 删除确认弹窗
         if matches!(app.confirm, ConfirmState::Pending) {
-            show_confirm_window(ctx, app);
+            show_confirm_window(ctx, app, delete_rx);
         }
 
         // 删除中弹窗
@@ -474,8 +508,100 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     });
 }
 
+/// 启动后台删除线程
+fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+    let (tx, rx) = mpsc::channel();
+    *delete_rx = Some(rx);
+
+    std::thread::spawn(move || {
+        for (path, category) in &to_delete {
+            // 安全校验
+            match safety::check_path_safety(path) {
+                safety::SafetyCheck::Danger(reason) => {
+                    let _ = tx.send(DeleteMessage::Log(format!("⛔ 已拦截: {} - {}", path, reason)));
+                    safety::log_deletion(path, category, false, Some(&reason));
+                    continue;
+                }
+                safety::SafetyCheck::Warning(reason) => {
+                    let _ = tx.send(DeleteMessage::Log(format!("⚠️ 已跳过: {} - {}", path, reason)));
+                    safety::log_deletion(path, category, false, Some(&reason));
+                    continue;
+                }
+                safety::SafetyCheck::Safe => {}
+            }
+
+            // APFS 快照特殊处理
+            if category == "APFS快照" {
+                match scanner::apfs::delete_snapshot(path) {
+                    Ok(_) => {
+                        let _ = tx.send(DeleteMessage::Log(format!("✓ 已删除快照: {}", path)));
+                        safety::log_deletion(path, category, true, None);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(DeleteMessage::Log(format!("✗ 删除失败: {} - {}", path, e)));
+                        safety::log_deletion(path, category, false, Some(&e));
+                    }
+                }
+                continue;
+            }
+
+            if category == "模拟器运行时" {
+                match scanner::apfs::delete_simulator_runtime(path) {
+                    Ok(_) => {
+                        let _ = tx.send(DeleteMessage::Log(format!("✓ 已删除运行时: {}", path)));
+                        safety::log_deletion(path, category, true, None);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(DeleteMessage::Log(format!("✗ 删除失败: {} - {}", path, e)));
+                        safety::log_deletion(path, category, false, Some(&e));
+                    }
+                }
+                continue;
+            }
+
+            // 普通文件/目录删除
+            let p = std::path::Path::new(path.as_str());
+
+            // 二次校验
+            if !p.exists() && !p.symlink_metadata().is_ok() {
+                let _ = tx.send(DeleteMessage::Log(format!("✗ 路径不存在: {}", path)));
+                safety::log_deletion(path, category, false, Some("路径不存在"));
+                continue;
+            }
+
+            // 拒绝删除符号链接
+            if let Ok(meta) = p.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    let _ = tx.send(DeleteMessage::Log(format!("⛔ 拒绝删除符号链接: {}", path)));
+                    safety::log_deletion(path, category, false, Some("符号链接拒绝删除"));
+                    continue;
+                }
+            }
+
+            let result = if p.is_dir() {
+                std::fs::remove_dir_all(p)
+            } else {
+                std::fs::remove_file(p)
+            };
+
+            match result {
+                Ok(_) => {
+                    let _ = tx.send(DeleteMessage::Log(format!("✓ 已删除 [{}] {}", category, path)));
+                    safety::log_deletion(path, category, true, None);
+                }
+                Err(e) => {
+                    let _ = tx.send(DeleteMessage::Log(format!("✗ 删除失败 [{}] {} - {}", category, path, e)));
+                    safety::log_deletion(path, category, false, Some(&e.to_string()));
+                }
+            }
+        }
+
+        let _ = tx.send(DeleteMessage::Done);
+    });
+}
+
 /// 删除确认弹窗
-fn show_confirm_window(ctx: &egui::Context, app: &mut App) {
+fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let count = app.selected_count();
     let size = app.selected_total_size();
 
@@ -495,7 +621,8 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App) {
 
                 ui.horizontal(|ui| {
                     if ui.button(egui::RichText::new(format!("✓ {}", app.t("confirm_delete"))).color(egui::Color32::from_rgb(52, 199, 89))).clicked() {
-                        app.confirm_delete();
+                        let to_delete = app.confirm_delete();
+                        start_delete(to_delete, delete_rx);
                     }
                     if ui.button(egui::RichText::new(format!("✗ {}", app.t("cancel"))).color(egui::Color32::RED)).clicked() {
                         app.cancel_delete();
@@ -505,37 +632,58 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App) {
         });
 }
 
-/// 删除中弹窗
+/// 删除中弹窗（带进度条）
 fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
+    let progress = if app.delete_total > 0 {
+        app.delete_done as f32 / app.delete_total as f32
+    } else {
+        0.0
+    };
+
     egui::Window::new(app.t("cleaning"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(500.0);
-            ui.set_min_height(200.0);
-            ui.add_space(5.0);
+            ui.set_min_width(520.0);
+            ui.set_min_height(220.0);
+            ui.add_space(10.0);
 
-            ui.label(egui::RichText::new("⏳ ".to_string() + app.t("cleaning_in_progress")).size(14.0));
-            ui.add_space(5.0);
+            // 标题
+            ui.label(egui::RichText::new(format!("⏳ {}...", app.t("cleaning_in_progress"))).size(16.0).color(egui::Color32::from_rgb(0, 200, 255)));
+            ui.add_space(10.0);
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for log in app.logs.iter().rev().take(10) {
-                    let color = if log.starts_with('✓') {
-                        egui::Color32::GREEN
+            // 进度条
+            ui.add(
+                egui::ProgressBar::new(progress)
+                    .desired_width(480.0)
+                    .fill(egui::Color32::from_rgb(52, 199, 89))
+                    .text(format!("{}/{} ({}%)", app.delete_done, app.delete_total, (progress * 100.0) as u32))
+            );
+            ui.add_space(8.0);
+
+            // 最新日志
+            ui.label(egui::RichText::new(app.t("cleaning_log")).size(12.0).color(egui::Color32::GRAY));
+            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                for log in app.logs.iter().rev().take(15) {
+                    let color = if log.starts_with('✓') || log.starts_with('✅') {
+                        egui::Color32::from_rgb(52, 199, 89)
                     } else if log.starts_with('✗') {
                         egui::Color32::RED
                     } else if log.starts_with('⛔') {
                         egui::Color32::from_rgb(200, 100, 100)
                     } else if log.starts_with('⚠') {
-                        egui::Color32::YELLOW
+                        egui::Color32::from_rgb(255, 159, 10)
                     } else {
                         egui::Color32::from_rgb(0, 200, 255)
                     };
-                    ui.colored_label(color, log);
+                    ui.colored_label(color, egui::RichText::new(log).size(12.0));
                 }
             });
         });
+
+    // 删除中持续刷新 UI
+    ctx.request_repaint_after(std::time::Duration::from_millis(50));
 }
 
 /// Tab 标题
