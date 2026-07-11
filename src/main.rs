@@ -38,6 +38,8 @@ fn main() -> eframe::Result {
             if NEEDS_INIT {
                 APP = Some(App::new());
                 NEEDS_INIT = false;
+                // 加载中文字体（egui 默认字体不含 CJK）
+                setup_fonts(ctx);
             }
 
             // 检查后台扫描结果
@@ -66,6 +68,44 @@ fn main() -> eframe::Result {
             }
         }
     })
+}
+
+/// 加载 macOS 系统中文字体，解决 egui 默认字体不含 CJK 导致乱码的问题
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // 尝试加载 PingFang SC（macOS 系统自带中文字体）
+    let font_paths = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ];
+
+    for path in &font_paths {
+        if let Ok(font_data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "CJK".to_owned(),
+                egui::FontData::from_owned(font_data.into()),
+            );
+
+            // 将 CJK 字体插入到 Proportional 和 Monospace 字体族的最前面
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "CJK".to_owned());
+
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("CJK".to_owned());
+
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
 }
 
 /// 获取磁盘信息
