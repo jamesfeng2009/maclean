@@ -457,7 +457,8 @@ impl App {
                 "disk_free" => "Free",
                 "disk_total" => "Total",
                 // 扫描状态
-                "scanning" => "Scanning...",
+                "scanning" => "Scanning",
+                "scanning_hint" => "Scanning disk for cleanable files, please wait...",
                 "press_r_to_scan" => "Click Scan to start",
                 "items_found" => "found",
                 "items_selected" => "selected",
@@ -496,7 +497,8 @@ impl App {
                 "disk_free" => "可用",
                 "disk_total" => "总量",
                 // 扫描状态
-                "scanning" => "扫描中...",
+                "scanning" => "扫描中",
+                "scanning_hint" => "正在扫描磁盘上的可清理文件，请稍候...",
                 "press_r_to_scan" => "点击「扫描」开始",
                 "items_found" => "找到",
                 "items_selected" => "已选",

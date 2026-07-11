@@ -277,14 +277,33 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         // 扫描结果列表
         let tab_idx = app.tab_index();
         let items = app.results[tab_idx].clone();
+        let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
 
-        if items.is_empty() {
+        if is_scanning {
+            // 扫描中：显示进度动画
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                // 旋转动画
+                ui.add(egui::Spinner::new().size(60.0));
+                ui.add_space(15.0);
+                ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(18.0).color(egui::Color32::from_rgb(0, 200, 255)));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(app.t("scanning_hint")).size(13.0).color(egui::Color32::GRAY));
+                ui.add_space(20.0);
+                // 模拟进度条（不确定模式）
+                let t = ctx.input(|i| i.time) as f32;
+                let progress = (t.sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+                ui.add(egui::ProgressBar::new(progress).desired_width(300.0).fill(egui::Color32::from_rgb(0, 200, 255)));
+            });
+            // 扫描中持续刷新 UI
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if items.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
                 ui.label(egui::RichText::new(app.t("no_items_hint")).size(16.0).color(egui::Color32::GRAY));
                 ui.add_space(10.0);
-                let scan_hint = format!("{} → {}", app.t("scan"), app.t("click_to_start"));
-                if ui.button(egui::RichText::new(&scan_hint).size(14.0)).clicked() {
+                let scan_hint = format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
+                if ui.button(egui::RichText::new(&scan_hint).size(16.0)).clicked() {
                     start_scan(app, scan_rx);
                 }
             });
