@@ -108,58 +108,113 @@ fn scan_rust_caches() -> Vec<ScanItem> {
 //  Xcode 缓存扫描
 // =========================================================================
 
-/// 扫描 Xcode 相关缓存
+/// 扫描 Xcode 相关缓存（参考 DevCleaner 细粒度拆分）
 fn scan_xcode_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
     let home = home_dir();
     let xcode_dir = home.join("Library/Developer/Xcode");
 
-    // 1. DerivedData (Xcode 编译产物)
+    // 1. DerivedData - 按项目拆分
     let derived_data = xcode_dir.join("DerivedData");
     if derived_data.is_dir() {
-        let size = dir_size(&derived_data);
-        items.push(ScanItem {
-            path: derived_data.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: "Xcode编译".to_string(),
-            selected: false,
-            deletable: true,
-            recommend: Recommend::Safe,
-            description: "Xcode 编译缓存，重新构建会自动恢复".to_string(),
-        });
+        if let Ok(entries) = std::fs::read_dir(&derived_data) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+                let size = dir_size(&path);
+                if size > 1024 * 1024 { // > 1MB 才展示
+                    // 提取项目名（DerivedData 目录名格式：ProjectName-xxxxxxxx）
+                    let project_name = name.split('-').next().unwrap_or(name);
+                    items.push(ScanItem {
+                        path: path.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: format!("Xcode编译-{}", project_name),
+                        selected: false,
+                        deletable: true,
+                        recommend: Recommend::Safe,
+                        description: format!("项目 {} 的编译缓存，重新构建会自动恢复", project_name),
+                    });
+                }
+            }
+        }
     }
 
-    // 2. iOS DeviceSupport (设备调试支持文件)
+    // 2. iOS DeviceSupport - 按版本拆分，保留最新版
     let device_support = xcode_dir.join("iOS DeviceSupport");
     if device_support.is_dir() {
-        let size = dir_size(&device_support);
-        items.push(ScanItem {
-            path: device_support.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: "Xcode设备".to_string(),
-            selected: false,
-            deletable: true,
-            recommend: Recommend::Caution,
-            description: "iOS 设备调试符号，连接设备时会重新生成".to_string(),
-        });
+        let mut versions: Vec<(String, PathBuf, u64)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&device_support) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.is_empty() || path.starts_with(".") {
+                    continue;
+                }
+                let size = dir_size(&path);
+                versions.push((name.to_string(), path, size));
+            }
+        }
+        // 按 iOS 版本号排序，找出最新版
+        versions.sort_by(|a, b| version_compare(&a.0, &b.0));
+
+        for (i, (version, path, size)) in versions.iter().enumerate() {
+            let is_latest = i == versions.len().saturating_sub(1);
+            items.push(ScanItem {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: *size,
+                category: format!("iOS设备-{}", version),
+                selected: false,
+                deletable: true,
+                recommend: if is_latest { Recommend::Advanced } else { Recommend::Safe },
+                description: if is_latest {
+                    format!("iOS {} 设备调试符号（最新版，建议保留）", version)
+                } else {
+                    format!("iOS {} 旧版调试符号，可安全删除", version)
+                },
+            });
+        }
     }
 
-    // 3. Archives (Xcode 归档文件)
+    // 3. Archives - 按日期/项目拆分
     let archives = xcode_dir.join("Archives");
     if archives.is_dir() {
-        let size = dir_size(&archives);
-        items.push(ScanItem {
-            path: archives.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: "Xcode归档".to_string(),
-            selected: false,
-            deletable: true,
-            recommend: Recommend::Advanced,
-            description: "Xcode 归档文件，包含已发布 App 的归档".to_string(),
-        });
+        // Archives 目录结构：Archives/YYYY-MM-DD/ProjectName.xcarchive
+        if let Ok(date_dirs) = std::fs::read_dir(&archives) {
+            for date_dir in date_dirs.filter_map(|e| e.ok()) {
+                let date_path = date_dir.path();
+                if !date_path.is_dir() {
+                    continue;
+                }
+                let date_name = date_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if let Ok(archive_entries) = std::fs::read_dir(&date_path) {
+                    for archive_entry in archive_entries.filter_map(|e| e.ok()) {
+                        let archive_path = archive_entry.path();
+                        let archive_name = archive_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let size = dir_size(&archive_path);
+                        if size > 1024 * 1024 { // > 1MB
+                            items.push(ScanItem {
+                                path: archive_path.to_string_lossy().to_string(),
+                                size_bytes: size,
+                                category: format!("Xcode归档-{}", date_name),
+                                selected: false,
+                                deletable: true,
+                                recommend: Recommend::Advanced,
+                                description: format!("归档 {} ({})，包含构建和调试信息", archive_name, date_name),
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // 4. 模拟器镜像 (系统级目录，不可直接删除，提示用 xcrun 删除)
+    // 4. 模拟器镜像 (系统级目录，不可直接删除)
     let sim_volumes = PathBuf::from("/Library/Developer/CoreSimulator/Volumes");
     if sim_volumes.is_dir() {
         let size = dir_size(&sim_volumes);
@@ -168,7 +223,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             size_bytes: size,
             category: "模拟器镜像".to_string(),
             selected: false,
-            deletable: false, // 系统级，需用 xcrun simctl runtime delete 删除
+            deletable: false,
             recommend: Recommend::Advanced,
             description: "iOS 模拟器运行时镜像，需用 xcrun simctl 删除".to_string(),
         });
@@ -189,7 +244,106 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
         });
     }
 
+    // 6. 文档缓存 (DevCleaner 特有)
+    let doc_cache = xcode_dir.join("Documentation Cache");
+    if doc_cache.is_dir() {
+        let size = dir_size(&doc_cache);
+        if size > 0 {
+            items.push(ScanItem {
+                path: doc_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Xcode文档缓存".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Safe,
+                description: "Xcode 在线文档缓存，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // 7. 设备日志 (DevCleaner 特有)
+    let device_logs = xcode_dir.join("iOS Device Logs");
+    if device_logs.is_dir() {
+        let size = dir_size(&device_logs);
+        if size > 0 {
+            items.push(ScanItem {
+                path: device_logs.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Xcode设备日志".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Safe,
+                description: "设备日志和崩溃报告，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // 8. Xcode 旧版离线文档
+    let offline_docs = home.join("Library/Developer/Shared/Documentation/DocSets");
+    if offline_docs.is_dir() {
+        let size = dir_size(&offline_docs);
+        if size > 0 {
+            items.push(ScanItem {
+                path: offline_docs.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Xcode离线文档".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Advanced,
+                description: "Xcode 旧版离线文档，可能不再需要".to_string(),
+            });
+        }
+    }
+
+    // 9. watchOS DeviceSupport
+    let watch_support = xcode_dir.join("watchOS DeviceSupport");
+    if watch_support.is_dir() {
+        let size = dir_size(&watch_support);
+        if size > 0 {
+            items.push(ScanItem {
+                path: watch_support.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "watchOS设备".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Caution,
+                description: "watchOS 设备调试符号，连接手表时会重新生成".to_string(),
+            });
+        }
+    }
+
+    // 10. AppleConnect 设备支持
+    let connector_support = xcode_dir.join("AppleConnectLogs");
+    if connector_support.is_dir() {
+        let size = dir_size(&connector_support);
+        if size > 0 {
+            items.push(ScanItem {
+                path: connector_support.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Xcode连接日志".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Safe,
+                description: "Apple Connect 日志，可安全删除".to_string(),
+            });
+        }
+    }
+
     items
+}
+
+/// 简单的版本号比较（如 "17.4" vs "17.5"）
+fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse_ver = |s: &str| -> Vec<u32> {
+        s.split(|c: char| !c.is_ascii_digit() && c != '.')
+            .filter(|p| !p.is_empty())
+            .flat_map(|p| p.split('.'))
+            .filter_map(|n| n.parse::<u32>().ok())
+            .collect()
+    };
+    let va = parse_ver(a);
+    let vb = parse_ver(b);
+    va.cmp(&vb)
 }
 
 // =========================================================================
