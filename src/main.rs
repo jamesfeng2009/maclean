@@ -26,6 +26,8 @@ enum ScanMessage {
 enum DeleteMessage {
     /// 单项删除结果（日志, 路径, 类别, 是否成功）
     Log(String, String, String, bool),
+    /// 进度信息（不计入成功/失败统计）
+    Info(String),
     /// 全部删除完成
     Done,
 }
@@ -152,6 +154,11 @@ fn main() -> eframe::Result {
                         Ok(DeleteMessage::Log(log, path, category, success)) => {
                             if let Some(app) = &mut APP {
                                 app.receive_delete_log(log, path, category, success);
+                            }
+                        }
+                        Ok(DeleteMessage::Info(info)) => {
+                            if let Some(app) = &mut APP {
+                                app.logs.push(info);
                             }
                         }
                         Ok(DeleteMessage::Done) => {
@@ -754,19 +761,22 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
 
         // ========== 阶段2: 自动 sudo 批量删除失败项 ==========
         if !failed_items.is_empty() {
-            let _ = tx.send(DeleteMessage::Log(
+            let _ = tx.send(DeleteMessage::Info(
                 format!("🔐 {} 项需要管理员权限，正在请求授权...", failed_items.len()),
-                String::new(), String::new(), false,
             ));
 
-            // 把所有失败项合并成一条 shell 命令，只弹一次密码框
+            // 为每个路径生成独立的命令块，用 || true 防止一个失败影响其他
             let mut cmds: Vec<String> = Vec::new();
             for (path, _) in &failed_items {
                 let escaped = path.replace("'", "'\\''");
-                cmds.push(format!("chflags -R nouchg '{}'; chmod -R u+rw '{}'; rm -rf '{}'", escaped, escaped, escaped));
+                // 每个路径的三步命令包在一个子shell中，用 || true 确保不会中断后续命令
+                cmds.push(format!(
+                    "(chflags -R nouchg '{}' || true; chmod -R u+rw '{}' || true; rm -rf '{}' || true)",
+                    escaped, escaped, escaped
+                ));
             }
             let combined_cmd = cmds.join("; ");
-            let escaped_cmd = combined_cmd.replace("\"", "\\\"");
+            let escaped_cmd = combined_cmd.replace("\"", "\\\"").replace("\\", "\\\\");
             let script = format!("do shell script \"{}\" with administrator privileges", escaped_cmd);
 
             let sudo_result = std::process::Command::new("osascript")
@@ -774,39 +784,28 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 .arg(&script)
                 .output();
 
+            // 无论 sudo 整体成功或失败，都逐项验证
             match sudo_result {
-                Ok(output) if output.status.success() => {
-                    // 整体执行成功，逐项验证
+                Ok(_output) => {
+                    // 逐项验证每个路径是否已被删除
                     for (path, category) in &failed_items {
                         let p = std::path::Path::new(path.as_str());
-                        if p.exists() {
+                        if p.exists() || p.symlink_metadata().is_ok() {
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✗ sudo 删除仍不完整: {}", path), path.clone(), category.clone(), false));
-                            safety::log_deletion(path, category, false, Some("sudo 删除后仍存在"));
+                                format!("✗ 删除失败: {}", path), path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some("管理员权限删除后仍存在"));
                         } else {
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ sudo 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
+                                format!("✓ 已删除 [{}] {} (管理员权限)", category, path), path.clone(), category.clone(), true));
                             safety::log_deletion(path, category, true, None);
                         }
                     }
                 }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let err_msg = if stderr.contains("User canceled") || stderr.contains("user canceled") {
-                        "用户取消授权".to_string()
-                    } else {
-                        stderr.lines().last().unwrap_or(&stderr).to_string()
-                    };
-                    for (path, category) in &failed_items {
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ 删除失败: {} - {}", path, err_msg), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some(&err_msg));
-                    }
-                }
                 Err(e) => {
+                    // osascript 无法启动
                     for (path, category) in &failed_items {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
+                            format!("✗ 无法启动管理员授权: {} - {}", path, e), path.clone(), category.clone(), false));
                         safety::log_deletion(path, category, false, Some(&e.to_string()));
                     }
                 }
