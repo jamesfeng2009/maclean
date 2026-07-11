@@ -85,17 +85,13 @@ pub trait Scanner {
 /// 返回 (deletable, reason)
 /// 不可删除的情况:
 /// 1. 文件属主为 root 且带有 com.apple.provenance 属性 (SIP 保护)
-/// 2. 目录中含 root 属主子项 (部分文件无法删除)
+/// 可删除但需要 sudo 的情况:
+/// 2. 文件属主为 root 但没有 provenance 属性 (需要管理员权限)
 pub fn check_deletable(path: &str) -> (bool, String) {
     let p = std::path::Path::new(path);
 
     // APFS 快照和模拟器运行时由专门的删除逻辑处理，总是可删除
     if path.starts_with("snapshot:") || path.contains("CoreSimulator") {
-        return (true, String::new());
-    }
-
-    // 系统级路径 /Library 下的一般需要 sudo
-    if path.starts_with("/Library/") || path.starts_with("/System/") {
         return (true, String::new());
     }
 
@@ -117,22 +113,9 @@ pub fn check_deletable(path: &str) -> (bool, String) {
             return (false, "文件由 root 创建且受 SIP 保护，无法删除 (需关闭 SIP)".to_string());
         }
 
-        // 属主为 root 但没有 provenance → 需要 sudo，但仍可删除
+        // 属主为 root 但没有 provenance → 需要 sudo，但可删除
         if uid == 0 {
             return (true, String::new());
-        }
-
-        // 非 root 属主，快速检查第一层子项是否有 root 属主
-        if meta.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(p) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    if let Ok(child_meta) = entry.metadata() {
-                        if child_meta.uid() == 0 {
-                            return (false, "目录含 root 属主文件，可能无法完全删除 (需关闭 SIP)".to_string());
-                        }
-                    }
-                }
-            }
         }
     }
 

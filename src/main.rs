@@ -820,15 +820,12 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 format!("🔐 {} 项需要管理员权限，正在请求授权...", failed_items.len()),
             ));
 
-            // 写临时脚本文件，避免 osascript 命令过长导致失败
+            // 写临时脚本文件，只执行 rm -rf（最快）
             let tmp_script = std::env::temp_dir().join("maclean_sudo_delete.sh");
             let mut script_content = String::from("#!/bin/bash\n");
             for (path, _) in &failed_items {
                 let escaped = path.replace("'", "'\\''");
-                script_content.push_str(&format!(
-                    "chflags -R nouchg '{}' 2>/dev/null; chmod -R u+rw '{}' 2>/dev/null; xattr -rc '{}' 2>/dev/null; rm -rf '{}' 2>/dev/null\n",
-                    escaped, escaped, escaped, escaped
-                ));
+                script_content.push_str(&format!("rm -rf '{}' 2>/dev/null\n", escaped));
             }
             script_content.push_str("exit 0\n");
             let _ = std::fs::write(&tmp_script, &script_content);
@@ -837,7 +834,7 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
             let script_path = tmp_script.to_string_lossy().to_string();
             let apple_script = format!(
                 "do shell script \"bash '{}'\" with administrator privileges",
-                script_path.replace("\"", "\\\"")
+                script_path
             );
 
             let sudo_result = std::process::Command::new("osascript")
@@ -845,32 +842,28 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 .arg(&apple_script)
                 .output();
 
-            // 记录 osascript 输出用于调试
-            match &sudo_result {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let _ = tx.send(DeleteMessage::Info(
-                        format!("osascript 退出码: {}, stderr: {}", output.status.code().unwrap_or(-1), stderr.lines().last().unwrap_or("")),
-                    ));
-                    if !stdout.is_empty() {
-                        let _ = tx.send(DeleteMessage::Info(format!("osascript stdout: {}", stdout.lines().last().unwrap_or(""))));
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(DeleteMessage::Info(format!("osascript 启动失败: {}", e)));
-                }
-            }
-
             // 无论 sudo 整体成功或失败，都逐项验证
             match sudo_result {
                 Ok(_output) => {
                     for (path, category) in &failed_items {
                         let p = std::path::Path::new(path.as_str());
                         if p.exists() || p.symlink_metadata().is_ok() {
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("✗ 删除失败: {}", path), path.clone(), category.clone(), false));
-                            safety::log_deletion(path, category, false, Some("管理员权限删除后仍存在"));
+                            // 删除后仍存在，检测是否 SIP 保护
+                            let has_provenance = std::process::Command::new("xattr")
+                                .arg(path)
+                                .output()
+                                .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
+                                .unwrap_or(false);
+                            
+                            if has_provenance {
+                                let _ = tx.send(DeleteMessage::Log(
+                                    format!("🔒 SIP保护无法删除: {}", path), path.clone(), category.clone(), false));
+                                safety::log_deletion(path, category, false, Some("SIP保护 (com.apple.provenance)"));
+                            } else {
+                                let _ = tx.send(DeleteMessage::Log(
+                                    format!("✗ 删除失败: {}", path), path.clone(), category.clone(), false));
+                                safety::log_deletion(path, category, false, Some("管理员权限删除后仍存在"));
+                            }
                         } else {
                             let _ = tx.send(DeleteMessage::Log(
                                 format!("✓ 已删除 [{}] {} (管理员权限)", category, path), path.clone(), category.clone(), true));
@@ -1182,10 +1175,10 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                     ui.add_space(3.0);
                     ui.colored_label(
                         egui::Color32::from_gray(150),
-                        egui::RichText::new("这些文件由 root 创建且带有 macOS 安全属性 (com.apple.provenance)，受 SIP 保护无法删除。").size(12.0),
+                        egui::RichText::new("部分文件因权限或系统保护无法删除，详见上方日志。").size(12.0),
                     );
 
-                    // 引导用户授予完全磁盘访问权限
+                    // 引导用户处理失败项
                     ui.add_space(8.0);
                     egui::Frame::group(ui.style())
                         .fill(egui::Color32::from_rgb(30, 35, 50))
@@ -1194,21 +1187,26 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                         .show(ui, |ui| {
                             ui.colored_label(
                                 egui::Color32::from_rgb(100, 150, 255),
-                                egui::RichText::new("💡 提示: macOS 保护机制阻止了删除").size(13.0).strong(),
+                                egui::RichText::new("💡 提示: 失败原因及解决方案").size(13.0).strong(),
                             );
                             ui.add_space(3.0);
                             ui.colored_label(
                                 egui::Color32::from_gray(180),
-                                egui::RichText::new("这些文件由 root 创建且带有 macOS 安全属性 (com.apple.provenance)，").size(11.0),
+                                egui::RichText::new("🔒 标记 SIP 保护的文件: 由 root 创建且带 com.apple.provenance 属性，").size(11.0),
                             );
                             ui.colored_label(
                                 egui::Color32::from_gray(180),
-                                egui::RichText::new("即使管理员权限也无法删除。请尝试以下方法：").size(11.0),
+                                egui::RichText::new("    即使管理员权限也无法删除，需关闭 SIP 才能删除。").size(11.0),
                             );
                             ui.add_space(3.0);
+                            ui.colored_label(
+                                egui::Color32::from_gray(180),
+                                egui::RichText::new("✗ 标记删除失败的文件: 可能被进程占用或权限不足。").size(11.0),
+                            );
+                            ui.add_space(5.0);
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 200, 200),
-                                egui::RichText::new("1. 终端执行: sudo rm -rf 路径 (可能仍失败)").size(11.0),
+                                egui::RichText::new("1. 终端执行: sudo rm -rf 路径").size(11.0),
                             );
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 200, 200),
