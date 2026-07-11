@@ -29,7 +29,73 @@ enum DeleteMessage {
     Done,
 }
 
+/// 初始化崩溃日志文件，返回日志路径
+fn init_crash_log() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let log_dir = PathBuf::from(&home).join(".maclean/logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("crash.log");
+
+    // 写入启动分隔线
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "\n=== maclean 启动 @ {} ===", timestamp);
+    }
+
+    log_path
+}
+
+/// 写入扫描日志（用于追踪扫描进度，崩溃时定位问题）
+pub fn log_scan_step(msg: &str) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let log_path = PathBuf::from(&home).join(".maclean/logs/scan.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{}] {}", timestamp, msg);
+    }
+}
+
 fn main() -> eframe::Result {
+    // 初始化崩溃日志
+    let log_path = init_crash_log();
+
+    // 设置全局 panic hook：写入崩溃日志文件，不崩溃
+    let log_path_for_hook = log_path.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let msg = format!("[{}] PANIC: {}\n", timestamp, info);
+        eprintln!("{}", msg);
+        // 追加写入崩溃日志
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&log_path_for_hook)
+        {
+            use std::io::Write;
+            let _ = f.write_all(msg.as_bytes());
+            let _ = f.write_all(format!("Backtrace: {}\n", std::backtrace::Backtrace::force_capture()).as_bytes());
+        }
+    }));
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
@@ -247,6 +313,18 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         format!("✓ {} {} {}, {} {}", count, app.t("items_found"), app.t("items"), app.t("total"), format_size(total)),
                     );
                 }
+            }
+
+            ui.separator();
+
+            // 日志按钮
+            if ui.small_button("📋 日志").clicked() {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let log_dir = format!("{}/.maclean/logs", home);
+                // 在 Finder 中打开日志目录
+                let _ = std::process::Command::new("open")
+                    .arg(&log_dir)
+                    .spawn();
             }
         });
     });
@@ -535,14 +613,25 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
 
     // 实际扫描线程
     std::thread::spawn(move || {
-        let result = match tab {
-            Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
-            Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
-            Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
-            Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
-        };
+        // 用 catch_unwind 兜底，防止扫描 panic 后 UI 卡死
+        let result = std::panic::catch_unwind(|| {
+            match tab {
+                Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
+                Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
+                Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
+                Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+            }
+        });
 
-        let _ = tx.send(ScanMessage::Done(result.items, result.scan_time_ms, tab_idx as u64));
+        match result {
+            Ok(scan_result) => {
+                let _ = tx.send(ScanMessage::Done(scan_result.items, scan_result.scan_time_ms, tab_idx as u64));
+            }
+            Err(_) => {
+                // 扫描 panic，发送空结果让 UI 恢复正常
+                let _ = tx.send(ScanMessage::Done(Vec::new(), 0, tab_idx as u64));
+            }
+        }
     });
 }
 

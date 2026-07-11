@@ -56,6 +56,9 @@ fn should_skip_home_dir(name: &str) -> bool {
         "Public" => true,         // 系统共享目录
         "Applications" => true,   // 应用目录
         "Sites" => true,          // 旧版 Web 共享
+        "Documents" => true,      // TCC 保护，可能触发权限弹窗导致崩溃
+        "Desktop" => true,        // 已在单独段落扫描顶层文件
+        "Downloads" => true,      // 已在单独段落扫描顶层文件
         _ => false,
     }
 }
@@ -78,11 +81,23 @@ impl Scanner for LargeFileScanner {
 
 /// 扫描大文件，可自定义最小大小阈值
 pub fn scan_with_min_size(min_size: u64) -> ScanResult {
+    // 整个扫描用 catch_unwind 兜底，防止任何未预期的 panic 导致崩溃
+    catch_unwind(AssertUnwindSafe(|| scan_impl(min_size)))
+        .unwrap_or_else(|_| ScanResult {
+            items: Vec::new(),
+            total_size: 0,
+            scan_time_ms: 0,
+        })
+}
+
+fn scan_impl(min_size: u64) -> ScanResult {
     let start = Instant::now();
     let home = home_dir();
     let mut items = Vec::new();
+    crate::log_scan_step("大文件扫描: 开始");
 
     // 1. 扫描主目录顶层目录和文件
+    crate::log_scan_step("大文件扫描: 读取主目录");
     if let Ok(entries) = std::fs::read_dir(&home) {
         let paths: Vec<PathBuf> = entries
             .filter_map(|e| e.ok())
@@ -103,9 +118,12 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
             .collect();
 
         // 并行计算每个路径的大小（用 catch_unwind 防止崩溃）
+        crate::log_scan_step(&format!("大文件扫描: 并行计算 {} 个路径", paths.len()));
         let sized: Vec<(PathBuf, u64, bool)> = paths
             .par_iter()
             .filter_map(|path| {
+                let path_str = path.to_string_lossy().to_string();
+                crate::log_scan_step(&format!("大文件扫描: 计算大小 {}", path_str));
                 let is_dir = path.is_dir();
 
                 // 跳过 Photos Library 等会导致崩溃的 bundle
@@ -146,53 +164,82 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
         }
     }
 
-    // 2. 扫描 ~/Downloads 顶层大文件（不递归子目录）
+    // 2. 扫描 ~/Downloads 顶层大文件和大目录（不递归子目录内部）
+    crate::log_scan_step("大文件扫描: 扫描 Downloads");
     let downloads = home.join("Downloads");
     if let Ok(entries) = std::fs::read_dir(&downloads) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.is_file() {
-                if let Ok(meta) = path.symlink_metadata() {
-                    if meta.len() >= DOWNLOAD_MIN_SIZE {
-                        items.push(ScanItem {
-                            path: path.to_string_lossy().to_string(),
-                            size_bytes: meta.len(),
-                            category: "下载文件".to_string(),
-                            selected: false,
-                            deletable: true,
-                            recommend: Recommend::Advanced,
-                            description: "Downloads 中的大文件，请确认无需保留".to_string(),
-                        });
-                    }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // 跳过问题路径
+            if is_problematic_path(name) || name.starts_with('.') {
+                continue;
+            }
+            // 用 catch_unwind 防止单个文件 panic
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if path.is_file() {
+                    path.symlink_metadata()
+                        .map(|m| m.len())
+                        .unwrap_or(0)
+                } else if path.is_dir() {
+                    dir_size_with_timeout(&path)
+                } else {
+                    0
                 }
+            }));
+            let size = result.unwrap_or(0);
+            if size >= DOWNLOAD_MIN_SIZE {
+                items.push(ScanItem {
+                    path: path.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: "下载文件".to_string(),
+                    selected: false,
+                    deletable: true,
+                    recommend: Recommend::Advanced,
+                    description: "Downloads 中的大文件/目录，请确认无需保留".to_string(),
+                });
             }
         }
     }
 
-    // 3. 扫描 ~/Desktop 顶层大文件
+    // 3. 扫描 ~/Desktop 顶层大文件和大目录
+    crate::log_scan_step("大文件扫描: 扫描 Desktop");
     let desktop = home.join("Desktop");
     if let Ok(entries) = std::fs::read_dir(&desktop) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.is_file() {
-                if let Ok(meta) = path.symlink_metadata() {
-                    if meta.len() >= MIN_SIZE {
-                        items.push(ScanItem {
-                            path: path.to_string_lossy().to_string(),
-                            size_bytes: meta.len(),
-                            category: "桌面文件".to_string(),
-                            selected: false,
-                            deletable: true,
-                            recommend: Recommend::Advanced,
-                            description: "桌面上的大文件，请确认无需保留".to_string(),
-                        });
-                    }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if is_problematic_path(name) || name.starts_with('.') {
+                continue;
+            }
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if path.is_file() {
+                    path.symlink_metadata()
+                        .map(|m| m.len())
+                        .unwrap_or(0)
+                } else if path.is_dir() {
+                    dir_size_with_timeout(&path)
+                } else {
+                    0
                 }
+            }));
+            let size = result.unwrap_or(0);
+            if size >= MIN_SIZE {
+                items.push(ScanItem {
+                    path: path.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: "桌面文件".to_string(),
+                    selected: false,
+                    deletable: true,
+                    recommend: Recommend::Advanced,
+                    description: "桌面上的大文件/目录，请确认无需保留".to_string(),
+                });
             }
         }
     }
 
     // 按大小降序排列
+    crate::log_scan_step(&format!("大文件扫描: 完成, 共 {} 项", items.len()));
     items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
 
     let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
