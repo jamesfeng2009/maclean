@@ -725,16 +725,7 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 }
             }
 
-            // 先尝试去除 immutable 标志和改权限（不需要 sudo）
-            if p.is_dir() {
-                let _ = std::process::Command::new("chflags")
-                    .arg("-R").arg("nouchg").arg(path)
-                    .output();
-                let _ = std::process::Command::new("chmod")
-                    .arg("-R").arg("u+rw").arg(path)
-                    .output();
-            }
-
+            // 先直接尝试删除（大多数情况不需要 chflags/chmod）
             let result = if p.is_dir() {
                 std::fs::remove_dir_all(p)
             } else {
@@ -746,7 +737,23 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                     // 删除后验证
                     !p.exists() && p.symlink_metadata().is_err()
                 }
-                Err(_) => false,
+                Err(_) => {
+                    // 第一次删除失败，尝试 chflags + chmod 后重试
+                    if p.is_dir() {
+                        let _ = std::process::Command::new("chflags")
+                            .arg("-R").arg("nouchg").arg(path)
+                            .output();
+                        let _ = std::process::Command::new("chmod")
+                            .arg("-R").arg("u+rw").arg(path)
+                            .output();
+                        // 重试删除
+                        std::fs::remove_dir_all(p).is_ok()
+                            && !p.exists()
+                            && p.symlink_metadata().is_err()
+                    } else {
+                        false
+                    }
+                }
             };
 
             if deleted_ok {
@@ -776,7 +783,8 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 ));
             }
             let combined_cmd = cmds.join("; ");
-            let escaped_cmd = combined_cmd.replace("\"", "\\\"").replace("\\", "\\\\");
+            // 正确转义：先转义反斜杠，再转义双引号
+            let escaped_cmd = combined_cmd.replace("\\", "\\\\").replace("\"", "\\\"");
             let script = format!("do shell script \"{}\" with administrator privileges", escaped_cmd);
 
             let sudo_result = std::process::Command::new("osascript")
@@ -850,7 +858,13 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
 
 /// 删除中弹窗（带进度条）
 fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
-    let progress = if app.delete_total > 0 {
+    // 判断是否在 sudo 阶段（阶段1已完成，等待管理员权限）
+    let in_sudo_phase = app.delete_done >= app.delete_total
+        && app.logs.iter().any(|l| l.contains("管理员权限"));
+
+    let progress = if in_sudo_phase {
+        0.95 // sudo 阶段显示 95%
+    } else if app.delete_total > 0 {
         app.delete_done as f32 / app.delete_total as f32
     } else {
         0.0
@@ -866,15 +880,25 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
             ui.add_space(10.0);
 
             // 标题
-            ui.label(egui::RichText::new(format!("⏳ {}...", app.t("cleaning_in_progress"))).size(16.0).color(egui::Color32::from_rgb(0, 200, 255)));
+            let title = if in_sudo_phase {
+                "🔐 正在请求管理员权限，请在系统弹窗中输入密码..."
+            } else {
+                app.t("cleaning_in_progress")
+            };
+            ui.label(egui::RichText::new(format!("⏳ {}...", title)).size(15.0).color(egui::Color32::from_rgb(0, 200, 255)));
             ui.add_space(10.0);
 
             // 进度条
+            let progress_text = if in_sudo_phase {
+                "请求管理员权限中...".to_string()
+            } else {
+                format!("{}/{} ({}%)", app.delete_done, app.delete_total, (progress * 100.0) as u32)
+            };
             ui.add(
                 egui::ProgressBar::new(progress)
                     .desired_width(480.0)
-                    .fill(egui::Color32::from_rgb(52, 199, 89))
-                    .text(format!("{}/{} ({}%)", app.delete_done, app.delete_total, (progress * 100.0) as u32))
+                    .fill(if in_sudo_phase { egui::Color32::from_rgb(255, 159, 10) } else { egui::Color32::from_rgb(52, 199, 89) })
+                    .text(progress_text)
             );
             ui.add_space(8.0);
 
