@@ -208,6 +208,7 @@ fn scan_group_containers() -> Vec<ScanItem> {
             category: display,
             selected: false,
             deletable: true,
+                            undeletable_reason: String::new(),
             recommend: Recommend::Caution,
             description: "应用组缓存，删除后可能需重新配置".to_string(),
         });
@@ -275,6 +276,7 @@ fn scan_app_support() -> Vec<ScanItem> {
             category: name,
             selected: false,
             deletable: true,
+                            undeletable_reason: String::new(),
             recommend: Recommend::Advanced,
             description: "应用数据目录，可能包含重要配置".to_string(),
         });
@@ -328,6 +330,7 @@ fn scan_system_caches() -> Vec<ScanItem> {
             category: format!("系统缓存-{}", name),
             selected: false,
             deletable: true,
+                            undeletable_reason: String::new(),
             recommend: Recommend::Safe,
             description: "系统缓存目录，可安全删除".to_string(),
         });
@@ -355,6 +358,7 @@ fn scan_logs() -> Vec<ScanItem> {
                 category: "系统日志".to_string(),
                 selected: false,
                 deletable: true,
+                            undeletable_reason: String::new(),
                 recommend: Recommend::Safe,
                 description: "系统日志文件，可安全删除".to_string(),
             });

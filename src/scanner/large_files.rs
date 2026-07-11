@@ -158,6 +158,7 @@ fn scan_impl(min_size: u64) -> ScanResult {
                 category: category.to_string(),
                 selected: false,
                 deletable: true,
+                            undeletable_reason: String::new(),
                 recommend: Recommend::Advanced,
                 description: "主目录下的大文件/目录，请确认无需保留".to_string(),
             });
