@@ -657,38 +657,39 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
     });
 }
 
-/// 使用 sudo 重试删除失败的项（通过 osascript 弹出系统授权窗口）
+/// 使用 sudo 重试删除失败的项（通过 osascript 弹出一次系统授权窗口）
 fn start_sudo_delete(failed_paths: Vec<(String, String)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
-        for (path, category) in &failed_paths {
-            // 转义单引号：每个 ' 替换为 '\''
-            let escaped_path = path.replace("'", "'\\''");
+        // 把所有失败项合并成一条 shell 命令，只弹一次密码框
+        let mut cmds: Vec<String> = Vec::new();
+        for (path, _) in &failed_paths {
+            let escaped = path.replace("'", "'\\''");
+            cmds.push(format!("chflags -R nouchg '{}'; chmod -R u+rw '{}'; rm -rf '{}'", escaped, escaped, escaped));
+        }
 
-            // 三步删除：去标志 → 改权限 → 删除
-            // chflags -R nouchg：去除 immutable 标志
-            // chmod -R u+rw：确保可读写
-            // rm -rf：强制递归删除
-            let cmd = format!(
-                "chflags -R nouchg '{}'; chmod -R u+rw '{}'; rm -rf '{}'",
-                escaped_path, escaped_path, escaped_path
-            );
+        // 合并所有命令，用分号连接
+        let combined_cmd = cmds.join("; ");
+        let escaped_cmd = combined_cmd.replace("\"", "\\\"");
+        let script = format!("do shell script \"{}\" with administrator privileges", escaped_cmd);
 
-            let script = format!(
-                "do shell script \"{}\" with administrator privileges",
-                cmd.replace("\"", "\\\"")
-            );
+        // 发送一条日志告知用户正在请求授权
+        let _ = tx.send(DeleteMessage::Log(
+            format!("🔐 正在请求管理员权限，删除 {} 项...", failed_paths.len()),
+            String::new(), String::new(), false,
+        ));
 
-            let result = std::process::Command::new("osascript")
-                .arg("-e")
-                .arg(&script)
-                .output();
+        let result = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output();
 
-            match result {
-                Ok(output) if output.status.success() => {
-                    // 验证删除
+        match result {
+            Ok(output) if output.status.success() => {
+                // 整体执行成功，逐项验证
+                for (path, category) in &failed_paths {
                     let p = std::path::Path::new(path.as_str());
                     if p.exists() {
                         let _ = tx.send(DeleteMessage::Log(
@@ -700,19 +701,23 @@ fn start_sudo_delete(failed_paths: Vec<(String, String)>, delete_rx: &mut Option
                         safety::log_deletion(path, category, true, None);
                     }
                 }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let err_msg = if stderr.contains("User canceled") || stderr.contains("user canceled") {
-                        "用户取消授权".to_string()
-                    } else {
-                        // 截取关键错误信息
-                        stderr.lines().last().unwrap_or(&stderr).to_string()
-                    };
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let err_msg = if stderr.contains("User canceled") || stderr.contains("user canceled") {
+                    "用户取消授权".to_string()
+                } else {
+                    stderr.lines().last().unwrap_or(&stderr).to_string()
+                };
+                // 用户取消或整体失败，所有项标记为失败
+                for (path, category) in &failed_paths {
                     let _ = tx.send(DeleteMessage::Log(
                         format!("✗ sudo 删除失败: {} - {}", path, err_msg), path.clone(), category.clone(), false));
                     safety::log_deletion(path, category, false, Some(&err_msg));
                 }
-                Err(e) => {
+            }
+            Err(e) => {
+                for (path, category) in &failed_paths {
                     let _ = tx.send(DeleteMessage::Log(
                         format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
                     safety::log_deletion(path, category, false, Some(&e.to_string()));
