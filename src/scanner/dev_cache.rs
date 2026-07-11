@@ -8,6 +8,8 @@
 //! - Homebrew (下载缓存)
 //! - pip (包缓存)
 //! - JetBrains IDE (旧版本配置、缓存)
+//! - Java (Gradle 缓存/版本、Maven 仓库、build 目录)
+//! - Python (pip/Conda/Poetry 缓存、__pycache__)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +42,10 @@ impl Scanner for DevCacheScanner {
         items.extend(scan_homebrew_caches());
         items.extend(scan_pip_caches());
         items.extend(scan_jetbrains_caches());
+
+        // Java/Gradle/Maven 和 Python 缓存
+        scan_java_caches(&mut items);
+        scan_python_caches(&mut items);
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
@@ -485,4 +491,190 @@ fn search_dirs(base: &Path, name: &str, max_depth: usize) -> Vec<PathBuf> {
     });
 
     found
+}
+
+/// 扫描 Java/Gradle/Maven 缓存
+fn scan_java_caches(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+
+    // Gradle 缓存 (~/.gradle/caches)
+    let gradle_caches = home.join(".gradle/caches");
+    if let Ok(size) = dir_size_checked(&gradle_caches) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: gradle_caches.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Gradle缓存".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Caution,
+                description: "Gradle 构建缓存，删除后编译时需重新下载依赖".to_string(),
+            });
+        }
+    }
+
+    // Gradle wrapper 发行版 (~/.gradle/wrapper/dists)
+    let gradle_dists = home.join(".gradle/wrapper/dists");
+    if let Ok(size) = dir_size_checked(&gradle_dists) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: gradle_dists.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Gradle版本".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Safe,
+                description: "Gradle Wrapper 下载的版本，可安全删除会自动重新下载".to_string(),
+            });
+        }
+    }
+
+    // Maven 本地仓库 (~/.m2/repository)
+    let m2_repo = home.join(".m2/repository");
+    if let Ok(size) = dir_size_checked(&m2_repo) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: m2_repo.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Maven仓库".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Caution,
+                description: "Maven 本地依赖仓库，删除后编译时需重新下载".to_string(),
+            });
+        }
+    }
+
+    // Java 项目 build 目录
+    for search_path in get_project_search_paths() {
+        let build_dirs = search_dirs(&search_path, "build", 4);
+        for dir in build_dirs {
+            // 排除 node_modules 内的 build
+            if dir.to_string_lossy().contains("node_modules") {
+                continue;
+            }
+            if let Ok(size) = dir_size_checked(&dir) {
+                if size > 10 * 1024 * 1024 { // > 10MB
+                    items.push(ScanItem {
+                        path: dir.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: "Java编译".to_string(),
+                        selected: false,
+                        deletable: true,
+                        recommend: Recommend::Safe,
+                        description: "Java/Gradle 项目编译产物，gradle build 会自动重新生成".to_string(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// 扫描 Python 缓存
+fn scan_python_caches(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+
+    // pip 缓存 (~/Library/Caches/pip)
+    let pip_cache = home.join("Library/Caches/pip");
+    if let Ok(size) = dir_size_checked(&pip_cache) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: pip_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "pip缓存".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Safe,
+                description: "pip 下载缓存，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // Conda 缓存 (~/.conda)
+    let conda_pkgs = home.join(".conda/pkgs");
+    if let Ok(size) = dir_size_checked(&conda_pkgs) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: conda_pkgs.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Conda缓存".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Caution,
+                description: "Conda 包缓存，删除后安装时需重新下载".to_string(),
+            });
+        }
+    }
+
+    // Poetry 缓存 (~/Library/Caches/pypoetry)
+    let poetry_cache = home.join("Library/Caches/pypoetry");
+    if let Ok(size) = dir_size_checked(&poetry_cache) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: poetry_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Poetry缓存".to_string(),
+                selected: false,
+                deletable: true,
+                recommend: Recommend::Safe,
+                description: "Poetry 依赖缓存，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // Python __pycache__ 目录
+    for search_path in get_project_search_paths() {
+        let pycache_dirs = search_dirs(&search_path, "__pycache__", 5);
+        let mut total_py_size: u64 = 0;
+        let mut py_paths: Vec<String> = Vec::new();
+        for dir in &pycache_dirs {
+            if let Ok(size) = dir_size_checked(dir) {
+                total_py_size += size;
+                py_paths.push(dir.to_string_lossy().to_string());
+            }
+        }
+        if total_py_size > 10 * 1024 * 1024 { // > 10MB 才展示
+            items.push(ScanItem {
+                path: format!("{}个 __pycache__ 目录", py_paths.len()),
+                size_bytes: total_py_size,
+                category: "Python缓存".to_string(),
+                selected: false,
+                deletable: false, // 多个目录无法一键删除
+                recommend: Recommend::Safe,
+                description: "Python 字节码缓存，运行时自动重建，需手动清理".to_string(),
+            });
+        }
+    }
+}
+
+/// 安全的目录大小计算（带错误处理）
+fn dir_size_checked(path: &Path) -> Result<u64, String> {
+    if !path.is_dir() {
+        return Ok(0);
+    }
+    let mut total: u64 = 0;
+    for entry in WalkDir::new(path)
+        .follow_links(false)
+        .max_depth(50)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() > 0 && e.file_type().is_dir() {
+                std::fs::metadata(e.path()).is_ok()
+            } else {
+                true
+            }
+        })
+    {
+        match entry {
+            Ok(entry) => {
+                if entry.file_type().is_file() {
+                    if let Ok(metadata) = entry.metadata() {
+                        total += metadata.len();
+                    }
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    Ok(total)
 }

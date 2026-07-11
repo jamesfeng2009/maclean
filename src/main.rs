@@ -623,6 +623,16 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 }
             }
 
+            // 先尝试去除 immutable 标志和改权限（不需要 sudo）
+            if p.is_dir() {
+                let _ = std::process::Command::new("chflags")
+                    .arg("-R").arg("nouchg").arg(path)
+                    .output();
+                let _ = std::process::Command::new("chmod")
+                    .arg("-R").arg("u+rw").arg(path)
+                    .output();
+            }
+
             let result = if p.is_dir() {
                 std::fs::remove_dir_all(p)
             } else {
