@@ -774,14 +774,15 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
 
             // 写临时脚本文件，避免 osascript 命令过长导致失败
             let tmp_script = std::env::temp_dir().join("maclean_sudo_delete.sh");
-            let mut script_content = String::from("#!/bin/bash\nset +e\n");
+            let mut script_content = String::from("#!/bin/bash\n");
             for (path, _) in &failed_items {
                 let escaped = path.replace("'", "'\\''");
                 script_content.push_str(&format!(
-                    "chflags -R nouchg '{}' 2>/dev/null; chmod -R u+rw '{}' 2>/dev/null; rm -rf '{}' 2>/dev/null\n",
-                    escaped, escaped, escaped
+                    "chflags -R nouchg '{}' 2>/dev/null; chmod -R u+rw '{}' 2>/dev/null; xattr -rc '{}' 2>/dev/null; rm -rf '{}' 2>/dev/null\n",
+                    escaped, escaped, escaped, escaped
                 ));
             }
+            script_content.push_str("exit 0\n");
             let _ = std::fs::write(&tmp_script, &script_content);
             let _ = std::process::Command::new("chmod").arg("+x").arg(&tmp_script).output();
 
@@ -978,6 +979,43 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                         egui::Color32::from_gray(150),
                         egui::RichText::new("以下项目即使使用管理员权限也无法删除，可能被进程占用或受系统保护").size(12.0),
                     );
+
+                    // 引导用户授予完全磁盘访问权限
+                    ui.add_space(8.0);
+                    egui::Frame::group(ui.style())
+                        .fill(egui::Color32::from_rgb(30, 35, 50))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 80, 120)))
+                        .inner_margin(egui::Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(100, 150, 255),
+                                egui::RichText::new("💡 提示: macOS 保护机制阻止了删除").size(13.0).strong(),
+                            );
+                            ui.add_space(3.0);
+                            ui.colored_label(
+                                egui::Color32::from_gray(180),
+                                egui::RichText::new("这些文件由 root 创建且带有 macOS 安全属性 (com.apple.provenance)，").size(11.0),
+                            );
+                            ui.colored_label(
+                                egui::Color32::from_gray(180),
+                                egui::RichText::new("即使管理员权限也无法删除。请尝试以下方法：").size(11.0),
+                            );
+                            ui.add_space(3.0);
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 200, 200),
+                                egui::RichText::new("1. 系统设置 → 隐私与安全 → 完全磁盘访问 → 添加 maclean").size(11.0),
+                            );
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 200, 200),
+                                egui::RichText::new("2. 终端手动删除: sudo rm -rf 路径").size(11.0),
+                            );
+                            ui.add_space(5.0);
+                            if ui.button(egui::RichText::new("⚙️ 打开系统设置").size(12.0)).clicked() {
+                                let _ = std::process::Command::new("open")
+                                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                                    .spawn();
+                            }
+                        });
 
                     // 列出所有失败的路径（可滚动+复制）
                     ui.add_space(5.0);
