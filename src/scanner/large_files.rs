@@ -19,16 +19,45 @@ const DOWNLOAD_MIN_SIZE: u64 = 500 * 1024 * 1024;
 /// 单目录遍历超时 10 秒
 const DIR_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 已知会导致崩溃或极慢的目录/文件（Photos Library、Music Library 等 bundle）
+/// 已知会导致崩溃、极慢或权限问题的目录/文件
+/// - Media Library bundles（包含数据库和大量小文件，遍历会触发权限弹窗或 panic）
+/// - .app bundles（macOS 应用包，不应删除）
+/// - 系统保护目录
 fn is_problematic_path(name: &str) -> bool {
     let lower = name.to_lowercase();
+    // Media Library bundles
     lower.ends_with(".photoslibrary")
         || lower.ends_with(".musiclibrary")
         || lower.ends_with(".tvlibrary")
         || lower.ends_with(".podcastlibrary")
-        || lower == "photos library.photoslibrary"
-        || lower.contains(".photoslibrary")
-        || lower == "photo library"
+        || lower.ends_with(".aplibrary")
+        || lower.ends_with(".fcpbundle")
+        || lower.ends_with(".logicx")
+        || lower.ends_with(".band")
+        // macOS App bundles
+        || lower.ends_with(".app")
+        // Xcode workspaces/projects（内部有大量索引文件）
+        || lower.ends_with(".xcworkspace")
+        || lower.ends_with(".xcodeproj")
+        // 其他特殊 bundle
+        || lower.ends_with(".bundle")
+        || lower.ends_with(".pkg")
+        || lower.ends_with(".dmg")
+        || lower.ends_with(".iso")
+}
+
+/// 主目录下应跳过的目录名（可能触发权限弹窗或包含系统保护文件）
+fn should_skip_home_dir(name: &str) -> bool {
+    match name {
+        "Library" => true,        // 包含大量系统/应用数据，由 App缓存 Tab 单独扫描
+        "Pictures" => true,       // 可能包含 Photos Library
+        "Music" => true,          // 可能包含 Music Library
+        "Movies" => true,         // 可能包含 iMovie 库
+        "Public" => true,         // 系统共享目录
+        "Applications" => true,   // 应用目录
+        "Sites" => true,          // 旧版 Web 共享
+        _ => false,
+    }
 }
 
 /// 大文件扫描器
@@ -59,9 +88,13 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
-                // 跳过隐藏目录和 Library
+                // 跳过隐藏目录
                 if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with('.') {
+                        return false;
+                    }
+                    // 跳过 Library/Pictures/Music/Movies 等系统目录
+                    if should_skip_home_dir(name) {
                         return false;
                     }
                 }

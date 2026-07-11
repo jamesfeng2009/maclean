@@ -47,6 +47,9 @@ impl Scanner for DevCacheScanner {
         scan_java_caches(&mut items);
         scan_python_caches(&mut items);
 
+        // 更多语言缓存
+        scan_more_dev_caches(&mut items);
+
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
 
@@ -677,4 +680,93 @@ fn dir_size_checked(path: &Path) -> Result<u64, String> {
         }
     }
     Ok(total)
+}
+
+/// 扫描更多语言/工具的缓存
+/// 覆盖 Ruby/PHP/Flutter/Swift/CocoaPods/CMake/Docker 等
+fn scan_more_dev_caches(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+
+    // 定义缓存路径列表：(路径, 类别, 推荐等级, 描述)
+    let cache_dirs: Vec<(&str, &str, Recommend, &str)> = vec![
+        // Ruby
+        ("~/.gem", "RubyGems", Recommend::Caution, "Ruby Gem 缓存，删除后安装时需重新下载"),
+        ("~/.bundle/cache", "Bundler", Recommend::Safe, "Ruby Bundler 缓存，可安全删除"),
+        ("~/.rbenv/versions", "rbenv", Recommend::Advanced, "rbenv 安装的 Ruby 版本，请确认后删除"),
+        // PHP
+        ("~/.composer/cache", "Composer", Recommend::Safe, "PHP Composer 下载缓存，可安全删除"),
+        // Flutter/Dart
+        ("~/.pub-cache", "Flutter/Dart", Recommend::Caution, "Dart/Flutter 包缓存，删除后需重新下载"),
+        // Swift Package Manager
+        ("~/.swiftpm", "SwiftPM", Recommend::Safe, "Swift Package Manager 缓存，可安全删除"),
+        // CocoaPods
+        ("~/Library/Caches/CocoaPods", "CocoaPods", Recommend::Safe, "CocoaPods 缓存，可安全删除"),
+        // CMake
+        ("~/.cmake", "CMake", Recommend::Safe, "CMake 缓存，可安全删除"),
+        // Docker
+        ("~/Library/Containers/com.docker.docker/Data/vms", "Docker", Recommend::Advanced, "Docker 虚拟机数据，请确认后删除"),
+        // Android SDK
+        ("~/Library/Android/sdk/system-images", "AndroidSDK", Recommend::Caution, "Android 模拟器系统镜像，删除后需重新下载"),
+        // Yarn (非 nodejs 的独立缓存)
+        ("~/.yarn/cache", "Yarn", Recommend::Safe, "Yarn 包缓存，可安全删除"),
+        // Deno
+        ("~/Library/Caches/deno", "Deno", Recommend::Safe, "Deno 缓存，可安全删除"),
+        // Bun
+        ("~/.bun/install/cache", "Bun", Recommend::Safe, "Bun 包缓存，可安全删除"),
+    ];
+
+    for (path_str, category, recommend, desc) in cache_dirs {
+        let full_path = path_str.replace("~", &home.to_string_lossy());
+        let path = Path::new(&full_path);
+        if let Ok(size) = dir_size_checked(path) {
+            if size > 0 {
+                items.push(ScanItem {
+                    path: full_path,
+                    size_bytes: size,
+                    category: category.to_string(),
+                    selected: false,
+                    deletable: true,
+                    recommend,
+                    description: desc.to_string(),
+                });
+            }
+        }
+    }
+
+    // 通用构建产物目录扫描（dist、build、.next、.nuxt、.turbo、.svelte-kit）
+    for search_path in get_project_search_paths() {
+        let build_dir_names = vec![
+            ("dist", "构建产物", Recommend::Safe, "前端构建产物，npm run build 会重新生成"),
+            (".next", "Next.js", Recommend::Safe, "Next.js 构建缓存，可安全删除"),
+            (".nuxt", "Nuxt.js", Recommend::Safe, "Nuxt.js 构建缓存，可安全删除"),
+            (".turbo", "Turborepo", Recommend::Safe, "Turborepo 缓存，可安全删除"),
+            (".svelte-kit", "SvelteKit", Recommend::Safe, "SvelteKit 构建缓存，可安全删除"),
+            (".astro", "Astro", Recommend::Safe, "Astro 构建缓存，可安全删除"),
+            (".remix", "Remix", Recommend::Safe, "Remix 构建缓存，可安全删除"),
+            (".gradle", "Gradle项目", Recommend::Safe, "Gradle 项目本地缓存，可安全删除"),
+        ];
+
+        for (dir_name, category, recommend, desc) in &build_dir_names {
+            let found_dirs = search_dirs(&search_path, dir_name, 4);
+            for dir in found_dirs {
+                // 排除 node_modules 内的目录
+                if dir.to_string_lossy().contains("node_modules") {
+                    continue;
+                }
+                if let Ok(size) = dir_size_checked(&dir) {
+                    if size > 10 * 1024 * 1024 { // > 10MB
+                        items.push(ScanItem {
+                            path: dir.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: category.to_string(),
+                            selected: false,
+                            deletable: true,
+                            recommend: *recommend,
+                            description: desc.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
