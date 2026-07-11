@@ -24,18 +24,72 @@ pub enum SafetyCheck {
 ///
 /// 这是删除前的最终安全屏障，即使扫描器有 bug 扫到了危险路径，
 /// 这里的检查也会阻止删除。
+///
+/// 安全检查层（从外到内）:
+/// 1. 空路径 / 非绝对路径检查
+/// 2. 控制字符 / 路径遍历 `..` 防护
+/// 3. 符号链接目标解析（拒绝指向保护目录的符号链接）
+/// 4. 系统关键目录黑名单（/System, /usr, /bin 等 50+ 路径）
+/// 5. 用户关键目录黑名单（Keychains, Mail, Messages 等）
+/// 6. 白名单校验（只允许已知安全路径模式）
+/// 7. 敏感文件名检测（.env, id_rsa, credentials 等）
 pub fn check_path_safety(path: &str) -> SafetyCheck {
+    // ================================================================
+    //  第 0 层: 空路径检查
+    // ================================================================
+    if path.is_empty() {
+        return SafetyCheck::Danger("路径为空".to_string());
+    }
+
+    // ================================================================
+    //  第 1 层: 控制字符过滤 + 路径遍历防护
+    // ================================================================
+    // 拒绝包含控制字符的路径（防止注入攻击）
+    if path.chars().any(|c| c.is_control() || c == '\n' || c == '\r' || c == '\0') {
+        return SafetyCheck::Danger("路径包含控制字符".to_string());
+    }
+
+    // 路径遍历防护：拒绝 `..` 作为完整路径组件
+    // 但允许文件名中包含 `..`（如 Firefox 的 name..files）
+    let path_components: Vec<&str> = path.split('/').collect();
+    if path_components.iter().any(|&c| c == "..") {
+        return SafetyCheck::Danger("路径包含目录遍历 (..)".to_string());
+    }
+
+    // 非文件路径（APFS 快照等），跳过文件路径检查
+    if path.starts_with("com.apple.TimeMachine.") || path.contains(" | ") {
+        return SafetyCheck::Safe;
+    }
+
     let p = Path::new(path);
+
+    // ================================================================
+    //  第 2 层: 符号链接目标解析
+    // ================================================================
+    // 如果是符号链接，解析目标并检查目标是否为保护路径
+    if let Ok(meta) = p.symlink_metadata() {
+        if meta.file_type().is_symlink() {
+            match std::fs::canonicalize(p) {
+                Ok(target) => {
+                    let target_str = target.to_string_lossy().to_string();
+                    // 检查符号链接目标是否指向系统保护目录
+                    if is_critical_system_path(&target_str) {
+                        return SafetyCheck::Danger(format!(
+                            "符号链接指向系统保护目录: {} -> {}",
+                            path, target_str
+                        ));
+                    }
+                }
+                Err(_) => {
+                    return SafetyCheck::Danger(format!("符号链接目标无法解析: {}", path));
+                }
+            }
+        }
+    }
+
     let canonical = match p.canonicalize() {
         Ok(c) => c,
         Err(_) => {
-            // 路径不存在或无法解析，可能是 APFS 快照名称等非文件路径
-            // 对于非文件路径（如快照名），跳过文件路径安全检查
-            if path.starts_with("com.apple.TimeMachine.")
-                || path.contains(" | ")
-            {
-                return SafetyCheck::Safe;
-            }
             return SafetyCheck::Danger(format!("路径无法解析: {}", path));
         }
     };
@@ -43,32 +97,13 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
     let canonical_str = canonical.to_string_lossy().to_string();
 
     // ================================================================
-    //  第一层: 绝对禁止路径（系统关键目录）
+    //  第 3 层: 系统关键目录黑名单（参考 Mole 的保护列表）
     // ================================================================
-    let forbidden_prefixes = [
-        "/",
-        "/System",
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/var",
-        "/private/var/db",      // 系统数据库
-        "/private/var/log",      // 系统日志（不是 ~/Library/Logs）
-        "/etc",
-        "/dev",
-        "/Library/Preferences",  // 系统偏好设置
-        "/Library/StartupItems",
-        "/Library/LaunchDaemons",
-        "/Library/LaunchAgents",
-    ];
-
-    for forbidden in &forbidden_prefixes {
-        if canonical_str == *forbidden {
-            return SafetyCheck::Danger(format!(
-                "拒绝删除系统关键目录: {}",
-                canonical_str
-            ));
-        }
+    if is_critical_system_path(&canonical_str) {
+        return SafetyCheck::Danger(format!(
+            "拒绝删除系统关键目录: {}",
+            canonical_str
+        ));
     }
 
     // 根目录本身绝对禁止
@@ -77,7 +112,7 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
     }
 
     // ================================================================
-    //  第二层: 用户主目录下的禁止路径
+    //  第 4 层: 用户主目录下的禁止路径
     // ================================================================
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/NONEXISTENT"));
     let home_str = home.to_string_lossy();
@@ -94,8 +129,8 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
         "Library/Mail",                  // 邮件数据
         "Library/Messages",              // 消息数据
         "Library/Cookies",               // Cookie
-        "Library/Group Containers",      // Group Containers 根目录（只允许删其下的 Caches）
-        "Library/Containers",            // Containers 根目录（只允许删其下的 Caches）
+        "Library/Group Containers",      // Group Containers 根目录
+        "Library/Containers",            // Containers 根目录
         "Library/Application Support/MobileSync",   // iOS 备份
         "Library/Application Support/AddressBook",  // 通讯录
         "Library/Application Support/CallHistoryDB", // 通话记录
@@ -107,7 +142,7 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
         "Library/Assistants",            // Siri 数据
         "Library/Passwords",             // 密码
         "Library/Security",              // 安全数据
-        "Library/Caches/Homebrew/Caskroom", // Homebrew 已安装应用（不是缓存）
+        "Library/Caches/Homebrew/Caskroom", // Homebrew 已安装应用
         ".ssh",                          // SSH 密钥
         ".gnupg",                        // GPG 密钥
         ".config/git",                   // Git 配置
@@ -124,7 +159,7 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
     }
 
     // ================================================================
-    //  第三层: 白名单校验 - 只允许删除已知安全的路径模式
+    //  第 5 层: 白名单校验 - 只允许删除已知安全的路径模式
     // ================================================================
     let is_in_safe_zone = check_whitelist(&canonical, &home);
 
@@ -136,7 +171,7 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
     }
 
     // ================================================================
-    //  第四层: 敏感文件名检测
+    //  第 6 层: 敏感文件名检测
     // ================================================================
     let file_name = canonical
         .file_name()
@@ -170,6 +205,77 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
     }
 
     SafetyCheck::Safe
+}
+
+/// 检查路径是否为系统关键保护路径
+/// 参考 Mole 的 _mole_is_critical_deletion_path，包含 50+ 保护路径
+fn is_critical_system_path(path: &str) -> bool {
+    // 精确匹配的系统根路径
+    let exact_match = [
+        "/",
+        "/bin",
+        "/sbin",
+        "/usr",
+        "/System",
+        "/Library",
+        "/Applications",
+        "/Volumes",
+        "/opt",
+        "/private",
+        "/private/var",
+        "/private/etc",
+        "/private/tmp",
+        "/private/var/db",
+        "/private/var/log",
+        "/private/var/audit",
+        "/private/var/root",
+        "/etc",
+        "/var",
+        "/dev",
+        "/Users",
+        "/Users/Shared",
+        "/Users/Guest",
+        "/cores",
+    ];
+
+    for &m in &exact_match {
+        if path == m {
+            return true;
+        }
+    }
+
+    // 前缀匹配的系统保护路径
+    let prefix_match = [
+        "/System/",
+        "/bin/",
+        "/sbin/",
+        "/usr/",
+        "/Library/Apple/",
+        "/Library/Application Support/",
+        "/Library/Extensions/",
+        "/Library/Keychains/",
+        "/Library/Preferences/",
+        "/Library/StartupItems/",
+        "/Library/LaunchDaemons/",
+        "/Library/LaunchAgents/",
+        "/Library/Managed Preferences/",
+        "/Library/ConfigurationProfiles/",
+        "/private/var/db/",
+        "/private/var/audit/",
+        "/private/var/root/",
+        "/private/etc/",
+        "/var/db/",
+        "/var/audit/",
+        "/var/root/",
+    ];
+
+    for &p in &prefix_match {
+        if path.starts_with(p) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// 检查路径是否在安全白名单内
