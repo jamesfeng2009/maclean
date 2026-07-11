@@ -409,6 +409,8 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             let safe_sz = app.safe_size();
             let caution_cnt = app.caution_count();
             let caution_sz = app.caution_size();
+            let advanced_cnt = app.advanced_count();
+            let advanced_sz = app.advanced_size();
             let selected_cnt = app.selected_count();
             let selected_sz = app.selected_total_size();
 
@@ -430,6 +432,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                             egui::Color32::from_rgb(255, 159, 10),
                             format!("🟡 {} {} ({}), {} {}", caution_cnt, app.t("items"), app.t("caution_clean"), app.t("total"), format_size(caution_sz)),
                         );
+
+                        // 需确认（如果有）
+                        if advanced_cnt > 0 {
+                            ui.separator();
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 69, 58),
+                                format!("🔴 {} {} ({}), {} {}", advanced_cnt, app.t("items"), app.t("confirm_clean"), app.t("total"), format_size(advanced_sz)),
+                            );
+                        }
+
                         ui.separator();
 
                         // 已选
@@ -932,6 +944,37 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
                         let _ = std::process::Command::new("open")
                             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
                             .spawn();
+                    }
+
+                    ui.add_space(10.0);
+
+                    // 安装到 /Applications 按钮
+                    let install_btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("📦 安装到应用程序")
+                                .color(egui::Color32::WHITE)
+                                .size(14.0)
+                        )
+                        .fill(egui::Color32::from_rgb(52, 199, 89))
+                    );
+                    if install_btn.clicked() {
+                        // 获取当前应用路径
+                        if let Ok(exe_path) = std::env::current_exe() {
+                            if let Some(app_path) = exe_path.ancestors().nth(2) {
+                                let dest = "/Applications/maclean.app";
+                                let src = app_path.to_string_lossy().to_string();
+                                // 用 osascript 执行复制（需要管理员权限写入 /Applications）
+                                let script = format!(
+                                    "do shell script \"cp -R '{}' '{}'\" with administrator privileges",
+                                    src.replace("'", "'\\''"),
+                                    dest
+                                );
+                                let _ = std::process::Command::new("osascript")
+                                    .arg("-e")
+                                    .arg(&script)
+                                    .output();
+                            }
+                        }
                     }
 
                     ui.add_space(10.0);

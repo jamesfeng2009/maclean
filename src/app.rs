@@ -276,6 +276,23 @@ impl App {
             .sum()
     }
 
+    /// 统计当前 Tab 中需确认（Advanced）的数量
+    pub fn advanced_count(&self) -> usize {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Advanced)
+            .count()
+    }
+
+    /// 统计当前 Tab 中需确认（Advanced）的总大小
+    pub fn advanced_size(&self) -> u64 {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Advanced)
+            .map(|i| i.size_bytes)
+            .sum()
+    }
+
     /// 执行扫描（当前 Tab）
     pub fn scan_current(&mut self) {
         let idx = self.tab_index();
@@ -494,6 +511,7 @@ impl App {
                 "total" => "total",
                 "safe_clean" => "safe to clean",
                 "caution_clean" => "need caution",
+                "confirm_clean" => "need confirm",
                 // 列表
                 "category" => "Category",
                 "size" => "Size",
@@ -538,6 +556,7 @@ impl App {
                 "total" => "共计",
                 "safe_clean" => "可安全清理",
                 "caution_clean" => "需谨慎确认",
+                "confirm_clean" => "需确认",
                 // 列表
                 "category" => "类别",
                 "size" => "大小",

@@ -20,11 +20,41 @@ echo "  maclean v$VERSION GUI 打包脚本"
 echo "=========================================="
 echo ""
 
-# 1. 编译 release 版本
-echo "[1/7] 编译 release 版本..."
+# 1. 编译 Universal Binary (支持 Apple Silicon + Intel)
+echo "[1/7] 编译 Universal Binary (Apple Silicon + Intel)..."
 cd "$PROJECT_DIR"
-cargo build --release
-echo "  ✓ 编译完成"
+
+# 检测当前架构
+CURRENT_ARCH=$(uname -m)
+echo "  当前架构: $CURRENT_ARCH"
+
+# 检查是否有 x86_64 target
+HAS_X86=$(rustup target list --installed 2>/dev/null | grep "x86_64-apple-darwin" || true)
+HAS_ARM=$(rustup target list --installed 2>/dev/null | grep "aarch64-apple-darwin" || true)
+
+if [ -n "$HAS_ARM" ] && [ -n "$HAS_X86" ]; then
+    # 两个架构都有，构建 Universal Binary
+    echo "  编译 aarch64-apple-darwin..."
+    cargo build --release --target aarch64-apple-darwin 2>&1 | tail -1
+    echo "  编译 x86_64-apple-darwin..."
+    cargo build --release --target x86_64-apple-darwin 2>&1 | tail -1
+    echo "  合并 Universal Binary..."
+    lipo -create \
+        "$PROJECT_DIR/target/aarch64-apple-darwin/release/maclean" \
+        "$PROJECT_DIR/target/x86_64-apple-darwin/release/maclean" \
+        -output "$BUILD_DIR/maclean"
+    echo "  ✓ Universal Binary 编译完成 (M1 + Intel)"
+elif [ -n "$HAS_ARM" ]; then
+    echo "  仅 aarch64 target 可用，编译 Apple Silicon 版本..."
+    cargo build --release --target aarch64-apple-darwin 2>&1 | tail -1
+    cp "$PROJECT_DIR/target/aarch64-apple-darwin/release/maclean" "$BUILD_DIR/maclean"
+    echo "  ✓ Apple Silicon 版本编译完成 (仅 M1+)"
+    echo "  提示: 运行 rustup target add x86_64-apple-darwin 可启用 Intel 支持"
+else
+    echo "  编译当前架构版本..."
+    cargo build --release 2>&1 | tail -1
+    echo "  ✓ 编译完成"
+fi
 echo ""
 
 # 2. 准备打包目录
