@@ -838,23 +838,49 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                         ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("  ...等 {} 项", app.failed_paths.len())).size(11.0));
                     }
 
-                    // sudo 重试按钮
+                    // sudo 重试说明 + 按钮
                     ui.add_space(8.0);
-                    let sudo_btn = ui.add(
-                        egui::Button::new(egui::RichText::new("🔐 使用管理员权限重试删除")
-                            .color(egui::Color32::WHITE)
-                            .size(14.0))
-                    );
-                    if sudo_btn.clicked() {
-                        let failed = std::mem::take(&mut app.failed_paths);
-                        app.delete_summary = None;
-                        app.confirm = ConfirmState::Deleting;
-                        app.delete_total = failed.len();
-                        app.delete_done = 0;
-                        app.logs.clear();
-                        app.deleted_paths.clear();
-                        start_sudo_delete(failed, delete_rx);
-                    }
+                    egui::Frame::group(ui.style())
+                        .fill(egui::Color32::from_rgb(40, 35, 25))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 80, 40)))
+                        .inner_margin(egui::Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 200, 100),
+                                egui::RichText::new("🔐 需要管理员权限").size(13.0).strong(),
+                            );
+                            ui.add_space(2.0);
+                            ui.colored_label(
+                                egui::Color32::from_gray(180),
+                                egui::RichText::new(format!("以下 {} 项因权限不足无法删除，需要管理员密码授权才能删除。", fail)).size(12.0),
+                            );
+                            ui.colored_label(
+                                egui::Color32::from_gray(150),
+                                egui::RichText::new("点击下方按钮后，系统会弹出密码输入框，您可以授权或取消。").size(11.0),
+                            );
+                        });
+
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        let sudo_btn = ui.add(
+                            egui::Button::new(egui::RichText::new("🔐 授权管理员权限删除")
+                                .color(egui::Color32::from_rgb(52, 199, 89))
+                                .size(14.0))
+                        );
+                        if sudo_btn.clicked() {
+                            let failed = std::mem::take(&mut app.failed_paths);
+                            app.delete_summary = None;
+                            app.confirm = ConfirmState::Deleting;
+                            app.delete_total = failed.len();
+                            app.delete_done = 0;
+                            app.logs.clear();
+                            app.deleted_paths.clear();
+                            start_sudo_delete(failed, delete_rx);
+                        }
+                        if ui.button(egui::RichText::new("跳过，不删除这些项").size(14.0)).clicked() {
+                            app.dismiss_summary();
+                        }
+                    });
                 }
 
                 ui.add_space(10.0);
