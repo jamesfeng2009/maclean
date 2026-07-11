@@ -23,8 +23,8 @@ enum ScanMessage {
 
 /// 后台删除消息
 enum DeleteMessage {
-    /// 单项删除日志
-    Log(String),
+    /// 单项删除结果（日志, 路径, 类别, 是否成功）
+    Log(String, String, String, bool),
     /// 全部删除完成
     Done,
 }
@@ -82,9 +82,9 @@ fn main() -> eframe::Result {
             if let Some(rx) = &DELETE_RX {
                 loop {
                     match rx.try_recv() {
-                        Ok(DeleteMessage::Log(log)) => {
+                        Ok(DeleteMessage::Log(log, path, category, success)) => {
                             if let Some(app) = &mut APP {
-                                app.receive_delete_log(log);
+                                app.receive_delete_log(log, path, category, success);
                             }
                         }
                         Ok(DeleteMessage::Done) => {
@@ -497,7 +497,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
         // 删除完成汇总弹窗
         if let Some((ok, fail, skip)) = app.delete_summary {
-            show_summary_window(ctx, app, ok, fail, skip);
+            show_summary_window(ctx, app, ok, fail, skip, delete_rx);
         }
     });
 }
@@ -556,12 +556,14 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
             // 安全校验
             match safety::check_path_safety(path) {
                 safety::SafetyCheck::Danger(reason) => {
-                    let _ = tx.send(DeleteMessage::Log(format!("⛔ 已拦截: {} - {}", path, reason)));
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("⛔ 已拦截: {} - {}", path, reason), path.clone(), category.clone(), false));
                     safety::log_deletion(path, category, false, Some(&reason));
                     continue;
                 }
                 safety::SafetyCheck::Warning(reason) => {
-                    let _ = tx.send(DeleteMessage::Log(format!("⚠️ 已跳过: {} - {}", path, reason)));
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("⚠️ 已跳过: {} - {}", path, reason), path.clone(), category.clone(), false));
                     safety::log_deletion(path, category, false, Some(&reason));
                     continue;
                 }
@@ -572,11 +574,13 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
             if category == "APFS快照" {
                 match scanner::apfs::delete_snapshot(path) {
                     Ok(_) => {
-                        let _ = tx.send(DeleteMessage::Log(format!("✓ 已删除快照: {}", path)));
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✓ 已删除快照: {}", path), path.clone(), category.clone(), true));
                         safety::log_deletion(path, category, true, None);
                     }
                     Err(e) => {
-                        let _ = tx.send(DeleteMessage::Log(format!("✗ 删除失败: {} - {}", path, e)));
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ 删除失败: {} - {}", path, e), path.clone(), category.clone(), false));
                         safety::log_deletion(path, category, false, Some(&e));
                     }
                 }
@@ -586,11 +590,13 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
             if category == "模拟器运行时" {
                 match scanner::apfs::delete_simulator_runtime(path) {
                     Ok(_) => {
-                        let _ = tx.send(DeleteMessage::Log(format!("✓ 已删除运行时: {}", path)));
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✓ 已删除运行时: {}", path), path.clone(), category.clone(), true));
                         safety::log_deletion(path, category, true, None);
                     }
                     Err(e) => {
-                        let _ = tx.send(DeleteMessage::Log(format!("✗ 删除失败: {} - {}", path, e)));
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ 删除失败: {} - {}", path, e), path.clone(), category.clone(), false));
                         safety::log_deletion(path, category, false, Some(&e));
                     }
                 }
@@ -600,9 +606,9 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
             // 普通文件/目录删除
             let p = std::path::Path::new(path.as_str());
 
-            // 二次校验
             if !p.exists() && !p.symlink_metadata().is_ok() {
-                let _ = tx.send(DeleteMessage::Log(format!("✗ 路径不存在: {}", path)));
+                let _ = tx.send(DeleteMessage::Log(
+                    format!("✗ 路径不存在: {}", path), path.clone(), category.clone(), false));
                 safety::log_deletion(path, category, false, Some("路径不存在"));
                 continue;
             }
@@ -610,7 +616,8 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
             // 拒绝删除符号链接
             if let Ok(meta) = p.symlink_metadata() {
                 if meta.file_type().is_symlink() {
-                    let _ = tx.send(DeleteMessage::Log(format!("⛔ 拒绝删除符号链接: {}", path)));
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("⛔ 拒绝删除符号链接: {}", path), path.clone(), category.clone(), false));
                     safety::log_deletion(path, category, false, Some("符号链接拒绝删除"));
                     continue;
                 }
@@ -624,11 +631,78 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
 
             match result {
                 Ok(_) => {
-                    let _ = tx.send(DeleteMessage::Log(format!("✓ 已删除 [{}] {}", category, path)));
-                    safety::log_deletion(path, category, true, None);
+                    // 删除后验证：路径是否真的不存在了
+                    if p.exists() || p.symlink_metadata().is_ok() {
+                        // 目录仍然存在（部分文件删除失败）
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ 删除不完整: {} (部分文件需要管理员权限)", path),
+                            path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some("删除不完整，部分文件权限不足"));
+                    } else {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✓ 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
+                        safety::log_deletion(path, category, true, None);
+                    }
                 }
                 Err(e) => {
-                    let _ = tx.send(DeleteMessage::Log(format!("✗ 删除失败 [{}] {} - {}", category, path, e)));
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("✗ 删除失败 [{}] {} - {}", category, path, e),
+                        path.clone(), category.clone(), false));
+                    safety::log_deletion(path, category, false, Some(&e.to_string()));
+                }
+            }
+        }
+
+        let _ = tx.send(DeleteMessage::Done);
+    });
+}
+
+/// 使用 sudo 重试删除失败的项（通过 osascript 弹出系统授权窗口）
+fn start_sudo_delete(failed_paths: Vec<(String, String)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+    let (tx, rx) = mpsc::channel();
+    *delete_rx = Some(rx);
+
+    std::thread::spawn(move || {
+        for (path, category) in &failed_paths {
+            // 使用 osascript 弹出系统授权窗口，以管理员权限执行 rm -rf
+            let script = format!(
+                "do shell script \"rm -rf '{}'\" with administrator privileges",
+                path.replace("'", "'\\''")
+            );
+
+            let result = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => {
+                    // 验证删除
+                    let p = std::path::Path::new(path.as_str());
+                    if p.exists() {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ sudo 删除仍不完整: {}", path), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some("sudo 删除后仍存在"));
+                    } else {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✓ sudo 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
+                        safety::log_deletion(path, category, true, None);
+                    }
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let err_msg = if stderr.contains("User canceled") || stderr.contains("user canceled") {
+                        "用户取消授权".to_string()
+                    } else {
+                        stderr.to_string()
+                    };
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("✗ sudo 删除失败: {} - {}", path, err_msg), path.clone(), category.clone(), false));
+                    safety::log_deletion(path, category, false, Some(&err_msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
                     safety::log_deletion(path, category, false, Some(&e.to_string()));
                 }
             }
@@ -725,13 +799,15 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
 }
 
 /// 删除完成汇总弹窗
-fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usize, skip: usize) {
+fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usize, skip: usize, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+    let has_failures = !app.failed_paths.is_empty();
+
     egui::Window::new("清理结果")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(420.0);
+            ui.set_min_width(440.0);
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 // 成功
@@ -749,8 +825,36 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                     ui.add_space(3.0);
                     ui.colored_label(
                         egui::Color32::from_gray(150),
-                        egui::RichText::new("失败的项目已保留在列表中，可尝试手动处理或使用管理员权限重试").size(12.0),
+                        egui::RichText::new("失败的项目已保留在列表中").size(12.0),
                     );
+
+                    // 列出失败的路径
+                    ui.add_space(5.0);
+                    for (path, _) in app.failed_paths.iter().take(5) {
+                        let short = if path.len() > 60 { format!("...{}", &path[path.len()-57..]) } else { path.clone() };
+                        ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("  • {}", short)).size(11.0));
+                    }
+                    if app.failed_paths.len() > 5 {
+                        ui.colored_label(egui::Color32::GRAY, egui::RichText::new(format!("  ...等 {} 项", app.failed_paths.len())).size(11.0));
+                    }
+
+                    // sudo 重试按钮
+                    ui.add_space(8.0);
+                    let sudo_btn = ui.add(
+                        egui::Button::new(egui::RichText::new("🔐 使用管理员权限重试删除")
+                            .color(egui::Color32::WHITE)
+                            .size(14.0))
+                    );
+                    if sudo_btn.clicked() {
+                        let failed = std::mem::take(&mut app.failed_paths);
+                        app.delete_summary = None;
+                        app.confirm = ConfirmState::Deleting;
+                        app.delete_total = failed.len();
+                        app.delete_done = 0;
+                        app.logs.clear();
+                        app.deleted_paths.clear();
+                        start_sudo_delete(failed, delete_rx);
+                    }
                 }
 
                 ui.add_space(10.0);

@@ -115,6 +115,8 @@ pub struct App {
     pub deleted_paths: Vec<String>,
     /// 删除结果汇总（删除完成后显示）
     pub delete_summary: Option<(usize, usize, usize)>, // (成功, 失败, 跳过)
+    /// 删除失败的路径列表（供 sudo 重试）
+    pub failed_paths: Vec<(String, String)>, // (path, category)
 }
 
 impl App {
@@ -145,6 +147,7 @@ impl App {
             scan_progress: 0.0,
             deleted_paths: Vec::new(),
             delete_summary: None,
+            failed_paths: Vec::new(),
         }
     }
 
@@ -346,17 +349,16 @@ impl App {
         self.logs.clear();
         self.deleted_paths.clear();
         self.delete_summary = None;
+        self.failed_paths.clear();
         to_delete
     }
 
     /// 接收一条删除日志并更新进度
-    pub fn receive_delete_log(&mut self, log: String) {
-        // 如果日志以 ✓ 开头，说明删除成功，记录路径
-        if log.starts_with("✓") {
-            // 从日志中提取路径（格式：✓ 已删除 [类别] 路径）
-            if let Some(path) = log.splitn(4, ' ').nth(3) {
-                self.deleted_paths.push(path.to_string());
-            }
+    pub fn receive_delete_log(&mut self, log: String, path: String, category: String, success: bool) {
+        if success {
+            self.deleted_paths.push(path);
+        } else {
+            self.failed_paths.push((path, category));
         }
         self.logs.push(log);
         self.delete_done += 1;
@@ -366,10 +368,9 @@ impl App {
     pub fn finish_delete(&mut self) {
         let idx = self.tab_index();
 
-        // 统计成功/失败/跳过
+        // 统计成功/失败
         let success_count = self.deleted_paths.len();
-        let total = self.delete_total;
-        let failed_count = total - success_count;
+        let failed_count = self.failed_paths.len();
 
         // 只移除成功删除的项（通过路径匹配），保留失败的项让用户看到
         let deleted = self.deleted_paths.clone();
