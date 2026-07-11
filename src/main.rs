@@ -772,30 +772,50 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 format!("🔐 {} 项需要管理员权限，正在请求授权...", failed_items.len()),
             ));
 
-            // 为每个路径生成独立的命令块，用 || true 防止一个失败影响其他
-            let mut cmds: Vec<String> = Vec::new();
+            // 写临时脚本文件，避免 osascript 命令过长导致失败
+            let tmp_script = std::env::temp_dir().join("maclean_sudo_delete.sh");
+            let mut script_content = String::from("#!/bin/bash\nset +e\n");
             for (path, _) in &failed_items {
                 let escaped = path.replace("'", "'\\''");
-                // 每个路径的三步命令包在一个子shell中，用 || true 确保不会中断后续命令
-                cmds.push(format!(
-                    "(chflags -R nouchg '{}' || true; chmod -R u+rw '{}' || true; rm -rf '{}' || true)",
+                script_content.push_str(&format!(
+                    "chflags -R nouchg '{}' 2>/dev/null; chmod -R u+rw '{}' 2>/dev/null; rm -rf '{}' 2>/dev/null\n",
                     escaped, escaped, escaped
                 ));
             }
-            let combined_cmd = cmds.join("; ");
-            // 正确转义：先转义反斜杠，再转义双引号
-            let escaped_cmd = combined_cmd.replace("\\", "\\\\").replace("\"", "\\\"");
-            let script = format!("do shell script \"{}\" with administrator privileges", escaped_cmd);
+            let _ = std::fs::write(&tmp_script, &script_content);
+            let _ = std::process::Command::new("chmod").arg("+x").arg(&tmp_script).output();
+
+            let script_path = tmp_script.to_string_lossy().to_string();
+            let apple_script = format!(
+                "do shell script \"bash '{}'\" with administrator privileges",
+                script_path.replace("\"", "\\\"")
+            );
 
             let sudo_result = std::process::Command::new("osascript")
                 .arg("-e")
-                .arg(&script)
+                .arg(&apple_script)
                 .output();
+
+            // 记录 osascript 输出用于调试
+            match &sudo_result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let _ = tx.send(DeleteMessage::Info(
+                        format!("osascript 退出码: {}, stderr: {}", output.status.code().unwrap_or(-1), stderr.lines().last().unwrap_or("")),
+                    ));
+                    if !stdout.is_empty() {
+                        let _ = tx.send(DeleteMessage::Info(format!("osascript stdout: {}", stdout.lines().last().unwrap_or(""))));
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(DeleteMessage::Info(format!("osascript 启动失败: {}", e)));
+                }
+            }
 
             // 无论 sudo 整体成功或失败，都逐项验证
             match sudo_result {
                 Ok(_output) => {
-                    // 逐项验证每个路径是否已被删除
                     for (path, category) in &failed_items {
                         let p = std::path::Path::new(path.as_str());
                         if p.exists() || p.symlink_metadata().is_ok() {
@@ -810,7 +830,6 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                     }
                 }
                 Err(e) => {
-                    // osascript 无法启动
                     for (path, category) in &failed_items {
                         let _ = tx.send(DeleteMessage::Log(
                             format!("✗ 无法启动管理员授权: {} - {}", path, e), path.clone(), category.clone(), false));
@@ -818,6 +837,9 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                     }
                 }
             }
+
+            // 清理临时脚本
+            let _ = std::fs::remove_file(&tmp_script);
         }
 
         let _ = tx.send(DeleteMessage::Done);
