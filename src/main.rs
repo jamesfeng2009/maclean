@@ -557,10 +557,23 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                 );
                                 // 路径
                                 let path_display = truncate_path(&item.path, 70);
+                                let path_color = if item.deletable {
+                                    egui::Color32::from_gray(100)
+                                } else {
+                                    egui::Color32::from_gray(70)
+                                };
                                 ui.colored_label(
-                                    egui::Color32::from_gray(100),
+                                    path_color,
                                     egui::RichText::new(&path_display).size(11.0),
                                 );
+
+                                // 不可删除时显示原因
+                                if !item.deletable && !item.undeletable_reason.is_empty() {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(200, 80, 80),
+                                        egui::RichText::new(format!("⚠️ {}", item.undeletable_reason)).size(11.0),
+                                    );
+                                }
                             });
                         });
                     });
@@ -650,7 +663,16 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
 
         match result {
             Ok(scan_result) => {
-                let _ = tx.send(ScanMessage::Done(scan_result.items, scan_result.scan_time_ms, tab_idx as u64));
+                // 后处理：检测每个 item 的可删除性
+                let mut items = scan_result.items;
+                for item in &mut items {
+                    let (deletable, reason) = scanner::check_deletable(&item.path);
+                    item.deletable = deletable && item.deletable;
+                    if !item.deletable && !reason.is_empty() {
+                        item.undeletable_reason = reason;
+                    }
+                }
+                let _ = tx.send(ScanMessage::Done(items, scan_result.scan_time_ms, tab_idx as u64));
             }
             Err(_) => {
                 // 扫描 panic，发送空结果让 UI 恢复正常

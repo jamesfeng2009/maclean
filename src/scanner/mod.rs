@@ -56,6 +56,8 @@ pub struct ScanItem {
     pub selected: bool,
     /// 是否可删除（部分系统级目录不可直接删除）
     pub deletable: bool,
+    /// 不可删除的原因（deletable=false 时显示给用户）
+    pub undeletable_reason: String,
     /// 推荐等级
     pub recommend: Recommend,
     /// 该项的说明（告诉用户这是什么，删除后有什么影响）
@@ -77,6 +79,50 @@ pub struct ScanResult {
 pub trait Scanner {
     /// 执行扫描，返回扫描结果
     fn scan(&self) -> ScanResult;
+}
+
+/// 检测路径是否可被当前用户删除
+/// 返回 (deletable, reason)
+/// 不可删除的情况:
+/// 1. 文件属主为 root 且带有 com.apple.provenance 属性 (SIP 保护)
+/// 2. 路径在系统保护目录下 (/Library, /System 等)
+pub fn check_deletable(path: &str) -> (bool, String) {
+    let p = std::path::Path::new(path);
+
+    // APFS 快照和模拟器运行时由专门的删除逻辑处理，总是可删除
+    if path.starts_with("snapshot:") || path.contains("CoreSimulator") {
+        return (true, String::new());
+    }
+
+    // 系统级路径 /Library 下的一般需要 sudo
+    if path.starts_with("/Library/") || path.starts_with("/System/") {
+        // 这些路径需要 sudo，但不是完全不可删除
+        return (true, String::new());
+    }
+
+    // 检查属主和扩展属性
+    if let Ok(meta) = p.symlink_metadata() {
+        use std::os::unix::fs::MetadataExt;
+
+        // 检查 com.apple.provenance 属性
+        let has_provenance = std::process::Command::new("xattr")
+            .arg(path)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
+            .unwrap_or(false);
+
+        // 属主为 root 且有 provenance 属性 → SIP 保护，不可删除
+        if meta.uid() == 0 && has_provenance {
+            return (false, "文件由 root 创建且受 SIP 保护，无法删除 (需关闭 SIP)".to_string());
+        }
+
+        // 属主为 root 但没有 provenance → 需要 sudo，但仍可删除
+        if meta.uid() == 0 {
+            return (true, String::new());
+        }
+    }
+
+    (true, String::new())
 }
 
 /// 格式化字节大小为人类可读字符串
