@@ -576,25 +576,29 @@ fn parse_jetbrains_dir(name: &str) -> Option<(String, String)> {
 
 /// 获取项目搜索路径列表
 ///
-/// 从用户 home 目录下的多个常见工作区路径中搜索项目:
+/// 搜索用户 home 目录下的项目工作区:
 /// - ~/Downloads/myproject/workspace
 /// - ~/Downloads/myStudy/project
 /// - ~/FrontProject
-/// - ~/Desktop
 ///
-/// 仅返回实际存在的目录。
+/// 注意: Downloads 受 TCC 保护，在没有完全磁盘访问权限时遍历会触发弹窗。
+/// 这里仍然保留，因为开发者缓存扫描是核心功能。
+/// 如果触发弹窗，用户需在系统设置中授予完全磁盘访问权限。
 fn get_project_search_paths() -> Vec<PathBuf> {
     let home = home_dir();
     let candidates = [
         home.join("Downloads/myproject/workspace"),
         home.join("Downloads/myStudy/project"),
         home.join("FrontProject"),
-        home.join("Desktop"),
     ];
 
     candidates
         .into_iter()
-        .filter(|p| p.is_dir())
+        .filter(|p| {
+            p.symlink_metadata()
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        })
         .collect()
 }
 

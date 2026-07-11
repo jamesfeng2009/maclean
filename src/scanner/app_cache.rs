@@ -88,7 +88,7 @@ fn scan_containers() -> Vec<ScanItem> {
 
             // 微信特殊处理：检查 xwechat_files
             let wechat_data = container_path.join("Data/Documents/xwechat_files");
-            let wechat_size = if wechat_data.is_dir() {
+            let wechat_size = if wechat_data.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
                 dir_size(&wechat_data)
             } else {
                 0

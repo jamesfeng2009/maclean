@@ -113,6 +113,11 @@ EOF
 # 创建 PkgInfo
 echo "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
+# Ad-hoc 代码签名（使 macOS TCC 能识别应用身份）
+echo "  签名中..."
+codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
+echo "  ✓ 签名完成"
+
 echo "  ✓ .app 构建完成"
 echo ""
 
