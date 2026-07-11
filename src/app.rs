@@ -117,6 +117,8 @@ pub struct App {
     pub delete_summary: Option<(usize, usize, usize)>, // (成功, 失败, 跳过)
     /// 删除失败的路径列表（供 sudo 重试）
     pub failed_paths: Vec<(String, String)>, // (path, category)
+    /// 是否需要显示权限引导弹窗
+    pub show_permission_guide: bool,
 }
 
 impl App {
@@ -148,6 +150,7 @@ impl App {
             deleted_paths: Vec::new(),
             delete_summary: None,
             failed_paths: Vec::new(),
+            show_permission_guide: Self::check_full_disk_access() == false,
         }
     }
 
@@ -402,6 +405,43 @@ impl App {
     /// 关闭删除汇总弹窗
     pub fn dismiss_summary(&mut self) {
         self.delete_summary = None;
+    }
+
+    /// 检测是否有完全磁盘访问权限
+    /// 通过尝试访问 TCC 保护的目录来判断
+    pub fn check_full_disk_access() -> bool {
+        // 尝试读取 ~/Library/Metadata 或 ~/Library/Containers 下的内容
+        // 如果没有完全磁盘访问权限，读取会失败
+        let home = std::env::var("HOME").unwrap_or_default();
+        let test_paths = [
+            format!("{}/Library/Metadata", home),
+            format!("{}/Library/Containers/com.apple.mail", home),
+        ];
+
+        for path in &test_paths {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                // 尝试读取目录内容
+                if std::fs::read_dir(p).is_ok() {
+                    return true;
+                }
+            }
+        }
+
+        // 如果测试路径不存在，尝试读取其他 TCC 保护路径
+        let test_file = format!("{}/Library/Safari/Bookmarks.plist", home);
+        if std::path::Path::new(&test_file).exists() {
+            if std::fs::metadata(&test_file).is_ok() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// 关闭权限引导弹窗
+    pub fn dismiss_permission_guide(&mut self) {
+        self.show_permission_guide = false;
     }
 
     /// 取消删除

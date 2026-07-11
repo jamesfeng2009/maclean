@@ -571,6 +571,11 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             });
         }
 
+        // 权限引导弹窗（首次启动时显示）
+        if app.show_permission_guide {
+            show_permission_guide_window(ctx, app);
+        }
+
         // 删除确认弹窗
         if matches!(app.confirm, ConfirmState::Pending) {
             show_confirm_window(ctx, app, delete_rx);
@@ -847,10 +852,109 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
     });
 }
 
+/// 权限引导弹窗
+fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
+    egui::Window::new("权限设置")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(480.0);
+            ui.set_max_width(520.0);
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                // 标题
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 150, 255),
+                        egui::RichText::new("🔐").size(28.0),
+                    );
+                    ui.label(egui::RichText::new("授权完全磁盘访问").size(18.0).strong());
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // 说明
+                ui.colored_label(
+                    egui::Color32::from_gray(200),
+                    egui::RichText::new("maclean 需要完全磁盘访问权限才能删除开发者缓存文件。").size(13.0),
+                );
+                ui.add_space(3.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(170),
+                    egui::RichText::new("部分缓存文件由 root 创建且带有 macOS 安全属性，没有此权限将无法删除。").size(12.0),
+                );
+
+                ui.add_space(10.0);
+
+                // 步骤
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 200, 100),
+                    egui::RichText::new("请按以下步骤操作：").size(13.0).strong(),
+                );
+                ui.add_space(5.0);
+
+                let steps = [
+                    "点击下方「打开系统设置」按钮",
+                    "在「完全磁盘访问」列表中找到 maclean",
+                    "如果没有，点击 + 号添加 maclean.app",
+                    "确保 maclean 旁边的开关已打开",
+                    "重启 maclean 后即可正常删除",
+                ];
+                for (i, step) in steps.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(100, 200, 100),
+                            egui::RichText::new(format!("{}. ", i + 1)).size(13.0),
+                        );
+                        ui.colored_label(
+                            egui::Color32::from_gray(200),
+                            egui::RichText::new(*step).size(13.0),
+                        );
+                    });
+                }
+
+                ui.add_space(12.0);
+
+                // 按钮
+                ui.horizontal(|ui| {
+                    let btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("⚙️ 打开系统设置")
+                                .color(egui::Color32::WHITE)
+                                .size(14.0)
+                        )
+                        .fill(egui::Color32::from_rgb(0, 122, 255))
+                    );
+                    if btn.clicked() {
+                        let _ = std::process::Command::new("open")
+                            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                            .spawn();
+                    }
+
+                    ui.add_space(10.0);
+
+                    if ui.button(egui::RichText::new("稍后再说").size(14.0)).clicked() {
+                        app.dismiss_permission_guide();
+                    }
+                });
+
+                ui.add_space(5.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(120),
+                    egui::RichText::new("提示: 授权后重启 maclean 即可正常使用所有删除功能").size(11.0),
+                );
+            });
+        });
+}
+
 /// 删除确认弹窗
 fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let count = app.selected_count();
     let size = app.selected_total_size();
+    let has_full_disk_access = App::check_full_disk_access();
 
     egui::Window::new(app.t("confirm_delete"))
         .collapsible(false)
@@ -864,6 +968,33 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
                 ui.label(egui::RichText::new(format!("{}: {}", app.t("total"), format_size(size))).size(20.0).color(egui::Color32::from_rgb(255, 159, 10)));
                 ui.add_space(8.0);
                 ui.colored_label(egui::Color32::RED, format!("⚠️ {}", app.t("irreversible")));
+
+                // 如果没有完全磁盘访问权限，显示警告
+                if !has_full_disk_access {
+                    ui.add_space(8.0);
+                    egui::Frame::group(ui.style())
+                        .fill(egui::Color32::from_rgb(50, 40, 20))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 120, 40)))
+                        .inner_margin(egui::Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 200, 100),
+                                egui::RichText::new("⚠️ 未授予完全磁盘访问权限").size(13.0).strong(),
+                            );
+                            ui.add_space(2.0);
+                            ui.colored_label(
+                                egui::Color32::from_gray(180),
+                                egui::RichText::new("部分文件可能无法删除，建议先授权").size(12.0),
+                            );
+                            ui.add_space(3.0);
+                            if ui.button(egui::RichText::new("⚙️ 去授权").size(12.0)).clicked() {
+                                let _ = std::process::Command::new("open")
+                                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                                    .spawn();
+                            }
+                        });
+                }
+
                 ui.add_space(15.0);
 
                 ui.horizontal(|ui| {
