@@ -353,11 +353,12 @@ impl App {
         self.confirm = ConfirmState::Deleting;
         let idx = self.tab_index();
 
-        // 收集要删除的路径和类别
+        // 收集要删除的路径和类别（跳过不可删除的项）
         let to_delete: Vec<(String, String)> = self
             .pending_delete
             .iter()
             .rev()
+            .filter(|&&i| self.results[idx][i].deletable)
             .map(|&i| {
                 let item = &self.results[idx][i];
                 (item.path.clone(), item.category.clone())

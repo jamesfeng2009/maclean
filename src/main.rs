@@ -494,8 +494,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let mut toggled_indices: Vec<usize> = Vec::new();
 
                 for (i, item) in items.iter().enumerate() {
-                    let rec_color = recommend_color(&item.recommend);
-                    let badge = recommend_badge(&item.recommend);
+                    let rec_color = if !item.deletable {
+                        egui::Color32::from_gray(80)
+                    } else {
+                        recommend_color(&item.recommend)
+                    };
+                    let badge = if !item.deletable {
+                        "🔒 不可删除"
+                    } else {
+                        recommend_badge(&item.recommend)
+                    };
 
                     // 行背景色
                     let row_bg = if item.selected {
@@ -534,7 +542,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                             // 类别 + 描述（用户看得懂的信息）
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.colored_label(category_color(&item.category), &item.category);
+                                    let cat_color = if !item.deletable {
+                                        egui::Color32::from_gray(80)
+                                    } else {
+                                        category_color(&item.category)
+                                    };
+                                    ui.colored_label(cat_color, &item.category);
                                     // 大小
                                     let size_str = if item.size_bytes == 0 {
                                         app.t("unknown").to_string()

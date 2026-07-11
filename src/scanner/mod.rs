@@ -85,7 +85,7 @@ pub trait Scanner {
 /// 返回 (deletable, reason)
 /// 不可删除的情况:
 /// 1. 文件属主为 root 且带有 com.apple.provenance 属性 (SIP 保护)
-/// 2. 路径在系统保护目录下 (/Library, /System 等)
+/// 2. 目录中含 root 属主子项 (部分文件无法删除)
 pub fn check_deletable(path: &str) -> (bool, String) {
     let p = std::path::Path::new(path);
 
@@ -96,13 +96,14 @@ pub fn check_deletable(path: &str) -> (bool, String) {
 
     // 系统级路径 /Library 下的一般需要 sudo
     if path.starts_with("/Library/") || path.starts_with("/System/") {
-        // 这些路径需要 sudo，但不是完全不可删除
         return (true, String::new());
     }
 
     // 检查属主和扩展属性
     if let Ok(meta) = p.symlink_metadata() {
         use std::os::unix::fs::MetadataExt;
+
+        let uid = meta.uid();
 
         // 检查 com.apple.provenance 属性
         let has_provenance = std::process::Command::new("xattr")
@@ -112,13 +113,29 @@ pub fn check_deletable(path: &str) -> (bool, String) {
             .unwrap_or(false);
 
         // 属主为 root 且有 provenance 属性 → SIP 保护，不可删除
-        if meta.uid() == 0 && has_provenance {
+        if uid == 0 && has_provenance {
             return (false, "文件由 root 创建且受 SIP 保护，无法删除 (需关闭 SIP)".to_string());
         }
 
         // 属主为 root 但没有 provenance → 需要 sudo，但仍可删除
-        if meta.uid() == 0 {
+        if uid == 0 {
             return (true, String::new());
+        }
+
+        // 非 root 属主，但检查子目录是否有 root 属主文件
+        if meta.is_dir() {
+            let has_root_child = std::process::Command::new("find")
+                .arg(path)
+                .arg("-maxdepth").arg("1")
+                .arg("-user").arg("root")
+                .arg("-print")
+                .output()
+                .map(|o| !o.stdout.is_empty())
+                .unwrap_or(false);
+            
+            if has_root_child {
+                return (false, "目录含 root 属主文件，可能无法完全删除 (需关闭 SIP)".to_string());
+            }
         }
     }
 

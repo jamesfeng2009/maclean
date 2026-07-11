@@ -118,6 +118,7 @@ fn scan_containers() -> Vec<ScanItem> {
             category: app_name,
             selected: false,
             deletable: !is_wechat_data,
+                            undeletable_reason: String::new(),
             recommend: if is_wechat_data { Recommend::Advanced } else { Recommend::Caution },
             description: if is_wechat_data { "微信聊天数据，删除将丢失聊天记录".to_string() } else { "应用容器缓存，删除后 App 可能需要重新登录".to_string() },
         });
