@@ -3,6 +3,7 @@
 //! 扫描用户主目录下的顶层大目录和大文件，
 //! 以及 Downloads 和 Desktop 下的散落大文件。
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,18 @@ const MIN_SIZE: u64 = 100 * 1024 * 1024;
 const DOWNLOAD_MIN_SIZE: u64 = 500 * 1024 * 1024;
 /// 单目录遍历超时 10 秒
 const DIR_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 已知会导致崩溃或极慢的目录/文件（Photos Library、Music Library 等 bundle）
+fn is_problematic_path(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".photoslibrary")
+        || lower.ends_with(".musiclibrary")
+        || lower.ends_with(".tvlibrary")
+        || lower.ends_with(".podcastlibrary")
+        || lower == "photos library.photoslibrary"
+        || lower.contains(".photoslibrary")
+        || lower == "photo library"
+}
 
 /// 大文件扫描器
 #[derive(Debug, Default)]
@@ -56,18 +69,31 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
             })
             .collect();
 
-        // 并行计算每个路径的大小
+        // 并行计算每个路径的大小（用 catch_unwind 防止崩溃）
         let sized: Vec<(PathBuf, u64, bool)> = paths
             .par_iter()
             .filter_map(|path| {
                 let is_dir = path.is_dir();
-                let size = if is_dir {
-                    dir_size_with_timeout(path)
-                } else {
-                    path.symlink_metadata()
-                        .map(|m| m.len())
-                        .unwrap_or(0)
-                };
+
+                // 跳过 Photos Library 等会导致崩溃的 bundle
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if is_problematic_path(name) {
+                        return None;
+                    }
+                }
+
+                // 用 catch_unwind 防止遍历过程中 panic
+                let size = catch_unwind(AssertUnwindSafe(|| {
+                    if is_dir {
+                        dir_size_with_timeout(path)
+                    } else {
+                        path.symlink_metadata()
+                            .map(|m| m.len())
+                            .unwrap_or(0)
+                    }
+                }))
+                .unwrap_or(0);
+
                 Some((path.clone(), size, is_dir))
             })
             .filter(|(_, size, _)| *size >= min_size)
@@ -149,19 +175,28 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
 /// 带超时的目录大小计算
 ///
 /// 使用 walkdir 遍历，如果超过 10 秒则返回 0。
-/// 跳过权限不足的目录和符号链接。
+/// 跳过权限不足的目录、符号链接和已知的问题 bundle。
 fn dir_size_with_timeout(path: &std::path::Path) -> u64 {
     let start = Instant::now();
     let mut total: u64 = 0;
 
     for entry in WalkDir::new(path)
         .follow_links(false)
+        .max_depth(50) // 限制深度防止无限递归
         .into_iter()
         .filter_entry(|e| {
-            if e.depth() > 0 && e.file_type().is_dir() {
+            if e.depth() > 0 {
                 // 跳过不可读目录
-                if std::fs::metadata(e.path()).is_err() {
-                    return false;
+                if e.file_type().is_dir() {
+                    if std::fs::metadata(e.path()).is_err() {
+                        return false;
+                    }
+                }
+                // 跳过 Photos Library 等问题 bundle
+                if let Some(name) = e.file_name().to_str() {
+                    if is_problematic_path(name) {
+                        return false;
+                    }
                 }
             }
             true

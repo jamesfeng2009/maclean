@@ -110,7 +110,31 @@ pub fn format_size(bytes: u64) -> String {
 /// 遇到无法访问的文件/目录时直接跳过，不报错。
 pub fn dir_size(path: &Path) -> u64 {
     let mut total: u64 = 0;
-    for entry in WalkDir::new(path).follow_links(false) {
+    for entry in WalkDir::new(path)
+        .follow_links(false)
+        .max_depth(50)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() > 0 {
+                if e.file_type().is_dir() {
+                    if std::fs::metadata(e.path()).is_err() {
+                        return false;
+                    }
+                }
+                // 跳过 Photos Library 等问题 bundle
+                if let Some(name) = e.file_name().to_str() {
+                    let lower = name.to_lowercase();
+                    if lower.ends_with(".photoslibrary")
+                        || lower.ends_with(".musiclibrary")
+                        || lower.ends_with(".tvlibrary")
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+    {
         match entry {
             Ok(entry) => {
                 if entry.file_type().is_file() {
@@ -119,7 +143,7 @@ pub fn dir_size(path: &Path) -> u64 {
                     }
                 }
             }
-            Err(_) => continue, // 跳过不可访问的条目
+            Err(_) => continue,
         }
     }
     total
