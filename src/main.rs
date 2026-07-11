@@ -636,12 +636,17 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     });
 }
 
-/// 启动后台删除线程
+/// 启动后台删除线程（两阶段自动删除）
+/// 阶段1: 普通删除 (chflags + chmod + remove_dir_all)
+/// 阶段2: 对失败项自动 sudo 批量删除 (只弹一次密码框)
 fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
+        let mut failed_items: Vec<(String, String)> = Vec::new();
+
+        // ========== 阶段1: 普通删除 ==========
         for (path, category) in &to_delete {
             // 安全校验
             match safety::check_path_safety(path) {
@@ -729,98 +734,81 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 std::fs::remove_file(p)
             };
 
-            match result {
+            let deleted_ok = match result {
                 Ok(_) => {
-                    // 删除后验证：路径是否真的不存在了
-                    if p.exists() || p.symlink_metadata().is_ok() {
-                        // 目录仍然存在（部分文件删除失败）
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ 删除不完整: {} (部分文件需要管理员权限)", path),
-                            path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some("删除不完整，部分文件权限不足"));
+                    // 删除后验证
+                    !p.exists() && p.symlink_metadata().is_err()
+                }
+                Err(_) => false,
+            };
+
+            if deleted_ok {
+                let _ = tx.send(DeleteMessage::Log(
+                    format!("✓ 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
+                safety::log_deletion(path, category, true, None);
+            } else {
+                // 普通删除失败，加入待 sudo 列表
+                failed_items.push((path.clone(), category.clone()));
+            }
+        }
+
+        // ========== 阶段2: 自动 sudo 批量删除失败项 ==========
+        if !failed_items.is_empty() {
+            let _ = tx.send(DeleteMessage::Log(
+                format!("🔐 {} 项需要管理员权限，正在请求授权...", failed_items.len()),
+                String::new(), String::new(), false,
+            ));
+
+            // 把所有失败项合并成一条 shell 命令，只弹一次密码框
+            let mut cmds: Vec<String> = Vec::new();
+            for (path, _) in &failed_items {
+                let escaped = path.replace("'", "'\\''");
+                cmds.push(format!("chflags -R nouchg '{}'; chmod -R u+rw '{}'; rm -rf '{}'", escaped, escaped, escaped));
+            }
+            let combined_cmd = cmds.join("; ");
+            let escaped_cmd = combined_cmd.replace("\"", "\\\"");
+            let script = format!("do shell script \"{}\" with administrator privileges", escaped_cmd);
+
+            let sudo_result = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .output();
+
+            match sudo_result {
+                Ok(output) if output.status.success() => {
+                    // 整体执行成功，逐项验证
+                    for (path, category) in &failed_items {
+                        let p = std::path::Path::new(path.as_str());
+                        if p.exists() {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✗ sudo 删除仍不完整: {}", path), path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some("sudo 删除后仍存在"));
+                        } else {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✓ sudo 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
+                            safety::log_deletion(path, category, true, None);
+                        }
+                    }
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let err_msg = if stderr.contains("User canceled") || stderr.contains("user canceled") {
+                        "用户取消授权".to_string()
                     } else {
+                        stderr.lines().last().unwrap_or(&stderr).to_string()
+                    };
+                    for (path, category) in &failed_items {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✓ 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
-                        safety::log_deletion(path, category, true, None);
+                            format!("✗ 删除失败: {} - {}", path, err_msg), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some(&err_msg));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!("✗ 删除失败 [{}] {} - {}", category, path, e),
-                        path.clone(), category.clone(), false));
-                    safety::log_deletion(path, category, false, Some(&e.to_string()));
-                }
-            }
-        }
-
-        let _ = tx.send(DeleteMessage::Done);
-    });
-}
-
-/// 使用 sudo 重试删除失败的项（通过 osascript 弹出一次系统授权窗口）
-fn start_sudo_delete(failed_paths: Vec<(String, String)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
-    let (tx, rx) = mpsc::channel();
-    *delete_rx = Some(rx);
-
-    std::thread::spawn(move || {
-        // 把所有失败项合并成一条 shell 命令，只弹一次密码框
-        let mut cmds: Vec<String> = Vec::new();
-        for (path, _) in &failed_paths {
-            let escaped = path.replace("'", "'\\''");
-            cmds.push(format!("chflags -R nouchg '{}'; chmod -R u+rw '{}'; rm -rf '{}'", escaped, escaped, escaped));
-        }
-
-        // 合并所有命令，用分号连接
-        let combined_cmd = cmds.join("; ");
-        let escaped_cmd = combined_cmd.replace("\"", "\\\"");
-        let script = format!("do shell script \"{}\" with administrator privileges", escaped_cmd);
-
-        // 发送一条日志告知用户正在请求授权
-        let _ = tx.send(DeleteMessage::Log(
-            format!("🔐 正在请求管理员权限，删除 {} 项...", failed_paths.len()),
-            String::new(), String::new(), false,
-        ));
-
-        let result = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                // 整体执行成功，逐项验证
-                for (path, category) in &failed_paths {
-                    let p = std::path::Path::new(path.as_str());
-                    if p.exists() {
+                    for (path, category) in &failed_items {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ sudo 删除仍不完整: {}", path), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some("sudo 删除后仍存在"));
-                    } else {
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✓ sudo 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
-                        safety::log_deletion(path, category, true, None);
+                            format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some(&e.to_string()));
                     }
-                }
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let err_msg = if stderr.contains("User canceled") || stderr.contains("user canceled") {
-                    "用户取消授权".to_string()
-                } else {
-                    stderr.lines().last().unwrap_or(&stderr).to_string()
-                };
-                // 用户取消或整体失败，所有项标记为失败
-                for (path, category) in &failed_paths {
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!("✗ sudo 删除失败: {} - {}", path, err_msg), path.clone(), category.clone(), false));
-                    safety::log_deletion(path, category, false, Some(&err_msg));
-                }
-            }
-            Err(e) => {
-                for (path, category) in &failed_paths {
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
-                    safety::log_deletion(path, category, false, Some(&e.to_string()));
                 }
             }
         }
@@ -916,7 +904,7 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
 }
 
 /// 删除完成汇总弹窗
-fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usize, skip: usize, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usize, skip: usize, _delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let has_failures = !app.failed_paths.is_empty();
 
     egui::Window::new("清理结果")
@@ -938,19 +926,18 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
                         ui.colored_label(egui::Color32::RED, "❌");
-                        ui.label(egui::RichText::new(format!("删除失败 {} 项", fail)).size(15.0).color(egui::Color32::RED));
+                        ui.label(egui::RichText::new(format!("删除失败 {} 项（已尝试管理员权限）", fail)).size(15.0).color(egui::Color32::RED));
                     });
                     ui.add_space(3.0);
                     ui.colored_label(
                         egui::Color32::from_gray(150),
-                        egui::RichText::new("失败的项目已保留在列表中").size(12.0),
+                        egui::RichText::new("以下项目即使使用管理员权限也无法删除，可能被进程占用或受系统保护").size(12.0),
                     );
 
                     // 列出所有失败的路径（可滚动+复制）
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("失败列表:").size(12.0).color(egui::Color32::from_gray(170)));
-                        // 复制全部按钮
                         let all_paths: String = app.failed_paths.iter()
                             .map(|(p, c)| format!("[{}] {}", c, p))
                             .collect::<Vec<_>>()
@@ -975,7 +962,6 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                                             egui::Color32::from_rgb(200, 120, 100),
                                             egui::RichText::new(category).size(11.0),
                                         );
-                                        // 完整路径，可选中文本
                                         ui.add(
                                             egui::TextEdit::multiline(&mut path.as_str())
                                                 .desired_width(400.0)
@@ -988,50 +974,6 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                                 ui.add_space(2.0);
                             }
                         });
-
-                    // sudo 重试说明 + 按钮
-                    ui.add_space(8.0);
-                    egui::Frame::group(ui.style())
-                        .fill(egui::Color32::from_rgb(40, 35, 25))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 80, 40)))
-                        .inner_margin(egui::Margin::same(8.0))
-                        .show(ui, |ui| {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(255, 200, 100),
-                                egui::RichText::new("🔐 需要管理员权限").size(13.0).strong(),
-                            );
-                            ui.add_space(2.0);
-                            ui.colored_label(
-                                egui::Color32::from_gray(180),
-                                egui::RichText::new(format!("以下 {} 项因权限不足无法删除，需要管理员密码授权才能删除。", fail)).size(12.0),
-                            );
-                            ui.colored_label(
-                                egui::Color32::from_gray(150),
-                                egui::RichText::new("点击下方按钮后，系统会弹出密码输入框，您可以授权或取消。").size(11.0),
-                            );
-                        });
-
-                    ui.add_space(5.0);
-                    ui.horizontal(|ui| {
-                        let sudo_btn = ui.add(
-                            egui::Button::new(egui::RichText::new("🔐 授权管理员权限删除")
-                                .color(egui::Color32::from_rgb(52, 199, 89))
-                                .size(14.0))
-                        );
-                        if sudo_btn.clicked() {
-                            let failed = std::mem::take(&mut app.failed_paths);
-                            app.delete_summary = None;
-                            app.confirm = ConfirmState::Deleting;
-                            app.delete_total = failed.len();
-                            app.delete_done = 0;
-                            app.logs.clear();
-                            app.deleted_paths.clear();
-                            start_sudo_delete(failed, delete_rx);
-                        }
-                        if ui.button(egui::RichText::new("跳过，不删除这些项").size(14.0)).clicked() {
-                            app.dismiss_summary();
-                        }
-                    });
                 }
 
                 ui.add_space(10.0);
