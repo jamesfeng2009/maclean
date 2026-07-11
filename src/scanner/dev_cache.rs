@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use super::{dir_size, home_dir, ScanItem, ScanResult, Scanner};
+use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 /// 开发者缓存扫描器
 #[derive(Debug, Default)]
@@ -71,6 +71,8 @@ fn scan_rust_caches() -> Vec<ScanItem> {
                 category: "Rust编译".to_string(),
                 selected: false,
                 deletable: true,
+                recommend: Recommend::Safe,
+                description: "Rust 编译产物，cargo build 会自动重新生成".to_string(),
             });
         }
     }
@@ -85,6 +87,8 @@ fn scan_rust_caches() -> Vec<ScanItem> {
             category: "Rust编译".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Caution,
+            description: "Cargo 包下载缓存，删除后编译时需重新下载".to_string(),
         });
     }
 
@@ -111,6 +115,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             category: "Xcode编译".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Safe,
+            description: "Xcode 编译缓存，重新构建会自动恢复".to_string(),
         });
     }
 
@@ -124,6 +130,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             category: "Xcode设备".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Caution,
+            description: "iOS 设备调试符号，连接设备时会重新生成".to_string(),
         });
     }
 
@@ -137,6 +145,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             category: "Xcode归档".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Advanced,
+            description: "Xcode 归档文件，包含已发布 App 的归档".to_string(),
         });
     }
 
@@ -150,6 +160,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             category: "模拟器镜像".to_string(),
             selected: false,
             deletable: false, // 系统级，需用 xcrun simctl runtime delete 删除
+            recommend: Recommend::Advanced,
+            description: "iOS 模拟器运行时镜像，需用 xcrun simctl 删除".to_string(),
         });
     }
 
@@ -163,6 +175,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             category: "模拟器缓存".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Safe,
+            description: "模拟器缓存，可安全删除".to_string(),
         });
     }
 
@@ -188,6 +202,8 @@ fn scan_node_caches() -> Vec<ScanItem> {
                 category: "Node依赖".to_string(),
                 selected: false,
                 deletable: true,
+                recommend: Recommend::Safe,
+                description: "Node.js 依赖包，npm install 可恢复".to_string(),
             });
         }
     }
@@ -202,6 +218,8 @@ fn scan_node_caches() -> Vec<ScanItem> {
             category: "pnpm缓存".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Caution,
+            description: "pnpm 全局存储，删除后需重新安装依赖".to_string(),
         });
     }
 
@@ -215,6 +233,8 @@ fn scan_node_caches() -> Vec<ScanItem> {
             category: "npm缓存".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Safe,
+            description: "npm 下载缓存，可安全删除".to_string(),
         });
     }
 
@@ -240,6 +260,8 @@ fn scan_go_caches() -> Vec<ScanItem> {
             category: "Go模块".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Caution,
+            description: "Go 模块缓存，编译时需重新下载".to_string(),
         });
     }
 
@@ -265,6 +287,8 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
             category: "Homebrew缓存".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Safe,
+            description: "Homebrew 下载缓存，可安全删除".to_string(),
         });
     }
 
@@ -290,6 +314,8 @@ fn scan_pip_caches() -> Vec<ScanItem> {
             category: "pip缓存".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Safe,
+            description: "pip 下载缓存，可安全删除".to_string(),
         });
     }
 
@@ -337,6 +363,8 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
                     category: "IDE旧版".to_string(),
                     selected: false,
                     deletable: true,
+                    recommend: Recommend::Safe,
+                    description: "JetBrains IDE 旧版本配置，已保留最新版".to_string(),
                 });
             }
         }
@@ -352,6 +380,8 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
             category: "IDE缓存".to_string(),
             selected: false,
             deletable: true,
+            recommend: Recommend::Safe,
+            description: "JetBrains IDE 缓存，重启 IDE 会自动重建".to_string(),
         });
     }
 

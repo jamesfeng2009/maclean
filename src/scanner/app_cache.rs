@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use super::{dir_size, home_dir, ScanItem, ScanResult, Scanner};
+use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 /// 50MB 阈值
 const CONTAINER_MIN: u64 = 50 * 1024 * 1024;
@@ -117,7 +117,9 @@ fn scan_containers() -> Vec<ScanItem> {
             size_bytes: size,
             category: app_name,
             selected: false,
-            deletable: !is_wechat_data, // 微信数据标记为不可直接删除
+            deletable: !is_wechat_data,
+            recommend: if is_wechat_data { Recommend::Advanced } else { Recommend::Caution },
+            description: if is_wechat_data { "微信聊天数据，删除将丢失聊天记录".to_string() } else { "应用容器缓存，删除后 App 可能需要重新登录".to_string() },
         });
     }
 
@@ -206,6 +208,8 @@ fn scan_group_containers() -> Vec<ScanItem> {
             category: display,
             selected: false,
             deletable: true,
+            recommend: Recommend::Caution,
+            description: "应用组缓存，删除后可能需重新配置".to_string(),
         });
     }
 
@@ -271,6 +275,8 @@ fn scan_app_support() -> Vec<ScanItem> {
             category: name,
             selected: false,
             deletable: true,
+            recommend: Recommend::Advanced,
+            description: "应用数据目录，可能包含重要配置".to_string(),
         });
     }
 
@@ -322,6 +328,8 @@ fn scan_system_caches() -> Vec<ScanItem> {
             category: format!("系统缓存-{}", name),
             selected: false,
             deletable: true,
+            recommend: Recommend::Safe,
+            description: "系统缓存目录，可安全删除".to_string(),
         });
     }
 
@@ -347,6 +355,8 @@ fn scan_logs() -> Vec<ScanItem> {
                 category: "系统日志".to_string(),
                 selected: false,
                 deletable: true,
+                recommend: Recommend::Safe,
+                description: "系统日志文件，可安全删除".to_string(),
             });
         }
     }

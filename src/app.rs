@@ -205,12 +205,54 @@ impl App {
         }
     }
 
+    /// 智能选择：只选中推荐清理（Safe）的项
+    pub fn select_safe_only(&mut self) {
+        let idx = self.tab_index();
+        for item in &mut self.results[idx] {
+            item.selected = item.deletable && item.recommend == crate::scanner::Recommend::Safe;
+        }
+    }
+
     /// 取消全选
     pub fn deselect_all(&mut self) {
         let idx = self.tab_index();
         for item in &mut self.results[idx] {
             item.selected = false;
         }
+    }
+
+    /// 统计当前 Tab 中推荐清理（Safe）的项数
+    pub fn safe_count(&self) -> usize {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Safe)
+            .count()
+    }
+
+    /// 统计当前 Tab 中推荐清理（Safe）的总大小
+    pub fn safe_size(&self) -> u64 {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Safe)
+            .map(|i| i.size_bytes)
+            .sum()
+    }
+
+    /// 统计当前 Tab 中需谨慎（Caution）的项数
+    pub fn caution_count(&self) -> usize {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Caution)
+            .count()
+    }
+
+    /// 统计当前 Tab 中需谨慎（Caution）的总大小
+    pub fn caution_size(&self) -> u64 {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Caution)
+            .map(|i| i.size_bytes)
+            .sum()
     }
 
     /// 执行扫描（当前 Tab）
@@ -450,6 +492,7 @@ impl App {
                 "delete" => "Delete",
                 "select_all" => "Select All",
                 "deselect_all" => "Deselect All",
+                "select_safe" => "Select Safe Only",
                 "confirm_delete" => "Confirm Delete",
                 "cancel" => "Cancel",
                 // 磁盘信息
@@ -464,6 +507,8 @@ impl App {
                 "items_selected" => "selected",
                 "items" => "items",
                 "total" => "total",
+                "safe_clean" => "safe to clean",
+                "caution_clean" => "need caution",
                 // 列表
                 "category" => "Category",
                 "size" => "Size",
@@ -490,6 +535,7 @@ impl App {
                 "delete" => "删除",
                 "select_all" => "全选",
                 "deselect_all" => "取消全选",
+                "select_safe" => "一键选推荐清理",
                 "confirm_delete" => "确认删除",
                 "cancel" => "取消",
                 // 磁盘信息
@@ -504,6 +550,8 @@ impl App {
                 "items_selected" => "已选",
                 "items" => "项",
                 "total" => "共计",
+                "safe_clean" => "可安全清理",
+                "caution_clean" => "需谨慎确认",
                 // 列表
                 "category" => "类别",
                 "size" => "大小",

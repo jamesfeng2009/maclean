@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use super::{home_dir, ScanItem, ScanResult, Scanner};
+use super::{home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 /// 100MB 阈值
 const MIN_SIZE: u64 = 100 * 1024 * 1024;
@@ -81,6 +81,8 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
                 category: category.to_string(),
                 selected: false,
                 deletable: true,
+                recommend: Recommend::Advanced,
+                description: "主目录下的大文件/目录，请确认无需保留".to_string(),
             });
         }
     }
@@ -99,6 +101,8 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
                             category: "下载文件".to_string(),
                             selected: false,
                             deletable: true,
+                            recommend: Recommend::Advanced,
+                            description: "Downloads 中的大文件，请确认无需保留".to_string(),
                         });
                     }
                 }
@@ -120,6 +124,8 @@ pub fn scan_with_min_size(min_size: u64) -> ScanResult {
                             category: "桌面文件".to_string(),
                             selected: false,
                             deletable: true,
+                            recommend: Recommend::Advanced,
+                            description: "桌面上的大文件，请确认无需保留".to_string(),
                         });
                     }
                 }

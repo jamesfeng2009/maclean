@@ -12,6 +12,37 @@ pub mod app_cache;
 pub mod dev_cache;
 pub mod large_files;
 
+/// 推荐等级 - 帮助用户判断是否应该清理
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recommend {
+    /// 推荐清理 - 安全可删，重新构建/使用时会自动恢复
+    Safe,
+    /// 谨慎清理 - 删除后可能需要重新下载或配置
+    Caution,
+    /// 高级用户 - 需要了解风险后自行判断
+    Advanced,
+}
+
+impl Recommend {
+    /// 返回等级的中文描述
+    pub fn label(self) -> &'static str {
+        match self {
+            Recommend::Safe => "推荐",
+            Recommend::Caution => "谨慎",
+            Recommend::Advanced => "高级",
+        }
+    }
+
+    /// 返回详细说明
+    pub fn description(self) -> &'static str {
+        match self {
+            Recommend::Safe => "安全可删，自动恢复",
+            Recommend::Caution => "删除后需重新下载",
+            Recommend::Advanced => "请确认后再删除",
+        }
+    }
+}
+
 /// 扫描项 - 表示一个可清理的文件或目录
 #[derive(Debug, Clone)]
 pub struct ScanItem {
@@ -25,6 +56,10 @@ pub struct ScanItem {
     pub selected: bool,
     /// 是否可删除（部分系统级目录不可直接删除）
     pub deletable: bool,
+    /// 推荐等级
+    pub recommend: Recommend,
+    /// 该项的说明（告诉用户这是什么，删除后有什么影响）
+    pub description: String,
 }
 
 /// 扫描结果

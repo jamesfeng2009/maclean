@@ -8,7 +8,7 @@
 use std::process::Command;
 use std::time::Instant;
 
-use super::{ScanItem, ScanResult, Scanner};
+use super::{Recommend, ScanItem, ScanResult, Scanner};
 
 /// APFS 快照扫描器
 #[derive(Debug, Default)]
@@ -85,6 +85,8 @@ fn scan_local_snapshots() -> Vec<ScanItem> {
                 category: "APFS快照".to_string(),
                 selected: false,
                 deletable: true,
+                recommend: Recommend::Safe,
+                description: "Time Machine 本地快照，可安全删除".to_string(),
             });
         }
     }
@@ -177,6 +179,8 @@ fn scan_simulator_runtimes() -> Vec<ScanItem> {
                 category: "模拟器运行时".to_string(),
                 selected: false,
                 deletable: true,
+                recommend: Recommend::Caution,
+                description: "iOS 模拟器运行时，删除后需重新下载".to_string(),
             });
         }
     }
