@@ -111,6 +111,10 @@ pub struct App {
     pub delete_total: usize,
     /// 扫描进度 (0.0 ~ 1.0)
     pub scan_progress: f32,
+    /// 删除结果：成功的路径集合
+    pub deleted_paths: Vec<String>,
+    /// 删除结果汇总（删除完成后显示）
+    pub delete_summary: Option<(usize, usize, usize)>, // (成功, 失败, 跳过)
 }
 
 impl App {
@@ -139,6 +143,8 @@ impl App {
             delete_done: 0,
             delete_total: 0,
             scan_progress: 0.0,
+            deleted_paths: Vec::new(),
+            delete_summary: None,
         }
     }
 
@@ -338,6 +344,8 @@ impl App {
         self.delete_total = to_delete.len();
         self.delete_done = 0;
         self.logs.clear();
+        self.deleted_paths.clear();
+        self.delete_summary = None;
         to_delete
     }
 
@@ -345,24 +353,34 @@ impl App {
     pub fn receive_delete_log(&mut self, log: String) {
         self.logs.push(log);
         self.delete_done += 1;
+        // 如果日志以 ✓ 开头，说明删除成功，记录路径
+        if log.starts_with("✓") {
+            // 从日志中提取路径（格式：✓ 已删除 [类别] 路径）
+            if let Some(path) = log.splitn(4, ' ').nth(3) {
+                self.deleted_paths.push(path.to_string());
+            }
+        }
     }
 
     /// 删除完成后的收尾工作
     pub fn finish_delete(&mut self) {
         let idx = self.tab_index();
 
-        // 从结果列表中移除已删除的项（倒序删除避免索引偏移）
-        let mut indices: Vec<usize> = self.pending_delete.clone();
-        indices.sort_unstable_by(|a, b| b.cmp(a));
-        for i in &indices {
-            if *i < self.results[idx].len() {
-                self.results[idx].remove(*i);
-            }
-        }
+        // 统计成功/失败/跳过
+        let success_count = self.deleted_paths.len();
+        let total = self.delete_total;
+        let failed_count = total - success_count;
+
+        // 只移除成功删除的项（通过路径匹配），保留失败的项让用户看到
+        let deleted = self.deleted_paths.clone();
+        self.results[idx].retain(|item| !deleted.contains(&item.path));
+
+        // 生成汇总
+        self.delete_summary = Some((success_count, failed_count, 0));
 
         self.logs.push(format!(
-            "✅ 清理完成: 已处理 {} 项",
-            self.delete_total
+            "✅ 清理完成: 成功 {} 项, 失败 {} 项",
+            success_count, failed_count
         ));
 
         // 刷新磁盘信息
@@ -370,9 +388,19 @@ impl App {
         self.disk_total = total;
         self.disk_free = free;
 
+        // 取消所有选中状态（失败的项保留在列表但取消选中）
+        for item in &mut self.results[idx] {
+            item.selected = false;
+        }
+
         self.pending_delete.clear();
         self.confirm = ConfirmState::None;
         self.list_index = 0;
+    }
+
+    /// 关闭删除汇总弹窗
+    pub fn dismiss_summary(&mut self) {
+        self.delete_summary = None;
     }
 
     /// 取消删除

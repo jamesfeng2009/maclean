@@ -494,6 +494,11 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         if matches!(app.confirm, ConfirmState::Deleting) {
             show_deleting_window(ctx, app);
         }
+
+        // 删除完成汇总弹窗
+        if let Some((ok, fail, skip)) = app.delete_summary {
+            show_summary_window(ctx, app, ok, fail, skip);
+        }
     });
 }
 
@@ -717,6 +722,52 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
 
     // 删除中持续刷新 UI
     ctx.request_repaint_after(std::time::Duration::from_millis(50));
+}
+
+/// 删除完成汇总弹窗
+fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usize, skip: usize) {
+    egui::Window::new("清理结果")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(420.0);
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                // 成功
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(52, 199, 89), "✅");
+                    ui.label(egui::RichText::new(format!("成功删除 {} 项", ok)).size(15.0).color(egui::Color32::from_rgb(52, 199, 89)));
+                });
+
+                if fail > 0 {
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::RED, "❌");
+                        ui.label(egui::RichText::new(format!("删除失败 {} 项", fail)).size(15.0).color(egui::Color32::RED));
+                    });
+                    ui.add_space(3.0);
+                    ui.colored_label(
+                        egui::Color32::from_gray(150),
+                        egui::RichText::new("失败的项目已保留在列表中，可尝试手动处理或使用管理员权限重试").size(12.0),
+                    );
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(5.0);
+
+                // 磁盘空间变化
+                ui.label(egui::RichText::new(format!("当前可用空间: {}", format_size(app.disk_free))).size(14.0));
+
+                ui.add_space(15.0);
+                ui.horizontal(|ui| {
+                    if ui.button(egui::RichText::new("确定").size(14.0)).clicked() {
+                        app.dismiss_summary();
+                    }
+                });
+            });
+        });
 }
 
 /// Tab 标题
