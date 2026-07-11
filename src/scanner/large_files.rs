@@ -46,19 +46,19 @@ fn is_problematic_path(name: &str) -> bool {
         || lower.ends_with(".iso")
 }
 
-/// 主目录下应跳过的目录名（可能触发权限弹窗或包含系统保护文件）
+/// 主目录下应跳过的目录名（TCC 保护，访问会触发权限弹窗）
 fn should_skip_home_dir(name: &str) -> bool {
     match name {
-        "Library" => true,        // 包含大量系统/应用数据，由 App缓存 Tab 单独扫描
-        "Pictures" => true,       // 可能包含 Photos Library
-        "Music" => true,          // 可能包含 Music Library
-        "Movies" => true,         // 可能包含 iMovie 库
+        "Library" => true,        // TCC 保护
+        "Pictures" => true,       // TCC 保护
+        "Music" => true,          // TCC 保护
+        "Movies" => true,         // TCC 保护
         "Public" => true,         // 系统共享目录
         "Applications" => true,   // 应用目录
         "Sites" => true,          // 旧版 Web 共享
-        "Documents" => true,      // TCC 保护，可能触发权限弹窗导致崩溃
-        "Desktop" => true,        // 已在单独段落扫描顶层文件
-        "Downloads" => true,      // 已在单独段落扫描顶层文件
+        "Documents" => true,      // TCC 保护
+        "Desktop" => true,        // TCC 保护
+        "Downloads" => true,      // TCC 保护
         _ => false,
     }
 }
@@ -164,79 +164,10 @@ fn scan_impl(min_size: u64) -> ScanResult {
         }
     }
 
-    // 2. 扫描 ~/Downloads 顶层大文件和大目录（不递归子目录内部）
-    crate::log_scan_step("大文件扫描: 扫描 Downloads");
-    let downloads = home.join("Downloads");
-    if let Ok(entries) = std::fs::read_dir(&downloads) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // 跳过问题路径
-            if is_problematic_path(name) || name.starts_with('.') {
-                continue;
-            }
-            // 用 catch_unwind 防止单个文件 panic
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                if path.is_file() {
-                    path.symlink_metadata()
-                        .map(|m| m.len())
-                        .unwrap_or(0)
-                } else if path.is_dir() {
-                    dir_size_with_timeout(&path)
-                } else {
-                    0
-                }
-            }));
-            let size = result.unwrap_or(0);
-            if size >= DOWNLOAD_MIN_SIZE {
-                items.push(ScanItem {
-                    path: path.to_string_lossy().to_string(),
-                    size_bytes: size,
-                    category: "下载文件".to_string(),
-                    selected: false,
-                    deletable: true,
-                    recommend: Recommend::Advanced,
-                    description: "Downloads 中的大文件/目录，请确认无需保留".to_string(),
-                });
-            }
-        }
-    }
-
-    // 3. 扫描 ~/Desktop 顶层大文件和大目录
-    crate::log_scan_step("大文件扫描: 扫描 Desktop");
-    let desktop = home.join("Desktop");
-    if let Ok(entries) = std::fs::read_dir(&desktop) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if is_problematic_path(name) || name.starts_with('.') {
-                continue;
-            }
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                if path.is_file() {
-                    path.symlink_metadata()
-                        .map(|m| m.len())
-                        .unwrap_or(0)
-                } else if path.is_dir() {
-                    dir_size_with_timeout(&path)
-                } else {
-                    0
-                }
-            }));
-            let size = result.unwrap_or(0);
-            if size >= MIN_SIZE {
-                items.push(ScanItem {
-                    path: path.to_string_lossy().to_string(),
-                    size_bytes: size,
-                    category: "桌面文件".to_string(),
-                    selected: false,
-                    deletable: true,
-                    recommend: Recommend::Advanced,
-                    description: "桌面上的大文件/目录，请确认无需保留".to_string(),
-                });
-            }
-        }
-    }
+    // 2. Downloads 和 Desktop 已在 should_skip_home_dir 中跳过
+    // 这两个目录受 TCC 保护，扫描会触发权限弹窗死循环
+    // 用户需在系统设置中授予完全磁盘访问权限后才能扫描
+    crate::log_scan_step("大文件扫描: 跳过 Downloads/Desktop (TCC 保护)");
 
     // 按大小降序排列
     crate::log_scan_step(&format!("大文件扫描: 完成, 共 {} 项", items.len()));
