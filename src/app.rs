@@ -351,8 +351,6 @@ impl App {
 
     /// 接收一条删除日志并更新进度
     pub fn receive_delete_log(&mut self, log: String) {
-        self.logs.push(log);
-        self.delete_done += 1;
         // 如果日志以 ✓ 开头，说明删除成功，记录路径
         if log.starts_with("✓") {
             // 从日志中提取路径（格式：✓ 已删除 [类别] 路径）
@@ -360,6 +358,8 @@ impl App {
                 self.deleted_paths.push(path.to_string());
             }
         }
+        self.logs.push(log);
+        self.delete_done += 1;
     }
 
     /// 删除完成后的收尾工作
