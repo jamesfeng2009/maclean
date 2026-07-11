@@ -12,6 +12,7 @@ rayon = "1.10"
 sysinfo = "0.32"
 dirs = "5.0"
 unicode-width = "0.2"
+rust-i18n = "3"
 
 [profile.release]
 opt-level = 3

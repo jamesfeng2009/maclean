@@ -1,0 +1,49 @@
+en:
+  # Tab titles
+  tab_dev_cache: "Dev Cache"
+  tab_large_files: "Large Files"
+  tab_app_cache: "App Cache"
+  tab_apfs: "APFS Snapshots"
+
+  # Disk overview
+  disk_title: "Disk: %{used} used / %{total} total / %{free} free (%{tab})"
+
+  # Scan states
+  scan_idle: "%{tab} - Press r to scan"
+  scan_scanning: "%{tab} - Scanning..."
+  scan_done: "%{tab} - %{count} items, %{size} total (%{ms}ms)"
+  scan_idle_msg: "Press r to start scanning"
+  scan_scanning_msg: "Scanning, please wait..."
+  scan_done_msg: "Scan complete, no items found"
+
+  # List
+  list_unknown_size: "unknown"
+  list_selected_info: " Selected %{count} items, %{size} total "
+
+  # Help bar
+  help_full: " Tab switch | ↑↓/jk move | Space toggle | d delete | a select all | n deselect | r rescan | L lang | q quit "
+  help_short: "Tab switch | ↑↓ move | Space toggle | d delete | a all | n cancel | r scan | L lang | q quit"
+
+  # Confirm popup
+  confirm_title: " Confirm Delete "
+  confirm_about_to_delete: "  About to delete "
+  confirm_items: " items, total "
+  confirm_irreversible: "  This action cannot be undone!"
+  confirm_yes: "Confirm  "
+  confirm_no: "Cancel"
+
+  # Deleting popup
+  deleting_title: " Cleaning... "
+
+  # Log messages
+  log_blocked: "⛔ Blocked: %{path} - %{reason}"
+  log_skipped: "⚠️ Skipped: %{path} - %{reason}"
+  log_deleted_snapshot: "✓ Deleted snapshot: %{path}"
+  log_deleted_runtime: "✓ Deleted runtime: %{path}"
+  log_delete_snapshot_fail: "✗ Failed: %{path} - %{err}"
+  log_delete_runtime_fail: "✗ Failed: %{path} - %{err}"
+  log_path_not_exist: "✗ Path not found: %{path}"
+  log_symlink_blocked: "⛔ Refused symlink: %{path}"
+  log_deleted: "✓ Deleted [%{cat}] %{path}"
+  log_delete_fail: "✗ Failed [%{cat}] %{path} - %{err}"
+  log_summary: "Done: deleted %{deleted}, blocked %{blocked}, failed %{failed}, freed %{freed}"

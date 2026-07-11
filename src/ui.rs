@@ -4,6 +4,7 @@
 
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+use rust_i18n::t;
 
 use crate::app::{App, ConfirmState, ScanState, Tab};
 use crate::scanner::{format_size, ScanItem};
@@ -55,13 +56,12 @@ fn render_disk_overview(frame: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::new()
                 .borders(Borders::ALL)
-                .title(format!(
-                    " 磁盘: {} 已用 / {} 总计 / {} 可用 ({}) ",
-                    format_size(used),
-                    format_size(app.disk_total),
-                    format_size(app.disk_free),
-                    app.tab.title(),
-                )),
+                .title(t!("disk_title",
+                    used = format_size(used),
+                    total = format_size(app.disk_total),
+                    free = format_size(app.disk_free),
+                    tab = app.tab.title()
+                ).to_string()),
         )
         .gauge_style(Style::new().fg(gauge_color))
         .percent(used_pct as u16);
@@ -108,30 +108,29 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
     let state = app.current_scan_state();
 
     let title = match state {
-        ScanState::Idle => format!(" {} - 按 r 开始扫描 ", app.tab.title()),
-        ScanState::Scanning => format!(" {} - 扫描中... ", app.tab.title()),
+        ScanState::Idle => t!("scan_idle", tab = app.tab.title()).to_string(),
+        ScanState::Scanning => t!("scan_scanning", tab = app.tab.title()).to_string(),
         ScanState::Done => {
             let total: u64 = items.iter().map(|i| i.size_bytes).sum();
-            format!(
-                " {} - {} 项, 共 {} ({}ms) ",
-                app.tab.title(),
-                items.len(),
-                format_size(total),
-                app.scan_time_ms[match app.tab {
+            t!("scan_done",
+                tab = app.tab.title(),
+                count = items.len(),
+                size = format_size(total),
+                ms = app.scan_time_ms[match app.tab {
                     Tab::DevCache => 0,
                     Tab::LargeFiles => 1,
                     Tab::AppCache => 2,
                     Tab::Apfs => 3,
-                }],
-            )
+                }]
+            ).to_string()
         }
     };
 
     if items.is_empty() {
         let msg = match state {
-            ScanState::Idle => "按 r 键开始扫描",
-            ScanState::Scanning => "正在扫描，请稍候...",
-            ScanState::Done => "扫描完成，未发现可清理项目",
+            ScanState::Idle => t!("scan_idle_msg").to_string(),
+            ScanState::Scanning => t!("scan_scanning_msg").to_string(),
+            ScanState::Done => t!("scan_done_msg").to_string(),
         };
         let paragraph = Paragraph::new(msg)
             .alignment(Alignment::Center)
@@ -156,7 +155,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             let size_str = if item.size_bytes == 0 {
-                "未知".to_string()
+                t!("list_unknown_size").to_string()
             } else {
                 format_size(item.size_bytes)
             };
@@ -197,11 +196,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
     let selected_count = app.selected_count();
     let selected_size = app.selected_selected_size_display();
     if selected_count > 0 {
-        let info = format!(
-            " 已选 {} 项, 共 {} ",
-            selected_count,
-            selected_size,
-        );
+        let info = t!("list_selected_info", count = selected_count, size = selected_size).to_string();
         let info_area = Rect {
             x: area.x + 1,
             y: area.bottom() - 1,
@@ -215,10 +210,10 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
 
 /// 渲染快捷键提示栏
 fn render_help_bar(frame: &mut Frame, area: Rect) {
-    let help = if matches!(frame.area().width, w if w < 80) {
-        "Tab切换 | ↑↓选择 | Space勾选 | d删除 | a全选 | n取消 | r扫描 | q退出"
+    let help = if frame.area().width < 80 {
+        t!("help_short").to_string()
     } else {
-        " Tab切换 | ↑↓/jk选择 | Space勾选 | d删除 | a全选 | n取消全选 | r重新扫描 | q退出 "
+        t!("help_full").to_string()
     };
 
     let bar = Paragraph::new(help)
@@ -241,25 +236,25 @@ fn render_confirm_popup(frame: &mut Frame, app: &App) {
     let text = vec![
         Line::from(""),
         Line::from(vec![
-            Span::raw("  即将删除 "),
+            Span::raw(t!("confirm_about_to_delete").to_string()),
             Span::styled(format!("{}", count), Style::new().fg(Color::Yellow).bold()),
-            Span::raw(" 项, 共 "),
+            Span::raw(t!("confirm_items").to_string()),
             Span::styled(format!("{}", format_size(size)), Style::new().fg(Color::Red).bold()),
         ]),
         Line::from(""),
-        Line::from("  此操作不可撤销!"),
+        Line::from(t!("confirm_irreversible").to_string()),
         Line::from(""),
         Line::from(vec![
             Span::styled("  [y] ", Style::new().fg(Color::Green).bold()),
-            Span::raw("确认删除  "),
+            Span::raw(t!("confirm_yes").to_string()),
             Span::styled("[n/Esc] ", Style::new().fg(Color::Red).bold()),
-            Span::raw("取消"),
+            Span::raw(t!("confirm_no").to_string()),
         ]),
     ];
 
     let block = Block::new()
         .borders(Borders::ALL)
-        .title(" 确认删除 ")
+        .title(t!("confirm_title").to_string())
         .border_style(Style::new().fg(Color::Red));
 
     let paragraph = Paragraph::new(text).block(block);
@@ -293,7 +288,7 @@ fn render_deleting_popup(frame: &mut Frame, app: &App) {
 
     let block = Block::new()
         .borders(Borders::ALL)
-        .title(" 正在清理... ")
+        .title(t!("deleting_title").to_string())
         .border_style(Style::new().fg(Color::Cyan));
 
     let paragraph = Paragraph::new(logs).block(block);

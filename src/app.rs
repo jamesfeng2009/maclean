@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::scanner::{self, ScanItem, Scanner};
 use crate::safety;
+use rust_i18n::t;
 
 /// Tab 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,13 +22,13 @@ pub enum Tab {
 }
 
 impl Tab {
-    /// 获取 Tab 的中文标题
-    pub fn title(self) -> &'static str {
+    /// 获取 Tab 的标题（国际化）
+    pub fn title(self) -> String {
         match self {
-            Tab::DevCache => "开发者缓存",
-            Tab::LargeFiles => "大文件",
-            Tab::AppCache => "App缓存",
-            Tab::Apfs => "APFS快照",
+            Tab::DevCache => t!("tab_dev_cache").to_string(),
+            Tab::LargeFiles => t!("tab_large_files").to_string(),
+            Tab::AppCache => t!("tab_app_cache").to_string(),
+            Tab::Apfs => t!("tab_apfs").to_string(),
         }
     }
 
@@ -311,14 +312,13 @@ impl App {
             match safety::check_path_safety(path) {
                 safety::SafetyCheck::Danger(reason) => {
                     blocked_count += 1;
-                    self.logs.push(format!("⛔ 已拦截: {} - {}", path, reason));
+                    self.logs.push(t!("log_blocked", path = path, reason = reason).to_string());
                     safety::log_deletion(path, category, false, Some(&reason));
                     continue;
                 }
                 safety::SafetyCheck::Warning(reason) => {
-                    // 警告项也跳过，避免误删敏感文件
                     blocked_count += 1;
-                    self.logs.push(format!("⚠️ 已跳过: {} - {}", path, reason));
+                    self.logs.push(t!("log_skipped", path = path, reason = reason).to_string());
                     safety::log_deletion(path, category, false, Some(&reason));
                     continue;
                 }
@@ -333,12 +333,12 @@ impl App {
                     match scanner::apfs::delete_snapshot(path) {
                         Ok(_) => {
                             deleted_count += 1;
-                            self.logs.push(format!("✓ 已删除快照: {}", path));
+                            self.logs.push(t!("log_deleted_snapshot", path = path).to_string());
                             safety::log_deletion(path, category, true, None);
                         }
                         Err(e) => {
                             failed_count += 1;
-                            self.logs.push(format!("✗ 删除失败: {} - {}", path, e));
+                            self.logs.push(t!("log_delete_snapshot_fail", path = path, err = e).to_string());
                             safety::log_deletion(path, category, false, Some(&e));
                         }
                     }
@@ -346,12 +346,12 @@ impl App {
                     match scanner::apfs::delete_simulator_runtime(path) {
                         Ok(_) => {
                             deleted_count += 1;
-                            self.logs.push(format!("✓ 已删除运行时: {}", path));
+                            self.logs.push(t!("log_deleted_runtime", path = path).to_string());
                             safety::log_deletion(path, category, true, None);
                         }
                         Err(e) => {
                             failed_count += 1;
-                            self.logs.push(format!("✗ 删除失败: {} - {}", path, e));
+                            self.logs.push(t!("log_delete_runtime_fail", path = path, err = e).to_string());
                             safety::log_deletion(path, category, false, Some(&e));
                         }
                     }
@@ -366,7 +366,7 @@ impl App {
             // 二次校验：删除前再次确认路径存在且不是符号链接
             if !p.exists() && !p.symlink_metadata().is_ok() {
                 failed_count += 1;
-                self.logs.push(format!("✗ 路径不存在: {}", path));
+                self.logs.push(t!("log_path_not_exist", path = path).to_string());
                 safety::log_deletion(path, category, false, Some("路径不存在"));
                 continue;
             }
@@ -375,7 +375,7 @@ impl App {
             if let Ok(meta) = p.symlink_metadata() {
                 if meta.file_type().is_symlink() {
                     blocked_count += 1;
-                    self.logs.push(format!("⛔ 拒绝删除符号链接: {}", path));
+                    self.logs.push(t!("log_symlink_blocked", path = path).to_string());
                     safety::log_deletion(path, category, false, Some("符号链接拒绝删除"));
                     continue;
                 }
@@ -391,12 +391,12 @@ impl App {
                 Ok(_) => {
                     deleted_count += 1;
                     freed_bytes += size;
-                    self.logs.push(format!("✓ 已删除 [{}] {}", category, path));
+                    self.logs.push(t!("log_deleted", cat = category, path = path).to_string());
                     safety::log_deletion(path, category, true, None);
                 }
                 Err(e) => {
                     failed_count += 1;
-                    self.logs.push(format!("✗ 删除失败 [{}] {} - {}", category, path, e));
+                    self.logs.push(t!("log_delete_fail", cat = category, path = path, err = e.to_string()).to_string());
                     safety::log_deletion(path, category, false, Some(&e.to_string()));
                 }
             }
@@ -407,13 +407,13 @@ impl App {
             self.results[idx].remove(*i);
         }
 
-        self.logs.push(format!(
-            "清理完成: 删除 {} 项, 拦截 {} 项, 失败 {} 项, 释放 {}",
-            deleted_count,
-            blocked_count,
-            failed_count,
-            scanner::format_size(freed_bytes)
-        ));
+        self.logs.push(t!(
+            "log_summary",
+            deleted = deleted_count,
+            blocked = blocked_count,
+            failed = failed_count,
+            freed = scanner::format_size(freed_bytes)
+        ).to_string());
 
         // 刷新磁盘信息
         let (total, free) = get_disk_info();

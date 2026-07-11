@@ -4,9 +4,13 @@
 //! 开发者工具产生的缓存、构建产物，以及 APFS 快照等。
 
 mod app;
+mod i18n;
 mod safety;
 mod scanner;
 mod ui;
+
+// 初始化国际化，加载 locales/ 目录下的翻译文件
+rust_i18n::i18n!("locales");
 
 use std::io::{self, stdout};
 
@@ -134,6 +138,10 @@ fn run_event_loop(
             // 重新扫描
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 app.scan_current();
+            }
+            // 切换语言
+            KeyCode::Char('L') => {
+                i18n::toggle_language();
             }
             _ => {}
         }
