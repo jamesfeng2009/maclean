@@ -38,6 +38,7 @@ impl Scanner for AppCacheScanner {
         items.extend(scan_app_support_caches());
         items.extend(scan_system_caches());
         items.extend(scan_logs());
+        items.extend(scan_browser_caches());
 
         // 按大小降序排列
         items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
@@ -487,6 +488,252 @@ fn scan_logs() -> Vec<ScanItem> {
                 recommend: Recommend::Safe,
                 description: "系统日志文件，可安全删除".to_string(),
             });
+        }
+    }
+
+    items
+}
+
+// =========================================================================
+//  浏览器缓存（可重建的缓存子目录，不触碰用户数据）
+// =========================================================================
+
+/// 扫描浏览器可重建缓存
+///
+/// 只清理缓存类子目录（AI 模型、GPU 缓存、Code Cache、Crashpad 等），
+/// 不触碰用户数据（书签、密码、扩展、登录状态、IndexedDB 等）。
+///
+/// 支持浏览器：
+/// - Google Chrome
+/// - Microsoft Edge
+/// - Brave
+/// - Arc
+/// - Firefox
+/// - Safari
+fn scan_browser_caches() -> Vec<ScanItem> {
+    let home = home_dir();
+    let app_support = home.join("Library/Application Support");
+    let caches = home.join("Library/Caches");
+    let mut items: Vec<ScanItem> = Vec::new();
+
+    // Chromium 系浏览器共享相同的缓存子目录结构
+    // 这些子目录都是可重建的缓存，删除后浏览器会自动重新生成
+    let chromium_cache_subdirs: &[&str] = &[
+        "OptGuideOnDeviceModel",           // Chrome 本地 AI 模型（可重新下载）
+        "OptGuideOnDeviceClassifierModel", // AI 分类模型
+        "optimization_guide_model_store",  // 模型存储
+        "component_crx_cache",             // 组件 CRX 缓存
+        "GPUCache",                        // GPU 着色器缓存
+        "GraphiteDawnCache",               // Graphite GPU 缓存
+        "Crashpad",                        // 崩溃报告
+        "Safe Browsing",                   // 安全浏览数据库（可重建）
+        "OnDeviceHeadSuggestModel",        // 搜索建议模型
+        "ZxcvbnData",                      // 密码强度评估数据
+        "CertificateRevocation",           // 证书吊销列表
+        "segmentation_platform",           // 分段平台数据
+        "ActorSafetyLists",                // 安全列表
+        "WasmTtsEngine",                   // WebAssembly TTS 引擎
+    ];
+
+    // 各浏览器在 Application Support 下的根目录
+    let chromium_browsers: &[(&str, &str)] = &[
+        ("Google/Chrome", "Google Chrome"),
+        ("Microsoft Edge", "Microsoft Edge"),
+        ("BraveSoftware/Brave-Browser", "Brave"),
+        ("Arc/User Data", "Arc"),
+        ("Vivaldi", "Vivaldi"),
+        ("Chromium", "Chromium"),
+    ];
+
+    for (rel_path, browser_name) in chromium_browsers {
+        let browser_root = app_support.join(rel_path);
+        if !browser_root.is_dir() {
+            continue;
+        }
+        items.extend(scan_chromium_cache_subdirs(
+            &browser_root,
+            browser_name,
+            chromium_cache_subdirs,
+        ));
+    }
+
+    // Firefox 缓存（不同结构）
+    let firefox_profiles = app_support.join("Firefox/Profiles");
+    if firefox_profiles.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&firefox_profiles) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let profile_path = entry.path();
+                if !profile_path.is_dir() {
+                    continue;
+                }
+                // Firefox 缓存目录
+                for cache_subdir in &["cache2", "startupCache", "shader-cache", "thumbnails"] {
+                    let cache_path = profile_path.join(cache_subdir);
+                    if cache_path.is_dir() {
+                        let size = dir_size(&cache_path);
+                        if size >= 10 * 1024 * 1024 {
+                            // 10MB 阈值
+                            let profile_name = profile_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            items.push(ScanItem {
+                                path: cache_path.to_string_lossy().to_string(),
+                                size_bytes: size,
+                                category: "浏览器缓存".to_string(),
+                                selected: false,
+                                deletable: true,
+                                undeletable_reason: String::new(),
+                                batch_paths: Vec::new(),
+                                recommend: Recommend::Safe,
+                                description: format!(
+                                    "Firefox ({}) 的 {} 缓存，可安全清理",
+                                    profile_name, cache_subdir
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Safari 缓存
+    let safari_cache = caches.join("com.apple.Safari");
+    if safari_cache.is_dir() {
+        let size = dir_size(&safari_cache);
+        if size >= 10 * 1024 * 1024 {
+            items.push(ScanItem {
+                path: safari_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "浏览器缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "Safari 缓存文件，可安全清理".to_string(),
+            });
+        }
+    }
+
+    // Safari WebKit 网络缓存
+    let webkit_cache = caches.join("WebKit");
+    if webkit_cache.is_dir() {
+        let size = dir_size(&webkit_cache);
+        if size >= 10 * 1024 * 1024 {
+            items.push(ScanItem {
+                path: webkit_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "浏览器缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution, // WebKit 缓存被多个 App 共享
+                description: "WebKit 网络缓存（被 Safari 等 App 共享），可安全清理".to_string(),
+            });
+        }
+    }
+
+    items
+}
+
+/// 扫描 Chromium 系浏览器的缓存子目录
+fn scan_chromium_cache_subdirs(
+    browser_root: &std::path::Path,
+    browser_name: &str,
+    cache_subdirs: &[&str],
+) -> Vec<ScanItem> {
+    let mut items = Vec::new();
+
+    // Chromium 系浏览器有多个 Profile：Default、Profile 1、Profile 2 等
+    // 每个 Profile 下也有 GPUCache、Code Cache 等缓存
+    let mut profile_dirs: Vec<PathBuf> = vec![browser_root.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(browser_root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "Default" || name.starts_with("Profile ") {
+                profile_dirs.push(entry.path());
+            }
+        }
+    }
+
+    for profile_dir in &profile_dirs {
+        let profile_label = if profile_dir == browser_root {
+            "根目录".to_string()
+        } else {
+            profile_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+
+        // 扫描该 Profile 下的缓存子目录
+        for subdir in cache_subdirs {
+            let cache_path = profile_dir.join(subdir);
+            if !cache_path.is_dir() {
+                continue;
+            }
+            let size = dir_size(&cache_path);
+            if size < 10 * 1024 * 1024 {
+                continue; // 10MB 阈值
+            }
+            let is_user_safe = matches!(
+                *subdir,
+                "OptGuideOnDeviceModel"
+                    | "OptGuideOnDeviceClassifierModel"
+                    | "optimization_guide_model_store"
+                    | "component_crx_cache"
+                    | "GPUCache"
+                    | "GraphiteDawnCache"
+                    | "Crashpad"
+                    | "OnDeviceHeadSuggestModel"
+                    | "ZxcvbnData"
+                    | "WasmTtsEngine"
+            );
+            items.push(ScanItem {
+                path: cache_path.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "浏览器缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: if is_user_safe {
+                    Recommend::Safe
+                } else {
+                    Recommend::Caution
+                },
+                description: format!(
+                    "{} ({}) 的 {} 缓存，删除后浏览器会自动重建",
+                    browser_name, profile_label, subdir
+                ),
+            });
+        }
+
+        // Profile 级别的额外缓存（Default/Cache、Default/Code Cache 等）
+        for extra in &["Cache", "Code Cache", "Service Worker/CacheStorage"] {
+            let cache_path = profile_dir.join(extra);
+            if cache_path.is_dir() {
+                let size = dir_size(&cache_path);
+                if size >= 10 * 1024 * 1024 {
+                    items.push(ScanItem {
+                        path: cache_path.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: "浏览器缓存".to_string(),
+                        selected: false,
+                        deletable: true,
+                        undeletable_reason: String::new(),
+                        batch_paths: Vec::new(),
+                        recommend: Recommend::Safe,
+                        description: format!(
+                            "{} ({}) 的 {} 缓存，删除后浏览器会自动重建",
+                            browser_name, profile_label, extra
+                        ),
+                    });
+                }
+            }
         }
     }
 
