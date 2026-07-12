@@ -1,6 +1,14 @@
 #!/bin/bash
-# preinstall - 安装前检查
-# 确保目录存在
-mkdir -p /usr/local/bin
-mkdir -p /usr/local/share/doc/maclean
+# preinstall - 安装前清理旧版本
+# 确保 /Applications 中只有一个 maclean.app
+
+set -e
+
+# 删除任何可能的 maclean.app 变体（包括系统生成的 "maclean 2.app"）
+for app in /Applications/maclean.app /Applications/maclean\ *.app; do
+    if [ -e "$app" ]; then
+        rm -rf "$app"
+    fi
+done
+
 exit 0

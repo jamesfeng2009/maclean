@@ -28,6 +28,18 @@ package: release
 package-only:
 	@bash scripts/build-package.sh
 
+## 安装 GUI app 到 /Applications (需要 sudo)
+install-app: package
+	@echo "安装 maclean.app 到 /Applications..."
+	@bash scripts/install-app.sh
+	@echo "安装完成，请在 Launchpad 或 /Applications 中打开 maclean"
+
+## 卸载 GUI app
+uninstall-app:
+	@echo "卸载 maclean.app..."
+	@bash scripts/uninstall-app.sh
+	@echo "卸载完成"
+
 ## 安装到系统 (需要 sudo)
 install: release
 	@echo "安装 maclean 到 /usr/local/bin..."

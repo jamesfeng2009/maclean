@@ -1,5 +1,18 @@
 #!/bin/bash
-# postinstall - 安装后设置权限
-# 设置可执行文件权限
-chmod 755 /usr/local/bin/maclean
+# postinstall - 安装后设置权限并刷新 LaunchServices
+
+set -e
+
+APP_PATH="/Applications/maclean.app"
+
+# 确保应用目录权限正确
+if [ -d "$APP_PATH" ]; then
+    chmod -R 755 "$APP_PATH"
+    # 修复 Gatekeeper 可能导致的应用无法打开问题
+    xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
+fi
+
+# 刷新 LaunchServices，确保 Finder 中只显示一个图标
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$APP_PATH" 2>/dev/null || true
+
 exit 0
