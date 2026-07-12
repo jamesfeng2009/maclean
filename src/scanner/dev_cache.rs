@@ -258,6 +258,23 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
         });
     }
 
+    // 6. 模拟器 Cryptex（系统级运行时扩展，与 Volumes 同级）
+    let sim_cryptex = PathBuf::from("/Library/Developer/CoreSimulator/Cryptex");
+    if sim_cryptex.is_dir() {
+        let size = dir_size(&sim_cryptex);
+        items.push(ScanItem {
+            path: sim_cryptex.to_string_lossy().to_string(),
+            size_bytes: size,
+            category: "模拟器Cryptex".to_string(),
+            selected: false,
+            deletable: true,
+                            undeletable_reason: String::new(),
+            recommend: Recommend::Caution,
+            description: "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除".to_string(),
+                            batch_paths: Vec::new(),
+        });
+    }
+
     // 6. 文档缓存 (DevCleaner 特有)
     let doc_cache = xcode_dir.join("Documentation Cache");
     if doc_cache.is_dir() {

@@ -121,6 +121,8 @@ pub struct App {
     pub failed_paths: Vec<(String, String)>, // (path, category)
     /// 是否需要显示权限引导弹窗
     pub show_permission_guide: bool,
+    /// 是否显示删除预览（dry-run）
+    pub show_preview: bool,
     /// sudo 密码输入框的当前内容
     pub sudo_password_input: String,
     /// 已确认的用户密码（用于 sudo -S）
@@ -161,6 +163,7 @@ impl App {
             delete_summary: None,
             failed_paths: Vec::new(),
             show_permission_guide: Self::check_full_disk_access() == false,
+            show_preview: false,
             sudo_password_input: String::new(),
             sudo_password: None,
             sudo_failed_items: Vec::new(),
@@ -362,20 +365,27 @@ impl App {
         self.confirm = ConfirmState::Pending;
     }
 
-    /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths) 供后台线程使用
-    pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>)> {
+    /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths, use_trash) 供后台线程使用
+    /// use_trash: true 表示移至废纸篓（可恢复），false 表示永久删除
+    pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>, bool)> {
         self.confirm = ConfirmState::Deleting;
         let idx = self.tab_index();
 
         // 收集要删除的路径和类别（跳过不可删除的项）
-        let to_delete: Vec<(String, String, Vec<String>)> = self
+        // 策略：Safe 级别永久删除（缓存自动重建），Caution/Advanced 移至废纸篓（可恢复）
+        let to_delete: Vec<(String, String, Vec<String>, bool)> = self
             .pending_delete
             .iter()
             .rev()
             .filter(|&&i| self.results[idx][i].deletable)
             .map(|&i| {
                 let item = &self.results[idx][i];
-                (item.path.clone(), item.category.clone(), item.batch_paths.clone())
+                let use_trash = match item.recommend {
+                    crate::scanner::Recommend::Safe => false,      // 缓存类：永久删除
+                    crate::scanner::Recommend::Caution => false,   // 系统缓存：永久删除（root 属主无法移到用户废纸篓）
+                    crate::scanner::Recommend::Advanced => true,   // 大文件/高级项：移至废纸篓
+                };
+                (item.path.clone(), item.category.clone(), item.batch_paths.clone(), use_trash)
             })
             .collect();
 

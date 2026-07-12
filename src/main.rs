@@ -758,6 +758,93 @@ fn best_effort_delete(path: &std::path::Path) -> bool {
     !path.exists() && path.symlink_metadata().is_err()
 }
 
+/// 检查 Xcode/Simulator/CoreSimulatorService 是否正在运行
+/// 如果正在运行，不能删除 CoreSimulator 相关目录
+fn is_simulator_running() -> bool {
+    let processes = ["Xcode", "Simulator", "CoreSimulatorService", "simdiskimaged"];
+    for proc in &processes {
+        if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
+            .arg("-x")
+            .arg(proc)
+            .output()
+        {
+            if output.status.success() && !output.stdout.is_empty() {
+                return true;
+            }
+        }
+    }
+    // 额外检查 com.apple.CoreSimulator
+    if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
+        .arg("-f")
+        .arg("com.apple.CoreSimulator")
+        .output()
+    {
+        if output.status.success() && !output.stdout.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 获取系统所有挂载点
+fn get_mount_points() -> Vec<String> {
+    let output = std::process::Command::new("/sbin/mount")
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 { Some(parts[2].to_string()) } else { None }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// 检查路径是否被挂载使用（即路径本身或其子路径是挂载点）
+fn is_path_mounted(path: &str, mount_points: &[String]) -> bool {
+    for mp in mount_points {
+        if mp == path || mp.starts_with(&format!("{}/", path)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 移动文件/目录到废纸篓（可恢复）
+/// 用于 Caution/Advanced 级别的文件，给用户后悔的机会
+fn move_to_trash(path: &str) -> bool {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let trash = format!("{}/.Trash", home);
+
+    // 确保 .Trash 存在
+    let _ = std::fs::create_dir_all(&trash);
+
+    let p = std::path::Path::new(path);
+    let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+
+    // 生成不冲突的目标文件名
+    let mut dest = format!("{}/{}", trash, file_name);
+    if std::path::Path::new(&dest).exists() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        dest = format!("{}/{}.{}", trash, file_name, timestamp);
+    }
+
+    // 用 mv 移动到废纸篓
+    std::process::Command::new("/bin/mv")
+        .arg(path)
+        .arg(&dest)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// 从文本中提取所有 UUID（格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
 fn extract_all_uuids(text: &str) -> Vec<String> {
     let mut uuids = Vec::new();
@@ -790,11 +877,28 @@ fn extract_all_uuids(text: &str) -> Vec<String> {
 
 /// 安全删除模拟器运行时镜像（/Library/Developer/CoreSimulator/Volumes）
 ///
-/// 使用 `xcrun simctl runtime list` 列出所有运行时，逐个 `xcrun simctl runtime delete <uuid>`。
-/// 这是 Apple 推荐的安全删除方式，会正确卸载和注销运行时，不会残留挂载点。
-/// 如果 xcrun 不可用或全部失败，返回 Err 让调用方 fallback 到 sudo rm -rf。
-fn delete_simulator_volumes(_path: &str) -> Result<String, String> {
-    // 1. 列出所有运行时
+/// 安全检查层：
+/// 1. 进程检测：Xcode/Simulator/CoreSimulatorService 运行时拒绝删除
+/// 2. 挂载点检测：正在挂载使用的运行时跳过，只删 UNUSED 的
+/// 3. 使用 `xcrun simctl runtime delete <uuid>` 安全删除
+/// 4. 如果 xcrun 失败，返回 Err 让调用方 fallback 到 sudo rm -rf（仅 UNUSED 项）
+fn delete_simulator_volumes(path: &str) -> Result<String, String> {
+    // 1. 进程检测：模拟器运行中时拒绝删除
+    if is_simulator_running() {
+        return Err("Xcode/Simulator 正在运行，请先关闭后再删除模拟器镜像".to_string());
+    }
+
+    // 2. 挂载点检测：如果路径被挂载使用，跳过
+    let mount_points = get_mount_points();
+    if mount_points.is_empty() {
+        // mount 命令失败，无法确认安全，拒绝删除
+        return Err("无法获取挂载点信息，为安全起见跳过删除".to_string());
+    }
+    if is_path_mounted(path, &mount_points) {
+        return Err("模拟器运行时正在被挂载使用，跳过删除".to_string());
+    }
+
+    // 3. 列出所有运行时
     let list_output = std::process::Command::new("xcrun")
         .args(["simctl", "runtime", "list"])
         .output()
@@ -807,7 +911,7 @@ fn delete_simulator_volumes(_path: &str) -> Result<String, String> {
 
     let stdout = String::from_utf8_lossy(&list_output.stdout);
 
-    // 2. 提取所有 UUID（格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
+    // 4. 提取所有 UUID（格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
     let uuids: Vec<String> = extract_all_uuids(&stdout);
 
     if uuids.is_empty() {
@@ -861,7 +965,7 @@ fn delete_simulator_volumes(_path: &str) -> Result<String, String> {
 /// 启动后台删除线程（两阶段自动删除）
 /// 阶段1: 普通删除（多线程并行 rm -rf）
 /// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
-fn start_delete(to_delete: Vec<(String, String, Vec<String>)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
 
@@ -878,10 +982,11 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>)>, delete_rx: &mut O
                     loop {
                         let i = idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if i >= to_delete.len() { break; }
-                        let (path, category, batch_paths) = &to_delete[i];
+                        let (path, category, batch_paths, use_trash) = &to_delete[i];
                         let path = path.to_string();
                         let category = category.to_string();
                         let batch_paths = batch_paths.clone();
+                        let use_trash = *use_trash;
 
                         // 批量删除模式（如 __pycache__）：逐个安全删除
                         if !batch_paths.is_empty() {
@@ -967,8 +1072,8 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>)>, delete_rx: &mut O
                             continue;
                         }
 
-                        // 模拟器镜像 — 通过 xcrun simctl runtime delete 安全删除
-                        if category == "模拟器镜像" {
+                        // 模拟器镜像/Cryptex — 通过 xcrun simctl runtime delete 安全删除
+                        if category == "模拟器镜像" || category == "模拟器Cryptex" {
                             match delete_simulator_volumes(&path) {
                                 Ok(msg) => {
                                     let _ = tx.send(DeleteMessage::Log(
@@ -984,6 +1089,17 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>)>, delete_rx: &mut O
                                 }
                             }
                             continue;
+                        }
+
+                        // 模拟器缓存 — 进程检测后删除
+                        if category == "模拟器缓存" {
+                            if is_simulator_running() {
+                                let _ = tx.send(DeleteMessage::Log(
+                                    format!("⏭️ 跳过 [{}] Xcode/Simulator 正在运行", path), path.clone(), category.clone(), false));
+                                safety::log_deletion(&path, &category, false, Some("模拟器运行中，跳过删除"));
+                                continue;
+                            }
+                            // 走普通删除流程（会自动 fallback 到 sudo）
                         }
 
                         // 普通文件/目录删除 - 尽力删除模式
@@ -1006,12 +1122,24 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>)>, delete_rx: &mut O
                             }
                         }
 
-                        // 尽力删除：先直接删除，失败则递归逐个删除
-                        let deleted_ok = best_effort_delete(p);
+                        // 尽力删除：废纸篓模式或永久删除
+                        let deleted_ok = if use_trash {
+                            // 移至废纸篓（可恢复）
+                            if move_to_trash(&path) {
+                                true
+                            } else {
+                                // 废纸篓失败，尝试永久删除
+                                best_effort_delete(p)
+                            }
+                        } else {
+                            // 永久删除
+                            best_effort_delete(p)
+                        };
 
                         if deleted_ok {
+                            let action = if use_trash { "已移至废纸篓" } else { "已删除" };
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
+                                format!("✓ {} [{}] {}", action, category, path), path.clone(), category.clone(), true));
                             safety::log_deletion(&path, &category, true, None);
                         } else {
                             // 普通删除失败，加入待 sudo 列表
@@ -1067,7 +1195,7 @@ fn start_sudo_delete(
         // ========== 预处理：模拟器镜像通过 sudo xcrun simctl runtime delete 删除 ==========
         let mut remaining_items: Vec<(String, String)> = Vec::new();
         for (path, category) in &failed_items {
-            if category == "模拟器镜像" {
+            if category == "模拟器镜像" || category == "模拟器Cryptex" {
                 // 用 sudo xcrun simctl runtime delete 删除所有运行时
                 let script = r#"#!/bin/bash
 set +e
@@ -1466,10 +1594,11 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
 
     egui::Window::new(app.t("confirm_delete"))
         .collapsible(false)
-        .resizable(false)
+        .resizable(true)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(420.0);
+            ui.set_min_width(480.0);
+            ui.set_min_height(200.0);
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(format!("{} {} {}", app.t("about_to_delete"), count, app.t("items"))).size(16.0));
@@ -1503,14 +1632,51 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
                         });
                 }
 
+                // 预览按钮
+                ui.add_space(8.0);
+                if ui.button(egui::RichText::new("🔍 预览删除项").size(13.0)).clicked() {
+                    app.show_preview = !app.show_preview;
+                }
+
+                // 预览面板
+                if app.show_preview {
+                    ui.add_space(5.0);
+                    egui::Frame::group(ui.style())
+                        .inner_margin(egui::Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.set_max_height(250.0);
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                let idx = app.tab_index();
+                                let items: Vec<_> = app.results[idx].iter()
+                                    .filter(|item| item.selected && item.deletable)
+                                    .collect();
+                                for item in &items {
+                                    ui.horizontal(|ui| {
+                                        ui.label(recommend_badge(&item.recommend));
+                                        ui.label(format_size(item.size_bytes));
+                                        ui.label(&item.category);
+                                        ui.label(egui::RichText::new(&item.path).size(11.0).color(egui::Color32::from_gray(160)));
+                                    });
+                                }
+                                ui.add_space(3.0);
+                                ui.colored_label(
+                                    egui::Color32::from_gray(140),
+                                    egui::RichText::new(format!("共 {} 项, 缓存类永久删除, 大文件移至废纸篓", items.len())).size(11.0),
+                                );
+                            });
+                        });
+                }
+
                 ui.add_space(15.0);
 
                 ui.horizontal(|ui| {
                     if ui.button(egui::RichText::new(format!("✓ {}", app.t("confirm_delete"))).color(egui::Color32::from_rgb(52, 199, 89))).clicked() {
+                        app.show_preview = false;
                         let to_delete = app.confirm_delete();
                         start_delete(to_delete, delete_rx);
                     }
                     if ui.button(egui::RichText::new(format!("✗ {}", app.t("cancel"))).color(egui::Color32::RED)).clicked() {
+                        app.show_preview = false;
                         app.cancel_delete();
                     }
                 });
