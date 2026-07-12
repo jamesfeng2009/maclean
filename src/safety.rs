@@ -286,32 +286,33 @@ fn check_whitelist(canonical: &Path, home: &Path) -> bool {
     let home_str = home.to_string_lossy();
 
     // 安全路径前缀列表
+    // 注意：叶子目录（精确匹配的缓存目录）末尾不带 /，前缀目录（允许子目录）末尾带 /
     let safe_prefixes: Vec<String> = vec![
         // Rust 编译产物
-        format!("{}/.cargo/registry/", home_str),
+        format!("{}/.cargo/registry", home_str),
         // Xcode
-        format!("{}/Library/Developer/Xcode/DerivedData/", home_str),
-        format!("{}/Library/Developer/Xcode/iOS DeviceSupport/", home_str),
-        format!("{}/Library/Developer/Xcode/Archives/", home_str),
+        format!("{}/Library/Developer/Xcode/DerivedData", home_str),
+        format!("{}/Library/Developer/Xcode/iOS DeviceSupport", home_str),
+        format!("{}/Library/Developer/Xcode/Archives", home_str),
         // 模拟器缓存（不是运行时镜像）
-        "/Library/Developer/CoreSimulator/Caches/".to_string(),
+        "/Library/Developer/CoreSimulator/Caches".to_string(),
         // Node.js
-        format!("{}/.npm/", home_str),
-        format!("{}/Library/pnpm/store/", home_str),
+        format!("{}/.npm", home_str),
+        format!("{}/Library/pnpm/store", home_str),
         // Go
-        format!("{}/go/pkg/mod/", home_str),
+        format!("{}/go/pkg/mod", home_str),
         // Homebrew 缓存
-        format!("{}/Library/Caches/Homebrew/", home_str),
+        format!("{}/Library/Caches/Homebrew", home_str),
         // pip 缓存
-        format!("{}/Library/Caches/pip/", home_str),
+        format!("{}/Library/Caches/pip", home_str),
         // Gradle 缓存
-        format!("{}/.gradle/caches/", home_str),
-        format!("{}/.gradle/daemon/", home_str),
-        format!("{}/.gradle/wrapper/dists/", home_str),
+        format!("{}/.gradle/caches", home_str),
+        format!("{}/.gradle/daemon", home_str),
+        format!("{}/.gradle/wrapper/dists", home_str),
         // JetBrains 缓存
-        format!("{}/Library/Caches/JetBrains/", home_str),
+        format!("{}/Library/Caches/JetBrains", home_str),
         // 系统日志
-        format!("{}/Library/Logs/", home_str),
+        format!("{}/Library/Logs", home_str),
         // App 容器内的缓存
         format!("{}/Library/Containers/", home_str),
         format!("{}/Library/Group Containers/", home_str),
