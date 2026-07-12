@@ -74,6 +74,9 @@ echo "[3/7] 构建 .app 应用包..."
 cp "$BUILD_DIR/maclean" "$APP_BUNDLE/Contents/MacOS/maclean"
 chmod +x "$APP_BUNDLE/Contents/MacOS/maclean"
 
+# 复制应用图标
+cp "$PROJECT_DIR/assets/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+
 # 创建 Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -98,6 +101,10 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
     <string>6.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSUIElement</key>
