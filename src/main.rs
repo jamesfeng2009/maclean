@@ -105,11 +105,11 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([760.0, 540.0])
-            .with_title("maclean - macOS 磁盘清理"),
+            .with_title("Maclean - macOS 磁盘清理"),
         ..Default::default()
     };
 
-    eframe::run_simple_native("maclean", options, move |ctx, _frame| {
+    eframe::run_simple_native("Maclean", options, move |ctx, _frame| {
         static mut APP: Option<App> = None;
         static mut SCAN_RX: Option<mpsc::Receiver<ScanMessage>> = None;
         static mut DELETE_RX: Option<mpsc::Receiver<DeleteMessage>> = None;
@@ -276,7 +276,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
     // ========== 顶部：标题栏 + 磁盘概览 ==========
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            ui.heading("🧹 maclean");
+            ui.heading("🧹 Maclean");
             ui.separator();
 
             if ui.button(if app.lang_en { "中文" } else { "EN" }).clicked() {
@@ -1493,7 +1493,7 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
                 // 说明
                 ui.colored_label(
                     egui::Color32::from_gray(200),
-                    egui::RichText::new("maclean 需要完全磁盘访问权限才能删除开发者缓存文件。").size(13.0),
+                    egui::RichText::new("Maclean 需要完全磁盘访问权限才能删除开发者缓存文件。").size(13.0),
                 );
                 ui.add_space(3.0);
                 ui.colored_label(
@@ -1512,10 +1512,10 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
 
                 let steps = [
                     "点击下方「打开系统设置」按钮",
-                    "在「完全磁盘访问」列表中找到 maclean",
-                    "如果没有，点击 + 号添加 maclean.app",
-                    "确保 maclean 旁边的开关已打开",
-                    "重启 maclean 后即可正常删除",
+                    "在「完全磁盘访问」列表中找到 Maclean",
+                    "如果没有，点击 + 号添加 Maclean.app",
+                    "确保 Maclean 旁边的开关已打开",
+                    "重启 Maclean 后即可正常删除",
                 ];
                 for (i, step) in steps.iter().enumerate() {
                     ui.horizontal(|ui| {
@@ -1589,7 +1589,7 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
                 ui.add_space(5.0);
                 ui.colored_label(
                     egui::Color32::from_gray(120),
-                    egui::RichText::new("提示: 授权后重启 maclean 即可正常使用所有删除功能").size(11.0),
+                    egui::RichText::new("提示: 授权后重启 Maclean 即可正常使用所有删除功能").size(11.0),
                 );
             });
         });

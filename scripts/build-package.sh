@@ -84,9 +84,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>maclean</string>
+    <string>Maclean</string>
     <key>CFBundleDisplayName</key>
-    <string>maclean</string>
+    <string>Maclean</string>
     <key>CFBundleIdentifier</key>
     <string>com.maclean.app</string>
     <key>CFBundleVersion</key>
