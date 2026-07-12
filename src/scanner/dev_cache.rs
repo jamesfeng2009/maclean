@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 use walkdir::WalkDir;
 
@@ -49,6 +50,12 @@ impl Scanner for DevCacheScanner {
 
         // 更多语言缓存
         scan_more_dev_caches(&mut items);
+
+        // K8s/Docker/AI模型/Monorepo 缓存
+        items.extend(scan_k8s_caches());
+        items.extend(scan_docker_caches());
+        items.extend(scan_ai_model_caches());
+        items.extend(scan_monorepo_caches());
 
         // 安装包清理、App 卸载残留
         scan_installer_files(&mut items);
@@ -999,8 +1006,6 @@ fn scan_more_dev_caches(items: &mut Vec<ScanItem>) {
         ("~/Library/Caches/CocoaPods", "CocoaPods", Recommend::Safe, "CocoaPods 缓存，可安全删除"),
         // CMake
         ("~/.cmake", "CMake", Recommend::Safe, "CMake 缓存，可安全删除"),
-        // Docker
-        ("~/Library/Containers/com.docker.docker/Data/vms", "Docker", Recommend::Advanced, "Docker 虚拟机数据，请确认后删除"),
         // Android SDK
         ("~/Library/Android/sdk/system-images", "AndroidSDK", Recommend::Caution, "Android 模拟器系统镜像，删除后需重新下载"),
         // Yarn (非 nodejs 的独立缓存)
@@ -1356,4 +1361,578 @@ fn is_system_app_support_dir(name: &str) -> bool {
     }
 
     false
+}
+
+// =========================================================================
+//  K8s / Helm 配置缓存扫描
+// =========================================================================
+
+/// 扫描 Kubernetes / Helm 相关缓存
+///
+/// 只扫描缓存目录，绝不扫描 ~/.kube/config（重要配置文件）
+fn scan_k8s_caches() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    let home = home_dir();
+
+    // ~/.kube/cache (kubectl discovery/mapping 缓存)
+    let kube_cache = home.join(".kube/cache");
+    if let Ok(size) = dir_size_checked(&kube_cache) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: kube_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "K8s缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "kubectl 缓存（discovery、mapping 等），删除后下次 kubectl 命令自动重建".to_string(),
+            });
+        }
+    }
+
+    // ~/.kube/http-cache (HTTP 缓存)
+    let kube_http = home.join(".kube/http-cache");
+    if let Ok(size) = dir_size_checked(&kube_http) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: kube_http.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "K8sHTTP缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "kubectl HTTP 缓存，删除后自动重建".to_string(),
+            });
+        }
+    }
+
+    // ~/.cache/helm/repository (Helm 仓库索引缓存)
+    let helm_repo = home.join(".cache/helm/repository");
+    if let Ok(size) = dir_size_checked(&helm_repo) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: helm_repo.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Helm缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: "Helm 仓库索引缓存，删除后执行 helm repo update 恢复".to_string(),
+            });
+        }
+    }
+
+    // ~/.cache/helm/plugins (Helm 插件缓存)
+    let helm_plugins = home.join(".cache/helm/plugins");
+    if let Ok(size) = dir_size_checked(&helm_plugins) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: helm_plugins.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Helm插件缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "Helm 插件缓存，可安全删除".to_string(),
+            });
+        }
+    }
+
+    items
+}
+
+// =========================================================================
+//  Docker 镜像/层缓存扫描
+// =========================================================================
+
+/// 检查 Docker 是否安装且 daemon 正在运行
+fn is_docker_available() -> bool {
+    Command::new("docker")
+        .arg("info")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// 解析 `docker system df` 输出，获取可回收空间（字节）
+///
+/// 输出格式示例:
+/// ```text
+/// TYPE            TOTAL   ACTIVE  SIZE      RECLAIMABLE
+/// Images          5       2       1.2GB     800MB (66%)
+/// Containers      3       1       50MB      30MB (60%)
+/// Local Volumes   2       1       500MB     200MB (40%)
+/// Build Cache     10      0       300MB     300MB
+/// ```
+fn get_docker_reclaimable_size() -> u64 {
+    let output = Command::new("docker")
+        .args(["system", "df", "--format", "{{.Type}}\t{{.Size}}\t{{.Reclaimable}}"])
+        .output();
+
+    let Ok(out) = output else { return 0 };
+    if !out.status.success() { return 0; }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut total: u64 = 0;
+    for line in stdout.lines() {
+        // 每行: "Images\t1.2GB\t800MB (66%)"
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 {
+            // Reclaimable 列: "800MB (66%)" 或 "0B"
+            let reclaim_str = parts[2].split_whitespace().next().unwrap_or("0B");
+            total += parse_size_str(reclaim_str);
+        }
+    }
+    total
+}
+
+/// 解析 Docker/人类可读的大小字符串为字节数
+///
+/// 支持: 1.2GB, 800MB, 50KB, 1024B, 0B
+fn parse_size_str(s: &str) -> u64 {
+    let s = s.trim();
+    if s.is_empty() || s == "0B" {
+        return 0;
+    }
+
+    // 分离数字和单位
+    let (num_part, unit) = s
+        .find(|c: char| c.is_alphabetic())
+        .map(|idx| (&s[..idx], &s[idx..]))
+        .unwrap_or((s, "B"));
+
+    let num: f64 = num_part.parse().unwrap_or(0.0);
+    let multiplier: f64 = match unit.to_uppercase().as_str() {
+        "GB" => 1024.0 * 1024.0 * 1024.0,
+        "MB" => 1024.0 * 1024.0,
+        "KB" => 1024.0,
+        "B" => 1.0,
+        _ => 1.0,
+    };
+
+    (num * multiplier) as u64
+}
+
+/// 扫描 Docker 相关缓存
+///
+/// - 调用 `docker system df` 获取可回收空间（需要 Docker 运行）
+/// - 扫描 ~/.docker/buildx/cache (构建缓存)
+/// - 扫描 ~/Library/Containers/com.docker.docker/Data (Docker Desktop 数据)
+fn scan_docker_caches() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    let home = home_dir();
+
+    // 1. Docker daemon 可回收空间（通过 docker system prune 清理）
+    if is_docker_available() {
+        let reclaimable = get_docker_reclaimable_size();
+        if reclaimable > 0 {
+            items.push(ScanItem {
+                // 特殊路径标记，删除时走 docker prune 分支
+                path: "docker:system-prune".to_string(),
+                size_bytes: reclaimable,
+                category: "Docker清理".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Advanced,
+                description: format!(
+                    "执行 docker system prune -a --volumes 清理未使用镜像/容器/卷/网络\n\
+                     可回收约 {} 空间，清理后需重新拉取镜像",
+                    crate::scanner::format_size(reclaimable)
+                ),
+            });
+        }
+    }
+
+    // 2. ~/.docker/buildx/cache (BuildKit 构建缓存)
+    let buildx_cache = home.join(".docker/buildx/cache");
+    if let Ok(size) = dir_size_checked(&buildx_cache) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: buildx_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Docker构建缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "Docker BuildKit 构建缓存，删除后自动重建".to_string(),
+            });
+        }
+    }
+
+    // 3. ~/Library/Containers/com.docker.docker/Data/vms (Docker Desktop 虚拟机数据)
+    let docker_vms = home.join("Library/Containers/com.docker.docker/Data/vms");
+    if let Ok(size) = dir_size_checked(&docker_vms) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: docker_vms.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Docker虚拟机".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Advanced,
+                description: "Docker Desktop 虚拟机数据，删除前请先退出 Docker Desktop".to_string(),
+            });
+        }
+    }
+
+    // 4. ~/Library/Containers/com.docker.docker/Data/cache (Docker Desktop 缓存)
+    let docker_cache = home.join("Library/Containers/com.docker.docker/Data/cache");
+    if let Ok(size) = dir_size_checked(&docker_cache) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: docker_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Docker缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: "Docker Desktop 缓存数据".to_string(),
+            });
+        }
+    }
+
+    items
+}
+
+// =========================================================================
+//  AI 模型缓存扫描
+// =========================================================================
+
+/// 扫描 AI/ML 模型相关缓存
+///
+/// 分类展示:
+/// - HuggingFace 模型（按 repo 拆分，Caution 级别）
+/// - HuggingFace 临时缓存（Safe 级别）
+/// - Ollama 模型（Advanced 级别）
+/// - PyTorch 缓存（Caution 级别）
+/// - llama.cpp 缓存（Safe 级别）
+fn scan_ai_model_caches() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    let home = home_dir();
+
+    // 1. HuggingFace 模型缓存 (~/.cache/huggingface/hub)
+    // 目录结构: hub/models--<org>--<name>/snapshots/<hash>/
+    let hf_hub = home.join(".cache/huggingface/hub");
+    if hf_hub.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&hf_hub) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let path = entry.path();
+
+                // 只处理 models-- 前缀的目录
+                if !name.starts_with("models--") {
+                    continue;
+                }
+
+                // 解析 org/name: models--<org>--<name>
+                let model_id = name.trim_start_matches("models--").replace("--", "/");
+                let size = dir_size(&path);
+                if size > 10 * 1024 * 1024 {
+                    // > 10MB 才展示
+                    items.push(ScanItem {
+                        path: path.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: "AI模型-HF".to_string(),
+                        selected: false,
+                        deletable: true,
+                        undeletable_reason: String::new(),
+                        batch_paths: Vec::new(),
+                        recommend: Recommend::Caution,
+                        description: format!(
+                            "HuggingFace 模型 {}，删除后需重新下载",
+                            model_id
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. HuggingFace datasets 缓存 (~/.cache/huggingface/datasets)
+    let hf_datasets = home.join(".cache/huggingface/datasets");
+    if let Ok(size) = dir_size_checked(&hf_datasets) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: hf_datasets.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "AI缓存-HF".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "HuggingFace datasets 临时缓存，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // 3. HuggingFace transformers 缓存 (~/.cache/huggingface/transformers)
+    let hf_transformers = home.join(".cache/huggingface/transformers");
+    if let Ok(size) = dir_size_checked(&hf_transformers) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: hf_transformers.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "AI缓存-HF".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "HuggingFace transformers 临时缓存，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // 4. Ollama 模型 (~/.ollama/models)
+    // 聚合展示整个 models 目录，包含 blobs 和 manifests
+    let ollama_models = home.join(".ollama/models");
+    if let Ok(size) = dir_size_checked(&ollama_models) {
+        if size > 10 * 1024 * 1024 {
+            // > 10MB 才展示
+            // 尝试统计模型数量（通过 manifests 目录）
+            let model_count = count_ollama_models(&home);
+            let count_desc = if model_count > 0 {
+                format!("Ollama 本地模型（{} 个），删除后需 ollama pull 重新下载", model_count)
+            } else {
+                "Ollama 本地模型，删除后需 ollama pull 重新下载".to_string()
+            };
+
+            items.push(ScanItem {
+                path: ollama_models.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Ollama模型".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Advanced,
+                description: count_desc,
+            });
+        }
+    }
+
+    // 5. PyTorch 缓存 (~/.cache/torch)
+    let torch_cache = home.join(".cache/torch");
+    if let Ok(size) = dir_size_checked(&torch_cache) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: torch_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "PyTorch缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: "PyTorch 缓存（含预训练权重），删除后需重新下载".to_string(),
+            });
+        }
+    }
+
+    // 6. llama.cpp 缓存 (~/Library/Caches/llama)
+    let llama_cache = home.join("Library/Caches/llama");
+    if let Ok(size) = dir_size_checked(&llama_cache) {
+        if size > 0 {
+            items.push(ScanItem {
+                path: llama_cache.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "llama缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "llama.cpp 缓存，可安全删除".to_string(),
+            });
+        }
+    }
+
+    items
+}
+
+/// 统计 Ollama 已安装的模型数量
+///
+/// 通过解析 ~/.ollama/models/manifests 目录结构获取
+fn count_ollama_models(home: &Path) -> usize {
+    let manifests = home.join(".ollama/models/manifests");
+    if !manifests.is_dir() {
+        return 0;
+    }
+
+    let mut count = 0;
+    // manifests/<registry>/<library>/<model>:<tag>
+    for entry in WalkDir::new(&manifests).max_depth(4).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            count += 1;
+        }
+    }
+    count
+}
+
+// =========================================================================
+//  Monorepo 感知扫描
+// =========================================================================
+
+/// Monorepo 标记文件列表
+const MONOREPO_MARKERS: &[&str] = &[
+    "pnpm-workspace.yaml", // pnpm workspace
+    "lerna.json",           // Lerna
+    "nx.json",              // Nx
+    "turbo.json",           // Turborepo
+    "rush.json",            // Rush
+];
+
+/// 检测目录是否为 monorepo root
+fn is_monorepo_root(dir: &Path) -> bool {
+    MONOREPO_MARKERS.iter().any(|marker| dir.join(marker).exists())
+}
+
+/// 识别 monorepo 类型
+fn detect_monorepo_type(dir: &Path) -> &'static str {
+    if dir.join("pnpm-workspace.yaml").exists() {
+        "pnpm"
+    } else if dir.join("lerna.json").exists() {
+        "lerna"
+    } else if dir.join("nx.json").exists() {
+        "nx"
+    } else if dir.join("turbo.json").exists() {
+        "turbo"
+    } else if dir.join("rush.json").exists() {
+        "rush"
+    } else {
+        "unknown"
+    }
+}
+
+/// 统计 monorepo 中包含 package.json 的子包数量
+fn count_monorepo_packages(root: &Path) -> usize {
+    WalkDir::new(root)
+        .max_depth(3)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() > 0 && e.file_type().is_dir() {
+                let name = e.file_name().to_string_lossy();
+                // 跳过 node_modules / .git / dist / build
+                if name == "node_modules" || name == ".git" || name == "dist" || name == "build" {
+                    return false;
+                }
+            }
+            true
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_dir() && e.path().join("package.json").exists())
+        .count()
+}
+
+/// 扫描 Monorepo 的所有子包 node_modules
+///
+/// 在项目搜索路径下查找 monorepo root，聚合展示所有子包的 node_modules
+fn scan_monorepo_caches() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+
+    for base in get_project_search_paths() {
+        // 在 base 下 3 层深度查找 monorepo root
+        let mut monorepo_roots: Vec<PathBuf> = Vec::new();
+
+        for entry in WalkDir::new(&base)
+            .max_depth(3)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() > 0 && e.file_type().is_dir() {
+                    let name = e.file_name().to_string_lossy();
+                    if name == "node_modules" || name == ".git" || name == ".svn" || name == ".hg" {
+                        return false;
+                    }
+                }
+                true
+            })
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_dir() && is_monorepo_root(entry.path()) {
+                monorepo_roots.push(entry.path().to_path_buf());
+            }
+        }
+
+        // 去重：移除嵌套的 monorepo root
+        monorepo_roots.sort();
+        monorepo_roots.dedup();
+        monorepo_roots.retain(|root| {
+            !monorepo_roots
+                .iter()
+                .any(|other| other != root && root.starts_with(other))
+        });
+
+        // 对每个 monorepo root，扫描所有子包的 node_modules
+        for monorepo_root in monorepo_roots {
+            let nm_dirs = search_dirs(&monorepo_root, "node_modules", 5);
+            if nm_dirs.is_empty() {
+                continue;
+            }
+
+            let mut total_size: u64 = 0;
+            let mut all_paths: Vec<String> = Vec::new();
+
+            for nm in &nm_dirs {
+                let size = dir_size(nm);
+                if size > 0 {
+                    total_size += size;
+                    all_paths.push(nm.to_string_lossy().to_string());
+                }
+            }
+
+            // 只展示 > 50MB 的 monorepo
+            if total_size < 50 * 1024 * 1024 {
+                continue;
+            }
+
+            let mono_type = detect_monorepo_type(&monorepo_root);
+            let pkg_count = count_monorepo_packages(&monorepo_root);
+            let root_name = monorepo_root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| monorepo_root.to_string_lossy().to_string());
+
+            items.push(ScanItem {
+                path: format!("Monorepo: {} ({} 个子包)", root_name, pkg_count),
+                size_bytes: total_size,
+                category: "Monorepo依赖".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: all_paths,
+                recommend: Recommend::Safe,
+                description: format!(
+                    "{} monorepo，包含 {} 个子包的 node_modules\n\
+                     删除后需在 root 目录执行 {} install 恢复",
+                    mono_type,
+                    pkg_count,
+                    match mono_type {
+                        "pnpm" => "pnpm",
+                        "lerna" | "nx" | "turbo" | "rush" => "npm",
+                        _ => "npm/pnpm",
+                    }
+                ),
+            });
+        }
+    }
+
+    items
 }

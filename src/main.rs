@@ -1120,6 +1120,49 @@ fn delete_simulator_volumes(path: &str) -> Result<String, String> {
     }
 }
 
+/// 执行 Docker 系统清理
+///
+/// 运行 `docker system prune -a --volumes -f` 清理:
+/// - 所有已停止的容器
+/// - 所有未被容器使用的网络
+/// - 所有未被容器引用的镜像（dangling + unused）
+/// - 所有未被容器使用的卷
+/// - 所有构建缓存
+fn run_docker_prune() -> Result<String, String> {
+    // 先检查 Docker 是否运行
+    let info_check = std::process::Command::new("docker")
+        .arg("info")
+        .output()
+        .map_err(|e| format!("无法执行 docker 命令: {}", e))?;
+
+    if !info_check.status.success() {
+        return Err("Docker daemon 未运行，请先启动 Docker Desktop".to_string());
+    }
+
+    // 执行 prune（-f 跳过交互确认，-a 删除所有未使用镜像，--volumes 删除卷）
+    let output = std::process::Command::new("docker")
+        .args(["system", "prune", "-a", "--volumes", "-f"])
+        .output()
+        .map_err(|e| format!("执行 docker prune 失败: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!("docker prune 失败: {}", stderr.trim()));
+    }
+
+    // 解析输出中的释放空间
+    // 输出包含: "Total reclaimed space: 1.2GB"
+    let reclaimed = stdout
+        .lines()
+        .find(|line| line.contains("Total reclaimed space"))
+        .map(|line| line.split(':').nth(1).unwrap_or("").trim().to_string())
+        .unwrap_or_else(|| "未知".to_string());
+
+    Ok(format!("Docker 清理完成，释放空间: {}", reclaimed))
+}
+
 /// 启动后台删除线程（两阶段自动删除）
 /// 阶段1: 普通删除（多线程并行 rm -rf）
 /// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
@@ -1258,6 +1301,23 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, delete_rx: 
                                 continue;
                             }
                             // 走普通删除流程（会自动 fallback 到 sudo）
+                        }
+
+                        // Docker 清理 — 通过 docker system prune 命令清理
+                        if category == "Docker清理" {
+                            match run_docker_prune() {
+                                Ok(msg) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✓ {}", msg), path.clone(), category.clone(), true));
+                                    safety::log_deletion(&path, &category, true, None);
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✗ Docker 清理失败: {}", e), path.clone(), category.clone(), false));
+                                    safety::log_deletion(&path, &category, false, Some(&e));
+                                }
+                            }
+                            continue;
                         }
 
                         // 普通文件/目录删除 - 尽力删除模式

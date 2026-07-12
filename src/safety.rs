@@ -69,6 +69,11 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         return SafetyCheck::Safe;
     }
 
+    // Docker prune 特殊路径标记，通过外部命令清理而非文件删除
+    if path.starts_with("docker:") {
+        return SafetyCheck::Safe;
+    }
+
     let p = Path::new(path);
 
     // ================================================================
