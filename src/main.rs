@@ -28,6 +28,8 @@ enum DeleteMessage {
     Log(String, String, String, bool),
     /// 进度信息（不计入成功/失败统计）
     Info(String),
+    /// 普通删除完成，部分项需要管理员权限
+    NeedPassword(Vec<(String, String)>),
     /// 全部删除完成
     Done,
 }
@@ -161,8 +163,21 @@ fn main() -> eframe::Result {
                                 app.logs.push(info);
                             }
                         }
+                        Ok(DeleteMessage::NeedPassword(items)) => {
+                            if let Some(app) = &mut APP {
+                                app.sudo_failed_items = items;
+                                app.confirm = ConfirmState::NeedSudoPassword;
+                                app.sudo_password_input.clear();
+                                app.sudo_password = None;
+                                app.sudo_error = None;
+                            }
+                            DELETE_RX = None;
+                            break;
+                        }
                         Ok(DeleteMessage::Done) => {
                             if let Some(app) = &mut APP {
+                                app.sudo_password = None;
+                                app.sudo_password_input.clear();
                                 app.finish_delete();
                             }
                             DELETE_RX = None;
@@ -352,7 +367,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let is_selected = *tab == app.tab;
                 let button = ui.selectable_label(is_selected, &tab_title);
 
-                if button.clicked() && !matches!(app.confirm, ConfirmState::Pending | ConfirmState::Deleting) {
+                if button.clicked() && matches!(app.confirm, ConfirmState::None) {
                     app.tab = *tab;
                     app.list_index = 0;
                 }
@@ -476,7 +491,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 ui.separator();
 
                 // 删除按钮
-                let delete_enabled = selected_cnt > 0 && !matches!(app.confirm, ConfirmState::Pending | ConfirmState::Deleting);
+                let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
                 let delete_btn = ui.add_enabled(
                     delete_enabled,
                     egui::Button::new(egui::RichText::new(format!("🗑 {} ({})", app.t("delete"), format_size(selected_sz))).color(egui::Color32::WHITE)),
@@ -619,6 +634,11 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             show_confirm_window(ctx, app, delete_rx);
         }
 
+        // sudo 密码输入弹窗
+        if matches!(app.confirm, ConfirmState::NeedSudoPassword) {
+            show_sudo_password_window(ctx, app, delete_rx);
+        }
+
         // 删除中弹窗
         if matches!(app.confirm, ConfirmState::Deleting) {
             show_deleting_window(ctx, app);
@@ -642,21 +662,26 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     *scan_rx = Some(rx);
 
     // 进度估算线程：每 200ms 发送进度更新
-    // 扫描通常 2-8 秒完成，用渐近曲线估算进度
+    // 扫描通常 2-8 秒完成，但大文件扫描可能更久，用渐近曲线估算进度
     let tx_progress = tx.clone();
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
             let elapsed = start.elapsed().as_secs_f32();
-            // 渐近曲线：5秒内接近 90%，之后缓慢逼近 95%
+            // 分段渐近曲线：
+            //   0-5s: 快速上升到约 90%
+            //   5-15s: 缓慢上升到约 99%
+            //   15s+: 极缓慢逼近 99.5%，避免长时间卡在同一个百分比
             let progress = if elapsed < 5.0 {
                 0.9 * (1.0 - (-elapsed / 2.5).exp())
+            } else if elapsed < 15.0 {
+                0.9 + 0.09 * (1.0 - (-(elapsed - 5.0) / 10.0).exp())
             } else {
-                0.9 + 0.05 * (1.0 - (-(elapsed - 5.0) / 5.0).exp())
+                0.99 + 0.005 * (1.0 - (-(elapsed - 15.0) / 10.0).exp())
             };
             // 如果通道关闭（扫描已完成），退出
-            if tx_progress.send(ScanMessage::Progress(progress.min(0.95))).is_err() {
+            if tx_progress.send(ScanMessage::Progress(progress.min(0.995))).is_err() {
                 break;
             }
         }
@@ -845,178 +870,213 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
 
         let mut failed_items: Vec<(String, String)> = failed_items.into_inner().unwrap();
 
-        // ========== 阶段2: 自动 sudo 批量删除失败项 ==========
+        // 普通删除完成后，若还有失败项，通知 GUI 弹出 egui 内置密码输入框
         if !failed_items.is_empty() {
             let _ = tx.send(DeleteMessage::Info(
-                format!("🔐 {} 项需要管理员权限，正在请求授权...", failed_items.len()),
+                format!("🔐 {} 项需要管理员权限", failed_items.len()),
             ));
-
-            // 辅助：记录 sudo 阶段调试日志
-            let sudo_debug_log = std::env::temp_dir().join("maclean_sudo_debug.log");
-            let mut debug_entries: Vec<String> = Vec::new();
-            debug_entries.push(format!("[sudo phase] started, {} items", failed_items.len()));
-            for (p, c) in &failed_items {
-                debug_entries.push(format!("  item: [{}] {}", c, p));
-            }
-
-            // 写 askpass 脚本：sudo 需要密码时由它弹系统输入框
-            let askpass_script = std::env::temp_dir().join("maclean_askpass.sh");
-            let askpass_content = r#"#!/bin/bash
-osascript -e 'Tell application "System Events" to display dialog "maclean 需要管理员密码以删除选中的文件" default answer "" with hidden answer buttons {"取消", "确定"} default button "确定"' -e 'text returned of result'
-"#;
-            let _ = std::fs::write(&askpass_script, askpass_content);
-            let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&askpass_script).output();
-
-            // 写临时删除脚本：所有目录后台并行删除
-            let tmp_script = std::env::temp_dir().join("maclean_sudo_delete.sh");
-            let current_user = std::env::var("USER")
-                .or_else(|_| std::env::var("LOGNAME"))
-                .unwrap_or_else(|_| "root".to_string());
-            let mut script_content = String::from("#!/bin/bash\nset +e\n");
-            script_content.push_str("workdir=$(/usr/bin/mktemp -d)\n");
-            script_content.push_str("trap \"/bin/rm -rf \\\"$workdir\\\"\" EXIT\n\n");
-            script_content.push_str("process_one() {\n");
-            script_content.push_str("  local idx=\"$1\"\n");
-            script_content.push_str("  local path=\"$2\"\n");
-            script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
-            script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
-            script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
-            script_content.push_str("  /usr/sbin/chown -R '");
-            script_content.push_str(&current_user.replace("'", "'\\''"));
-            script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
-            script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
-            script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
-            script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
-            script_content.push_str("}\n\n");
-
-            for (i, (path, _)) in failed_items.iter().enumerate() {
-                let escaped = path.replace("'", "'\\''");
-                script_content.push_str(&format!(
-                    "process_one {} '{}' &\n",
-                    i, escaped
-                ));
-            }
-            script_content.push_str("\nwait\n");
-            script_content.push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
-            script_content.push_str("exit 0\n");
-            let _ = std::fs::write(&tmp_script, &script_content);
-            let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&tmp_script).output();
-
-            debug_entries.push(format!("askpass script: {}", askpass_script.display()));
-            debug_entries.push(format!("delete script: {}", tmp_script.display()));
-            debug_entries.push("--- delete script content ---".to_string());
-            debug_entries.push(script_content.clone());
-
-            // 使用真正的 sudo -A，通过 SUDO_ASKPASS 弹一次密码框
-            let sudo_result = std::process::Command::new("/usr/bin/sudo")
-                .env("SUDO_ASKPASS", &askpass_script)
-                .arg("-A")
-                .arg("/bin/bash")
-                .arg(&tmp_script)
-                .output();
-
-            // 解析脚本输出，按路径收集错误信息
-            let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            match &sudo_result {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    debug_entries.push(format!("sudo exit code: {:?}", output.status.code()));
-                    debug_entries.push(format!("sudo stdout:\n{}", stdout));
-                    debug_entries.push(format!("sudo stderr:\n{}", stderr));
-                    let mut current_path = String::new();
-                    for line in stdout.lines() {
-                        if let Some(p) = line.strip_prefix(">MACLEAN_BEGIN:") {
-                            current_path = p.to_string();
-                        } else if let Some(rest) = line.strip_prefix(">MACLEAN_EXIT:") {
-                            // 格式: path:exit_code
-                            let _ = rest;
-                            current_path.clear();
-                        } else if !line.is_empty() && !current_path.is_empty() {
-                            rm_stderr.entry(current_path.clone()).or_default().push_str(line);
-                            rm_stderr.entry(current_path.clone()).or_default().push('\n');
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug_entries.push(format!("sudo spawn error: {}", e));
-                }
-            }
-
-            // 写入调试日志
-            let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
-
-            // 无论 sudo 整体成功或失败，都逐项验证
-            match sudo_result {
-                Ok(output) => {
-                    let stderr_all = String::from_utf8_lossy(&output.stderr);
-                    let sudo_failed = !output.status.success();
-                    let user_cancelled = stderr_all.contains("sudo: a password is required")
-                        || stderr_all.contains("sudo: 3 incorrect password attempts")
-                        || stderr_all.contains("User canceled");
-
-                    for (path, category) in &failed_items {
-                        let p = std::path::Path::new(path.as_str());
-                        if !p.exists() && p.symlink_metadata().is_err() {
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ 已删除 [{}] {} (管理员权限)", category, path), path.clone(), category.clone(), true));
-                            safety::log_deletion(path, category, true, None);
-                            continue;
-                        }
-
-                        // 仍在：判断是 SIP 保护还是普通权限/占用问题
-                        let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or(&stderr_all);
-                        let is_sip = err_text.contains("Operation not permitted")
-                            || std::process::Command::new("/usr/bin/xattr")
-                                .arg(path)
-                                .output()
-                                .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
-                                .unwrap_or(false)
-                            || path.starts_with("/Library/Developer/CoreSimulator/Caches");
-
-                        if is_sip {
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("🔒 SIP保护无法删除: {}", path), path.clone(), category.clone(), false));
-                            safety::log_deletion(path, category, false, Some("SIP保护或系统限制"));
-                        } else if user_cancelled {
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("✗ 已取消授权: {}", path), path.clone(), category.clone(), false));
-                            safety::log_deletion(path, category, false, Some("用户取消密码授权"));
-                        } else if sudo_failed {
-                            let detail = if stderr_all.is_empty() {
-                                format!("sudo 退出码 {}", output.status.code().unwrap_or(-1))
-                            } else {
-                                stderr_all.trim().to_string()
-                            };
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("✗ 删除失败: {} - {}", path, detail), path.clone(), category.clone(), false));
-                            safety::log_deletion(path, category, false, Some(&detail));
-                        } else {
-                            let detail = if err_text.is_empty() {
-                                "管理员权限删除后仍存在".to_string()
-                            } else {
-                                err_text.trim().to_string()
-                            };
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("✗ 删除失败: {} - {}", path, detail), path.clone(), category.clone(), false));
-                            safety::log_deletion(path, category, false, Some(&detail));
-                        }
-                    }
-                }
-                Err(e) => {
-                    for (path, category) in &failed_items {
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some(&e.to_string()));
-                    }
-                }
-            }
-
-            // 清理临时脚本
-            let _ = std::fs::remove_file(&tmp_script);
-            let _ = std::fs::remove_file(&askpass_script);
+            let _ = tx.send(DeleteMessage::NeedPassword(failed_items));
+            return;
         }
 
+        let _ = tx.send(DeleteMessage::Done);
+    });
+}
+
+/// 启动后台 sudo 删除线程
+/// 使用 egui 内置输入框收集到的密码，通过 sudo -S 的 stdin 传入，
+/// 避免调用 System Events / osascript 触发钥匙串弹窗。
+fn start_sudo_delete(
+    failed_items: Vec<(String, String)>,
+    password: String,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
+    if failed_items.is_empty() {
+        return;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    *delete_rx = Some(rx);
+
+    std::thread::spawn(move || {
+        let _ = tx.send(DeleteMessage::Info(
+            "🔐 正在使用管理员权限删除...".to_string(),
+        ));
+
+        let sudo_debug_log = std::env::temp_dir().join("maclean_sudo_debug.log");
+        let mut debug_entries: Vec<String> = Vec::new();
+        debug_entries.push(format!("[sudo phase] started, {} items", failed_items.len()));
+        for (p, c) in &failed_items {
+            debug_entries.push(format!("  item: [{}] {}", c, p));
+        }
+
+        // 写临时删除脚本：所有目录后台并行删除
+        let tmp_script = std::env::temp_dir().join("maclean_sudo_delete.sh");
+        let current_user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| "root".to_string());
+        let mut script_content = String::from("#!/bin/bash\nset +e\n");
+        script_content.push_str("workdir=$(/usr/bin/mktemp -d)\n");
+        script_content.push_str("trap \"/bin/rm -rf \\\"$workdir\\\"\" EXIT\n\n");
+        script_content.push_str("process_one() {\n");
+        script_content.push_str("  local idx=\"$1\"\n");
+        script_content.push_str("  local path=\"$2\"\n");
+        script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
+        script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
+        script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /usr/sbin/chown -R '");
+        script_content.push_str(&current_user.replace("'", "'\\''"));
+        script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
+        script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
+        script_content.push_str("}\n\n");
+
+        for (i, (path, _)) in failed_items.iter().enumerate() {
+            let escaped = path.replace("'", "'\\''");
+            script_content.push_str(&format!(
+                "process_one {} '{}' &\n",
+                i, escaped
+            ));
+        }
+        script_content.push_str("\nwait\n");
+        script_content.push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
+        script_content.push_str("exit 0\n");
+        let _ = std::fs::write(&tmp_script, &script_content);
+        let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&tmp_script).output();
+
+        debug_entries.push(format!("delete script: {}", tmp_script.display()));
+        debug_entries.push("--- delete script content ---".to_string());
+        debug_entries.push(script_content.clone());
+
+        // 使用 sudo -S，通过 stdin 传入密码，避免钥匙串弹窗
+        let sudo_result = std::process::Command::new("/usr/bin/sudo")
+            .arg("-S")
+            .arg("/bin/bash")
+            .arg(&tmp_script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = writeln!(stdin, "{}", password);
+                }
+                child.wait_with_output()
+            });
+
+        // 解析脚本输出，按路径收集错误信息
+        let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        match &sudo_result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug_entries.push(format!("sudo exit code: {:?}", output.status.code()));
+                debug_entries.push(format!("sudo stdout:\n{}", stdout));
+                debug_entries.push(format!("sudo stderr:\n{}", stderr));
+                let mut current_path = String::new();
+                for line in stdout.lines() {
+                    if let Some(p) = line.strip_prefix(">MACLEAN_BEGIN:") {
+                        current_path = p.to_string();
+                    } else if let Some(_rest) = line.strip_prefix(">MACLEAN_EXIT:") {
+                        current_path.clear();
+                    } else if !line.is_empty() && !current_path.is_empty() {
+                        rm_stderr.entry(current_path.clone()).or_default().push_str(line);
+                        rm_stderr.entry(current_path.clone()).or_default().push('\n');
+                    }
+                }
+            }
+            Err(e) => {
+                debug_entries.push(format!("sudo spawn error: {}", e));
+            }
+        }
+
+        // 写入调试日志
+        let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
+
+        // 逐项验证删除结果
+        match sudo_result {
+            Ok(output) => {
+                let stderr_all = String::from_utf8_lossy(&output.stderr);
+                let sudo_failed = !output.status.success();
+                let password_error = stderr_all.contains("sudo: 3 incorrect password attempts")
+                    || stderr_all.contains("incorrect password");
+                let user_cancelled = !password_error
+                    && (stderr_all.contains("sudo: a password is required")
+                        || stderr_all.contains("User canceled"));
+
+                if password_error {
+                    let _ = tx.send(DeleteMessage::Info(
+                        "🔒 管理员密码错误，请重新输入".to_string(),
+                    ));
+                    // 密码错误时 sudo 不会执行任何删除，全部项都需要重试
+                    let _ = tx.send(DeleteMessage::NeedPassword(failed_items));
+                    let _ = std::fs::remove_file(&tmp_script);
+                    return;
+                }
+
+                for (path, category) in &failed_items {
+                    let p = std::path::Path::new(path.as_str());
+                    if !p.exists() && p.symlink_metadata().is_err() {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✓ 已删除 [{}] {} (管理员权限)", category, path), path.clone(), category.clone(), true));
+                        safety::log_deletion(path, category, true, None);
+                        continue;
+                    }
+
+                    // 仍在：判断是 SIP 保护还是普通权限/占用问题
+                    let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or(&stderr_all);
+                    let is_sip = err_text.contains("Operation not permitted")
+                        || std::process::Command::new("/usr/bin/xattr")
+                            .arg(path)
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
+                            .unwrap_or(false)
+                        || path.starts_with("/Library/Developer/CoreSimulator/Caches");
+
+                    if is_sip {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("🔒 SIP保护无法删除: {}", path), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some("SIP保护或系统限制"));
+                    } else if user_cancelled {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ 已取消授权: {}", path), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some("用户取消密码授权"));
+                    } else if sudo_failed {
+                        let detail = if stderr_all.is_empty() {
+                            format!("sudo 退出码 {}", output.status.code().unwrap_or(-1))
+                        } else {
+                            stderr_all.trim().to_string()
+                        };
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ 删除失败: {} - {}", path, detail), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some(&detail));
+                    } else {
+                        let detail = if err_text.is_empty() {
+                            "管理员权限删除后仍存在".to_string()
+                        } else {
+                            err_text.trim().to_string()
+                        };
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ 删除失败: {} - {}", path, detail), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some(&detail));
+                    }
+                }
+            }
+            Err(e) => {
+                for (path, category) in &failed_items {
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
+                    safety::log_deletion(path, category, false, Some(&e.to_string()));
+                }
+            }
+        }
+
+        // 清理临时脚本
+        let _ = std::fs::remove_file(&tmp_script);
+
+        // 如果全部失败项仍在且不是因为密码错误，正常结束
         let _ = tx.send(DeleteMessage::Done);
     });
 }
@@ -1210,15 +1270,129 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
         });
 }
 
+/// sudo 密码输入弹窗（egui 内置输入框）
+fn show_sudo_password_window(
+    ctx: &egui::Context,
+    app: &mut App,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
+    egui::Window::new("需要管理员权限")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(420.0);
+            ui.set_max_width(480.0);
+            ui.add_space(10.0);
+
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 159, 10),
+                        egui::RichText::new("🔐").size(28.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("需要管理员权限")
+                            .size(18.0)
+                            .strong(),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(200),
+                    egui::RichText::new(format!(
+                        "{} 项文件因权限不足需要输入管理员密码继续删除。",
+                        app.sudo_failed_items.len()
+                    ))
+                    .size(13.0),
+                );
+                ui.add_space(2.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(150),
+                    egui::RichText::new("密码仅用于本次 sudo 授权，不会保存到钥匙串。")
+                        .size(12.0),
+                );
+
+                if let Some(ref err) = app.sudo_error {
+                    ui.add_space(8.0);
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        egui::RichText::new(err).size(13.0).strong(),
+                    );
+                }
+
+                ui.add_space(12.0);
+
+                // 密码输入框
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.sudo_password_input)
+                        .password(true)
+                        .hint_text("请输入管理员密码...")
+                        .desired_width(360.0),
+                );
+
+                ui.add_space(15.0);
+
+                ui.horizontal(|ui| {
+                    let confirm_enabled = !app.sudo_password_input.is_empty();
+                    if ui
+                        .add_enabled(
+                            confirm_enabled,
+                            egui::Button::new(
+                                egui::RichText::new("确认删除")
+                                    .color(egui::Color32::WHITE)
+                                    .size(14.0),
+                            )
+                            .fill(egui::Color32::from_rgb(0, 122, 255)),
+                        )
+                        .clicked()
+                    {
+                        let password = app.sudo_password_input.clone();
+                        app.sudo_password = Some(password.clone());
+                        app.sudo_error = None;
+                        app.confirm = ConfirmState::Deleting;
+                        let items = std::mem::take(&mut app.sudo_failed_items);
+                        app.delete_done = 0;
+                        app.delete_total = items.len();
+                        start_sudo_delete(items, password, delete_rx);
+                    }
+
+                    if ui
+                        .button(egui::RichText::new("取消").size(14.0))
+                        .clicked()
+                    {
+                        app.sudo_password_input.clear();
+                        app.sudo_password = None;
+                        app.sudo_error = None;
+                        // 将需要 sudo 的项标记为失败，结束删除流程
+                        for (path, category) in std::mem::take(&mut app.sudo_failed_items) {
+                            app.receive_delete_log(
+                                format!("✗ 已取消授权: {}", path),
+                                path.clone(),
+                                category.clone(),
+                                false,
+                            );
+                            safety::log_deletion(&path, &category, false, Some("用户取消密码授权"));
+                        }
+                        app.finish_delete();
+                    }
+                });
+            });
+        });
+}
+
 /// 删除中弹窗（带进度条）
 fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
-    // 判断是否在 sudo 阶段（阶段1已完成，等待管理员权限）
-    let in_sudo_phase = app.delete_done >= app.delete_total
-        && app.logs.iter().any(|l| l.contains("管理员权限"));
+    // 判断是否在 sudo 阶段（最近日志包含管理员权限）
+    let in_sudo_phase = app
+        .logs
+        .iter()
+        .rev()
+        .take(5)
+        .any(|l| l.contains("管理员权限"));
 
-    let progress = if in_sudo_phase {
-        0.95 // sudo 阶段显示 95%
-    } else if app.delete_total > 0 {
+    let progress = if app.delete_total > 0 {
         app.delete_done as f32 / app.delete_total as f32
     } else {
         0.0
@@ -1235,7 +1409,7 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
 
             // 标题
             let title = if in_sudo_phase {
-                "🔐 正在请求管理员权限，请在系统弹窗中输入密码..."
+                "🔐 正在使用管理员权限删除..."
             } else {
                 app.t("cleaning_in_progress")
             };
@@ -1243,11 +1417,12 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
             ui.add_space(10.0);
 
             // 进度条
-            let progress_text = if in_sudo_phase {
-                "请求管理员权限中...".to_string()
-            } else {
-                format!("{}/{} ({}%)", app.delete_done, app.delete_total, (progress * 100.0) as u32)
-            };
+            let progress_text = format!(
+                "{}/{} ({}%)",
+                app.delete_done,
+                app.delete_total,
+                (progress * 100.0) as u32
+            );
             ui.add(
                 egui::ProgressBar::new(progress)
                     .desired_width(480.0)

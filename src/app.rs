@@ -77,6 +77,8 @@ pub enum ConfirmState {
     Pending,
     /// 正在删除
     Deleting,
+    /// 等待用户输入 sudo 密码
+    NeedSudoPassword,
 }
 
 /// App 主状态
@@ -119,6 +121,14 @@ pub struct App {
     pub failed_paths: Vec<(String, String)>, // (path, category)
     /// 是否需要显示权限引导弹窗
     pub show_permission_guide: bool,
+    /// sudo 密码输入框的当前内容
+    pub sudo_password_input: String,
+    /// 已确认的用户密码（用于 sudo -S）
+    pub sudo_password: Option<String>,
+    /// 需要 sudo 删除的项（普通删除失败后暂存）
+    pub sudo_failed_items: Vec<(String, String)>,
+    /// sudo 密码错误提示
+    pub sudo_error: Option<String>,
 }
 
 impl App {
@@ -151,6 +161,10 @@ impl App {
             delete_summary: None,
             failed_paths: Vec::new(),
             show_permission_guide: Self::check_full_disk_access() == false,
+            sudo_password_input: String::new(),
+            sudo_password: None,
+            sudo_failed_items: Vec::new(),
+            sudo_error: None,
         }
     }
 
