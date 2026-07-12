@@ -94,6 +94,10 @@ pub enum ConfirmState {
     Deleting,
     /// 等待用户输入 sudo 密码
     NeedSudoPassword,
+    /// 提示用户是否启用 Touch ID
+    OfferTouchIdSetup,
+    /// 正在通过 Touch ID 删除（sudo 已配置 pam_tid.so）
+    SudoWithTouchId,
 }
 
 /// App 主状态
@@ -146,6 +150,12 @@ pub struct App {
     pub sudo_failed_items: Vec<(String, String)>,
     /// sudo 密码错误提示
     pub sudo_error: Option<String>,
+    /// Touch ID 是否可用（缓存检测结果）
+    pub touch_id_available: bool,
+    /// Touch ID 是否已为 sudo 启用（缓存检测结果）
+    pub touch_id_enabled: bool,
+    /// Touch ID 设置/执行中的错误提示
+    pub touch_id_error: Option<String>,
 }
 
 impl App {
@@ -186,6 +196,9 @@ impl App {
             sudo_password: None,
             sudo_failed_items: Vec::new(),
             sudo_error: None,
+            touch_id_available: crate::touchid::touch_id_available(),
+            touch_id_enabled: crate::touchid::sudo_touch_id_enabled(),
+            touch_id_error: None,
         }
     }
 

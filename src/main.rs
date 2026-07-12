@@ -5,6 +5,8 @@
 mod app;
 mod safety;
 mod scanner;
+mod touchid;
+mod menubar;
 
 use std::sync::mpsc;
 use std::path::PathBuf;
@@ -113,13 +115,69 @@ fn main() -> eframe::Result {
         static mut APP: Option<App> = None;
         static mut SCAN_RX: Option<mpsc::Receiver<ScanMessage>> = None;
         static mut DELETE_RX: Option<mpsc::Receiver<DeleteMessage>> = None;
+        static mut MENUBAR: Option<menubar::MenuBarHud> = None;
         static mut NEEDS_INIT: bool = true;
+        static mut LAST_DISK_UPDATE: f64 = 0.0;
 
         unsafe {
             if NEEDS_INIT {
                 APP = Some(App::new());
                 NEEDS_INIT = false;
                 setup_fonts(ctx);
+
+                // 初始化菜单栏 HUD
+                MENUBAR = Some(menubar::MenuBarHud::new());
+                if let Some(ref mut mb) = MENUBAR {
+                    mb.init();
+                }
+            }
+
+            // 轮询菜单栏事件
+            if let Some(ref mb) = MENUBAR {
+                let actions = mb.poll_events();
+                for action in actions {
+                    match action {
+                        menubar::TrayAction::ShowWindow => {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                        menubar::TrayAction::QuickScan => {
+                            if let Some(app) = &mut APP {
+                                if !matches!(app.current_scan_state(), ScanState::Scanning) {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                    start_scan(app, &mut SCAN_RX);
+                                }
+                            }
+                        }
+                        menubar::TrayAction::QuickClean => {
+                            // 显示主窗口让用户选择清理
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                        menubar::TrayAction::Quit => {
+                            std::process::exit(0);
+                        }
+                    }
+                }
+            }
+
+            // 定期更新菜单栏磁盘使用率（每 60 秒）
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            if now - LAST_DISK_UPDATE > 60.0 || LAST_DISK_UPDATE == 0.0 {
+                LAST_DISK_UPDATE = now;
+                if let Some(app) = &APP {
+                    let used_pct = if app.disk_total > 0 {
+                        (app.disk_total - app.disk_free) as f32 / app.disk_total as f32 * 100.0
+                    } else {
+                        0.0
+                    };
+                    if let Some(ref mut mb) = MENUBAR {
+                        mb.update_disk_usage(used_pct);
+                    }
+                }
             }
 
             // 检查后台扫描结果
@@ -166,10 +224,28 @@ fn main() -> eframe::Result {
                         Ok(DeleteMessage::NeedPassword(items)) => {
                             if let Some(app) = &mut APP {
                                 app.sudo_failed_items = items;
-                                app.confirm = ConfirmState::NeedSudoPassword;
                                 app.sudo_password_input.clear();
                                 app.sudo_password = None;
                                 app.sudo_error = None;
+                                app.touch_id_error = None;
+                                // 刷新 Touch ID 状态
+                                app.touch_id_available = touchid::touch_id_available();
+                                app.touch_id_enabled = touchid::sudo_touch_id_enabled();
+
+                                if app.touch_id_enabled {
+                                    // Touch ID 已启用：直接用 sudo（Touch ID 自动触发）
+                                    app.confirm = ConfirmState::SudoWithTouchId;
+                                    let items = app.sudo_failed_items.clone();
+                                    app.delete_done = 0;
+                                    app.delete_total = items.len();
+                                    start_sudo_delete_touchid(items, &mut DELETE_RX);
+                                } else if app.touch_id_available {
+                                    // Touch ID 可用但未启用：提示用户是否启用
+                                    app.confirm = ConfirmState::OfferTouchIdSetup;
+                                } else {
+                                    // 无 Touch ID：走密码输入流程
+                                    app.confirm = ConfirmState::NeedSudoPassword;
+                                }
                             }
                             DELETE_RX = None;
                             break;
@@ -643,6 +719,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         // sudo 密码输入弹窗
         if matches!(app.confirm, ConfirmState::NeedSudoPassword) {
             show_sudo_password_window(ctx, app, delete_rx);
+        }
+
+        // Touch ID 启用提示弹窗
+        if matches!(app.confirm, ConfirmState::OfferTouchIdSetup) {
+            show_touch_id_setup_window(ctx, app, delete_rx);
+        }
+
+        // Touch ID 删除中弹窗
+        if matches!(app.confirm, ConfirmState::SudoWithTouchId) {
+            show_touch_id_deleting_window(ctx, app);
         }
 
         // 删除中弹窗
@@ -1803,6 +1889,431 @@ fn show_sudo_password_window(
                 });
             });
         });
+}
+
+/// Touch ID 启用提示弹窗
+fn show_touch_id_setup_window(
+    ctx: &egui::Context,
+    app: &mut App,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
+    egui::Window::new("启用 Touch ID")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(440.0);
+            ui.set_max_width(500.0);
+            ui.add_space(10.0);
+
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0, 122, 255),
+                        egui::RichText::new("👆").size(28.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("使用 Touch ID 代替密码")
+                            .size(17.0)
+                            .strong(),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(200),
+                    egui::RichText::new(format!(
+                        "{} 项文件需要管理员权限删除。", app.sudo_failed_items.len()
+                    ))
+                    .size(13.0),
+                );
+                ui.add_space(4.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(170),
+                    egui::RichText::new(
+                        "启用后，系统会修改 /etc/pam.d/sudo 配置（自动备份），\n\
+                         之后所有管理员操作都可以用 Touch ID 验证，无需输入密码。\n\
+                         这是一次性操作，之后永久生效。"
+                    )
+                    .size(12.0),
+                );
+
+                if let Some(ref err) = app.touch_id_error {
+                    ui.add_space(8.0);
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        egui::RichText::new(err).size(13.0).strong(),
+                    );
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    // 启用 Touch ID
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("👆 启用 Touch ID")
+                                    .color(egui::Color32::WHITE)
+                                    .size(14.0),
+                            )
+                            .fill(egui::Color32::from_rgb(0, 122, 255)),
+                        )
+                        .clicked()
+                    {
+                        app.touch_id_error = None;
+                        match touchid::enable_touch_id_sudo() {
+                            Ok(()) => {
+                                app.touch_id_enabled = true;
+                                app.confirm = ConfirmState::SudoWithTouchId;
+                                let items = app.sudo_failed_items.clone();
+                                app.delete_done = 0;
+                                app.delete_total = items.len();
+                                start_sudo_delete_touchid(items, delete_rx);
+                            }
+                            Err(e) => {
+                                app.touch_id_error = Some(e);
+                            }
+                        }
+                    }
+
+                    // 跳过，用密码
+                    if ui
+                        .button(egui::RichText::new("用密码代替").size(14.0))
+                        .clicked()
+                    {
+                        app.touch_id_error = None;
+                        app.confirm = ConfirmState::NeedSudoPassword;
+                    }
+
+                    // 取消
+                    if ui
+                        .button(egui::RichText::new("取消").size(14.0))
+                        .clicked()
+                    {
+                        app.touch_id_error = None;
+                        for (path, category) in std::mem::take(&mut app.sudo_failed_items) {
+                            app.receive_delete_log(
+                                format!("✗ 已取消授权: {}", path),
+                                path.clone(),
+                                category.clone(),
+                                false,
+                            );
+                            safety::log_deletion(&path, &category, false, Some("用户取消授权"));
+                        }
+                        app.finish_delete();
+                    }
+                });
+            });
+        });
+}
+
+/// Touch ID 删除中弹窗
+fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
+    egui::Window::new("Touch ID 验证")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(400.0);
+            ui.set_max_width(440.0);
+            ui.add_space(10.0);
+
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0, 122, 255),
+                        egui::RichText::new("👆").size(28.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("请在 Touch ID 传感器上验证指纹")
+                            .size(15.0)
+                            .strong(),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(170),
+                    egui::RichText::new(format!(
+                        "正在删除 {} 项需要管理员权限的文件...", app.delete_total
+                    ))
+                    .size(13.0),
+                );
+
+                ui.add_space(8.0);
+
+                // 进度条
+                let progress = if app.delete_total > 0 {
+                    app.delete_done as f32 / app.delete_total as f32
+                } else {
+                    0.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(progress)
+                        .text(format!("{}/{}", app.delete_done, app.delete_total)),
+                );
+
+                ui.add_space(4.0);
+                ui.colored_label(
+                    egui::Color32::from_gray(120),
+                    egui::RichText::new("系统会弹出 Touch ID 对话框，请触碰指纹传感器").size(11.0),
+                );
+            });
+        });
+}
+
+/// 使用 Touch ID 的 sudo 删除（不需要密码，sudo 自动触发 Touch ID）
+fn start_sudo_delete_touchid(
+    failed_items: Vec<(String, String)>,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
+    if failed_items.is_empty() {
+        return;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    *delete_rx = Some(rx);
+
+    std::thread::spawn(move || {
+        let _ = tx.send(DeleteMessage::Info(
+            "👆 Touch ID 验证中，请在传感器上验证指纹...".to_string(),
+        ));
+
+        let sudo_debug_log = std::env::temp_dir().join("maclean_sudo_touchid.log");
+        let mut debug_entries: Vec<String> = Vec::new();
+        debug_entries.push(format!("[touchid sudo] started, {} items", failed_items.len()));
+
+        // 预处理：模拟器镜像通过 xcrun simctl runtime delete
+        let mut remaining_items: Vec<(String, String)> = Vec::new();
+        for (path, category) in &failed_items {
+            if category == "模拟器镜像" || category == "模拟器Cryptex" {
+                let script = r#"#!/bin/bash
+set +e
+uuids=$(xcrun simctl runtime list 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | sort -u)
+count=0
+fail=0
+for uuid in $uuids; do
+    xcrun simctl runtime delete "$uuid" 2>/dev/null
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        count=$((count + 1))
+    else
+        fail=$((fail + 1))
+    fi
+done
+echo "xcrun_deleted:$count"
+echo "xcrun_failed:$fail"
+exit 0
+"#;
+                let xcrun_script = std::env::temp_dir().join("maclean_xcrun_delete.sh");
+                let _ = std::fs::write(&xcrun_script, script);
+                let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&xcrun_script).output();
+
+                // 不用 -S，sudo 会自动弹出 Touch ID
+                let xcrun_result = std::process::Command::new("/usr/bin/sudo")
+                    .arg("/bin/bash")
+                    .arg(&xcrun_script)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output();
+
+                let mut xcrun_success = false;
+                match &xcrun_result {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        debug_entries.push(format!("xcrun touchid stdout: {}", stdout));
+                        debug_entries.push(format!("xcrun touchid stderr: {}", stderr));
+
+                        if !output.status.success() {
+                            // Touch ID 可能被取消
+                            if stderr.contains("canceled") || stderr.contains("cancelled") {
+                                let _ = tx.send(DeleteMessage::Info("🔒 Touch ID 验证已取消".to_string()));
+                                for (p, c) in &failed_items {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✗ Touch ID 取消: {}", p), p.clone(), c.clone(), false));
+                                    safety::log_deletion(p, c, false, Some("Touch ID 取消"));
+                                }
+                                let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
+                                let _ = std::fs::remove_file(&xcrun_script);
+                                let _ = tx.send(DeleteMessage::Done);
+                                return;
+                            }
+                        }
+
+                        let p = std::path::Path::new(path);
+                        if !p.exists() || std::fs::read_dir(p).map(|mut d| d.next().is_none()).unwrap_or(true) {
+                            xcrun_success = true;
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✓ 已通过 xcrun simctl 删除模拟器运行时镜像: {}", path),
+                                path.clone(), category.clone(), true));
+                            safety::log_deletion(path, category, true, None);
+                        }
+                    }
+                    Err(e) => {
+                        debug_entries.push(format!("xcrun touchid error: {}", e));
+                    }
+                }
+
+                let _ = std::fs::remove_file(&xcrun_script);
+
+                if !xcrun_success {
+                    remaining_items.push((path.clone(), category.clone()));
+                }
+            } else {
+                remaining_items.push((path.clone(), category.clone()));
+            }
+        }
+
+        let failed_items = remaining_items;
+
+        if failed_items.is_empty() {
+            let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        }
+
+        // 写临时删除脚本：并行删除
+        let tmp_script = std::env::temp_dir().join("maclean_sudo_touchid.sh");
+        let current_user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| "root".to_string());
+        let mut script_content = String::from("#!/bin/bash\nset +e\n");
+        script_content.push_str("workdir=$(/usr/bin/mktemp -d)\n");
+        script_content.push_str("trap \"/bin/rm -rf \\\"$workdir\\\"\" EXIT\n\n");
+        script_content.push_str("process_one() {\n");
+        script_content.push_str("  local idx=\"$1\"\n");
+        script_content.push_str("  local path=\"$2\"\n");
+        script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
+        script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
+        script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /usr/sbin/chown -R '");
+        script_content.push_str(&current_user.replace("'", "'\\''"));
+        script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
+        script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
+        script_content.push_str("}\n\n");
+
+        for (i, (path, _)) in failed_items.iter().enumerate() {
+            let escaped = path.replace("'", "'\\''");
+            script_content.push_str(&format!(
+                "process_one {} '{}' &\n",
+                i, escaped
+            ));
+        }
+        script_content.push_str("\nwait\n");
+        script_content.push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
+        script_content.push_str("exit 0\n");
+        let _ = std::fs::write(&tmp_script, &script_content);
+        let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&tmp_script).output();
+
+        debug_entries.push(format!("delete script: {}", tmp_script.display()));
+
+        // 不用 -S，sudo 自动触发 Touch ID
+        let sudo_result = std::process::Command::new("/usr/bin/sudo")
+            .arg("/bin/bash")
+            .arg(&tmp_script)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        // 解析输出
+        let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        match &sudo_result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug_entries.push(format!("sudo touchid exit code: {:?}", output.status.code()));
+                debug_entries.push(format!("sudo touchid stdout:\n{}", stdout));
+                debug_entries.push(format!("sudo touchid stderr:\n{}", stderr));
+
+                let mut current_path = String::new();
+                for line in stdout.lines() {
+                    if let Some(p) = line.strip_prefix(">MACLEAN_BEGIN:") {
+                        current_path = p.to_string();
+                    } else if let Some(_rest) = line.strip_prefix(">MACLEAN_EXIT:") {
+                        current_path.clear();
+                    } else if !line.is_empty() && !current_path.is_empty() {
+                        rm_stderr.entry(current_path.clone()).or_default().push_str(line);
+                        rm_stderr.entry(current_path.clone()).or_default().push('\n');
+                    }
+                }
+            }
+            Err(e) => {
+                debug_entries.push(format!("sudo touchid error: {}", e));
+            }
+        }
+
+        let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
+
+        // 逐项验证
+        match sudo_result {
+            Ok(output) => {
+                let stderr_all = String::from_utf8_lossy(&output.stderr);
+                let user_cancelled = stderr_all.contains("canceled")
+                    || stderr_all.contains("cancelled")
+                    || stderr_all.contains("User canceled");
+
+                if user_cancelled {
+                    let _ = tx.send(DeleteMessage::Info("🔒 Touch ID 验证已取消".to_string()));
+                    for (path, category) in &failed_items {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✗ Touch ID 取消: {}", path), path.clone(), category.clone(), false));
+                        safety::log_deletion(path, category, false, Some("Touch ID 取消"));
+                    }
+                    let _ = std::fs::remove_file(&tmp_script);
+                    let _ = tx.send(DeleteMessage::Done);
+                    return;
+                }
+
+                for (path, category) in &failed_items {
+                    let p = std::path::Path::new(path.as_str());
+                    if !p.exists() && p.symlink_metadata().is_err() {
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("✓ 已删除 [{}] {} (Touch ID)", category, path),
+                            path.clone(), category.clone(), true));
+                        safety::log_deletion(path, category, true, None);
+                    } else {
+                        let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or(&stderr_all);
+                        let is_sip = err_text.contains("Operation not permitted")
+                            || path.starts_with("/Library/Developer/CoreSimulator/Caches");
+
+                        if is_sip {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("🔒 SIP保护无法删除: {}", path),
+                                path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some("SIP保护或系统限制"));
+                        } else {
+                            let detail = if err_text.is_empty() {
+                                "管理员权限删除后仍存在".to_string()
+                            } else {
+                                err_text.trim().to_string()
+                            };
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✗ 删除失败: {} - {}", path, detail),
+                                path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some(&detail));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                for (path, category) in &failed_items {
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!("✗ 无法启动 sudo: {} - {}", path, e),
+                        path.clone(), category.clone(), false));
+                    safety::log_deletion(path, category, false, Some(&e.to_string()));
+                }
+            }
+        }
+
+        let _ = std::fs::remove_file(&tmp_script);
+        let _ = tx.send(DeleteMessage::Done);
+    });
 }
 
 /// 删除中弹窗（带进度条）
