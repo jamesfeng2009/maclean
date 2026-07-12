@@ -149,6 +149,7 @@ impl From<std::io::Error> for AewpError {
 }
 
 /// 执行结果
+#[allow(dead_code)]
 pub struct PrivilegedOutput {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
@@ -208,7 +209,7 @@ pub fn execute_with_privileges(
         value: std::ptr::null(),
         flags: 0,
     };
-    let mut rights = AuthorizationItemSet {
+    let rights = AuthorizationItemSet {
         count: 1,
         items: &mut item,
     };

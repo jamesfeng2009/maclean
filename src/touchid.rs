@@ -149,10 +149,10 @@ pub fn trigger_enable_touch_id() -> Result<(), String> {
     );
 
     let apple_script = format!(
-        r#"tell application "Terminal"
+        r##"tell application "Terminal"
     activate
     do script "{}"
-end tell"#,
+end tell"##,
         terminal_script.replace('"', "\\\"")
     );
 
@@ -167,6 +167,7 @@ end tell"#,
 /// 异步触发禁用 Touch ID（非阻塞）
 ///
 /// 优先使用 AEWP，不可用时回退到 Terminal.app。
+#[allow(dead_code)]
 pub fn trigger_disable_touch_id() -> Result<(), String> {
     if !sudo_touch_id_enabled() {
         return Ok(());
@@ -190,10 +191,10 @@ pub fn trigger_disable_touch_id() -> Result<(), String> {
     );
 
     let apple_script = format!(
-        r#"tell application "Terminal"
+        r##"tell application "Terminal"
     activate
     do script "{}"
-end tell"#,
+end tell"##,
         terminal_script.replace('"', "\\\"")
     );
 
