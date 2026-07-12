@@ -242,40 +242,60 @@ fn group_container_display_name(id: &str) -> String {
 ///
 /// 这些是各类 App 在 Application Support 下创建的缓存子目录，
 /// 删除后 App 会自动重建，不影响用户数据。
-/// 参考 Mole 的 app_caches.sh 中数百个 safe_clean 路径归纳而来。
+/// 参考 Mole (https://github.com/tw93/Mole) 的 app_caches.sh、dev.sh、
+/// user.sh 中数百条 safe_clean 路径归纳而来，覆盖：
+/// - Electron / Chromium 应用（VS Code, Discord, Slack, Teams 等）
+/// - 浏览器（Chrome, Brave, Arc, Vivaldi, Firefox, Yandex 等）
+/// - 游戏（Steam, Battle.net, Minecraft, RPCS3 等）
+/// - 设计/媒体（Adobe, Sketch, Figma, Final Cut Pro 等）
+/// - 通信（微信, QQ, DingTalk, Telegram 等）
+/// - 开发工具（Claude, Antigravity, Qoder 等）
 const CACHE_DIR_NAMES: &[&str] = &[
-    // 通用缓存
+    // === 通用缓存 ===
     "Cache", "Caches", "cache", "caches",
     "CachedData", "CachedExtensions", "CachedExtensionVSIXs",
-    "Cache_Data", "CacheData",
-    // Electron/Chromium 缓存
+    "Cache_Data", "CacheData", "CacheStorage", "cacheStorage",
+    "Application Cache", "application_cache",
+    // === Electron / Chromium 缓存 ===
     "Code Cache", "CodeCache", "code_cache",
     "GPUCache", "gpu_cache",
-    "DawnGraphiteCache", "DawnWebGPUCache",
+    "DawnGraphiteCache", "DawnWebGPUCache", "DawnCache",
+    "GrShaderCache", "GraphiteDawnCache",
+    "ShaderCache", "shader_cache", "shadercache",
     "Service Worker", "ServiceWorker",
-    // Web 缓存
-    "webcache", "webcache2", "WebStorage",
-    "CacheStorage", "cacheStorage",
-    // 日志
+    "WebStorage",
+    "Crashpad", // Chromium 崩溃报告（Crashpad/completed）
+    // === 浏览器特有缓存 ===
+    "cache2", // Firefox profile cache
+    "component_crx_cache", "extensions_crx_cache", "crx_cache",
+    "OptGuideOnDeviceModel", "OptGuideOnDeviceClassifierModel",
+    // === Web 缓存 ===
+    "webcache", "webcache2",
+    "browser_cache", "BrowserCache",
+    "NetworkCache", "network_cache",
+    // === 日志 ===
     "logs", "Logs", "log",
-    // 临时文件
+    "holmeslogs", // DingTalk
+    // === 临时文件 ===
     "tmp", "Temp", "temp", "T",
-    // 崩溃报告
+    // === 崩溃报告 ===
     "crash-reports", "CrashReporter", "CrashReports",
-    "SentryCrash", "sentry-crash",
-    // 媒体缓存
+    "SentryCrash", "sentry-crash", "sentry",
+    // === 媒体缓存 ===
     "thumbnails", "thumbnail-cache",
     "Media Cache Files", "MediaCache",
     "videoCache", "VideoCache",
-    // 游戏/工具缓存
-    "htmlcache", "appcache", "depotcache", "shadercache",
-    "shader_cache", "ShaderCache",
-    // 网络缓存
-    "NetworkCache", "network_cache",
-    // 其他
+    "CacheClip", // DaVinci Resolve
+    // === 游戏 / 工具缓存 ===
+    "htmlcache", // Steam web cache
+    "appcache", // Steam app cache
+    "depotcache", // Steam depot cache
+    "stremio-cache", // Stremio
+    "DictUpdate", // WeType 输入法
+    // === 通信应用缓存（QQ Music 等）===
     "iRRCache", "iCache", "iTemp", "iLog",
-    "CacheClip",
-    "browser_cache", "BrowserCache",
+    // === 其他 ===
+    "Photos.cache", // Address Book
 ];
 
 /// 递归扫描 Application Support 下的缓存子目录
