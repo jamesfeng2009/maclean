@@ -2,6 +2,7 @@
 //!
 //! 使用 egui 构建，专注开发者缓存与深度清理。
 
+mod aewp;
 mod app;
 mod safety;
 mod scanner;
@@ -2050,7 +2051,7 @@ fn show_touch_id_waiting_window(ctx: &egui::Context, app: &mut App) {
                         egui::RichText::new("⏳").size(28.0),
                     );
                     ui.label(
-                        egui::RichText::new("请在弹出的 Terminal 窗口中输入密码")
+                        egui::RichText::new("请在系统弹窗中输入密码")
                             .size(15.0)
                             .strong(),
                     );
@@ -2060,7 +2061,7 @@ fn show_touch_id_waiting_window(ctx: &egui::Context, app: &mut App) {
                 ui.colored_label(
                     egui::Color32::from_gray(170),
                     egui::RichText::new(
-                        "已打开 Terminal 窗口，请在其中输入管理员密码\n\
+                        "系统会弹出密码对话框，请输入管理员密码\n\
                          以创建 /etc/pam.d/sudo_local 配置文件。\n\
                          完成后会自动继续删除操作。"
                     )

@@ -4,8 +4,12 @@
 //! /etc/pam.d/sudo 中已包含 `auth include sudo_local`，只需创建 sudo_local 文件
 //! 并取消注释 pam_tid.so 行即可。
 //!
-//! 注意：由于 SIP 保护，osascript 的 administrator 权限无法修改 /etc/pam.d/。
-//! 必须通过 Terminal.app 中的 sudo 命令来创建/删除 sudo_local 文件。
+//! 特权操作使用三种方案（按优先级）：
+//! 1. AEWP (AuthorizationExecuteWithPrivileges) — 系统原生密码弹窗，不打开终端
+//! 2. Terminal.app + sudo — 回退方案，打开终端窗口
+//! 3. osascript administrator — 最终回退（可能被 TCC 拦截）
+//!
+//! 兼容 macOS 12+ (Monterey 到 Tahoe)，Intel 和 Apple Silicon 均可。
 
 use std::path::Path;
 use std::process::Command;
@@ -31,10 +35,8 @@ pub fn touch_id_enrolled() -> bool {
     if let Ok(out) = output {
         let stdout = String::from_utf8_lossy(&out.stdout);
         // 输出格式: "User 501:       1 biometric template(s)"
-        // 提取数字部分
         for line in stdout.lines() {
             if line.contains("biometric template") {
-                // 提取 "N biometric template" 中的 N
                 if let Some(num) = line
                     .split_whitespace()
                     .find(|s| s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty())
@@ -54,7 +56,6 @@ pub fn touch_id_enrolled() -> bool {
 
     if let Ok(out) = output {
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // 输出包含 "Biometrics for unlock: 1" 表示已启用
         return stdout.contains("Biometrics for unlock: 1");
     }
 
@@ -74,7 +75,6 @@ pub fn touch_id_available() -> bool {
 pub fn sudo_touch_id_enabled() -> bool {
     // 优先检查 sudo_local（推荐方式）
     if let Ok(content) = std::fs::read_to_string(SUDO_LOCAL_PATH) {
-        // 确认 pam_tid.so 行未被注释
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('#') {
@@ -102,12 +102,18 @@ pub fn sudo_touch_id_enabled() -> bool {
     false
 }
 
+/// 准备 sudo_local 临时文件内容
+fn prepare_sudo_local_content() -> String {
+    "# sudo_local: local config file which survives system update and is included for sudo\n\
+# uncomment following line to enable Touch ID for sudo\n\
+auth       sufficient     pam_tid.so\n"
+        .to_string()
+}
+
 /// 异步触发启用 Touch ID（非阻塞）
 ///
-/// 打开 Terminal.app 执行 sudo cp 命令，立即返回。
+/// 优先使用 AEWP（系统原生密码弹窗），不可用时回退到 Terminal.app。
 /// 调用者应通过 `sudo_touch_id_enabled()` 轮询检测是否启用成功。
-///
-/// 返回 Ok 表示 Terminal 已成功打开，Err 表示无法打开 Terminal。
 pub fn trigger_enable_touch_id() -> Result<(), String> {
     if sudo_touch_id_enabled() {
         return Ok(());
@@ -118,15 +124,25 @@ pub fn trigger_enable_touch_id() -> Result<(), String> {
     }
 
     // 1. 准备 sudo_local 内容到临时文件
-    let sudo_local_content = "# sudo_local: local config file which survives system update and is included for sudo\n\
-# uncomment following line to enable Touch ID for sudo\n\
-auth       sufficient     pam_tid.so\n";
-
     let tmp_path = "/tmp/maclean_sudo_local.tmp";
-    std::fs::write(tmp_path, sudo_local_content)
+    let content = prepare_sudo_local_content();
+    std::fs::write(tmp_path, &content)
         .map_err(|e| format!("无法写入临时文件: {}", e))?;
 
-    // 2. 通过 Terminal.app 执行 sudo cp（非阻塞）
+    // 2. 优先尝试 AEWP（在后台线程中执行，不阻塞 GUI）
+    if crate::aewp::aewp_available() {
+        let tmp_path_owned = tmp_path.to_string();
+        std::thread::spawn(move || {
+            let script = format!(
+                "cp {} {} && chmod 444 {} && rm -f {}",
+                tmp_path_owned, SUDO_LOCAL_PATH, SUDO_LOCAL_PATH, tmp_path_owned
+            );
+            let _ = crate::aewp::execute_with_privileges("/bin/sh", &["-c", &script]);
+        });
+        return Ok(());
+    }
+
+    // 3. 回退：通过 Terminal.app 执行 sudo cp（非阻塞）
     let terminal_script = format!(
         "sudo cp {} {} && sudo chmod 444 {} && echo MACLEAN_TOUCHID_DONE && sleep 1 && exit",
         tmp_path, SUDO_LOCAL_PATH, SUDO_LOCAL_PATH
@@ -150,13 +166,24 @@ end tell"#,
 
 /// 异步触发禁用 Touch ID（非阻塞）
 ///
-/// 打开 Terminal.app 执行 sudo rm 命令，立即返回。
-/// 调用者应通过 `sudo_touch_id_enabled()` 轮询检测是否禁用成功。
+/// 优先使用 AEWP，不可用时回退到 Terminal.app。
 pub fn trigger_disable_touch_id() -> Result<(), String> {
     if !sudo_touch_id_enabled() {
         return Ok(());
     }
 
+    // 1. 优先尝试 AEWP（后台线程）
+    if crate::aewp::aewp_available() {
+        std::thread::spawn(move || {
+            let _ = crate::aewp::execute_with_privileges(
+                "/bin/rm",
+                &["-f", SUDO_LOCAL_PATH],
+            );
+        });
+        return Ok(());
+    }
+
+    // 2. 回退：Terminal.app
     let terminal_script = format!(
         "sudo rm {} && echo MACLEAN_TOUCHID_DISABLED && sleep 1 && exit",
         SUDO_LOCAL_PATH

@@ -2245,6 +2245,7 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "libc",
  "muda 0.14.1",
  "rayon",
  "tray-icon",
