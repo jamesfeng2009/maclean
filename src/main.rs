@@ -119,6 +119,8 @@ fn main() -> eframe::Result {
         static mut MENUBAR: Option<menubar::MenuBarHud> = None;
         static mut NEEDS_INIT: bool = true;
         static mut LAST_DISK_UPDATE: f64 = 0.0;
+        // QuickClean 标志：扫描完成后自动选择 Safe 项并删除
+        static mut AUTO_CLEAN_AFTER_SCAN: bool = false;
 
         unsafe {
             if NEEDS_INIT {
@@ -146,6 +148,8 @@ fn main() -> eframe::Result {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                         }
                         menubar::TrayAction::QuickScan => {
+                            // 快速扫描：只扫描不删除
+                            AUTO_CLEAN_AFTER_SCAN = false;
                             if let Some(app) = &mut APP {
                                 if !matches!(app.current_scan_state(), ScanState::Scanning) {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -154,18 +158,19 @@ fn main() -> eframe::Result {
                             }
                         }
                         menubar::TrayAction::QuickClean => {
+                            // 一键清理：扫描 + 自动删除所有 Safe 项
                             // 1. 显示并聚焦主窗口
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 
-                            // 2. 实际执行一键清理：扫描 + 删除所有 Safe 项
+                            // 2. 切换到开发者缓存 Tab 并开始扫描
                             if let Some(app) = &mut APP {
-                                // 切换到开发者缓存 Tab
                                 app.tab = Tab::DevCache;
                                 let state = app.current_scan_state().clone();
                                 if !matches!(state, ScanState::Scanning) {
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                    // 设置标志：扫描完成后自动选择 Safe 项并删除
+                                    AUTO_CLEAN_AFTER_SCAN = true;
                                     start_scan(app, &mut SCAN_RX);
                                 }
                             }
@@ -214,6 +219,24 @@ fn main() -> eframe::Result {
                                 let (total, free) = get_disk_info();
                                 app.disk_total = total;
                                 app.disk_free = free;
+
+                                // 一键清理模式：自动选择 Safe 项并删除
+                                if AUTO_CLEAN_AFTER_SCAN {
+                                    AUTO_CLEAN_AFTER_SCAN = false;
+                                    app.select_safe_only();
+                                    let selected_count = app.selected_count();
+                                    if selected_count > 0 {
+                                        log_scan_step(&format!(
+                                            "一键清理：自动选择 {} 个安全项，开始删除",
+                                            selected_count
+                                        ));
+                                        app.prepare_delete();
+                                        let to_delete = app.confirm_delete();
+                                        start_delete(to_delete, &mut DELETE_RX);
+                                    } else {
+                                        log_scan_step("一键清理：没有可删除的安全项");
+                                    }
+                                }
                             }
                             SCAN_RX = None;
                             break;
