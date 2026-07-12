@@ -62,6 +62,9 @@ pub struct ScanItem {
     pub recommend: Recommend,
     /// 该项的说明（告诉用户这是什么，删除后有什么影响）
     pub description: String,
+    /// 批量删除的真实路径列表（用于 __pycache__ 等聚合项）
+    /// 为空表示单项删除，使用 path 字段
+    pub batch_paths: Vec<String>,
 }
 
 /// 扫描结果
@@ -95,14 +98,14 @@ pub fn check_deletable(path: &str) -> (bool, String) {
         return (true, String::new());
     }
 
-    // CoreSimulator 运行时镜像不可直接删除
+    // CoreSimulator 运行时镜像 — 通过 xcrun simctl runtime delete 安全删除
     if path.starts_with("/Library/Developer/CoreSimulator/Volumes") {
-        return (false, "iOS 模拟器运行时镜像，需用 xcrun simctl 删除".to_string());
+        return (true, String::new());
     }
 
-    // CoreSimulator/Caches 实际受 SIP 保护，直接 rm 即使 sudo 也会失败
+    // CoreSimulator/Caches — root 属主，sudo rm -rf 可删
     if path.starts_with("/Library/Developer/CoreSimulator/Caches") {
-        return (false, "模拟器系统缓存受 SIP 保护，需关闭 SIP 或使用 xcrun simctl 清理".to_string());
+        return (true, String::new());
     }
 
     // 检查属主和扩展属性

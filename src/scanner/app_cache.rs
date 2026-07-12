@@ -119,6 +119,7 @@ fn scan_containers() -> Vec<ScanItem> {
             selected: false,
             deletable: !is_wechat_data,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: if is_wechat_data { Recommend::Advanced } else { Recommend::Caution },
             description: if is_wechat_data { "微信聊天数据，删除将丢失聊天记录".to_string() } else { "应用容器缓存，删除后 App 可能需要重新登录".to_string() },
         });
@@ -210,6 +211,7 @@ fn scan_group_containers() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Caution,
             description: "应用组缓存，删除后可能需重新配置".to_string(),
         });
@@ -278,6 +280,7 @@ fn scan_app_support() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Advanced,
             description: "应用数据目录，可能包含重要配置".to_string(),
         });
@@ -332,6 +335,7 @@ fn scan_system_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Safe,
             description: "系统缓存目录，可安全删除".to_string(),
         });
@@ -360,6 +364,7 @@ fn scan_logs() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "系统日志文件，可安全删除".to_string(),
             });

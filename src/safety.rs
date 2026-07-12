@@ -333,6 +333,7 @@ fn check_whitelist(canonical: &Path, home: &Path) -> bool {
         format!("{}/Library/Developer/Xcode/Archives", home_str),
         format!("{}/Library/Developer/Xcode/Products", home_str),
         "/Library/Developer/CoreSimulator/Caches".to_string(),
+        "/Library/Developer/CoreSimulator/Volumes".to_string(),
         // 日志
         format!("{}/Library/Logs", home_str),
         // JetBrains

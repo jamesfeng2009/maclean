@@ -362,20 +362,20 @@ impl App {
         self.confirm = ConfirmState::Pending;
     }
 
-    /// 确认删除 - 收集待删除项，返回路径列表供后台线程使用
-    pub fn confirm_delete(&mut self) -> Vec<(String, String)> {
+    /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths) 供后台线程使用
+    pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>)> {
         self.confirm = ConfirmState::Deleting;
         let idx = self.tab_index();
 
         // 收集要删除的路径和类别（跳过不可删除的项）
-        let to_delete: Vec<(String, String)> = self
+        let to_delete: Vec<(String, String, Vec<String>)> = self
             .pending_delete
             .iter()
             .rev()
             .filter(|&&i| self.results[idx][i].deletable)
             .map(|&i| {
                 let item = &self.results[idx][i];
-                (item.path.clone(), item.category.clone())
+                (item.path.clone(), item.category.clone(), item.batch_paths.clone())
             })
             .collect();
 

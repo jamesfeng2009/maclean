@@ -758,10 +758,110 @@ fn best_effort_delete(path: &std::path::Path) -> bool {
     !path.exists() && path.symlink_metadata().is_err()
 }
 
+/// 从文本中提取所有 UUID（格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
+fn extract_all_uuids(text: &str) -> Vec<String> {
+    let mut uuids = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i + 36 <= len {
+        // 检查 UUID 格式: 8-4-4-4-12
+        if chars[i..i+8].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i+8] == '-'
+            && chars[i+9..i+13].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i+13] == '-'
+            && chars[i+14..i+18].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i+18] == '-'
+            && chars[i+19..i+23].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i+23] == '-'
+            && chars[i+24..i+36].iter().all(|c| c.is_ascii_hexdigit())
+        {
+            let uuid: String = chars[i..i+36].iter().collect();
+            if !uuids.contains(&uuid) {
+                uuids.push(uuid);
+            }
+            i += 36;
+        } else {
+            i += 1;
+        }
+    }
+    uuids
+}
+
+/// 安全删除模拟器运行时镜像（/Library/Developer/CoreSimulator/Volumes）
+///
+/// 使用 `xcrun simctl runtime list` 列出所有运行时，逐个 `xcrun simctl runtime delete <uuid>`。
+/// 这是 Apple 推荐的安全删除方式，会正确卸载和注销运行时，不会残留挂载点。
+/// 如果 xcrun 不可用或全部失败，返回 Err 让调用方 fallback 到 sudo rm -rf。
+fn delete_simulator_volumes(_path: &str) -> Result<String, String> {
+    // 1. 列出所有运行时
+    let list_output = std::process::Command::new("xcrun")
+        .args(["simctl", "runtime", "list"])
+        .output()
+        .map_err(|e| format!("无法执行 xcrun: {}", e))?;
+
+    if !list_output.status.success() {
+        let stderr = String::from_utf8_lossy(&list_output.stderr);
+        return Err(format!("xcrun simctl runtime list 失败: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+
+    // 2. 提取所有 UUID（格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
+    let uuids: Vec<String> = extract_all_uuids(&stdout);
+
+    if uuids.is_empty() {
+        return Err("没有找到已安装的模拟器运行时".to_string());
+    }
+
+    // 3. 逐个删除运行时
+    let mut success_count = 0;
+    let mut fail_msgs: Vec<String> = Vec::new();
+
+    for uuid in &uuids {
+        let del_output = std::process::Command::new("xcrun")
+            .args(["simctl", "runtime", "delete", uuid])
+            .output();
+
+        match del_output {
+            Ok(o) if o.status.success() => {
+                success_count += 1;
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // 如果是 "not found" 或 "already deleted" 类错误，算成功
+                if stderr.contains("not found") || stderr.contains("No such") {
+                    success_count += 1;
+                } else {
+                    fail_msgs.push(format!("{}: {}", uuid, stderr.trim()));
+                }
+            }
+            Err(e) => {
+                fail_msgs.push(format!("{}: {}", uuid, e));
+            }
+        }
+    }
+
+    if success_count > 0 {
+        let msg = format!(
+            "已通过 xcrun simctl 删除 {} 个模拟器运行时{}",
+            success_count,
+            if !fail_msgs.is_empty() {
+                format!("，{} 个失败", fail_msgs.len())
+            } else {
+                String::new()
+            }
+        );
+        Ok(msg)
+    } else {
+        Err(format!("所有运行时删除失败: {}", fail_msgs.join("; ")))
+    }
+}
+
 /// 启动后台删除线程（两阶段自动删除）
 /// 阶段1: 普通删除（多线程并行 rm -rf）
 /// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
-fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+fn start_delete(to_delete: Vec<(String, String, Vec<String>)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
 
@@ -778,9 +878,44 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                     loop {
                         let i = idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if i >= to_delete.len() { break; }
-                        let (path, category) = &to_delete[i];
+                        let (path, category, batch_paths) = &to_delete[i];
                         let path = path.to_string();
                         let category = category.to_string();
+                        let batch_paths = batch_paths.clone();
+
+                        // 批量删除模式（如 __pycache__）：逐个安全删除
+                        if !batch_paths.is_empty() {
+                            let mut success_count = 0;
+                            let mut fail_count = 0;
+                            for bp in &batch_paths {
+                                match safety::check_path_safety(bp) {
+                                    safety::SafetyCheck::Danger(reason) => {
+                                        fail_count += 1;
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("⛔ 已拦截: {} - {}", bp, reason), bp.clone(), category.clone(), false));
+                                        safety::log_deletion(bp, &category, false, Some(&reason));
+                                        continue;
+                                    }
+                                    safety::SafetyCheck::Warning(reason) => {
+                                        fail_count += 1;
+                                        continue;
+                                    }
+                                    safety::SafetyCheck::Safe => {}
+                                }
+                                let p = std::path::Path::new(bp.as_str());
+                                if best_effort_delete(p) {
+                                    success_count += 1;
+                                } else {
+                                    fail_count += 1;
+                                    failed_items.lock().unwrap().push((bp.clone(), category.clone()));
+                                }
+                            }
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✓ 已删除 [{}] {} (成功 {} / 失败 {})", category, path, success_count, fail_count),
+                                path.clone(), category.clone(), fail_count == 0));
+                            safety::log_deletion(&path, &category, fail_count == 0, None);
+                            continue;
+                        }
 
                         // 安全校验
                         match safety::check_path_safety(&path) {
@@ -827,6 +962,25 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                                     let _ = tx.send(DeleteMessage::Log(
                                         format!("✗ 删除失败: {} - {}", path, e), path.clone(), category.clone(), false));
                                     safety::log_deletion(&path, &category, false, Some(&e));
+                                }
+                            }
+                            continue;
+                        }
+
+                        // 模拟器镜像 — 通过 xcrun simctl runtime delete 安全删除
+                        if category == "模拟器镜像" {
+                            match delete_simulator_volumes(&path) {
+                                Ok(msg) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✓ {}", msg), path.clone(), category.clone(), true));
+                                    safety::log_deletion(&path, &category, true, None);
+                                }
+                                Err(e) => {
+                                    // xcrun 失败，加入 sudo 重试列表
+                                    failed_items.lock().unwrap().push((path.clone(), category.clone()));
+                                    let _ = tx.send(DeleteMessage::Info(
+                                        format!("🔄 xcrun 删除失败，将尝试 sudo: {}", e),
+                                    ));
                                 }
                             }
                             continue;
@@ -908,6 +1062,100 @@ fn start_sudo_delete(
         debug_entries.push(format!("[sudo phase] started, {} items", failed_items.len()));
         for (p, c) in &failed_items {
             debug_entries.push(format!("  item: [{}] {}", c, p));
+        }
+
+        // ========== 预处理：模拟器镜像通过 sudo xcrun simctl runtime delete 删除 ==========
+        let mut remaining_items: Vec<(String, String)> = Vec::new();
+        for (path, category) in &failed_items {
+            if category == "模拟器镜像" {
+                // 用 sudo xcrun simctl runtime delete 删除所有运行时
+                let script = r#"#!/bin/bash
+set +e
+uuids=$(xcrun simctl runtime list 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | sort -u)
+count=0
+fail=0
+for uuid in $uuids; do
+    xcrun simctl runtime delete "$uuid" 2>/dev/null
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        count=$((count + 1))
+    else
+        fail=$((fail + 1))
+    fi
+done
+echo "xcrun_deleted:$count"
+echo "xcrun_failed:$fail"
+exit 0
+"#;
+                let xcrun_script = std::env::temp_dir().join("maclean_xcrun_delete.sh");
+                let _ = std::fs::write(&xcrun_script, script);
+                let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&xcrun_script).output();
+
+                let xcrun_result = std::process::Command::new("/usr/bin/sudo")
+                    .arg("-S")
+                    .arg("/bin/bash")
+                    .arg(&xcrun_script)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        if let Some(mut stdin) = child.stdin.take() {
+                            use std::io::Write;
+                            let _ = writeln!(stdin, "{}", password);
+                        }
+                        child.wait_with_output()
+                    });
+
+                let mut xcrun_success = false;
+                match &xcrun_result {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        debug_entries.push(format!("xcrun sudo stdout: {}", stdout));
+                        debug_entries.push(format!("xcrun sudo stderr: {}", stderr));
+
+                        // 检查是否密码错误
+                        if stderr.contains("incorrect password") || stderr.contains("3 incorrect") {
+                            let _ = tx.send(DeleteMessage::Info("🔒 管理员密码错误，请重新输入".to_string()));
+                            let _ = tx.send(DeleteMessage::NeedPassword(failed_items.clone()));
+                            let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
+                            let _ = std::fs::remove_file(&xcrun_script);
+                            return;
+                        }
+
+                        // 检查 Volumes 目录是否已清空
+                        let p = std::path::Path::new(path);
+                        if !p.exists() || std::fs::read_dir(p).map(|mut d| d.next().is_none()).unwrap_or(true) {
+                            xcrun_success = true;
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✓ 已通过 xcrun simctl 删除模拟器运行时镜像: {}", path),
+                                path.clone(), category.clone(), true));
+                            safety::log_deletion(path, category, true, None);
+                        }
+                    }
+                    Err(e) => {
+                        debug_entries.push(format!("xcrun sudo error: {}", e));
+                    }
+                }
+
+                let _ = std::fs::remove_file(&xcrun_script);
+
+                if !xcrun_success {
+                    // xcrun 删除后仍有残留，用 sudo rm -rf 清理
+                    remaining_items.push((path.clone(), category.clone()));
+                }
+            } else {
+                remaining_items.push((path.clone(), category.clone()));
+            }
+        }
+
+        let failed_items = remaining_items;
+
+        if failed_items.is_empty() {
+            let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
+            let _ = tx.send(DeleteMessage::Done);
+            return;
         }
 
         // 写临时删除脚本：所有目录后台并行删除

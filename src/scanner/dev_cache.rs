@@ -81,6 +81,7 @@ fn scan_rust_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "Rust 编译产物，cargo build 会自动重新生成".to_string(),
             });
@@ -98,6 +99,7 @@ fn scan_rust_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Caution,
             description: "Cargo 包下载缓存，删除后编译时需重新下载".to_string(),
         });
@@ -140,6 +142,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                         selected: false,
                         deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                         recommend: Recommend::Safe,
                         description: format!("项目 {} 的编译缓存，重新构建会自动恢复", project_name),
                     });
@@ -175,6 +178,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: if is_latest { Recommend::Advanced } else { Recommend::Safe },
                 description: if is_latest {
                     format!("iOS {} 设备调试符号（最新版，建议保留）", version)
@@ -209,6 +213,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                                 selected: false,
                                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                                 recommend: Recommend::Advanced,
                                 description: format!("归档 {} ({})，包含构建和调试信息", archive_name, date_name),
                             });
@@ -219,7 +224,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
         }
     }
 
-    // 4. 模拟器镜像 (系统级目录，不可直接删除)
+    // 4. 模拟器镜像 (系统级目录，通过 xcrun simctl runtime delete 安全删除)
     let sim_volumes = PathBuf::from("/Library/Developer/CoreSimulator/Volumes");
     if sim_volumes.is_dir() {
         let size = dir_size(&sim_volumes);
@@ -228,14 +233,15 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             size_bytes: size,
             category: "模拟器镜像".to_string(),
             selected: false,
-            deletable: false,
+            deletable: true,
                             undeletable_reason: String::new(),
-            recommend: Recommend::Advanced,
-            description: "iOS 模拟器运行时镜像，需用 xcrun simctl 删除".to_string(),
+            recommend: Recommend::Caution,
+            description: "iOS 模拟器运行时镜像，将通过 xcrun simctl runtime delete 安全删除".to_string(),
+                            batch_paths: Vec::new(),
         });
     }
 
-    // 5. 模拟器缓存（受 SIP 保护，不能直接删除）
+    // 5. 模拟器缓存（root 属主，sudo rm -rf 可删，内容为可重建的缓存）
     let sim_caches = PathBuf::from("/Library/Developer/CoreSimulator/Caches");
     if sim_caches.is_dir() {
         let size = dir_size(&sim_caches);
@@ -244,10 +250,11 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             size_bytes: size,
             category: "模拟器缓存".to_string(),
             selected: false,
-            deletable: false,
+            deletable: true,
                             undeletable_reason: String::new(),
-            recommend: Recommend::Advanced,
-            description: "模拟器系统缓存，受 SIP 保护，需关闭 SIP 或使用 xcrun simctl 清理".to_string(),
+            recommend: Recommend::Caution,
+            description: "模拟器系统缓存，删除后自动重建，需管理员权限".to_string(),
+                            batch_paths: Vec::new(),
         });
     }
 
@@ -263,6 +270,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "Xcode 在线文档缓存，可安全删除".to_string(),
             });
@@ -281,6 +289,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "设备日志和崩溃报告，可安全删除".to_string(),
             });
@@ -299,6 +308,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
                 description: "Xcode 旧版离线文档，可能不再需要".to_string(),
             });
@@ -317,6 +327,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Caution,
                 description: "watchOS 设备调试符号，连接手表时会重新生成".to_string(),
             });
@@ -335,6 +346,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "Apple Connect 日志，可安全删除".to_string(),
             });
@@ -378,6 +390,7 @@ fn scan_node_caches() -> Vec<ScanItem> {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "Node.js 依赖包，npm install 可恢复".to_string(),
             });
@@ -395,6 +408,7 @@ fn scan_node_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Caution,
             description: "pnpm 全局存储，删除后需重新安装依赖".to_string(),
         });
@@ -411,6 +425,7 @@ fn scan_node_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Safe,
             description: "npm 下载缓存，可安全删除".to_string(),
         });
@@ -439,6 +454,7 @@ fn scan_go_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Caution,
             description: "Go 模块缓存，编译时需重新下载".to_string(),
         });
@@ -467,6 +483,7 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Safe,
             description: "Homebrew 下载缓存，可安全删除".to_string(),
         });
@@ -495,6 +512,7 @@ fn scan_pip_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Safe,
             description: "pip 下载缓存，可安全删除".to_string(),
         });
@@ -545,6 +563,7 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
                     selected: false,
                     deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                     recommend: Recommend::Safe,
                     description: "JetBrains IDE 旧版本配置，已保留最新版".to_string(),
                 });
@@ -563,6 +582,7 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
             selected: false,
             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
             recommend: Recommend::Safe,
             description: "JetBrains IDE 缓存，重启 IDE 会自动重建".to_string(),
         });
@@ -689,6 +709,7 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Caution,
                 description: "Gradle 构建缓存，删除后编译时需重新下载依赖".to_string(),
             });
@@ -706,6 +727,7 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "Gradle Wrapper 下载的版本，可安全删除会自动重新下载".to_string(),
             });
@@ -723,6 +745,7 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Caution,
                 description: "Maven 本地依赖仓库，删除后编译时需重新下载".to_string(),
             });
@@ -746,6 +769,7 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
                         selected: false,
                         deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                         recommend: Recommend::Safe,
                         description: "Java/Gradle 项目编译产物，gradle build 会自动重新生成".to_string(),
                     });
@@ -770,6 +794,7 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "pip 下载缓存，可安全删除".to_string(),
             });
@@ -787,6 +812,7 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Caution,
                 description: "Conda 包缓存，删除后安装时需重新下载".to_string(),
             });
@@ -804,35 +830,37 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
                 selected: false,
                 deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "Poetry 依赖缓存，可安全删除".to_string(),
             });
         }
     }
 
-    // Python __pycache__ 目录
+    // Python __pycache__ 目录 — 聚合为单个项，batch_paths 存储真实路径
+    let mut all_pycache_paths: Vec<String> = Vec::new();
+    let mut all_pycache_size: u64 = 0;
     for search_path in get_project_search_paths() {
         let pycache_dirs = search_dirs(&search_path, "__pycache__", 5);
-        let mut total_py_size: u64 = 0;
-        let mut py_paths: Vec<String> = Vec::new();
         for dir in &pycache_dirs {
             if let Ok(size) = dir_size_checked(dir) {
-                total_py_size += size;
-                py_paths.push(dir.to_string_lossy().to_string());
+                all_pycache_size += size;
+                all_pycache_paths.push(dir.to_string_lossy().to_string());
             }
         }
-        if total_py_size > 10 * 1024 * 1024 { // > 10MB 才展示
-            items.push(ScanItem {
-                path: format!("{}个 __pycache__ 目录", py_paths.len()),
-                size_bytes: total_py_size,
-                category: "Python缓存".to_string(),
-                selected: false,
-                deletable: false,
-                            undeletable_reason: String::new(), // 多个目录无法一键删除
-                recommend: Recommend::Safe,
-                description: "Python 字节码缓存，运行时自动重建，需手动清理".to_string(),
-            });
-        }
+    }
+    if all_pycache_size > 10 * 1024 * 1024 { // > 10MB 才展示
+        items.push(ScanItem {
+            path: format!("{}个 __pycache__ 目录", all_pycache_paths.len()),
+            size_bytes: all_pycache_size,
+            category: "Python缓存".to_string(),
+            selected: false,
+            deletable: true,
+                            undeletable_reason: String::new(),
+            recommend: Recommend::Safe,
+            description: "Python 字节码缓存，运行时自动重建".to_string(),
+            batch_paths: all_pycache_paths,
+        });
     }
 }
 
@@ -913,6 +941,7 @@ fn scan_more_dev_caches(items: &mut Vec<ScanItem>) {
                     selected: false,
                     deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                     recommend,
                     description: desc.to_string(),
                 });
@@ -949,6 +978,7 @@ fn scan_more_dev_caches(items: &mut Vec<ScanItem>) {
                             selected: false,
                             deletable: true,
                             undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
                             recommend: *recommend,
                             description: desc.to_string(),
                         });
