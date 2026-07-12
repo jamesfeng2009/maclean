@@ -84,15 +84,25 @@ pub trait Scanner {
 /// 检测路径是否可被当前用户删除
 /// 返回 (deletable, reason)
 /// 不可删除的情况:
-/// 1. 文件属主为 root 且带有 com.apple.provenance 属性 (SIP 保护)
+/// 1. 路径位于系统 SIP 保护目录下，即使 root 也无法修改
 /// 可删除但需要 sudo 的情况:
-/// 2. 文件属主为 root 但没有 provenance 属性 (需要管理员权限)
+/// 2. 文件属主为 root (需要管理员权限)
 pub fn check_deletable(path: &str) -> (bool, String) {
     let p = std::path::Path::new(path);
 
-    // APFS 快照和模拟器运行时由专门的删除逻辑处理，总是可删除
-    if path.starts_with("snapshot:") || path.contains("CoreSimulator") {
+    // APFS 快照由专门的删除逻辑处理，总是可删除
+    if path.starts_with("snapshot:") {
         return (true, String::new());
+    }
+
+    // CoreSimulator 运行时镜像不可直接删除
+    if path.starts_with("/Library/Developer/CoreSimulator/Volumes") {
+        return (false, "iOS 模拟器运行时镜像，需用 xcrun simctl 删除".to_string());
+    }
+
+    // CoreSimulator/Caches 实际受 SIP 保护，直接 rm 即使 sudo 也会失败
+    if path.starts_with("/Library/Developer/CoreSimulator/Caches") {
+        return (false, "模拟器系统缓存受 SIP 保护，需关闭 SIP 或使用 xcrun simctl 清理".to_string());
     }
 
     // 检查属主和扩展属性
@@ -101,19 +111,8 @@ pub fn check_deletable(path: &str) -> (bool, String) {
 
         let uid = meta.uid();
 
-        // 检查 com.apple.provenance 属性
-        let has_provenance = std::process::Command::new("xattr")
-            .arg(path)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
-            .unwrap_or(false);
-
-        // 属主为 root 且有 provenance 属性 → SIP 保护，不可删除
-        if uid == 0 && has_provenance {
-            return (false, "文件由 root 创建且受 SIP 保护，无法删除 (需关闭 SIP)".to_string());
-        }
-
-        // 属主为 root 但没有 provenance → 需要 sudo，但可删除
+        // 属主为 root → 需要 sudo，但允许尝试删除
+        // com.apple.provenance 只是下载来源标记，不代表 SIP 保护
         if uid == 0 {
             return (true, String::new());
         }

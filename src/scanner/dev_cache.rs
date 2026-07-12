@@ -235,7 +235,7 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
         });
     }
 
-    // 5. 模拟器缓存
+    // 5. 模拟器缓存（受 SIP 保护，不能直接删除）
     let sim_caches = PathBuf::from("/Library/Developer/CoreSimulator/Caches");
     if sim_caches.is_dir() {
         let size = dir_size(&sim_caches);
@@ -244,10 +244,10 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             size_bytes: size,
             category: "模拟器缓存".to_string(),
             selected: false,
-            deletable: true,
+            deletable: false,
                             undeletable_reason: String::new(),
-            recommend: Recommend::Safe,
-            description: "模拟器缓存，可安全删除".to_string(),
+            recommend: Recommend::Advanced,
+            description: "模拟器系统缓存，受 SIP 保护，需关闭 SIP 或使用 xcrun simctl 清理".to_string(),
         });
     }
 

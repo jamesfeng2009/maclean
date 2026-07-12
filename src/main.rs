@@ -695,22 +695,36 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     });
 }
 
-/// 尽力删除：先 remove_dir_all，失败则用 rm -rf 命令，再失败就放弃
+/// 尽力删除：优先用系统 rm -rf（对 node_modules 等大目录更快），
+/// 失败则尝试解除 immutable/只读标志后再删，再失败就放弃
 fn best_effort_delete(path: &std::path::Path) -> bool {
-    // 先尝试直接删除
-    if path.is_dir() {
-        if std::fs::remove_dir_all(path).is_ok() {
-            return !path.exists() && path.symlink_metadata().is_err();
-        }
-    } else {
-        if std::fs::remove_file(path).is_ok() {
-            return !path.exists() && path.symlink_metadata().is_err();
-        }
+    let path_str = path.to_string_lossy().to_string();
+
+    // 优先用系统 rm -rf，对包含大量小文件的目录（如 node_modules）比 Rust API 快很多
+    if std::process::Command::new("/bin/rm")
+        .arg("-rf")
+        .arg(&path_str)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        && !path.exists()
+    {
+        return true;
     }
 
-    // 直接删除失败，用 rm -rf 命令（比递归快得多）
-    let path_str = path.to_string_lossy().to_string();
-    let result = std::process::Command::new("rm")
+    // rm -rf 失败，尝试解除可能存在的 immutable/只读标志后再删除
+    let _ = std::process::Command::new("/usr/bin/chflags")
+        .arg("-R")
+        .arg("nouchg")
+        .arg(&path_str)
+        .output();
+    let _ = std::process::Command::new("/bin/chmod")
+        .arg("-R")
+        .arg("u+w")
+        .arg(&path_str)
+        .output();
+
+    let _ = std::process::Command::new("/bin/rm")
         .arg("-rf")
         .arg(&path_str)
         .output();
@@ -720,99 +734,116 @@ fn best_effort_delete(path: &std::path::Path) -> bool {
 }
 
 /// 启动后台删除线程（两阶段自动删除）
-/// 阶段1: 普通删除 (chflags + chmod + remove_dir_all)
-/// 阶段2: 对失败项自动 sudo 批量删除 (只弹一次密码框)
+/// 阶段1: 普通删除（多线程并行 rm -rf）
+/// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
 fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
-        let mut failed_items: Vec<(String, String)> = Vec::new();
+        let failed_items: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
-        // ========== 阶段1: 普通删除 ==========
-        for (path, category) in &to_delete {
-            // 安全校验
-            match safety::check_path_safety(path) {
-                safety::SafetyCheck::Danger(reason) => {
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!("⛔ 已拦截: {} - {}", path, reason), path.clone(), category.clone(), false));
-                    safety::log_deletion(path, category, false, Some(&reason));
-                    continue;
-                }
-                safety::SafetyCheck::Warning(reason) => {
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!("⚠️ 已跳过: {} - {}", path, reason), path.clone(), category.clone(), false));
-                    safety::log_deletion(path, category, false, Some(&reason));
-                    continue;
-                }
-                safety::SafetyCheck::Safe => {}
-            }
+        // ========== 阶段1: 普通删除（多线程并行） ==========
+        let worker_count = std::cmp::min(4, to_delete.len().max(1));
+        let idx = std::sync::atomic::AtomicUsize::new(0);
 
-            // APFS 快照特殊处理
-            if category == "APFS快照" {
-                match scanner::apfs::delete_snapshot(path) {
-                    Ok(_) => {
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✓ 已删除快照: {}", path), path.clone(), category.clone(), true));
-                        safety::log_deletion(path, category, true, None);
+        std::thread::scope(|s| {
+            for _ in 0..worker_count {
+                s.spawn(|| {
+                    loop {
+                        let i = idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= to_delete.len() { break; }
+                        let (path, category) = &to_delete[i];
+                        let path = path.to_string();
+                        let category = category.to_string();
+
+                        // 安全校验
+                        match safety::check_path_safety(&path) {
+                            safety::SafetyCheck::Danger(reason) => {
+                                let _ = tx.send(DeleteMessage::Log(
+                                    format!("⛔ 已拦截: {} - {}", path, reason), path.clone(), category.clone(), false));
+                                safety::log_deletion(&path, &category, false, Some(&reason));
+                                continue;
+                            }
+                            safety::SafetyCheck::Warning(reason) => {
+                                let _ = tx.send(DeleteMessage::Log(
+                                    format!("⚠️ 已跳过: {} - {}", path, reason), path.clone(), category.clone(), false));
+                                safety::log_deletion(&path, &category, false, Some(&reason));
+                                continue;
+                            }
+                            safety::SafetyCheck::Safe => {}
+                        }
+
+                        // APFS 快照特殊处理
+                        if category == "APFS快照" {
+                            match scanner::apfs::delete_snapshot(&path) {
+                                Ok(_) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✓ 已删除快照: {}", path), path.clone(), category.clone(), true));
+                                    safety::log_deletion(&path, &category, true, None);
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✗ 删除失败: {} - {}", path, e), path.clone(), category.clone(), false));
+                                    safety::log_deletion(&path, &category, false, Some(&e));
+                                }
+                            }
+                            continue;
+                        }
+
+                        if category == "模拟器运行时" {
+                            match scanner::apfs::delete_simulator_runtime(&path) {
+                                Ok(_) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✓ 已删除运行时: {}", path), path.clone(), category.clone(), true));
+                                    safety::log_deletion(&path, &category, true, None);
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✗ 删除失败: {} - {}", path, e), path.clone(), category.clone(), false));
+                                    safety::log_deletion(&path, &category, false, Some(&e));
+                                }
+                            }
+                            continue;
+                        }
+
+                        // 普通文件/目录删除 - 尽力删除模式
+                        let p = std::path::Path::new(path.as_str());
+
+                        if !p.exists() && !p.symlink_metadata().is_ok() {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✗ 路径不存在: {}", path), path.clone(), category.clone(), false));
+                            safety::log_deletion(&path, &category, false, Some("路径不存在"));
+                            continue;
+                        }
+
+                        // 拒绝删除符号链接
+                        if let Ok(meta) = p.symlink_metadata() {
+                            if meta.file_type().is_symlink() {
+                                let _ = tx.send(DeleteMessage::Log(
+                                    format!("⛔ 拒绝删除符号链接: {}", path), path.clone(), category.clone(), false));
+                                safety::log_deletion(&path, &category, false, Some("符号链接拒绝删除"));
+                                continue;
+                            }
+                        }
+
+                        // 尽力删除：先直接删除，失败则递归逐个删除
+                        let deleted_ok = best_effort_delete(p);
+
+                        if deleted_ok {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✓ 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
+                            safety::log_deletion(&path, &category, true, None);
+                        } else {
+                            // 普通删除失败，加入待 sudo 列表
+                            failed_items.lock().unwrap().push((path, category));
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ 删除失败: {} - {}", path, e), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some(&e));
-                    }
-                }
-                continue;
+                });
             }
+        });
 
-            if category == "模拟器运行时" {
-                match scanner::apfs::delete_simulator_runtime(path) {
-                    Ok(_) => {
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✓ 已删除运行时: {}", path), path.clone(), category.clone(), true));
-                        safety::log_deletion(path, category, true, None);
-                    }
-                    Err(e) => {
-                        let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ 删除失败: {} - {}", path, e), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some(&e));
-                    }
-                }
-                continue;
-            }
-
-            // 普通文件/目录删除 - 尽力删除模式
-            let p = std::path::Path::new(path.as_str());
-
-            if !p.exists() && !p.symlink_metadata().is_ok() {
-                let _ = tx.send(DeleteMessage::Log(
-                    format!("✗ 路径不存在: {}", path), path.clone(), category.clone(), false));
-                safety::log_deletion(path, category, false, Some("路径不存在"));
-                continue;
-            }
-
-            // 拒绝删除符号链接
-            if let Ok(meta) = p.symlink_metadata() {
-                if meta.file_type().is_symlink() {
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!("⛔ 拒绝删除符号链接: {}", path), path.clone(), category.clone(), false));
-                    safety::log_deletion(path, category, false, Some("符号链接拒绝删除"));
-                    continue;
-                }
-            }
-
-            // 尽力删除：先直接删除，失败则递归逐个删除
-            let deleted_ok = best_effort_delete(p);
-
-            if deleted_ok {
-                let _ = tx.send(DeleteMessage::Log(
-                    format!("✓ 已删除 [{}] {}", category, path), path.clone(), category.clone(), true));
-                safety::log_deletion(path, category, true, None);
-            } else {
-                // 普通删除失败，加入待 sudo 列表
-                failed_items.push((path.clone(), category.clone()));
-            }
-        }
+        let mut failed_items: Vec<(String, String)> = failed_items.into_inner().unwrap();
 
         // ========== 阶段2: 自动 sudo 批量删除失败项 ==========
         if !failed_items.is_empty() {
@@ -820,61 +851,162 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
                 format!("🔐 {} 项需要管理员权限，正在请求授权...", failed_items.len()),
             ));
 
-            // 写临时脚本文件，只执行 rm -rf（最快）
-            let tmp_script = std::env::temp_dir().join("maclean_sudo_delete.sh");
-            let mut script_content = String::from("#!/bin/bash\n");
-            for (path, _) in &failed_items {
-                let escaped = path.replace("'", "'\\''");
-                script_content.push_str(&format!("rm -rf '{}' 2>/dev/null\n", escaped));
+            // 辅助：记录 sudo 阶段调试日志
+            let sudo_debug_log = std::env::temp_dir().join("maclean_sudo_debug.log");
+            let mut debug_entries: Vec<String> = Vec::new();
+            debug_entries.push(format!("[sudo phase] started, {} items", failed_items.len()));
+            for (p, c) in &failed_items {
+                debug_entries.push(format!("  item: [{}] {}", c, p));
             }
+
+            // 写 askpass 脚本：sudo 需要密码时由它弹系统输入框
+            let askpass_script = std::env::temp_dir().join("maclean_askpass.sh");
+            let askpass_content = r#"#!/bin/bash
+osascript -e 'Tell application "System Events" to display dialog "maclean 需要管理员密码以删除选中的文件" default answer "" with hidden answer buttons {"取消", "确定"} default button "确定"' -e 'text returned of result'
+"#;
+            let _ = std::fs::write(&askpass_script, askpass_content);
+            let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&askpass_script).output();
+
+            // 写临时删除脚本：所有目录后台并行删除
+            let tmp_script = std::env::temp_dir().join("maclean_sudo_delete.sh");
+            let current_user = std::env::var("USER")
+                .or_else(|_| std::env::var("LOGNAME"))
+                .unwrap_or_else(|_| "root".to_string());
+            let mut script_content = String::from("#!/bin/bash\nset +e\n");
+            script_content.push_str("workdir=$(/usr/bin/mktemp -d)\n");
+            script_content.push_str("trap \"/bin/rm -rf \\\"$workdir\\\"\" EXIT\n\n");
+            script_content.push_str("process_one() {\n");
+            script_content.push_str("  local idx=\"$1\"\n");
+            script_content.push_str("  local path=\"$2\"\n");
+            script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
+            script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
+            script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
+            script_content.push_str("  /usr/sbin/chown -R '");
+            script_content.push_str(&current_user.replace("'", "'\\''"));
+            script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
+            script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
+            script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
+            script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
+            script_content.push_str("}\n\n");
+
+            for (i, (path, _)) in failed_items.iter().enumerate() {
+                let escaped = path.replace("'", "'\\''");
+                script_content.push_str(&format!(
+                    "process_one {} '{}' &\n",
+                    i, escaped
+                ));
+            }
+            script_content.push_str("\nwait\n");
+            script_content.push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
             script_content.push_str("exit 0\n");
             let _ = std::fs::write(&tmp_script, &script_content);
-            let _ = std::process::Command::new("chmod").arg("+x").arg(&tmp_script).output();
+            let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&tmp_script).output();
 
-            let script_path = tmp_script.to_string_lossy().to_string();
-            let apple_script = format!(
-                "do shell script \"bash '{}'\" with administrator privileges",
-                script_path
-            );
+            debug_entries.push(format!("askpass script: {}", askpass_script.display()));
+            debug_entries.push(format!("delete script: {}", tmp_script.display()));
+            debug_entries.push("--- delete script content ---".to_string());
+            debug_entries.push(script_content.clone());
 
-            let sudo_result = std::process::Command::new("osascript")
-                .arg("-e")
-                .arg(&apple_script)
+            // 使用真正的 sudo -A，通过 SUDO_ASKPASS 弹一次密码框
+            let sudo_result = std::process::Command::new("/usr/bin/sudo")
+                .env("SUDO_ASKPASS", &askpass_script)
+                .arg("-A")
+                .arg("/bin/bash")
+                .arg(&tmp_script)
                 .output();
+
+            // 解析脚本输出，按路径收集错误信息
+            let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            match &sudo_result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    debug_entries.push(format!("sudo exit code: {:?}", output.status.code()));
+                    debug_entries.push(format!("sudo stdout:\n{}", stdout));
+                    debug_entries.push(format!("sudo stderr:\n{}", stderr));
+                    let mut current_path = String::new();
+                    for line in stdout.lines() {
+                        if let Some(p) = line.strip_prefix(">MACLEAN_BEGIN:") {
+                            current_path = p.to_string();
+                        } else if let Some(rest) = line.strip_prefix(">MACLEAN_EXIT:") {
+                            // 格式: path:exit_code
+                            let _ = rest;
+                            current_path.clear();
+                        } else if !line.is_empty() && !current_path.is_empty() {
+                            rm_stderr.entry(current_path.clone()).or_default().push_str(line);
+                            rm_stderr.entry(current_path.clone()).or_default().push('\n');
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug_entries.push(format!("sudo spawn error: {}", e));
+                }
+            }
+
+            // 写入调试日志
+            let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
 
             // 无论 sudo 整体成功或失败，都逐项验证
             match sudo_result {
-                Ok(_output) => {
+                Ok(output) => {
+                    let stderr_all = String::from_utf8_lossy(&output.stderr);
+                    let sudo_failed = !output.status.success();
+                    let user_cancelled = stderr_all.contains("sudo: a password is required")
+                        || stderr_all.contains("sudo: 3 incorrect password attempts")
+                        || stderr_all.contains("User canceled");
+
                     for (path, category) in &failed_items {
                         let p = std::path::Path::new(path.as_str());
-                        if p.exists() || p.symlink_metadata().is_ok() {
-                            // 删除后仍存在，检测是否 SIP 保护
-                            let has_provenance = std::process::Command::new("xattr")
-                                .arg(path)
-                                .output()
-                                .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
-                                .unwrap_or(false);
-                            
-                            if has_provenance {
-                                let _ = tx.send(DeleteMessage::Log(
-                                    format!("🔒 SIP保护无法删除: {}", path), path.clone(), category.clone(), false));
-                                safety::log_deletion(path, category, false, Some("SIP保护 (com.apple.provenance)"));
-                            } else {
-                                let _ = tx.send(DeleteMessage::Log(
-                                    format!("✗ 删除失败: {}", path), path.clone(), category.clone(), false));
-                                safety::log_deletion(path, category, false, Some("管理员权限删除后仍存在"));
-                            }
-                        } else {
+                        if !p.exists() && p.symlink_metadata().is_err() {
                             let _ = tx.send(DeleteMessage::Log(
                                 format!("✓ 已删除 [{}] {} (管理员权限)", category, path), path.clone(), category.clone(), true));
                             safety::log_deletion(path, category, true, None);
+                            continue;
+                        }
+
+                        // 仍在：判断是 SIP 保护还是普通权限/占用问题
+                        let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or(&stderr_all);
+                        let is_sip = err_text.contains("Operation not permitted")
+                            || std::process::Command::new("/usr/bin/xattr")
+                                .arg(path)
+                                .output()
+                                .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
+                                .unwrap_or(false)
+                            || path.starts_with("/Library/Developer/CoreSimulator/Caches");
+
+                        if is_sip {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("🔒 SIP保护无法删除: {}", path), path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some("SIP保护或系统限制"));
+                        } else if user_cancelled {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✗ 已取消授权: {}", path), path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some("用户取消密码授权"));
+                        } else if sudo_failed {
+                            let detail = if stderr_all.is_empty() {
+                                format!("sudo 退出码 {}", output.status.code().unwrap_or(-1))
+                            } else {
+                                stderr_all.trim().to_string()
+                            };
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✗ 删除失败: {} - {}", path, detail), path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some(&detail));
+                        } else {
+                            let detail = if err_text.is_empty() {
+                                "管理员权限删除后仍存在".to_string()
+                            } else {
+                                err_text.trim().to_string()
+                            };
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("✗ 删除失败: {} - {}", path, detail), path.clone(), category.clone(), false));
+                            safety::log_deletion(path, category, false, Some(&detail));
                         }
                     }
                 }
                 Err(e) => {
                     for (path, category) in &failed_items {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ 无法启动管理员授权: {} - {}", path, e), path.clone(), category.clone(), false));
+                            format!("✗ 无法启动 sudo: {} - {}", path, e), path.clone(), category.clone(), false));
                         safety::log_deletion(path, category, false, Some(&e.to_string()));
                     }
                 }
@@ -882,6 +1014,7 @@ fn start_delete(to_delete: Vec<(String, String)>, delete_rx: &mut Option<mpsc::R
 
             // 清理临时脚本
             let _ = std::fs::remove_file(&tmp_script);
+            let _ = std::fs::remove_file(&askpass_script);
         }
 
         let _ = tx.send(DeleteMessage::Done);
@@ -1192,36 +1325,34 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                             ui.add_space(3.0);
                             ui.colored_label(
                                 egui::Color32::from_gray(180),
-                                egui::RichText::new("🔒 标记 SIP 保护的文件: 由 root 创建且带 com.apple.provenance 属性，").size(11.0),
-                            );
-                            ui.colored_label(
-                                egui::Color32::from_gray(180),
-                                egui::RichText::new("    即使管理员权限也无法删除，需关闭 SIP 才能删除。").size(11.0),
+                                egui::RichText::new("🔒 SIP/系统保护: /Library/Developer/CoreSimulator 等系统路径即使 sudo 也无法删除，需关闭 SIP 或使用 Apple 官方工具。").size(11.0),
                             );
                             ui.add_space(3.0);
                             ui.colored_label(
                                 egui::Color32::from_gray(180),
-                                egui::RichText::new("✗ 标记删除失败的文件: 可能被进程占用或权限不足。").size(11.0),
+                                egui::RichText::new("✗ 权限不足: node_modules 等目录内部可能存在 root 拥有的文件，可点击「复制 sudo 命令」在终端手动执行。").size(11.0),
                             );
                             ui.add_space(5.0);
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 200, 200),
-                                egui::RichText::new("1. 终端执行: sudo rm -rf 路径").size(11.0),
+                                egui::RichText::new("1. 复制 sudo 命令到终端执行（推荐）").size(11.0),
                             );
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 200, 200),
-                                egui::RichText::new("2. 关闭SIP: 重启→按住Cmd+R→终端→csrutil disable→重启").size(11.0),
+                                egui::RichText::new("2. 关闭 SIP: 重启→按住 Cmd+R→终端→csrutil disable→重启").size(11.0),
                             );
                             ui.colored_label(
                                 egui::Color32::from_rgb(200, 200, 200),
                                 egui::RichText::new("3. 用项目工具删除: cd 项目目录 && npm run clean / npx rimraf .next").size(11.0),
                             );
                             ui.add_space(5.0);
-                            if ui.button(egui::RichText::new("⚙️ 打开系统设置").size(12.0)).clicked() {
-                                let _ = std::process::Command::new("open")
-                                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-                                    .spawn();
-                            }
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new("⚙️ 打开系统设置").size(12.0)).clicked() {
+                                    let _ = std::process::Command::new("open")
+                                        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                                        .spawn();
+                                }
+                            });
                         });
 
                     // 列出所有失败的路径（可滚动+复制）
@@ -1232,8 +1363,16 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                             .map(|(p, c)| format!("[{}] {}", c, p))
                             .collect::<Vec<_>>()
                             .join("\n");
-                        if ui.button(egui::RichText::new("📋 复制全部").size(11.0)).clicked() {
+                        let sudo_cmd: String = app.failed_paths.iter()
+                            .map(|(p, _)| format!("'{}'", p.replace("'", "'\\''")))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let sudo_text = format!("sudo /usr/bin/chflags -R nouchg {}; sudo /usr/sbin/chown -R $(whoami):staff {}; sudo /bin/chmod -R u+w {}; sudo /bin/rm -rf {}", sudo_cmd, sudo_cmd, sudo_cmd, sudo_cmd);
+                        if ui.button(egui::RichText::new("📋 复制路径").size(11.0)).clicked() {
                             ui.output_mut(|o| o.copied_text = all_paths);
+                        }
+                        if ui.button(egui::RichText::new("🔐 复制 sudo 命令").size(11.0)).clicked() {
+                            ui.output_mut(|o| o.copied_text = sudo_text);
                         }
                     });
 
