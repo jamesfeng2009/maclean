@@ -263,8 +263,9 @@ const CACHE_DIR_NAMES: &[&str] = &[
     "DawnGraphiteCache", "DawnWebGPUCache", "DawnCache",
     "GrShaderCache", "GraphiteDawnCache",
     "ShaderCache", "shader_cache", "shadercache",
-    "Service Worker", "ServiceWorker",
-    "WebStorage",
+    // 注意：Service Worker / ServiceWorker / WebStorage 不在此列表
+    // 这些目录包含用户数据（PWA 注册信息、Web Storage），不应被清理工具触碰
+    // 浏览器缓存清理由 scan_browser_caches() 专门处理 Service Worker/CacheStorage 子目录
     "Crashpad", // Chromium 崩溃报告（Crashpad/completed）
     // === 浏览器特有缓存 ===
     "cache2", // Firefox profile cache
