@@ -251,6 +251,7 @@ fn get_bundle_id(app_path: &PathBuf) -> Option<String> {
 /// 从 Info.plist 读取应用显示名称
 ///
 /// 优先读取 CFBundleDisplayName，回退到 CFBundleName。
+/// macOS `defaults read` 对中文字符会输出 \uXXXX 转义序列，这里做解码。
 fn get_app_display_name(app_path: &PathBuf) -> Option<String> {
     let plist = app_path.join("Contents/Info.plist");
     if !plist.exists() {
@@ -266,7 +267,8 @@ fn get_app_display_name(app_path: &PathBuf) -> Option<String> {
 
         if let Ok(out) = output {
             if out.status.success() {
-                let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let name = decode_unicode_escapes(&raw);
                 if !name.is_empty() {
                     return Some(name);
                 }
@@ -275,6 +277,43 @@ fn get_app_display_name(app_path: &PathBuf) -> Option<String> {
     }
 
     None
+}
+
+/// 解码 \uXXXX / \UXXXXXXXX 转义序列
+///
+/// macOS `defaults read` 对非 ASCII 字符会输出 Unicode 转义，例如：
+///   \u5143\u5b9d -> 元宝
+fn decode_unicode_escapes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            if next == 'u' || next == 'U' {
+                let is_long = next == 'U';
+                let hex_len = if is_long { 8 } else { 4 };
+                let start = i + 2;
+                let end = (start + hex_len).min(chars.len());
+                let hex: String = chars[start..end].iter().collect();
+
+                if hex.len() == hex_len && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
+                        if let Some(ch) = char::from_u32(codepoint) {
+                            result.push(ch);
+                            i = end;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
 }
 
 // =========================================================================
