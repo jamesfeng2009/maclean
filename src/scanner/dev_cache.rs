@@ -238,7 +238,10 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     // 4. 模拟器镜像 (系统级目录，通过 xcrun simctl runtime delete 安全删除)
     let sim_volumes = PathBuf::from("/Library/Developer/CoreSimulator/Volumes");
     if sim_volumes.is_dir() {
-        let size = dir_size(&sim_volumes);
+        // 优先使用 xcrun simctl runtime list 获取镜像大小。普通 dir_size() 也能
+        // 遍历该目录，但结果可能包含 overlay 文件或因权限跳过子目录而不准确，
+        // simctl 提供 Apple 官方统计，更适合展示给用户。
+        let size = get_simulator_runtime_size().unwrap_or(0);
         items.push(ScanItem {
             path: sim_volumes.to_string_lossy().to_string(),
             size_bytes: size,
@@ -247,7 +250,11 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             deletable: true,
                             undeletable_reason: String::new(),
             recommend: Recommend::Caution,
-            description: "iOS 模拟器运行时镜像，将通过 xcrun simctl runtime delete 安全删除".to_string(),
+            description: if size > 0 {
+                "iOS 模拟器运行时镜像，将通过 xcrun simctl runtime delete 安全删除".to_string()
+            } else {
+                "iOS 模拟器运行时镜像（大小未获取到，可尝试开启完全磁盘访问权限），将通过 xcrun simctl runtime delete 安全删除".to_string()
+            },
                             batch_paths: Vec::new(),
         });
     }
@@ -272,7 +279,9 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     // 6. 模拟器 Cryptex（系统级运行时扩展，与 Volumes 同级）
     let sim_cryptex = PathBuf::from("/Library/Developer/CoreSimulator/Cryptex");
     if sim_cryptex.is_dir() {
-        let size = dir_size(&sim_cryptex);
+        // 优先使用 /usr/bin/du -sk 获取真实大小。普通 dir_size() 也能得到近似
+        // 值，但部分子目录会触发 Permission denied，du 处理 mount point 更准确。
+        let size = get_simulator_cryptex_size().unwrap_or(0);
         items.push(ScanItem {
             path: sim_cryptex.to_string_lossy().to_string(),
             size_bytes: size,
@@ -281,7 +290,11 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             deletable: true,
                             undeletable_reason: String::new(),
             recommend: Recommend::Caution,
-            description: "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除".to_string(),
+            description: if size > 0 {
+                "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除".to_string()
+            } else {
+                "模拟器运行时 Cryptex 扩展（大小未获取到，可尝试开启完全磁盘访问权限），通过 xcrun simctl runtime delete 安全删除".to_string()
+            },
                             batch_paths: Vec::new(),
         });
     }
@@ -678,6 +691,58 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
     }
 
     items
+}
+
+/// 通过 xcrun simctl runtime list 获取 iOS 模拟器运行时镜像总大小
+///
+/// 输出示例：
+///   Total Disk Images: 3 (24.2G)
+/// 解析最后一行的总大小（例如 24.2G）。
+///
+/// 注：普通 dir_size() 也能遍历该目录，但会跳过无权限子目录，结果可能
+/// 偏大（包含 overlay 文件）或不准确。simctl 提供 Apple 官方的 runtime
+/// 镜像大小统计，更适合展示给用户。
+fn get_simulator_runtime_size() -> Option<u64> {
+    let output = std::process::Command::new("/usr/bin/xcrun")
+        .args(["simctl", "runtime", "list"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // 查找 Total Disk Images 行，例如 "Total Disk Images: 3 (24.2G)"
+    for line in stdout.lines() {
+        if let Some(start) = line.find("(") {
+            if let Some(end) = line.find(")") {
+                let size_str = &line[start + 1..end];
+                let bytes = parse_size_str(size_str.trim());
+                if bytes > 0 {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 获取模拟器 Cryptex 目录大小
+///
+/// 优先使用 /usr/bin/du -sk 获取 Cryptex 真实大小。普通 dir_size() 递归
+/// 遍历该目录也能得到近似值，但部分子目录会触发 Permission denied，
+/// du 在处理 mount point 时更准确且性能更好。失败则返回 None。
+fn get_simulator_cryptex_size() -> Option<u64> {
+    let path = PathBuf::from("/Library/Developer/CoreSimulator/Cryptex");
+    let output = std::process::Command::new("/usr/bin/du")
+        .args(["-sk", &path.to_string_lossy()])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    if let Some(first) = parts.first() {
+        if let Ok(kb) = first.parse::<u64>() {
+            return Some(kb * 1024);
+        }
+    }
+    None
 }
 
 /// 解析 JetBrains 目录名，提取产品名和版本号
@@ -1614,7 +1679,7 @@ fn get_docker_reclaimable_size() -> u64 {
 
 /// 解析 Docker/人类可读的大小字符串为字节数
 ///
-/// 支持: 1.2GB, 800MB, 50KB, 1024B, 0B
+/// 支持: 1.2GB, 800MB, 50KB, 1024B, 0B, 24.2G, 100M, 10K
 fn parse_size_str(s: &str) -> u64 {
     let s = s.trim();
     if s.is_empty() || s == "0B" {
@@ -1629,9 +1694,9 @@ fn parse_size_str(s: &str) -> u64 {
 
     let num: f64 = num_part.parse().unwrap_or(0.0);
     let multiplier: f64 = match unit.to_uppercase().as_str() {
-        "GB" => 1024.0 * 1024.0 * 1024.0,
-        "MB" => 1024.0 * 1024.0,
-        "KB" => 1024.0,
+        "GB" | "G" => 1024.0 * 1024.0 * 1024.0,
+        "MB" | "M" => 1024.0 * 1024.0,
+        "KB" | "K" => 1024.0,
         "B" => 1.0,
         _ => 1.0,
     };
