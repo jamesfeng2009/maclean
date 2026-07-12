@@ -1,6 +1,7 @@
 #!/bin/bash
 # maclean GUI 打包脚本
 # 生成 .app 应用包、.pkg 安装包和 .dmg 磁盘镜像
+# 同时生成 Universal Binary 以及独立的 arm64 / x86_64 版本
 #
 # 用法: ./scripts/build-package.sh
 
@@ -20,24 +21,35 @@ echo "  maclean v$VERSION GUI 打包脚本"
 echo "=========================================="
 echo ""
 
-# 1. 编译 Universal Binary (支持 Apple Silicon + Intel)
-echo "[1/7] 编译 Universal Binary (Apple Silicon + Intel)..."
-cd "$PROJECT_DIR"
+# 检测已安装的 target
+HAS_X86=$(rustup target list --installed 2>/dev/null | grep "x86_64-apple-darwin" || true)
+HAS_ARM=$(rustup target list --installed 2>/dev/null | grep "aarch64-apple-darwin" || true)
 
 # 检测当前架构
 CURRENT_ARCH=$(uname -m)
 echo "  当前架构: $CURRENT_ARCH"
 
-# 检查是否有 x86_64 target
-HAS_X86=$(rustup target list --installed 2>/dev/null | grep "x86_64-apple-darwin" || true)
-HAS_ARM=$(rustup target list --installed 2>/dev/null | grep "aarch64-apple-darwin" || true)
+# 1. 编译各架构二进制
+echo "[1/7] 编译二进制..."
+cd "$PROJECT_DIR"
 
-if [ -n "$HAS_ARM" ] && [ -n "$HAS_X86" ]; then
-    # 两个架构都有，构建 Universal Binary
+if [ -n "$HAS_ARM" ]; then
     echo "  编译 aarch64-apple-darwin..."
     cargo build --release --target aarch64-apple-darwin 2>&1 | tail -1
+fi
+
+if [ -n "$HAS_X86" ]; then
     echo "  编译 x86_64-apple-darwin..."
     cargo build --release --target x86_64-apple-darwin 2>&1 | tail -1
+fi
+
+# 2. 准备通用二进制
+echo ""
+echo "[2/7] 准备二进制..."
+
+mkdir -p "$BUILD_DIR"
+
+if [ -n "$HAS_ARM" ] && [ -n "$HAS_X86" ]; then
     echo "  合并 Universal Binary..."
     lipo -create \
         "$PROJECT_DIR/target/aarch64-apple-darwin/release/maclean" \
@@ -45,20 +57,16 @@ if [ -n "$HAS_ARM" ] && [ -n "$HAS_X86" ]; then
         -output "$BUILD_DIR/maclean"
     echo "  ✓ Universal Binary 编译完成 (M1 + Intel)"
 elif [ -n "$HAS_ARM" ]; then
-    echo "  仅 aarch64 target 可用，编译 Apple Silicon 版本..."
-    cargo build --release --target aarch64-apple-darwin 2>&1 | tail -1
     cp "$PROJECT_DIR/target/aarch64-apple-darwin/release/maclean" "$BUILD_DIR/maclean"
     echo "  ✓ Apple Silicon 版本编译完成 (仅 M1+)"
-    echo "  提示: 运行 rustup target add x86_64-apple-darwin 可启用 Intel 支持"
 else
-    echo "  编译当前架构版本..."
     cargo build --release 2>&1 | tail -1
-    echo "  ✓ 编译完成"
+    echo "  ✓ 当前架构版本编译完成"
 fi
 echo ""
 
-# 2. 准备打包目录
-echo "[2/7] 准备 .app 应用包目录..."
+# 3. 准备打包目录
+echo "[3/7] 准备 .app 应用包目录..."
 rm -rf "$PKG_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
@@ -67,17 +75,7 @@ mkdir -p "$DMG_DIR"
 echo "  ✓ 目录就绪"
 echo ""
 
-# 3. 构建 .app 包
-echo "[3/7] 构建 .app 应用包..."
-
-# 复制二进制文件
-cp "$BUILD_DIR/maclean" "$APP_BUNDLE/Contents/MacOS/maclean"
-chmod +x "$APP_BUNDLE/Contents/MacOS/maclean"
-
-# 复制应用图标
-cp "$PROJECT_DIR/assets/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-
-# 创建 Info.plist
+# 4. 创建 Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -120,23 +118,10 @@ EOF
 # 创建 PkgInfo
 echo "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
-# Ad-hoc 代码签名（使 macOS TCC 能识别应用身份）
-echo "  签名中..."
-codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
-echo "  ✓ 签名完成"
+# 复制应用图标
+cp "$PROJECT_DIR/assets/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
-echo "  ✓ .app 构建完成"
-echo ""
-
-# 4. 创建 .pkg 安装包
-echo "[4/7] 创建 .pkg 安装包..."
-
-# 将 .app 复制到 payload 的 Applications 目录
-cp -R "$APP_BUNDLE" "$PAYLOAD_DIR/Applications/maclean.app"
-
-PKG_FILE="$PKG_DIR/maclean-$VERSION.pkg"
-
-# 创建组件属性列表
+# 5. 创建组件属性列表
 cat > "$PKG_DIR/component.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -172,35 +157,48 @@ cat > "$PKG_DIR/component.plist" << EOF
 </plist>
 EOF
 
-pkgbuild \
-    --root "$PAYLOAD_DIR" \
-    --component-plist "$PKG_DIR/component.plist" \
-    --identifier "com.maclean.pkg" \
-    --version "$VERSION" \
-    --install-location "/" \
-    --scripts "$PROJECT_DIR/scripts/pkg-scripts" \
-    "$PKG_FILE" 2>/dev/null || pkgbuild \
-    --root "$PAYLOAD_DIR" \
-    --identifier "com.maclean.pkg" \
-    --version "$VERSION" \
-    --install-location "/" \
-    "$PKG_FILE"
+# 6. 为指定架构构建 .app、.pkg、.dmg
+build_for_arch() {
+    local arch_label="$1"
+    local binary_path="$2"
+    local suffix="$3"
 
-echo "  ✓ .pkg 创建完成: $PKG_FILE"
-echo ""
+    echo "  ----------------------------------------"
+    echo "  构建 $arch_label 版本..."
 
-# 5. 创建 .dmg 磁盘镜像
-echo "[5/7] 创建 .dmg 磁盘镜像..."
+    # 复制二进制
+    cp "$binary_path" "$APP_BUNDLE/Contents/MacOS/maclean"
+    chmod +x "$APP_BUNDLE/Contents/MacOS/maclean"
 
-# 准备 DMG 内容目录
-DMG_CONTENT="$PKG_DIR/dmg_content"
-mkdir -p "$DMG_CONTENT"
+    # Ad-hoc 代码签名
+    codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
 
-# 复制 .app 到 dmg 内容目录
-cp -R "$APP_BUNDLE" "$DMG_CONTENT/maclean.app"
+    # .pkg
+    rm -rf "$PAYLOAD_DIR/Applications/maclean.app"
+    cp -R "$APP_BUNDLE" "$PAYLOAD_DIR/Applications/maclean.app"
 
-# 创建安装说明
-cat > "$DMG_CONTENT/安装说明.txt" << 'EOF'
+    local pkg_file="$PKG_DIR/maclean-$VERSION$suffix.pkg"
+    pkgbuild \
+        --root "$PAYLOAD_DIR" \
+        --component-plist "$PKG_DIR/component.plist" \
+        --identifier "com.maclean.pkg" \
+        --version "$VERSION" \
+        --install-location "/" \
+        --scripts "$PROJECT_DIR/scripts/pkg-scripts" \
+        "$pkg_file" 2>/dev/null || pkgbuild \
+        --root "$PAYLOAD_DIR" \
+        --identifier "com.maclean.pkg" \
+        --version "$VERSION" \
+        --install-location "/" \
+        "$pkg_file"
+
+    # .dmg
+    local dmg_content="$PKG_DIR/dmg_content$suffix"
+    rm -rf "$dmg_content"
+    mkdir -p "$dmg_content"
+    cp -R "$APP_BUNDLE" "$dmg_content/maclean.app"
+
+    cat > "$dmg_content/安装说明.txt" << 'EOF'
 maclean 安装说明
 ================
 
@@ -215,43 +213,55 @@ maclean 安装说明
   将 maclean.app 从 Applications 拖到废纸篓
 EOF
 
-# 创建 Applications 文件夹快捷方式
-ln -s /Applications "$DMG_CONTENT/Applications"
+    ln -s /Applications "$dmg_content/Applications"
 
-DMG_FILE="$PKG_DIR/maclean-$VERSION.dmg"
+    local dmg_file="$PKG_DIR/maclean-$VERSION$suffix.dmg"
+    hdiutil create \
+        -volname "maclean $VERSION $arch_label" \
+        -srcfolder "$dmg_content" \
+        -ov \
+        -fs HFS+ \
+        -format UDZO \
+        "$dmg_file" 2>&1 | grep -v "^$" || true
 
-# 用 hdiutil 创建 DMG
-hdiutil create \
-    -volname "maclean $VERSION" \
-    -srcfolder "$DMG_CONTENT" \
-    -ov \
-    -fs HFS+ \
-    -format UDZO \
-    "$DMG_FILE" 2>&1 | grep -v "^$" || true
+    echo "    .pkg: $pkg_file"
+    echo "    .dmg: $dmg_file"
+}
 
-echo "  ✓ .dmg 创建完成: $DMG_FILE"
+echo "[4/7] 创建各架构安装包..."
 echo ""
 
-# 6. 验证
-echo "[6/7] 验证打包结果..."
+# Universal Binary
+build_for_arch "Universal" "$BUILD_DIR/maclean" ""
+
+# arm64 独立包
+if [ -n "$HAS_ARM" ]; then
+    build_for_arch "Apple Silicon" "$PROJECT_DIR/target/aarch64-apple-darwin/release/maclean" "-arm64"
+fi
+
+# x86_64 独立包
+if [ -n "$HAS_X86" ]; then
+    build_for_arch "Intel" "$PROJECT_DIR/target/x86_64-apple-darwin/release/maclean" "-x86_64"
+fi
+
+echo ""
+
+# 7. 验证
+echo "[5/7] 验证打包结果..."
 echo ""
 echo "=== 打包结果 ==="
 echo ""
-ls -lh "$PKG_FILE" "$DMG_FILE" 2>/dev/null
-echo ""
-echo "=== .app 结构 ==="
-find "$APP_BUNDLE" -type f | head -10
+ls -lh "$PKG_DIR"/*.pkg "$PKG_DIR"/*.dmg 2>/dev/null
 echo ""
 echo "=== 可执行文件信息 ==="
 file "$BUILD_DIR/maclean"
 echo ""
 
-# 7. 清理临时目录
-echo "[7/7] 清理临时文件..."
-rm -rf "$PAYLOAD_DIR" "$DMG_CONTENT"
+# 8. 清理临时目录
+echo "[6/7] 清理临时文件..."
+rm -rf "$PAYLOAD_DIR" "$PKG_DIR"/dmg_content*
 
 # 取消注册构建产物 maclean.app，避免 LaunchServices 中显示重复图标
-# .pkg 和 .dmg 中已包含完整应用包，不再需要暴露的 .app 目录
 if [ -d "$APP_BUNDLE" ]; then
     /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -u "$APP_BUNDLE" 2>/dev/null || true
     rm -rf "$APP_BUNDLE"
@@ -264,8 +274,7 @@ echo "=========================================="
 echo "  打包完成!"
 echo "=========================================="
 echo ""
-echo "  .pkg: $PKG_FILE"
-echo "  .dmg: $DMG_FILE"
+ls -lh "$PKG_DIR"/*.pkg "$PKG_DIR"/*.dmg 2>/dev/null
 echo ""
 echo "  安装方式:"
 echo "    .pkg: 双击安装"
