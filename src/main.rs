@@ -2157,6 +2157,7 @@ fn execute_optimize_task(task_name: &str) -> String {
 
     let result = match task_name {
         "DNS 缓存刷新" => {
+            // dscacheutil 和 killall 在现代 macOS 上需要 sudo
             let r1 = std::process::Command::new("dscacheutil")
                 .arg("-flushcache")
                 .output();
@@ -2164,9 +2165,12 @@ fn execute_optimize_task(task_name: &str) -> String {
                 .arg("-HUP")
                 .arg("mDNSResponder")
                 .output();
-            match (r1, r2) {
-                (Ok(_), Ok(_)) => "✅ DNS 缓存已刷新".to_string(),
-                _ => "⚠️ DNS 缓存刷新需要管理员权限".to_string(),
+            let success = r1.map(|o| o.status.success()).unwrap_or(false)
+                && r2.map(|o| o.status.success()).unwrap_or(false);
+            if success {
+                "✅ DNS 缓存已刷新".to_string()
+            } else {
+                "⚠️ DNS 刷新需要管理员权限，可在终端执行: sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder".to_string()
             }
         }
         "QuickLook 缩略图重建" => {
@@ -2180,7 +2184,15 @@ fn execute_optimize_task(task_name: &str) -> String {
             }
         }
         "LaunchServices 重建" => {
-            let lsregister = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
+            // lsregister 路径在 macOS 10.0-15 上一致，但加 fallback 更稳健
+            let lsregister_candidates = [
+                "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister",
+                "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+            ];
+            let lsregister = lsregister_candidates
+                .iter()
+                .find(|p| std::path::Path::new(p).exists())
+                .unwrap_or(&lsregister_candidates[0]);
             let r = std::process::Command::new(lsregister)
                 .arg("-gc")
                 .output();
@@ -2230,10 +2242,11 @@ fn execute_optimize_task(task_name: &str) -> String {
             }
         }
         "内存压力释放" => {
+            // purge 在所有 macOS 版本上都需要 sudo
             let r = std::process::Command::new("purge").output();
             match r {
-                Ok(_) => "✅ 非活跃内存已释放".to_string(),
-                Err(_) => "⚠️ 内存释放需要管理员权限".to_string(),
+                Ok(o) if o.status.success() => "✅ 非活跃内存已释放".to_string(),
+                _ => "⚠️ 内存释放需要管理员权限，可在终端执行: sudo purge".to_string(),
             }
         }
         _ => format!("⚠️ 未知优化任务: {}", task_name),
