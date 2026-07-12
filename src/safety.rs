@@ -304,6 +304,10 @@ fn check_whitelist(canonical: &Path, home: &Path) -> bool {
         format!("{}/Library/Caches/Homebrew/", home_str),
         // pip 缓存
         format!("{}/Library/Caches/pip/", home_str),
+        // Gradle 缓存
+        format!("{}/.gradle/caches/", home_str),
+        format!("{}/.gradle/daemon/", home_str),
+        format!("{}/.gradle/wrapper/dists/", home_str),
         // JetBrains 缓存
         format!("{}/Library/Caches/JetBrains/", home_str),
         // 系统日志
