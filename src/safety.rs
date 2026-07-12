@@ -130,15 +130,37 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         return SafetyCheck::Danger("拒绝删除用户主目录".to_string());
     }
 
-    let forbidden_home_paths = [
-        "Library/Preferences",           // 用户偏好设置
+    // 4a. 精确匹配：只保护目录本身，允许删除其子项
+    //     （这些目录的子项在白名单中按需放行，如 Containers/<bundle_id>、Preferences/<bundle_id>.plist）
+    let forbidden_exact = [
+        "Library/Preferences",           // 偏好设置根目录（子项 plist 可删）
+        "Library/Containers",            // Containers 根目录（子项可删）
+        "Library/Group Containers",      // Group Containers 根目录（子项可删）
+        "Library/Saved Application State", // Saved State 根目录（子项可删）
+        "Library/HTTPStorages",          // HTTPStorages 根目录（子项可删）
+        "Library/Caches",                // Caches 根目录（子项可删）
+        "Library/Logs",                  // Logs 根目录（子项可删）
+        "Library/Application Support",   // Application Support 根目录（子项可删）
+    ];
+
+    for forbidden_suffix in &forbidden_exact {
+        let forbidden_path = home.join(forbidden_suffix);
+        if canonical == forbidden_path {
+            return SafetyCheck::Danger(format!(
+                "拒绝删除用户关键目录: {}",
+                canonical_str
+            ));
+        }
+    }
+
+    // 4b. 前缀匹配：保护目录本身及其所有子内容
+    //     （这些目录的任何子路径都不允许删除）
+    let forbidden_prefix = [
         "Library/Keychains",             // 钥匙串（密码）
         "Library/Accounts",              // 账户信息
         "Library/Mail",                  // 邮件数据
         "Library/Messages",              // 消息数据
         "Library/Cookies",               // Cookie
-        "Library/Group Containers",      // Group Containers 根目录
-        "Library/Containers",            // Containers 根目录
         "Library/Application Support/MobileSync",   // iOS 备份
         "Library/Application Support/AddressBook",  // 通讯录
         "Library/Application Support/CallHistoryDB", // 通话记录
@@ -156,9 +178,12 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         ".config/git",                   // Git 配置
     ];
 
-    for forbidden_suffix in &forbidden_home_paths {
+    for forbidden_suffix in &forbidden_prefix {
         let forbidden_path = home.join(forbidden_suffix);
-        if canonical == forbidden_path {
+        // 前缀匹配：禁止删除该目录本身或其任何子路径
+        if canonical == forbidden_path
+            || canonical.starts_with(&format!("{}/", forbidden_path.to_string_lossy()))
+        {
             return SafetyCheck::Danger(format!(
                 "拒绝删除用户关键目录: {}",
                 canonical_str
@@ -167,15 +192,26 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     }
 
     // ================================================================
-    //  第 5 层: 白名单校验 - 只允许删除已知安全的路径模式
+    //  第 5 层: 白名单校验
     // ================================================================
-    let is_in_safe_zone = check_whitelist(&canonical, &home, category);
+    // 策略分类：
+    //   - 用户主动扫描并勾选的类别（大文件/大目录）跳过白名单
+    //     因为这些是用户明确要删除的，黑名单已保证系统安全
+    //   - 自动批量清理类别（缓存/日志/App卸载关联文件）保留白名单
+    //     防止扫描器意外扫到非预期路径
+    let user_initiated = matches!(
+        category,
+        "大文件" | "大目录"
+    );
 
-    if !is_in_safe_zone {
-        return SafetyCheck::Danger(format!(
-            "路径不在安全白名单内，拒绝删除: {}",
-            canonical_str
-        ));
+    if !user_initiated {
+        let is_in_safe_zone = check_whitelist(&canonical, &home, category);
+        if !is_in_safe_zone {
+            return SafetyCheck::Danger(format!(
+                "路径不在安全白名单内，拒绝删除: {}",
+                canonical_str
+            ));
+        }
     }
 
     // ================================================================
