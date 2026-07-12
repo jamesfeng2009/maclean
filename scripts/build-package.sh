@@ -249,6 +249,14 @@ echo ""
 # 7. 清理临时目录
 echo "[7/7] 清理临时文件..."
 rm -rf "$PAYLOAD_DIR" "$DMG_CONTENT"
+
+# 取消注册构建产物 maclean.app，避免 LaunchServices 中显示重复图标
+# .pkg 和 .dmg 中已包含完整应用包，不再需要暴露的 .app 目录
+if [ -d "$APP_BUNDLE" ]; then
+    /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -u "$APP_BUNDLE" 2>/dev/null || true
+    rm -rf "$APP_BUNDLE"
+fi
+
 echo "  ✓ 清理完成"
 echo ""
 
@@ -258,10 +266,8 @@ echo "=========================================="
 echo ""
 echo "  .pkg: $PKG_FILE"
 echo "  .dmg: $DMG_FILE"
-echo "  .app: $APP_BUNDLE"
 echo ""
 echo "  安装方式:"
 echo "    .pkg: 双击安装"
 echo "    .dmg: 挂载后拖拽 maclean.app 到 Applications"
-echo "    .app: 直接双击运行"
 echo ""
