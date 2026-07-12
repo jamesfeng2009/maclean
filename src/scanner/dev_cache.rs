@@ -1874,8 +1874,10 @@ fn scan_monorepo_caches() -> Vec<ScanItem> {
         // 去重：移除嵌套的 monorepo root
         monorepo_roots.sort();
         monorepo_roots.dedup();
+        // 先克隆一份用于比较，避免 retain 的可变借用与闭包内的不可变借用冲突
+        let all_roots = monorepo_roots.clone();
         monorepo_roots.retain(|root| {
-            !monorepo_roots
+            !all_roots
                 .iter()
                 .any(|other| other != root && root.starts_with(other))
         });
