@@ -156,10 +156,19 @@ pub struct App {
     pub touch_id_available: bool,
     /// Touch ID 是否已为 sudo 启用（缓存检测结果）
     pub touch_id_enabled: bool,
+    /// 当前是否处于"输入密码以启用 Touch ID"模式
+    /// true: 确认密码后先创建 sudo_local，再执行删除
+    /// false: 确认密码后直接执行删除
+    pub touch_id_setup_mode: bool,
     /// Touch ID 设置/执行中的错误提示
     pub touch_id_error: Option<String>,
     /// Touch ID 启用等待开始时间（用于超时检测）
     pub touch_id_wait_start: Option<std::time::Instant>,
+    /// 关联文件明细：key = ScanItem.path，value = [(路径, 大小, 标签)]
+    /// 用于 App卸载 tab 展开显示每个关联文件的大小和路径
+    pub associated_details: std::collections::HashMap<String, Vec<(String, u64, String)>>,
+    /// 已展开的项路径集合（用于展开/收起状态）
+    pub expanded_items: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -202,8 +211,11 @@ impl App {
             sudo_error: None,
             touch_id_available: crate::touchid::touch_id_available(),
             touch_id_enabled: crate::touchid::sudo_touch_id_enabled(),
+            touch_id_setup_mode: false,
             touch_id_error: None,
             touch_id_wait_start: None,
+            associated_details: std::collections::HashMap::new(),
+            expanded_items: std::collections::HashSet::new(),
         }
     }
 
@@ -369,10 +381,110 @@ impl App {
         self.scan_states[idx] = ScanState::Done;
         self.list_index = 0;
 
+        // 扫描后预检查可删除性：对每项运行安全检查，
+        // 不可删除的标记 deletable=false，UI 会灰色显示且不可选中
+        self.precheck_deletability();
+
+        // App卸载 tab：计算关联文件明细，供 UI 展开
+        if self.tab == Tab::AppUninstall {
+            self.populate_associated_details();
+        }
+
         // 刷新磁盘信息
         let (total, free) = get_disk_info();
         self.disk_total = total;
         self.disk_free = free;
+    }
+
+    /// 扫描后预检查可删除性
+    ///
+    /// 对当前 Tab 的每个 ScanItem 运行安全检查（safety::check_path_safety_with_category）。
+    /// - Danger → 标记 deletable=false，写明原因，UI 灰色不可选
+    /// - Warning → 保持 deletable=true，但在描述中追加警告
+    /// - Safe → 不变
+    ///
+    /// 这样在扫描阶段就屏蔽掉确定无法删除的项，避免用户选中后删除失败。
+    fn precheck_deletability(&mut self) {
+        let idx = self.tab_index();
+        let items = &mut self.results[idx];
+        for item in items.iter_mut() {
+            if !item.deletable {
+                continue; // 已被扫描器标记为不可删除
+            }
+            match safety::check_path_safety_with_category(&item.path, &item.category) {
+                safety::SafetyCheck::Safe => {}
+                safety::SafetyCheck::Warning(msg) => {
+                    // 保持可删除，但追加警告到描述
+                    if !item.description.contains(&msg) {
+                        item.description = format!("{} ⚠️ {}", item.description, msg);
+                    }
+                }
+                safety::SafetyCheck::Danger(msg) => {
+                    item.deletable = false;
+                    item.undeletable_reason = msg;
+                }
+            }
+        }
+    }
+
+    /// 为 App卸载 tab 的每个项计算关联文件明细
+    ///
+    /// 遍历 batch_paths 中每个路径，计算大小并生成标签。
+    /// 对于大于 100MB 的目录，进一步枚举其直接子目录并作为子明细展示，
+    /// 让用户清楚看到空间被什么占用（如 Documents、Caches 等）。
+    fn populate_associated_details(&mut self) {
+        self.associated_details.clear();
+        let items = self.results[self.tab_index()].clone();
+        for item in &items {
+            if item.batch_paths.is_empty() {
+                continue;
+            }
+            let mut details: Vec<(String, u64, String)> = Vec::new();
+            for bp in &item.batch_paths {
+                let p = std::path::Path::new(bp);
+                let size = if p.is_dir() {
+                    scanner::dir_size(p)
+                } else if p.is_file() {
+                    p.symlink_metadata().map(|m| m.len()).unwrap_or(0)
+                } else {
+                    0
+                };
+                let label = classify_associated_path(bp);
+                details.push((bp.clone(), size, label));
+
+                // 对于大于 100MB 的目录，枚举直接子目录展示子明细
+                if p.is_dir() && size > 100 * 1024 * 1024 {
+                    if let Ok(entries) = std::fs::read_dir(p) {
+                        let mut sub_dirs: Vec<(String, u64)> = Vec::new();
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let sp = entry.path();
+                            if !sp.is_dir() {
+                                continue;
+                            }
+                            let ss = scanner::dir_size(&sp);
+                            if ss > 10 * 1024 * 1024 { // > 10MB 的子目录才展示
+                                sub_dirs.push((sp.to_string_lossy().to_string(), ss));
+                            }
+                        }
+                        // 按大小降序，最多展示 8 个子目录
+                        sub_dirs.sort_by(|a, b| b.1.cmp(&a.1));
+                        for (sp, ss) in sub_dirs.into_iter().take(8) {
+                            let sub_label = format!(
+                                "  ├─ {}",
+                                std::path::Path::new(&sp)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("?")
+                            );
+                            details.push((sp, ss, sub_label));
+                        }
+                    }
+                }
+            }
+            // 按大小降序排列
+            details.sort_by(|a, b| b.1.cmp(&a.1));
+            self.associated_details.insert(item.path.clone(), details);
+        }
     }
 
     /// 计算当前 Tab 选中项的总大小
@@ -668,4 +780,56 @@ fn get_disk_info() -> (u64, u64) {
     }
 
     (0, 0)
+}
+
+/// 根据路径分类关联文件的标签
+///
+/// 将 ~/Library 下的路径映射为用户友好的标签：
+/// - Containers → 应用容器
+/// - Caches → 缓存
+/// - Application Support → 应用数据
+/// - Preferences → 偏好设置
+/// - Logs → 日志
+/// - .app → 应用本体
+fn classify_associated_path(path: &str) -> String {
+    if path.ends_with(".app") {
+        return "应用本体".to_string();
+    }
+    if path.contains("/Containers/") {
+        return "应用容器".to_string();
+    }
+    if path.contains("/Group Containers/") {
+        return "共享容器".to_string();
+    }
+    if path.contains("/Cookies/") {
+        return "Cookie".to_string();
+    }
+    if path.contains("/WebKit/") {
+        return "WebKit数据".to_string();
+    }
+    if path.contains("/Application Scripts/") {
+        return "应用脚本".to_string();
+    }
+    if path.contains("/Metadata/") {
+        return "元数据".to_string();
+    }
+    if path.contains("/Caches/") {
+        return "缓存".to_string();
+    }
+    if path.contains("/Application Support/") {
+        return "应用数据".to_string();
+    }
+    if path.contains("/Preferences/") {
+        return "偏好设置".to_string();
+    }
+    if path.contains("/Logs/") {
+        return "日志".to_string();
+    }
+    if path.contains("/Saved Application State/") {
+        return "窗口状态".to_string();
+    }
+    if path.contains("/HTTPStorages/") {
+        return "网络存储".to_string();
+    }
+    "其他".to_string()
 }

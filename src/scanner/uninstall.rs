@@ -66,6 +66,10 @@ impl Scanner for UninstallScanner {
             .filter_map(|app_path| scan_app(app_path))
             .collect();
 
+        // 扫描废纸篓和 Downloads 中的 .app 残留
+        items.extend(scan_trash_apps());
+        items.extend(scan_downloads_apps());
+
         // 按大小降序排列
         items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
 
@@ -117,6 +121,130 @@ fn is_app_bundle(path: &PathBuf) -> bool {
         return name.ends_with(".app");
     }
     false
+}
+
+// =========================================================================
+//  废纸篓 / Downloads 中的 .app 残留扫描
+// =========================================================================
+
+/// 扫描 ~/.Trash 中的 .app 包（已删除应用的残留）
+///
+/// 废纸篓中的 .app 是用户已经拖入 Trash 的应用，可以安全清理。
+/// 会检测是否与 /Applications 中的已安装应用同名（避免删除正在重装的应用）。
+fn scan_trash_apps() -> Vec<ScanItem> {
+    let home = home_dir();
+    let trash_dir = home.join(".Trash");
+    let mut items = Vec::new();
+    if !trash_dir.is_dir() {
+        return items;
+    }
+
+    // 收集已安装应用名称集合，用于排除正在重装的情况
+    let installed_names = collect_installed_app_names();
+
+    if let Ok(entries) = std::fs::read_dir(&trash_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !is_app_bundle(&path) {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // 如果同名应用已在 /Applications 安装，则跳过（可能是在重装）
+            if installed_names.contains(name) {
+                continue;
+            }
+            let size = dir_size(&path);
+            items.push(ScanItem {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: format!("废纸篓残留-{}", name.trim_end_matches(".app")),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: format!(
+                    "废纸篓中的 {} 残留，可安全清理释放空间",
+                    name
+                ),
+            });
+        }
+    }
+
+    items
+}
+
+/// 扫描 ~/Downloads 中的 .app 包（下载后未清理的安装包）
+///
+/// Downloads 中的 .app 通常是下载后直接解压运行的，安装到 /Applications 后可清理。
+fn scan_downloads_apps() -> Vec<ScanItem> {
+    let home = home_dir();
+    let downloads = home.join("Downloads");
+    let mut items = Vec::new();
+    if !downloads.is_dir() {
+        return items;
+    }
+
+    let installed_names = collect_installed_app_names();
+
+    if let Ok(entries) = std::fs::read_dir(&downloads) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !is_app_bundle(&path) {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // 如果同名应用已安装，说明已拷贝到 /Applications，Downloads 里的是残留
+            let is_installed = installed_names.contains(name);
+            let size = dir_size(&path);
+            let recommend = if is_installed {
+                Recommend::Safe
+            } else {
+                Recommend::Caution
+            };
+            let desc = if is_installed {
+                format!("Downloads 中的 {}，同名应用已安装，可安全清理", name)
+            } else {
+                format!("Downloads 中的 {}，未检测到同名已安装应用，请确认后再删除", name)
+            };
+            items.push(ScanItem {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: format!("下载残留-{}", name.trim_end_matches(".app")),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend,
+                description: desc,
+            });
+        }
+    }
+
+    items
+}
+
+/// 收集 /Applications 和 ~/Applications 中已安装应用的文件名集合
+fn collect_installed_app_names() -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let home = home_dir();
+    let dirs = [PathBuf::from("/Applications"), home.join("Applications")];
+    for dir in &dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if let Some(name) = entry.file_name().to_str() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 // =========================================================================
@@ -324,17 +452,33 @@ fn decode_unicode_escapes(input: &str) -> String {
 ///
 /// 基于 bundle ID 和应用名搜索 ~/Library/ 下的各类关联路径。
 /// 返回所有存在的关联文件/目录路径列表。
+///
+/// 扫描范围（共 14 类）：
+/// 1.  Containers — 沙盒应用容器（含数据、缓存、文档）
+/// 2.  Group Containers — 共享容器（App Group）
+/// 3.  Caches — 应用缓存
+/// 4.  Application Support — 应用数据
+/// 5.  Preferences (.plist) — 偏好设置文件
+/// 6.  Preferences/ — 偏好设置目录
+/// 7.  Logs — 日志
+/// 8.  Saved Application State — 窗口恢复状态
+/// 9.  HTTPStorages — HTTP 缓存/Cookie
+/// 10. Cookies — Cookie 文件
+/// 11. WebKit — WebKit/Electron 数据
+/// 12. Application Scripts — 应用脚本
+/// 13. Metadata — Spotlight 元数据
+/// 14. Caches (按应用名匹配) — 部分应用缓存以名称而非 bundle ID 命名
 fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     let home = home_dir();
     let mut paths = Vec::new();
 
-    // ~/Library/Containers/<bundle_id>/
+    // 1. ~/Library/Containers/<bundle_id>/
     let p = home.join(format!("Library/Containers/{}", bundle_id));
     if p.exists() {
         paths.push(p.to_string_lossy().to_string());
     }
 
-    // ~/Library/Group Containers/*<bundle_id>*/  (通配匹配)
+    // 2. ~/Library/Group Containers/*<bundle_id>*/  (通配匹配)
     let group_dir = home.join("Library/Group Containers");
     if let Ok(entries) = std::fs::read_dir(&group_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -345,37 +489,37 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
         }
     }
 
-    // ~/Library/Caches/<bundle_id>/
+    // 3. ~/Library/Caches/<bundle_id>/
     let p = home.join(format!("Library/Caches/{}", bundle_id));
     if p.exists() {
         paths.push(p.to_string_lossy().to_string());
     }
 
-    // ~/Library/Application Support/<app_name>/
+    // 4. ~/Library/Application Support/<app_name>/
     let p = home.join(format!("Library/Application Support/{}", app_name));
     if p.exists() {
         paths.push(p.to_string_lossy().to_string());
     }
 
-    // ~/Library/Preferences/<bundle_id>.plist
+    // 5. ~/Library/Preferences/<bundle_id>.plist
     let p = home.join(format!("Library/Preferences/{}.plist", bundle_id));
     if p.exists() {
         paths.push(p.to_string_lossy().to_string());
     }
 
-    // ~/Library/Preferences/<bundle_id>/
+    // 6. ~/Library/Preferences/<bundle_id>/
     let p = home.join(format!("Library/Preferences/{}", bundle_id));
     if p.exists() {
         paths.push(p.to_string_lossy().to_string());
     }
 
-    // ~/Library/Logs/<app_name>/
+    // 7. ~/Library/Logs/<app_name>/
     let p = home.join(format!("Library/Logs/{}", app_name));
     if p.exists() {
         paths.push(p.to_string_lossy().to_string());
     }
 
-    // ~/Library/Saved Application State/<bundle_id>.savedState/
+    // 8. ~/Library/Saved Application State/<bundle_id>.savedState/
     let p = home.join(format!(
         "Library/Saved Application State/{}.savedState",
         bundle_id
@@ -384,10 +528,42 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
         paths.push(p.to_string_lossy().to_string());
     }
 
-    // ~/Library/HTTPStorages/<bundle_id>/
+    // 9. ~/Library/HTTPStorages/<bundle_id>/
     let p = home.join(format!("Library/HTTPStorages/{}", bundle_id));
     if p.exists() {
         paths.push(p.to_string_lossy().to_string());
+    }
+
+    // 10. ~/Library/Cookies/<bundle_id>.binarycookies
+    let p = home.join(format!("Library/Cookies/{}.binarycookies", bundle_id));
+    if p.exists() {
+        paths.push(p.to_string_lossy().to_string());
+    }
+
+    // 11. ~/Library/WebKit/<bundle_id>/
+    let p = home.join(format!("Library/WebKit/{}", bundle_id));
+    if p.exists() {
+        paths.push(p.to_string_lossy().to_string());
+    }
+
+    // 12. ~/Library/Application Scripts/<bundle_id>/
+    let p = home.join(format!("Library/Application Scripts/{}", bundle_id));
+    if p.exists() {
+        paths.push(p.to_string_lossy().to_string());
+    }
+
+    // 13. ~/Library/Metadata/<bundle_id>/
+    let p = home.join(format!("Library/Metadata/{}", bundle_id));
+    if p.exists() {
+        paths.push(p.to_string_lossy().to_string());
+    }
+
+    // 14. ~/Library/Caches/<app_name>/ — 部分应用以名称而非 bundle ID 命名缓存
+    if app_name != bundle_id {
+        let p = home.join(format!("Library/Caches/{}", app_name));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
     }
 
     paths

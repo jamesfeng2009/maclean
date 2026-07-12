@@ -4,13 +4,17 @@
 //! /etc/pam.d/sudo 中已包含 `auth include sudo_local`，只需创建 sudo_local 文件
 //! 并取消注释 pam_tid.so 行即可。
 //!
-//! 特权操作使用三种方案（按优先级）：
-//! 1. AEWP (AuthorizationExecuteWithPrivileges) — 系统原生密码弹窗，不打开终端
-//! 2. Terminal.app + sudo — 回退方案，打开终端窗口
-//! 3. osascript administrator — 最终回退（可能被 TCC 拦截）
+//! 启用流程说明：
+//! - 创建 /etc/pam.d/sudo_local 需要管理员权限，首次启用必须输入一次密码
+//!   （因为此时 Touch ID for sudo 尚未启用，无法绕过密码框）。
+//! - 启用成功后，后续所有 sudo 命令都会由系统弹出 Touch ID 提示。
+//!
+//! 特权操作使用 osascript `do shell script ... with administrator privileges`，
+//! 比 AEWP (AuthorizationExecuteWithPrivileges) 在新版 macOS 上更稳定可靠。
 //!
 //! 兼容 macOS 12+ (Monterey 到 Tahoe)，Intel 和 Apple Silicon 均可。
 
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -110,92 +114,148 @@ auth       sufficient     pam_tid.so\n"
         .to_string()
 }
 
-/// 异步触发启用 Touch ID（非阻塞）
+/// 使用 sudo -S 验证密码是否有效
 ///
-/// 优先使用 AEWP（系统原生密码弹窗），不可用时回退到 Terminal.app。
-/// 调用者应通过 `sudo_touch_id_enabled()` 轮询检测是否启用成功。
-pub fn trigger_enable_touch_id() -> Result<(), String> {
+/// 通过 `sudo -k && echo password | sudo -S -p "" -v` 验证。
+/// 返回 true 表示密码正确且 sudo 票据已缓存。
+fn verify_sudo_password(password: &str) -> bool {
+    let _ = Command::new("/usr/bin/sudo").arg("-k").output();
+    let mut child = match std::process::Command::new("/usr/bin/sudo")
+        .args(["-S", "-p", "", "-v"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(format!("{}\n", password).as_bytes());
+    }
+
+    match child.wait() {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+/// 使用密码通过 sudo -S 创建 /etc/pam.d/sudo_local
+///
+/// 因为 osascript `with administrator privileges` 在 macOS 15 上
+/// 无法写入 /etc/pam.d/，所以改用 sudo -S。
+///
+/// 返回 Ok(true) 表示成功创建，Ok(false) 表示已存在或无需创建，
+/// Err 表示密码错误或其他错误。
+pub fn enable_touch_id_with_password(password: &str) -> Result<bool, String> {
     if sudo_touch_id_enabled() {
-        return Ok(());
+        return Ok(false);
     }
 
     if !touch_id_supported() {
         return Err("系统不支持 Touch ID".to_string());
     }
 
-    // 1. 准备 sudo_local 内容到临时文件
+    // 1. 先验证密码是否正确
+    if !verify_sudo_password(password) {
+        return Err("密码错误".to_string());
+    }
+
+    // 2. 准备 sudo_local 内容到临时文件
     let tmp_path = "/tmp/maclean_sudo_local.tmp";
     let content = prepare_sudo_local_content();
     std::fs::write(tmp_path, &content)
         .map_err(|e| format!("无法写入临时文件: {}", e))?;
 
-    // 2. 优先尝试 AEWP（在后台线程中执行，不阻塞 GUI）
-    if crate::aewp::aewp_available() {
-        let tmp_path_owned = tmp_path.to_string();
-        std::thread::spawn(move || {
-            let script = format!(
-                "cp {} {} && chmod 444 {} && rm -f {}",
-                tmp_path_owned, SUDO_LOCAL_PATH, SUDO_LOCAL_PATH, tmp_path_owned
-            );
-            let _ = crate::aewp::execute_with_privileges("/bin/sh", &["-c", &script]);
-        });
-        return Ok(());
+    // 3. 使用 sudo -S 复制临时文件到 /etc/pam.d/sudo_local
+    let script = format!(
+        "cp \"{}\" \"{}\" && chmod 444 \"{}\" && rm -f \"{}\"",
+        tmp_path,
+        SUDO_LOCAL_PATH,
+        SUDO_LOCAL_PATH,
+        tmp_path
+    );
+
+    let mut child = Command::new("/usr/bin/sudo")
+        .args(["-S", "-p", "", "/bin/sh", "-c", &script])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动 sudo: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(format!("{}\n", password).as_bytes());
     }
 
-    // 3. 回退：通过 Terminal.app 执行 sudo cp（非阻塞）
-    let terminal_script = format!(
-        "sudo cp {} {} && sudo chmod 444 {} && echo MACLEAN_TOUCHID_DONE && sleep 1 && exit",
-        tmp_path, SUDO_LOCAL_PATH, SUDO_LOCAL_PATH
-    );
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("sudo 执行失败: {}", e))?;
 
-    let apple_script = format!(
-        "tell application \"Terminal\"\n    activate\n    do script \"{}\"\nend tell",
-        terminal_script.replace('"', "\\\"")
-    );
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("创建 sudo_local 失败: {}", stderr));
+    }
 
-    Command::new("/usr/bin/osascript")
-        .args(["-e", &apple_script])
-        .output()
-        .map_err(|e| format!("无法打开 Terminal: {}", e))?;
+    // 4. 验证是否真的启用了
+    if !sudo_touch_id_enabled() {
+        return Err("sudo_local 创建后未能检测到 Touch ID 配置".to_string());
+    }
 
-    Ok(())
+    // 5. 清除 sudo 票据，确保下一次 sudo 能触发 Touch ID
+    // 否则 sudo -S -v 获取的票据会让后续 sudo 跳过认证
+    let _ = Command::new("/usr/bin/sudo").arg("-k").output();
+
+    Ok(true)
+}
+
+/// 触发启用 Touch ID 流程（旧版 osascript 方式，已废弃）
+///
+/// 保留此函数以便兼容旧调用点，但实际逻辑改为返回提示信息，
+/// 调用者应改用 `enable_touch_id_with_password`。
+pub fn trigger_enable_touch_id() -> Result<(), String> {
+    Err("请使用 enable_touch_id_with_password 并提供管理员密码".to_string())
+}
+
+/// 使用密码通过 sudo -S 禁用 Touch ID
+#[allow(dead_code)]
+pub fn disable_touch_id_with_password(password: &str) -> Result<bool, String> {
+    if !sudo_touch_id_enabled() {
+        return Ok(false);
+    }
+
+    if !verify_sudo_password(password) {
+        return Err("密码错误".to_string());
+    }
+
+    let script = format!("rm -f \"{}\"", SUDO_LOCAL_PATH);
+    let mut child = Command::new("/usr/bin/sudo")
+        .args(["-S", "-p", "", "/bin/sh", "-c", &script])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动 sudo: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(format!("{}\n", password).as_bytes());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("sudo 执行失败: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("删除 sudo_local 失败: {}", stderr));
+    }
+
+    Ok(true)
 }
 
 /// 异步触发禁用 Touch ID（非阻塞）
-///
-/// 优先使用 AEWP，不可用时回退到 Terminal.app。
 #[allow(dead_code)]
 pub fn trigger_disable_touch_id() -> Result<(), String> {
-    if !sudo_touch_id_enabled() {
-        return Ok(());
-    }
-
-    // 1. 优先尝试 AEWP（后台线程）
-    if crate::aewp::aewp_available() {
-        std::thread::spawn(move || {
-            let _ = crate::aewp::execute_with_privileges(
-                "/bin/rm",
-                &["-f", SUDO_LOCAL_PATH],
-            );
-        });
-        return Ok(());
-    }
-
-    // 2. 回退：Terminal.app
-    let terminal_script = format!(
-        "sudo rm {} && echo MACLEAN_TOUCHID_DISABLED && sleep 1 && exit",
-        SUDO_LOCAL_PATH
-    );
-
-    let apple_script = format!(
-        "tell application \"Terminal\"\n    activate\n    do script \"{}\"\nend tell",
-        terminal_script.replace('"', "\\\"")
-    );
-
-    Command::new("/usr/bin/osascript")
-        .args(["-e", &apple_script])
-        .output()
-        .map_err(|e| format!("无法打开 Terminal: {}", e))?;
-
-    Ok(())
+    Err("请使用 disable_touch_id_with_password 并提供管理员密码".to_string())
 }

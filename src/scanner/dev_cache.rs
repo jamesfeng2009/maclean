@@ -18,6 +18,7 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use crate::safety;
 
 /// 开发者缓存扫描器
 #[derive(Debug, Default)]
@@ -236,67 +237,64 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     }
 
     // 4. 模拟器镜像 (系统级目录，通过 xcrun simctl runtime delete 安全删除)
+    // 如果模拟器相关服务（Xcode/Simulator/CoreSimulatorService/simdiskimaged）
+    // 在运行，runtime 镜像会被锁定，直接不展示；如果大小为 0，也没有清理价值，不展示。
     let sim_volumes = PathBuf::from("/Library/Developer/CoreSimulator/Volumes");
-    if sim_volumes.is_dir() {
-        // 优先使用 xcrun simctl runtime list 获取镜像大小。普通 dir_size() 也能
-        // 遍历该目录，但结果可能包含 overlay 文件或因权限跳过子目录而不准确，
-        // simctl 提供 Apple 官方统计，更适合展示给用户。
+    if sim_volumes.is_dir() && !safety::is_simulator_running() {
         let size = get_simulator_runtime_size().unwrap_or(0);
-        items.push(ScanItem {
-            path: sim_volumes.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: "模拟器镜像".to_string(),
-            selected: false,
-            deletable: true,
-                            undeletable_reason: String::new(),
-            recommend: Recommend::Caution,
-            description: if size > 0 {
-                "iOS 模拟器运行时镜像，将通过 xcrun simctl runtime delete 安全删除".to_string()
-            } else {
-                "iOS 模拟器运行时镜像（大小未获取到，可尝试开启完全磁盘访问权限），将通过 xcrun simctl runtime delete 安全删除".to_string()
-            },
-                            batch_paths: Vec::new(),
-        });
+        if size > 0 {
+            items.push(ScanItem {
+                path: sim_volumes.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "模拟器镜像".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                recommend: Recommend::Caution,
+                description: "iOS 模拟器运行时镜像，将通过 xcrun simctl runtime delete 安全删除".to_string(),
+                batch_paths: Vec::new(),
+            });
+        }
     }
 
     // 5. 模拟器缓存（root 属主，sudo rm -rf 可删，内容为可重建的缓存）
     let sim_caches = PathBuf::from("/Library/Developer/CoreSimulator/Caches");
-    if sim_caches.is_dir() {
+    if sim_caches.is_dir() && !safety::is_simulator_running() {
         let size = dir_size(&sim_caches);
-        items.push(ScanItem {
-            path: sim_caches.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: "模拟器缓存".to_string(),
-            selected: false,
-            deletable: true,
-                            undeletable_reason: String::new(),
-            recommend: Recommend::Caution,
-            description: "模拟器系统缓存，删除后自动重建，需管理员权限".to_string(),
-                            batch_paths: Vec::new(),
-        });
+        if size > 0 {
+            items.push(ScanItem {
+                path: sim_caches.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "模拟器缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                recommend: Recommend::Caution,
+                description: "模拟器系统缓存，删除后自动重建，需管理员权限".to_string(),
+                batch_paths: Vec::new(),
+            });
+        }
     }
 
     // 6. 模拟器 Cryptex（系统级运行时扩展，与 Volumes 同级）
     let sim_cryptex = PathBuf::from("/Library/Developer/CoreSimulator/Cryptex");
-    if sim_cryptex.is_dir() {
+    if sim_cryptex.is_dir() && !safety::is_simulator_running() {
         // 优先使用 /usr/bin/du -sk 获取真实大小。普通 dir_size() 也能得到近似
         // 值，但部分子目录会触发 Permission denied，du 处理 mount point 更准确。
         let size = get_simulator_cryptex_size().unwrap_or(0);
-        items.push(ScanItem {
-            path: sim_cryptex.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: "模拟器Cryptex".to_string(),
-            selected: false,
-            deletable: true,
-                            undeletable_reason: String::new(),
-            recommend: Recommend::Caution,
-            description: if size > 0 {
-                "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除".to_string()
-            } else {
-                "模拟器运行时 Cryptex 扩展（大小未获取到，可尝试开启完全磁盘访问权限），通过 xcrun simctl runtime delete 安全删除".to_string()
-            },
-                            batch_paths: Vec::new(),
-        });
+        if size > 0 {
+            items.push(ScanItem {
+                path: sim_cryptex.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "模拟器Cryptex".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                recommend: Recommend::Caution,
+                description: "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除".to_string(),
+                batch_paths: Vec::new(),
+            });
+        }
     }
 
     // 6. 文档缓存 (DevCleaner 特有)

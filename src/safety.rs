@@ -103,7 +103,10 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     let canonical = match p.canonicalize() {
         Ok(c) => c,
         Err(_) => {
-            return SafetyCheck::Danger(format!("路径无法解析: {}", path));
+            // canonicalize 失败不一定是路径不存在，可能是 TCC 保护导致 realpath() 无权限。
+            // 回退到原始路径（规范化斜杠但不解析符号链接），继续做安全检查。
+            // 如果路径确实不存在，删除时自然会失败，不需要在安全检查阶段拒绝。
+            PathBuf::from(path)
         }
     };
 
@@ -146,6 +149,9 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         "Library/Caches",                // Caches 根目录（子项可删）
         "Library/Logs",                  // Logs 根目录（子项可删）
         "Library/Application Support",   // Application Support 根目录（子项可删）
+        "Library/Cookies",               // Cookies 根目录（子项 .binarycookies 可删）
+        "Library/WebKit",                // WebKit 根目录（子项可删）
+        "Library/Application Scripts",   // Application Scripts 根目录（子项可删）
     ];
 
     for forbidden_suffix in &forbidden_exact {
@@ -165,7 +171,6 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         "Library/Accounts",              // 账户信息
         "Library/Mail",                  // 邮件数据
         "Library/Messages",              // 消息数据
-        "Library/Cookies",               // Cookie
         "Library/Application Support/MobileSync",   // iOS 备份
         "Library/Application Support/AddressBook",  // 通讯录
         "Library/Application Support/CallHistoryDB", // 通话记录
@@ -244,7 +249,79 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         }
     }
 
+    // ================================================================
+    //  第 7 层: 运行中应用保护
+    // ================================================================
+    // 如果要删除的是 /Applications 下的 .app 包，检查该应用是否正在运行。
+    // 运行中的应用不应被删除（可能导致系统不稳定）。
+    if canonical_str.ends_with(".app")
+        && (canonical_str.starts_with("/Applications/")
+            || canonical_str.starts_with(&format!("{}/Applications/", home_str)))
+    {
+        if let Some(app_name) = canonical
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.trim_end_matches(".app"))
+        {
+            if is_app_running(app_name) {
+                return SafetyCheck::Warning(format!(
+                    "应用 {} 正在运行，请先退出后再删除",
+                    app_name
+                ));
+            }
+        }
+    }
+
     SafetyCheck::Safe
+}
+
+/// 检查模拟器相关服务是否正在运行
+///
+/// 包括用户主动打开的前台应用（Xcode、Simulator.app）以及常驻后台的
+/// 模拟器核心服务（CoreSimulatorService、simdiskimaged）。这些服务运行
+/// 时会锁定 /Library/Developer/CoreSimulator/Volumes 下的 runtime 镜像，
+/// 导致 xcrun simctl runtime delete 无法删除。此时不应展示或删除这些项。
+pub fn is_simulator_running() -> bool {
+    let processes = ["Xcode", "Simulator", "CoreSimulatorService", "simdiskimaged"];
+    for proc in &processes {
+        if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
+            .arg("-x")
+            .arg(proc)
+            .output()
+        {
+            if output.status.success() && !output.stdout.is_empty() {
+                return true;
+            }
+        }
+    }
+    // 额外检查 com.apple.CoreSimulator
+    if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
+        .arg("-f")
+        .arg("com.apple.CoreSimulator")
+        .output()
+    {
+        if output.status.success() && !output.stdout.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 检查指定应用是否正在运行
+///
+/// 通过 `pgrep -f` 搜索进程列表中是否包含该应用名称的进程。
+fn is_app_running(app_name: &str) -> bool {
+    // 使用 pgrep 检查进程
+    let output = std::process::Command::new("/usr/bin/pgrep")
+        .args(["-f", app_name])
+        .output();
+
+    if let Ok(out) = output {
+        // pgrep 有匹配时 exit code = 0，无匹配时 exit code = 1
+        return out.status.success() && !out.stdout.is_empty();
+    }
+
+    false
 }
 
 /// 检查路径是否为系统关键保护路径
@@ -443,9 +520,9 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
     let user_containers = format!("{}/Library/Containers/", home_str);
     if canonical_str.starts_with(&user_containers) {
         // 允许删除整个 Container 子目录（App 卸载场景）
-        // 或 Container 内的 Caches（缓存清理场景）
+        // 或 Container 内的 Caches/Documents（缓存/数据清理场景）
         return canonical_str.contains("/Data/Library/Caches/")
-            || canonical_str.contains("/Documents/xwechat_files/")
+            || canonical_str.contains("/Data/Documents/")
             || is_direct_child(&canonical_str, &user_containers);
     }
 

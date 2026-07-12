@@ -626,8 +626,14 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.add_space(3.0);
 
             // ====== 可滚动列表 ======
+            // 提前克隆关联明细和展开状态，避免借用冲突
+            let associated_details = app.associated_details.clone();
+            let expanded_items = app.expanded_items.clone();
+            let is_uninstall_tab = app.tab == crate::app::Tab::AppUninstall;
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let mut toggled_indices: Vec<usize> = Vec::new();
+                let mut expand_toggles: Vec<String> = Vec::new();
 
                 for (i, item) in items.iter().enumerate() {
                     let rec_color = if !item.deletable {
@@ -655,6 +661,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                         .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)));
 
+                    // 检查是否有可展开的关联明细
+                    let has_details = is_uninstall_tab
+                        && !item.batch_paths.is_empty()
+                        && associated_details.contains_key(&item.path);
+                    let is_expanded = expanded_items.contains(&item.path);
+
                     let row_resp = row_frame.show(ui, |ui| {
                         ui.horizontal(|ui| {
                             // 复选框
@@ -673,7 +685,17 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                             // 推荐等级标签
                             ui.colored_label(rec_color, badge);
 
-                            ui.add_space(5.0);
+                            // 展开/收起按钮（仅 App卸载 tab 且有明细时显示）
+                            if has_details {
+                                let expand_icon = if is_expanded { "▼" } else { "▶" };
+                                if ui.small_button(expand_icon).clicked() {
+                                    expand_toggles.push(item.path.clone());
+                                }
+                            } else {
+                                ui.add_space(14.0); // 占位对齐
+                            }
+
+                            ui.add_space(3.0);
 
                             // 类别 + 描述（用户看得懂的信息）
                             ui.vertical(|ui| {
@@ -684,9 +706,9 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                         category_color(&item.category)
                                     };
                                     ui.colored_label(cat_color, &item.category);
-                                    // 大小
+                                    // 大小（为 0 时显示 —，可能是空目录或未获取到）
                                     let size_str = if item.size_bytes == 0 {
-                                        app.t("unknown").to_string()
+                                        "—".to_string()
                                     } else {
                                         format_size(item.size_bytes)
                                     };
@@ -732,6 +754,51 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         toggled_indices.push(i);
                     }
 
+                    // 展开时显示关联文件明细
+                    if has_details && is_expanded {
+                        if let Some(details) = associated_details.get(&item.path) {
+                            for (detail_path, detail_size, detail_label) in details {
+                                let detail_bg = egui::Color32::from_rgb(22, 22, 28);
+                                let detail_frame = egui::Frame::none()
+                                    .fill(detail_bg)
+                                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                                    .stroke(egui::Stroke::new(0.3, egui::Color32::from_rgb(40, 40, 45)));
+
+                                detail_frame.show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(40.0); // 缩进对齐
+                                        // 标签
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(130, 160, 255),
+                                            egui::RichText::new(detail_label).size(12.0),
+                                        );
+                                        // 大小
+                                        let sz_str = if *detail_size == 0 {
+                                            "—".to_string()
+                                        } else {
+                                            format_size(*detail_size)
+                                        };
+                                        let sz_color = if *detail_size > 1024 * 1024 * 1024 {
+                                            egui::Color32::from_rgb(255, 159, 10)
+                                        } else if *detail_size > 100 * 1024 * 1024 {
+                                            egui::Color32::from_rgb(255, 200, 100)
+                                        } else {
+                                            egui::Color32::from_gray(140)
+                                        };
+                                        ui.colored_label(sz_color, egui::RichText::new(&sz_str).size(12.0));
+                                        ui.add_space(8.0);
+                                        // 路径
+                                        let dp = truncate_path(detail_path, 55);
+                                        ui.colored_label(
+                                            egui::Color32::from_gray(90),
+                                            egui::RichText::new(&dp).size(10.0),
+                                        );
+                                    });
+                                });
+                            }
+                        }
+                    }
+
                     ui.add_space(1.0);
                 }
 
@@ -740,6 +807,13 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     let items_mut = &mut app.results[tab_idx];
                     if idx < items_mut.len() && items_mut[idx].deletable {
                         items_mut[idx].selected = !items_mut[idx].selected;
+                    }
+                }
+
+                // 应用展开/收起变更
+                for path in expand_toggles {
+                    if !app.expanded_items.insert(path.clone()) {
+                        app.expanded_items.remove(&path);
                     }
                 }
             });
@@ -916,34 +990,6 @@ fn best_effort_delete(path: &std::path::Path) -> bool {
     !path.exists() && path.symlink_metadata().is_err()
 }
 
-/// 检查 Xcode/Simulator/CoreSimulatorService 是否正在运行
-/// 如果正在运行，不能删除 CoreSimulator 相关目录
-fn is_simulator_running() -> bool {
-    let processes = ["Xcode", "Simulator", "CoreSimulatorService", "simdiskimaged"];
-    for proc in &processes {
-        if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
-            .arg("-x")
-            .arg(proc)
-            .output()
-        {
-            if output.status.success() && !output.stdout.is_empty() {
-                return true;
-            }
-        }
-    }
-    // 额外检查 com.apple.CoreSimulator
-    if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
-        .arg("-f")
-        .arg("com.apple.CoreSimulator")
-        .output()
-    {
-        if output.status.success() && !output.stdout.is_empty() {
-            return true;
-        }
-    }
-    false
-}
-
 /// 获取系统所有挂载点
 fn get_mount_points() -> Vec<String> {
     let output = std::process::Command::new("/sbin/mount")
@@ -1042,7 +1088,7 @@ fn extract_all_uuids(text: &str) -> Vec<String> {
 /// 4. 如果 xcrun 失败，返回 Err 让调用方 fallback 到 sudo rm -rf（仅 UNUSED 项）
 fn delete_simulator_volumes(path: &str) -> Result<String, String> {
     // 1. 进程检测：模拟器运行中时拒绝删除
-    if is_simulator_running() {
+    if safety::is_simulator_running() {
         return Err("Xcode/Simulator 正在运行，请先关闭后再删除模拟器镜像".to_string());
     }
 
@@ -1294,7 +1340,7 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, delete_rx: 
 
                         // 模拟器缓存 — 进程检测后删除
                         if category == "模拟器缓存" {
-                            if is_simulator_running() {
+                                if safety::is_simulator_running() {
                                 let _ = tx.send(DeleteMessage::Log(
                                     format!("⏭️ 跳过 [{}] Xcode/Simulator 正在运行", path), path.clone(), category.clone(), false));
                                 safety::log_deletion(&path, &category, false, Some("模拟器运行中，跳过删除"));
@@ -1903,12 +1949,41 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
 }
 
 /// sudo 密码输入弹窗（egui 内置输入框）
+///
+/// 两种模式：
+/// - 正常删除：输入密码后直接 sudo -S 删除 failed_items
+/// - Touch ID 启用模式（touch_id_setup_mode=true）：输入密码后先创建 sudo_local，
+///   启用成功再继续删除（后续 sudo 会触发 Touch ID）
 fn show_sudo_password_window(
     ctx: &egui::Context,
     app: &mut App,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
 ) {
-    egui::Window::new("需要管理员权限")
+    let is_setup_mode = app.touch_id_setup_mode;
+
+    let window_title = if is_setup_mode {
+        "启用 Touch ID"
+    } else {
+        "需要管理员权限"
+    };
+    let headline = if is_setup_mode {
+        "启用 Touch ID"
+    } else {
+        "需要管理员权限"
+    };
+    let emoji = if is_setup_mode { "👆" } else { "🔐" };
+    let description = if is_setup_mode {
+        "首次启用 Touch ID 需要输入一次管理员密码，以创建 /etc/pam.d/sudo_local。\n启用后，后续删除操作可使用 Touch ID 验证。"
+            .to_string()
+    } else {
+        format!(
+            "{} 项文件因权限不足需要输入管理员密码继续删除。",
+            app.sudo_failed_items.len()
+        )
+    };
+    let button_text = if is_setup_mode { "确认启用" } else { "确认删除" };
+
+    egui::Window::new(window_title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1921,10 +1996,10 @@ fn show_sudo_password_window(
                 ui.horizontal(|ui| {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 159, 10),
-                        egui::RichText::new("🔐").size(28.0),
+                        egui::RichText::new(emoji).size(28.0),
                     );
                     ui.label(
-                        egui::RichText::new("需要管理员权限")
+                        egui::RichText::new(headline)
                             .size(18.0)
                             .strong(),
                     );
@@ -1933,18 +2008,16 @@ fn show_sudo_password_window(
                 ui.add_space(8.0);
                 ui.colored_label(
                     egui::Color32::from_gray(200),
-                    egui::RichText::new(format!(
-                        "{} 项文件因权限不足需要输入管理员密码继续删除。",
-                        app.sudo_failed_items.len()
-                    ))
-                    .size(13.0),
+                    egui::RichText::new(description).size(13.0),
                 );
-                ui.add_space(2.0);
-                ui.colored_label(
-                    egui::Color32::from_gray(150),
-                    egui::RichText::new("密码仅用于本次 sudo 授权，不会保存到钥匙串。")
-                        .size(12.0),
-                );
+                if !is_setup_mode {
+                    ui.add_space(2.0);
+                    ui.colored_label(
+                        egui::Color32::from_gray(150),
+                        egui::RichText::new("密码仅用于本次 sudo 授权，不会保存到钥匙串。")
+                            .size(12.0),
+                    );
+                }
 
                 if let Some(ref err) = app.sudo_error {
                     ui.add_space(8.0);
@@ -1972,7 +2045,7 @@ fn show_sudo_password_window(
                         .add_enabled(
                             confirm_enabled,
                             egui::Button::new(
-                                egui::RichText::new("确认删除")
+                                egui::RichText::new(button_text)
                                     .color(egui::Color32::WHITE)
                                     .size(14.0),
                             )
@@ -1983,11 +2056,42 @@ fn show_sudo_password_window(
                         let password = app.sudo_password_input.clone();
                         app.sudo_password = Some(password.clone());
                         app.sudo_error = None;
-                        app.confirm = ConfirmState::Deleting;
-                        let items = std::mem::take(&mut app.sudo_failed_items);
-                        app.delete_done = 0;
-                        app.delete_total = items.len();
-                        start_sudo_delete(items, password, delete_rx);
+
+                        if is_setup_mode {
+                            // 启用 Touch ID 模式：先创建 sudo_local
+                            match touchid::enable_touch_id_with_password(&password) {
+                                Ok(true) => {
+                                    app.touch_id_enabled = true;
+                                    app.touch_id_setup_mode = false;
+                                    app.touch_id_error = None;
+                                    app.confirm = ConfirmState::SudoWithTouchId;
+                                    let items = std::mem::take(&mut app.sudo_failed_items);
+                                    app.delete_done = 0;
+                                    app.delete_total = items.len();
+                                    start_sudo_delete_touchid(items, delete_rx);
+                                }
+                                Ok(false) => {
+                                    // 已启用，直接走 Touch ID 删除
+                                    app.touch_id_enabled = true;
+                                    app.touch_id_setup_mode = false;
+                                    app.confirm = ConfirmState::SudoWithTouchId;
+                                    let items = std::mem::take(&mut app.sudo_failed_items);
+                                    app.delete_done = 0;
+                                    app.delete_total = items.len();
+                                    start_sudo_delete_touchid(items, delete_rx);
+                                }
+                                Err(e) => {
+                                    app.sudo_error = Some(e);
+                                    app.sudo_password_input.clear();
+                                }
+                            }
+                        } else {
+                            app.confirm = ConfirmState::Deleting;
+                            let items = std::mem::take(&mut app.sudo_failed_items);
+                            app.delete_done = 0;
+                            app.delete_total = items.len();
+                            start_sudo_delete(items, password, delete_rx);
+                        }
                     }
 
                     if ui
@@ -1997,6 +2101,7 @@ fn show_sudo_password_window(
                         app.sudo_password_input.clear();
                         app.sudo_password = None;
                         app.sudo_error = None;
+                        app.touch_id_setup_mode = false;
                         // 将需要 sudo 的项标记为失败，结束删除流程
                         for (path, category) in std::mem::take(&mut app.sudo_failed_items) {
                             app.receive_delete_log(
@@ -2087,17 +2192,10 @@ fn show_touch_id_setup_window(
                         .clicked()
                     {
                         app.touch_id_error = None;
-                        // 异步打开 Terminal，不阻塞 GUI
-                        match touchid::trigger_enable_touch_id() {
-                            Ok(()) => {
-                                // 进入等待状态，由主循环轮询检测
-                                app.confirm = ConfirmState::WaitForTouchIdSetup;
-                                app.touch_id_wait_start = Some(std::time::Instant::now());
-                            }
-                            Err(e) => {
-                                app.touch_id_error = Some(e);
-                            }
-                        }
+                        app.sudo_password_input.clear();
+                        app.sudo_error = None;
+                        app.touch_id_setup_mode = true;
+                        app.confirm = ConfirmState::NeedSudoPassword;
                     }
 
                     // 跳过，用密码
@@ -2253,6 +2351,47 @@ fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
                     egui::Color32::from_gray(120),
                     egui::RichText::new("系统会弹出 Touch ID 对话框，请触碰指纹传感器").size(11.0),
                 );
+
+                // 显示最近日志（帮助定位卡在哪里）
+                let recent_logs: Vec<&String> = app
+                    .logs
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                if !recent_logs.is_empty() {
+                    ui.add_space(10.0);
+                    egui::Frame::group(ui.style())
+                        .fill(egui::Color32::from_gray(25))
+                        .show(ui, |ui| {
+                            ui.set_min_width(360.0);
+                            ui.label(egui::RichText::new("最近日志:").size(11.0).strong());
+                            ui.add_space(4.0);
+                            for log in recent_logs {
+                                ui.colored_label(
+                                    egui::Color32::from_gray(170),
+                                    egui::RichText::new(log).size(10.0),
+                                );
+                            }
+                        });
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // 取消按钮：关闭弹窗并结束当前删除流程
+                if ui
+                    .button(egui::RichText::new("取消").size(14.0))
+                    .clicked()
+                {
+                    app.confirm = ConfirmState::None;
+                    app.touch_id_error = Some("已取消 Touch ID 授权".to_string());
+                    app.finish_delete();
+                }
             });
         });
 }
@@ -2282,9 +2421,13 @@ fn start_sudo_delete_touchid(
         let mut remaining_items: Vec<(String, String)> = Vec::new();
         for (path, category) in &failed_items {
             if category == "模拟器镜像" || category == "模拟器Cryptex" {
+                let _ = tx.send(DeleteMessage::Info(
+                    format!("🔄 准备通过 xcrun 删除: {}", category),
+                ));
+
                 let script = r#"#!/bin/bash
 set +e
-uuids=$(xcrun simctl runtime list 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | sort -u)
+uuids=$(xcrun simctl runtime list 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | sort -u)
 count=0
 fail=0
 for uuid in $uuids; do
@@ -2304,25 +2447,42 @@ exit 0
                 let _ = std::fs::write(&xcrun_script, script);
                 let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&xcrun_script).output();
 
-                // 不用 -S，sudo 会自动弹出 Touch ID
-                let xcrun_result = std::process::Command::new("/usr/bin/sudo")
-                    .arg("/bin/bash")
-                    .arg(&xcrun_script)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output();
+                // 先清除 sudo 票据，确保能触发 Touch ID
+                let _ = std::process::Command::new("/usr/bin/sudo").arg("-k").output();
+
+                let _ = tx.send(DeleteMessage::Info(
+                    "⏳ 等待 Touch ID 授权执行 xcrun...".to_string(),
+                ));
+
+                let xcrun_log = std::env::temp_dir().join("maclean_xcrun_touchid.log");
+                let xcrun_log_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&xcrun_log)
+                    .ok();
+
+                // 不用 -S，sudo 会自动弹出 Touch ID；stdout 重定向到文件避免 pipe 死锁
+                let mut cmd = std::process::Command::new("/usr/bin/sudo");
+                cmd.arg("/bin/bash").arg(&xcrun_script);
+                if let Some(file) = xcrun_log_file {
+                    cmd.stdout(file);
+                }
+                let xcrun_result = cmd.status();
 
                 let mut xcrun_success = false;
-                match &xcrun_result {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        debug_entries.push(format!("xcrun touchid stdout: {}", stdout));
-                        debug_entries.push(format!("xcrun touchid stderr: {}", stderr));
+                let xcrun_stdout = std::fs::read_to_string(&xcrun_log).unwrap_or_default();
+                debug_entries.push(format!("xcrun touchid stdout:\n{}", xcrun_stdout));
 
-                        if !output.status.success() {
+                let _ = tx.send(DeleteMessage::Info(
+                    format!("✅ xcrun 执行完成: {}", xcrun_stdout.trim().replace('\n', " ")),
+                ));
+
+                match &xcrun_result {
+                    Ok(status) => {
+                        if !status.success() {
                             // Touch ID 可能被取消
-                            if stderr.contains("canceled") || stderr.contains("cancelled") {
+                            if xcrun_stdout.contains("canceled") || xcrun_stdout.contains("cancelled") {
                                 let _ = tx.send(DeleteMessage::Info("🔒 Touch ID 验证已取消".to_string()));
                                 for (p, c) in &failed_items {
                                     let _ = tx.send(DeleteMessage::Log(
@@ -2331,16 +2491,31 @@ exit 0
                                 }
                                 let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
                                 let _ = std::fs::remove_file(&xcrun_script);
+                                let _ = std::fs::remove_file(&xcrun_log);
                                 let _ = tx.send(DeleteMessage::Done);
                                 return;
                             }
                         }
 
-                        let p = std::path::Path::new(path);
-                        if !p.exists() || std::fs::read_dir(p).map(|mut d| d.next().is_none()).unwrap_or(true) {
+                        // xcrun 删除成功即可认为该模拟器镜像项已清理
+                        // 不必要求 Volumes 目录为空（mount point 会残留，且受 SIP 保护）
+                        let deleted_count = xcrun_stdout
+                            .lines()
+                            .find(|l| l.starts_with("xcrun_deleted:"))
+                            .and_then(|l| l.strip_prefix("xcrun_deleted:"))
+                            .and_then(|n| n.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let failed_count = xcrun_stdout
+                            .lines()
+                            .find(|l| l.starts_with("xcrun_failed:"))
+                            .and_then(|l| l.strip_prefix("xcrun_failed:"))
+                            .and_then(|n| n.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+
+                        if deleted_count > 0 && failed_count == 0 {
                             xcrun_success = true;
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ 已通过 xcrun simctl 删除模拟器运行时镜像: {}", path),
+                                format!("✓ 已通过 xcrun simctl 删除 {} 个模拟器运行时镜像", deleted_count),
                                 path.clone(), category.clone(), true));
                             safety::log_deletion(path, category, true, None);
                         }
@@ -2351,6 +2526,7 @@ exit 0
                 }
 
                 let _ = std::fs::remove_file(&xcrun_script);
+                let _ = std::fs::remove_file(&xcrun_log);
 
                 if !xcrun_success {
                     remaining_items.push((path.clone(), category.clone()));
@@ -2363,10 +2539,15 @@ exit 0
         let failed_items = remaining_items;
 
         if failed_items.is_empty() {
+            let _ = tx.send(DeleteMessage::Info("✅ 无需 sudo 删除，全部通过 xcrun 完成".to_string()));
             let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
             let _ = tx.send(DeleteMessage::Done);
             return;
         }
+
+        let _ = tx.send(DeleteMessage::Info(
+            format!("🔄 准备 sudo 删除 {} 项残留文件...", failed_items.len()),
+        ));
 
         // 写临时删除脚本：并行删除
         let tmp_script = std::env::temp_dir().join("maclean_sudo_touchid.sh");
@@ -2405,50 +2586,57 @@ exit 0
 
         debug_entries.push(format!("delete script: {}", tmp_script.display()));
 
-        // 不用 -S，sudo 自动触发 Touch ID
-        let sudo_result = std::process::Command::new("/usr/bin/sudo")
-            .arg("/bin/bash")
-            .arg(&tmp_script)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output();
+        let sudo_log = std::env::temp_dir().join("maclean_sudo_touchid_script.log");
+        let sudo_log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&sudo_log)
+            .ok();
+
+        let _ = tx.send(DeleteMessage::Info(
+            "⏳ 等待 Touch ID 授权执行 sudo 删除...".to_string(),
+        ));
+
+        // 不用 -S，sudo 自动触发 Touch ID；stdout 重定向到文件避免 pipe 死锁
+        let mut sudo_cmd = std::process::Command::new("/usr/bin/sudo");
+        sudo_cmd.arg("/bin/bash").arg(&tmp_script);
+        if let Some(file) = sudo_log_file {
+            sudo_cmd.stdout(file);
+        }
+        let sudo_result = sudo_cmd.status();
+
+        let _ = tx.send(DeleteMessage::Info(
+            "✅ sudo 删除执行完成，正在解析结果...".to_string(),
+        ));
 
         // 解析输出
-        let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        match &sudo_result {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                debug_entries.push(format!("sudo touchid exit code: {:?}", output.status.code()));
-                debug_entries.push(format!("sudo touchid stdout:\n{}", stdout));
-                debug_entries.push(format!("sudo touchid stderr:\n{}", stderr));
+        let sudo_stdout = std::fs::read_to_string(&sudo_log).unwrap_or_default();
+        debug_entries.push(format!("sudo touchid exit code: {:?}", sudo_result.as_ref().ok().and_then(|s| s.code())));
+        debug_entries.push(format!("sudo touchid stdout:\n{}", sudo_stdout));
 
-                let mut current_path = String::new();
-                for line in stdout.lines() {
-                    if let Some(p) = line.strip_prefix(">MACLEAN_BEGIN:") {
-                        current_path = p.to_string();
-                    } else if let Some(_rest) = line.strip_prefix(">MACLEAN_EXIT:") {
-                        current_path.clear();
-                    } else if !line.is_empty() && !current_path.is_empty() {
-                        rm_stderr.entry(current_path.clone()).or_default().push_str(line);
-                        rm_stderr.entry(current_path.clone()).or_default().push('\n');
-                    }
-                }
-            }
-            Err(e) => {
-                debug_entries.push(format!("sudo touchid error: {}", e));
+        let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut current_path = String::new();
+        for line in sudo_stdout.lines() {
+            if let Some(p) = line.strip_prefix(">MACLEAN_BEGIN:") {
+                current_path = p.to_string();
+            } else if let Some(_rest) = line.strip_prefix(">MACLEAN_EXIT:") {
+                current_path.clear();
+            } else if !line.is_empty() && !current_path.is_empty() {
+                rm_stderr.entry(current_path.clone()).or_default().push_str(line);
+                rm_stderr.entry(current_path.clone()).or_default().push('\n');
             }
         }
 
         let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
+        let _ = std::fs::remove_file(&sudo_log);
 
         // 逐项验证
         match sudo_result {
-            Ok(output) => {
-                let stderr_all = String::from_utf8_lossy(&output.stderr);
-                let user_cancelled = stderr_all.contains("canceled")
-                    || stderr_all.contains("cancelled")
-                    || stderr_all.contains("User canceled");
+            Ok(_) => {
+                let user_cancelled = sudo_stdout.contains("canceled")
+                    || sudo_stdout.contains("cancelled")
+                    || sudo_stdout.contains("User canceled");
 
                 if user_cancelled {
                     let _ = tx.send(DeleteMessage::Info("🔒 Touch ID 验证已取消".to_string()));
@@ -2470,7 +2658,7 @@ exit 0
                             path.clone(), category.clone(), true));
                         safety::log_deletion(path, category, true, None);
                     } else {
-                        let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or(&stderr_all);
+                        let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or("");
                         let is_sip = err_text.contains("Operation not permitted")
                             || path.starts_with("/Library/Developer/CoreSimulator/Caches");
 
@@ -2749,7 +2937,6 @@ fn category_color(category: &str) -> egui::Color32 {
         c if c.contains("pip") => egui::Color32::from_rgb(100, 200, 255),
         c if c.contains("IDE") => egui::Color32::from_rgb(200, 150, 255),
         c if c.contains("APFS") => egui::Color32::from_rgb(255, 100, 150),
-        c if c.contains("微信") => egui::Color32::from_rgb(100, 200, 100),
         c if c.contains("大目录") | c.contains("大文件") => egui::Color32::from_rgb(255, 200, 100),
         _ => egui::Color32::from_gray(180),
     }

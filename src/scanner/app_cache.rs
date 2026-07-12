@@ -59,6 +59,9 @@ impl Scanner for AppCacheScanner {
 // =========================================================================
 
 /// 扫描应用容器缓存
+///
+/// 通用方案：对每个容器，分别扫描缓存（Data/Library/Caches）和数据（Data/Documents），
+/// 不针对任何特定 App 做特殊处理。缓存标记为 Safe，数据标记为 Advanced，由用户自行决定。
 fn scan_containers() -> Vec<ScanItem> {
     let home = home_dir();
     let containers_dir = home.join("Library/Containers");
@@ -76,88 +79,91 @@ fn scan_containers() -> Vec<ScanItem> {
         .filter(|p| p.is_dir())
         .collect();
 
-    // 并行计算每个容器的缓存大小
-    let sized: Vec<(PathBuf, PathBuf, u64, String, bool)> = container_paths
+    // 并行计算每个容器的缓存和数据大小
+    // 返回: (container_path, caches_path, caches_size, docs_path, docs_size, app_name)
+    let sized: Vec<(PathBuf, PathBuf, u64, PathBuf, u64, String)> = container_paths
         .par_iter()
         .filter_map(|container_path| {
             let caches_dir = container_path.join("Data/Library/Caches");
-            let total_size = if caches_dir.is_dir() {
+            let caches_size = if caches_dir.is_dir() {
                 dir_size(&caches_dir)
             } else {
                 0
             };
 
-            // 微信特殊处理：检查 xwechat_files
-            let wechat_data = container_path.join("Data/Documents/xwechat_files");
-            let wechat_size = if wechat_data.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
-                dir_size(&wechat_data)
+            let docs_dir = container_path.join("Data/Documents");
+            let docs_size = if docs_dir.is_dir() {
+                dir_size(&docs_dir)
             } else {
                 0
             };
+
+            // 至少有一个超过阈值才展示
+            if caches_size < CONTAINER_MIN && docs_size < CONTAINER_MIN {
+                return None;
+            }
 
             let container_name = container_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
+            let app_name = bundle_id_to_display_name(container_name);
 
-            if total_size >= CONTAINER_MIN {
-                let app_name = container_display_name(container_name);
-                Some((container_path.clone(), caches_dir, total_size, app_name, false))
-            } else if wechat_size >= CONTAINER_MIN {
-                let app_name = "微信数据".to_string();
-                Some((container_path.clone(), wechat_data, wechat_size, app_name, true))
-            } else {
-                None
-            }
+            Some((
+                container_path.clone(),
+                caches_dir,
+                caches_size,
+                docs_dir,
+                docs_size,
+                app_name,
+            ))
         })
         .collect();
 
-    for (_, cache_path, size, app_name, is_wechat_data) in sized {
-        items.push(ScanItem {
-            path: cache_path.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: app_name,
-            selected: false,
-            deletable: !is_wechat_data,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
-            recommend: if is_wechat_data { Recommend::Advanced } else { Recommend::Caution },
-            description: if is_wechat_data { "微信聊天数据，删除将丢失聊天记录".to_string() } else { "应用容器缓存，删除后 App 可能需要重新登录".to_string() },
-        });
+    for (_, caches_path, caches_size, docs_path, docs_size, app_name) in sized {
+        // 缓存项（Safe — 可自动重建）
+        if caches_size >= CONTAINER_MIN {
+            items.push(ScanItem {
+                path: caches_path.to_string_lossy().to_string(),
+                size_bytes: caches_size,
+                category: format!("{} 缓存", app_name),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: format!("{} 的应用缓存，删除后自动重建", app_name),
+            });
+        }
+        // 数据项（Advanced — 用户自行判断）
+        if docs_size >= CONTAINER_MIN {
+            items.push(ScanItem {
+                path: docs_path.to_string_lossy().to_string(),
+                size_bytes: docs_size,
+                category: format!("{} 数据", app_name),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Advanced,
+                description: format!("{} 的应用数据（含文档、聊天记录等），删除可能导致数据丢失", app_name),
+            });
+        }
     }
 
     items
 }
 
-/// 将容器目录名映射为友好的应用名
-fn container_display_name(container_id: &str) -> String {
-    match container_id {
-        "com.tencent.xinWeChat" => "微信缓存".to_string(),
-        "com.bytedance.macos.feishu" => "飞书".to_string(),
-        "com.tencent.QQMusicMac" => "QQ音乐".to_string(),
-        "com.youku.mac" => "优酷".to_string(),
-        "com.iqiyi.player" => "爱奇艺".to_string(),
-        "com.tencent.qq" => "QQ".to_string(),
-        "com.tencent.qqexdoc" => "QQ文档".to_string(),
-        "com.tencent.meeting" => "腾讯会议".to_string(),
-        "com.kingsoft.wpsoffice.mac" => "WPS".to_string(),
-        "com.microsoft.Excel" => "Excel".to_string(),
-        "com.microsoft.Word" => "Word".to_string(),
-        "com.microsoft.Powerpoint" => "PowerPoint".to_string(),
-        "com.apple.mail" => "邮件".to_string(),
-        "com.apple.Safari" => "Safari".to_string(),
-        "com.googlecode.iterm2" => "iTerm".to_string(),
-        "com.tinyspeck.slackmacgap" => "Slack".to_string(),
-        "com.spotify.client" => "Spotify".to_string(),
-        _ => {
-            // 截取最后一部分作为名称
-            container_id
-                .split('.')
-                .last()
-                .unwrap_or(container_id)
-                .to_string()
-        }
-    }
+/// 将 bundle ID 转换为用户友好的显示名称
+///
+/// 通用方案：取 bundle ID 最后一段作为名称（如 com.tencent.xinWeChat → xinWeChat）。
+/// 不硬编码任何特定 App 名称，适用于所有应用。
+fn bundle_id_to_display_name(bundle_id: &str) -> String {
+    bundle_id
+        .split('.')
+        .last()
+        .unwrap_or(bundle_id)
+        .to_string()
 }
 
 // =========================================================================
@@ -222,16 +228,9 @@ fn scan_group_containers() -> Vec<ScanItem> {
 }
 
 /// Group Containers 名称映射
+///
+/// 通用方案：直接使用目录名作为显示名，不做任何 App 特殊处理。
 fn group_container_display_name(id: &str) -> String {
-    if id.contains("Telegram") {
-        return "Telegram".to_string();
-    }
-    if id.contains("orbstack") {
-        return "OrbStack".to_string();
-    }
-    if id.contains("whatsapp") {
-        return "WhatsApp".to_string();
-    }
     id.to_string()
 }
 
