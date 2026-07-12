@@ -14,8 +14,10 @@ pub enum Tab {
     DevCache,
     /// 大文件
     LargeFiles,
-    /// App 缓存
+    /// App 缓存（仅缓存子目录，安全可删）
     AppCache,
+    /// App 数据（Application Support 整目录，高风险）
+    AppData,
     /// APFS 快照
     Apfs,
 }
@@ -27,13 +29,14 @@ impl Tab {
             Tab::DevCache => "开发者缓存",
             Tab::LargeFiles => "大文件",
             Tab::AppCache => "App缓存",
+            Tab::AppData => "App数据",
             Tab::Apfs => "APFS快照",
         }
     }
 
     /// 所有 Tab
-    pub fn all() -> [Tab; 4] {
-        [Tab::DevCache, Tab::LargeFiles, Tab::AppCache, Tab::Apfs]
+    pub fn all() -> [Tab; 5] {
+        [Tab::DevCache, Tab::LargeFiles, Tab::AppCache, Tab::AppData, Tab::Apfs]
     }
 
     /// 下一个 Tab
@@ -41,7 +44,8 @@ impl Tab {
         match self {
             Tab::DevCache => Tab::LargeFiles,
             Tab::LargeFiles => Tab::AppCache,
-            Tab::AppCache => Tab::Apfs,
+            Tab::AppCache => Tab::AppData,
+            Tab::AppData => Tab::Apfs,
             Tab::Apfs => Tab::DevCache,
         }
     }
@@ -52,7 +56,8 @@ impl Tab {
             Tab::DevCache => Tab::Apfs,
             Tab::LargeFiles => Tab::DevCache,
             Tab::AppCache => Tab::LargeFiles,
-            Tab::Apfs => Tab::AppCache,
+            Tab::AppData => Tab::AppCache,
+            Tab::Apfs => Tab::AppData,
         }
     }
 }
@@ -86,9 +91,9 @@ pub struct App {
     /// 当前 Tab
     pub tab: Tab,
     /// 每个 Tab 的扫描结果
-    pub results: [Vec<ScanItem>; 4],
+    pub results: [Vec<ScanItem>; 5],
     /// 每个 Tab 的扫描状态
-    pub scan_states: [ScanState; 4],
+    pub scan_states: [ScanState; 5],
     /// 列表选中索引
     pub list_index: usize,
     /// 磁盘总空间（字节）
@@ -104,7 +109,7 @@ pub struct App {
     /// 是否应该退出
     pub should_quit: bool,
     /// 扫描耗时（毫秒）
-    pub scan_time_ms: [u64; 4],
+    pub scan_time_ms: [u64; 5],
     /// 语言切换（true=英文, false=中文）
     pub lang_en: bool,
     /// 删除进度：已完成的项数
@@ -140,8 +145,9 @@ impl App {
 
         Self {
             tab: Tab::DevCache,
-            results: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            results: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             scan_states: [
+                ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
@@ -154,7 +160,7 @@ impl App {
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
             should_quit: false,
-            scan_time_ms: [0; 4],
+            scan_time_ms: [0; 5],
             lang_en: false, // 默认中文
             delete_done: 0,
             delete_total: 0,
@@ -177,7 +183,8 @@ impl App {
             Tab::DevCache => 0,
             Tab::LargeFiles => 1,
             Tab::AppCache => 2,
-            Tab::Apfs => 3,
+            Tab::AppData => 3,
+            Tab::Apfs => 4,
         }
     }
 
@@ -319,6 +326,7 @@ impl App {
             Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
             Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
             Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
+            Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
             Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
         };
 
@@ -508,6 +516,7 @@ impl App {
                 "tab_dev_cache" => "Dev Cache",
                 "tab_large_files" => "Large Files",
                 "tab_app_cache" => "App Cache",
+                "tab_app_data" => "App Data",
                 "tab_apfs" => "APFS Snapshots",
                 // 按钮
                 "scan" => "Scan",
@@ -553,6 +562,7 @@ impl App {
                 "tab_dev_cache" => "开发者缓存",
                 "tab_large_files" => "大文件",
                 "tab_app_cache" => "App缓存",
+                "tab_app_data" => "App数据",
                 "tab_apfs" => "APFS快照",
                 // 按钮
                 "scan" => "扫描",

@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 // 导出子模块
 pub mod apfs;
 pub mod app_cache;
+pub mod app_data;
 pub mod dev_cache;
 pub mod large_files;
 

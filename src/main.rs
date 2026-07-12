@@ -695,6 +695,7 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
                 Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
                 Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
+                Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
             }
         });
@@ -2017,6 +2018,7 @@ fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
         Tab::DevCache => app.t("tab_dev_cache"),
         Tab::LargeFiles => app.t("tab_large_files"),
         Tab::AppCache => app.t("tab_app_cache"),
+        Tab::AppData => app.t("tab_app_data"),
         Tab::Apfs => app.t("tab_apfs"),
     }
 }

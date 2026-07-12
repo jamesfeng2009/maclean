@@ -35,7 +35,7 @@ impl Scanner for AppCacheScanner {
 
         items.extend(scan_containers());
         items.extend(scan_group_containers());
-        items.extend(scan_app_support());
+        items.extend(scan_app_support_caches());
         items.extend(scan_system_caches());
         items.extend(scan_logs());
 
@@ -235,58 +235,157 @@ fn group_container_display_name(id: &str) -> String {
 }
 
 // =========================================================================
-//  ~/Library/Application Support
+//  ~/Library/Application Support — 递归扫描缓存子目录
 // =========================================================================
 
-/// 扫描 Application Support 下的应用数据
-fn scan_app_support() -> Vec<ScanItem> {
+/// 已知的缓存/临时目录名（不区分大小写匹配）
+///
+/// 这些是各类 App 在 Application Support 下创建的缓存子目录，
+/// 删除后 App 会自动重建，不影响用户数据。
+/// 参考 Mole 的 app_caches.sh 中数百个 safe_clean 路径归纳而来。
+const CACHE_DIR_NAMES: &[&str] = &[
+    // 通用缓存
+    "Cache", "Caches", "cache", "caches",
+    "CachedData", "CachedExtensions", "CachedExtensionVSIXs",
+    "Cache_Data", "CacheData",
+    // Electron/Chromium 缓存
+    "Code Cache", "CodeCache", "code_cache",
+    "GPUCache", "gpu_cache",
+    "DawnGraphiteCache", "DawnWebGPUCache",
+    "Service Worker", "ServiceWorker",
+    // Web 缓存
+    "webcache", "webcache2", "WebStorage",
+    "CacheStorage", "cacheStorage",
+    // 日志
+    "logs", "Logs", "log",
+    // 临时文件
+    "tmp", "Temp", "temp", "T",
+    // 崩溃报告
+    "crash-reports", "CrashReporter", "CrashReports",
+    "SentryCrash", "sentry-crash",
+    // 媒体缓存
+    "thumbnails", "thumbnail-cache",
+    "Media Cache Files", "MediaCache",
+    "videoCache", "VideoCache",
+    // 游戏/工具缓存
+    "htmlcache", "appcache", "depotcache", "shadercache",
+    "shader_cache", "ShaderCache",
+    // 网络缓存
+    "NetworkCache", "network_cache",
+    // 其他
+    "iRRCache", "iCache", "iTemp", "iLog",
+    "CacheClip",
+    "browser_cache", "BrowserCache",
+];
+
+/// 递归扫描 Application Support 下的缓存子目录
+///
+/// 策略：用 walkdir 迭代遍历（不会栈溢出），最大深度 4 层，
+/// 遇到目录名匹配已知缓存名时，计算大小并加入清理列表，
+/// 不再继续递归该目录（剪枝，避免重复扫描缓存内部文件）。
+fn scan_app_support_caches() -> Vec<ScanItem> {
     let home = home_dir();
     let app_support = home.join("Library/Application Support");
     let mut items = Vec::new();
 
-    let entries = match std::fs::read_dir(&app_support) {
-        Ok(e) => e,
-        Err(_) => return items,
-    };
+    if !app_support.is_dir() {
+        return items;
+    }
 
-    let paths: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
+    // 收集所有匹配的缓存目录
+    let mut cache_dirs: Vec<(PathBuf, u64)> = Vec::new();
 
-    let sized: Vec<(PathBuf, u64, String)> = paths
-        .par_iter()
-        .filter_map(|path| {
-            let size = dir_size(path);
-            if size >= APP_SUPPORT_MIN {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("未知")
-                    .to_string();
-                Some((path.clone(), size, name))
-            } else {
-                None
+    for entry in walkdir::WalkDir::new(&app_support)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // 跳过隐藏目录（如 .vscode 内部不再深入）
+            if e.depth() > 0 {
+                if let Some(name) = e.file_name().to_str() {
+                    if name.starts_with('.') && e.depth() > 1 {
+                        return false;
+                    }
+                }
             }
+            true
         })
-        .collect();
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        // 跳过根目录本身
+        if entry.depth() == 0 {
+            continue;
+        }
 
-    for (path, size, name) in sized {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+
+        // 检查是否匹配已知缓存目录名
+        if !is_cache_dir_name(&dir_name) {
+            continue;
+        }
+
+        let path = entry.path().to_path_buf();
+        let size = dir_size(&path);
+
+        // 只展示 >10MB 的缓存目录
+        if size >= 10 * 1024 * 1024 {
+            cache_dirs.push((path, size));
+        }
+    }
+
+    // 按大小降序排序
+    cache_dirs.sort_by(|a, b| b.1.cmp(&a.1));
+    cache_dirs.dedup_by(|a, b| a.0 == b.0);
+
+    for (path, size) in cache_dirs {
+        // 从路径中提取 App 名称（Application Support/<AppName>/.../<CacheDir>）
+        let app_name = extract_app_name_from_path(&path, &app_support);
+        let dir_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("缓存");
+
         items.push(ScanItem {
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
-            category: name,
+            category: format!("{} 缓存", app_name),
             selected: false,
             deletable: true,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
-            recommend: Recommend::Advanced,
-            description: "应用数据目录，可能包含重要配置".to_string(),
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
+            recommend: Recommend::Safe,
+            description: format!(
+                "{} 的 {} 目录，删除后自动重建",
+                app_name, dir_name
+            ),
         });
     }
 
     items
+}
+
+/// 检查目录名是否匹配已知缓存目录名（不区分大小写）
+fn is_cache_dir_name(name: &str) -> bool {
+    let name_lower = name.to_lowercase();
+    CACHE_DIR_NAMES
+        .iter()
+        .any(|&cache_name| name_lower == cache_name.to_lowercase())
+}
+
+/// 从路径中提取 App 名称
+///
+/// 例如：~/Library/Application Support/Code/Cache → "Code"
+///      ~/Library/Application Support/Steam/htmlcache → "Steam"
+fn extract_app_name_from_path(path: &std::path::Path, app_support: &std::path::Path) -> String {
+    if let Ok(rel) = path.strip_prefix(app_support) {
+        if let Some(first) = rel.components().next() {
+            return first.as_os_str().to_string_lossy().to_string();
+        }
+    }
+    "未知App".to_string()
 }
 
 // =========================================================================
