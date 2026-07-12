@@ -20,10 +20,18 @@ pub enum SafetyCheck {
     Warning(String),
 }
 
+/// 检查路径是否安全可删除（通用版本，兼容旧调用）
+pub fn check_path_safety(path: &str) -> SafetyCheck {
+    check_path_safety_with_category(path, "")
+}
+
 /// 检查路径是否安全可删除
 ///
 /// 这是删除前的最终安全屏障，即使扫描器有 bug 扫到了危险路径，
 /// 这里的检查也会阻止删除。
+///
+/// `category` 参数用于区分不同清理场景，大文件/目录可享受更宽松的策略：
+/// 用户通过大文件扫描器主动发现的主目录下的大文件/目录，明确由用户选择删除。
 ///
 /// 安全检查层（从外到内）:
 /// 1. 空路径 / 非绝对路径检查
@@ -33,7 +41,7 @@ pub enum SafetyCheck {
 /// 5. 用户关键目录黑名单（Keychains, Mail, Messages 等）
 /// 6. 白名单校验（只允许已知安全路径模式）
 /// 7. 敏感文件名检测（.env, id_rsa, credentials 等）
-pub fn check_path_safety(path: &str) -> SafetyCheck {
+pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyCheck {
     // ================================================================
     //  第 0 层: 空路径检查
     // ================================================================
@@ -161,7 +169,7 @@ pub fn check_path_safety(path: &str) -> SafetyCheck {
     // ================================================================
     //  第 5 层: 白名单校验 - 只允许删除已知安全的路径模式
     // ================================================================
-    let is_in_safe_zone = check_whitelist(&canonical, &home);
+    let is_in_safe_zone = check_whitelist(&canonical, &home, category);
 
     if !is_in_safe_zone {
         return SafetyCheck::Danger(format!(
@@ -285,9 +293,30 @@ fn is_critical_system_path(path: &str) -> bool {
 /// 2. 全局工具缓存标准路径放行（跨 macOS 通用）
 /// 3. 项目目录下的已知缓存/构建目录名放行
 /// 4. 用户 Library 下的 Caches / Logs / Application Support 子目录放行
-fn check_whitelist(canonical: &Path, home: &Path) -> bool {
+/// 5. 大文件/目录类别放行用户主目录下直接子项（用户主动扫描并选择删除）
+fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
     let canonical_str = canonical.to_string_lossy();
     let home_str = home.to_string_lossy();
+
+    // ================================================================
+    //  大文件/目录特殊策略
+    // ================================================================
+    // 大文件扫描器扫描的是用户主目录下的大文件/大目录，
+    // 属于用户主动发现并勾选删除的项目，因此放行主目录下的直接子项。
+    // 黑名单（Library、Pictures 等）已在上层处理，这里只需确保是直接子项。
+    let is_large_file = category == "大文件" || category == "大目录";
+    if is_large_file {
+        // 允许用户主目录下的直接子目录/文件
+        if is_direct_child(&canonical_str, &home_str) {
+            return true;
+        }
+        // 也允许 Downloads/Desktop 下的大文件（用户主动下载/存放的文件）
+        let downloads = format!("{}/Downloads/", home_str);
+        let desktop = format!("{}/Desktop/", home_str);
+        if canonical_str.starts_with(&downloads) || canonical_str.starts_with(&desktop) {
+            return true;
+        }
+    }
 
     // ================================================================
     //  第 1 层: 全局工具缓存标准路径

@@ -1002,7 +1002,7 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, delete_rx: 
                             let mut success_count = 0;
                             let mut fail_count = 0;
                             for bp in &batch_paths {
-                                match safety::check_path_safety(bp) {
+                                match safety::check_path_safety_with_category(bp, &category) {
                                     safety::SafetyCheck::Danger(reason) => {
                                         fail_count += 1;
                                         let _ = tx.send(DeleteMessage::Log(
@@ -1032,7 +1032,7 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, delete_rx: 
                         }
 
                         // 安全校验
-                        match safety::check_path_safety(&path) {
+                        match safety::check_path_safety_with_category(&path, &category) {
                             safety::SafetyCheck::Danger(reason) => {
                                 let _ = tx.send(DeleteMessage::Log(
                                     format!("⛔ 已拦截: {} - {}", path, reason), path.clone(), category.clone(), false));
