@@ -149,10 +149,7 @@ pub fn trigger_enable_touch_id() -> Result<(), String> {
     );
 
     let apple_script = format!(
-        r##"tell application "Terminal"
-    activate
-    do script "{}"
-end tell"##,
+        "tell application \"Terminal\"\n    activate\n    do script \"{}\"\nend tell",
         terminal_script.replace('"', "\\\"")
     );
 
@@ -191,10 +188,7 @@ pub fn trigger_disable_touch_id() -> Result<(), String> {
     );
 
     let apple_script = format!(
-        r##"tell application "Terminal"
-    activate
-    do script "{}"
-end tell"##,
+        "tell application \"Terminal\"\n    activate\n    do script \"{}\"\nend tell",
         terminal_script.replace('"', "\\\"")
     );
 
