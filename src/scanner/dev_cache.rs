@@ -1211,21 +1211,34 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 }
 
                 // 检查是否有对应的 App
-                if !is_app_installed(&name, &installed_apps) {
-                    let size = dir_size(&path);
-                    if size > 50 * 1024 * 1024 {
-                        items.push(ScanItem {
-                            path: path.to_string_lossy().to_string(),
-                            size_bytes: size,
-                            category: "App残留".to_string(),
-                            selected: false,
-                            deletable: true,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
-                            recommend: Recommend::Advanced,
-                            description: format!("{} 的残留数据（App 可能已卸载）", name),
-                        });
-                    }
+                if is_app_installed(&name, &installed_apps) {
+                    continue;
+                }
+
+                // 多应用共享厂商目录（如 Google/、Microsoft/）：
+                // 不整体标记为残留，递归检测子目录
+                if is_vendor_shared_dir(&name) {
+                    items.extend(scan_vendor_subdir_leftovers(
+                        &path, &installed_apps, "App残留",
+                        50 * 1024 * 1024, Recommend::Advanced,
+                    ));
+                    continue;
+                }
+
+                // 普通残留目录
+                let size = dir_size(&path);
+                if size > 50 * 1024 * 1024 {
+                    items.push(ScanItem {
+                        path: path.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: "App残留".to_string(),
+                        selected: false,
+                        deletable: true,
+                        undeletable_reason: String::new(),
+                        batch_paths: Vec::new(),
+                        recommend: Recommend::Advanced,
+                        description: format!("{} 的残留数据（App 可能已卸载）", name),
+                    });
                 }
             }
         }
@@ -1244,21 +1257,32 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     continue;
                 }
 
-                if !is_app_installed(&name, &installed_apps) {
-                    let size = dir_size(&path);
-                    if size > 100 * 1024 * 1024 {
-                        items.push(ScanItem {
-                            path: path.to_string_lossy().to_string(),
-                            size_bytes: size,
-                            category: "App残留缓存".to_string(),
-                            selected: false,
-                            deletable: true,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
-                            recommend: Recommend::Caution,
-                            description: format!("{} 的残留缓存（App 可能已卸载）", name),
-                        });
-                    }
+                if is_app_installed(&name, &installed_apps) {
+                    continue;
+                }
+
+                // 多应用共享厂商目录：递归检测子目录
+                if is_vendor_shared_dir(&name) {
+                    items.extend(scan_vendor_subdir_leftovers(
+                        &path, &installed_apps, "App残留缓存",
+                        100 * 1024 * 1024, Recommend::Caution,
+                    ));
+                    continue;
+                }
+
+                let size = dir_size(&path);
+                if size > 100 * 1024 * 1024 {
+                    items.push(ScanItem {
+                        path: path.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: "App残留缓存".to_string(),
+                        selected: false,
+                        deletable: true,
+                        undeletable_reason: String::new(),
+                        batch_paths: Vec::new(),
+                        recommend: Recommend::Caution,
+                        description: format!("{} 的残留缓存（App 可能已卸载）", name),
+                    });
                 }
             }
         }
@@ -1333,13 +1357,107 @@ fn is_app_installed(name: &str, installed_apps: &std::collections::HashSet<Strin
         }
     }
 
-    // 模糊匹配
+    // 模糊匹配：name 是 app 的前缀，或 app 是 name 的前缀
+    // 例如 "Google" 匹配 "Google Chrome"，"AndroidStudio2025.1.3" 匹配 "Android Studio"
+    let name_alnum: String = name_lower.chars().filter(|c| c.is_alphanumeric()).collect();
     for app in installed_apps {
-        if name_lower.contains(&app.to_lowercase()) {
+        let app_lower = app.to_lowercase();
+        if name_lower.contains(&app_lower) || app_lower.contains(&name_lower) {
             return true;
+        }
+        // 去除空格和标点后比较前缀（如 "AndroidStudio2025" vs "Android Studio"）
+        let app_alnum: String = app_lower.chars().filter(|c| c.is_alphanumeric()).collect();
+        if !name_alnum.is_empty() && !app_alnum.is_empty() {
+            if name_alnum.starts_with(&app_alnum) || app_alnum.starts_with(&name_alnum) {
+                return true;
+            }
         }
     }
 
+    false
+}
+
+/// 判断是否为多应用共享的厂商目录（如 Google/、Microsoft/、Adobe/）
+/// 这类目录下通常包含多个不同 App 的子目录，不应整体标记为残留
+fn is_vendor_shared_dir(name: &str) -> bool {
+    let vendor_dirs = [
+        "Google", "Microsoft", "Adobe", "JetBrains", "Mozilla",
+        "Opera", "BraveSoftware", "Vivaldi", "Chromium",
+    ];
+    vendor_dirs.iter().any(|v| name.eq_ignore_ascii_case(v))
+}
+
+/// 扫描厂商共享目录的子目录，检测真正的残留
+/// 例如 Google/ 下有 Chrome/（已安装）和 OtherApp/（未安装），只标记 OtherApp/
+fn scan_vendor_subdir_leftovers(
+    vendor_path: &Path,
+    installed_apps: &std::collections::HashSet<String>,
+    category: &str,
+    min_size: u64,
+    recommend: Recommend,
+) -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    let vendor_name = vendor_path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let Ok(entries) = std::fs::read_dir(vendor_path) else {
+        return items;
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let sub_name = entry.file_name().to_string_lossy().to_string();
+        let sub_path = entry.path();
+
+        if !sub_path.is_dir() {
+            continue;
+        }
+
+        // 检查子目录是否对应已安装的 App
+        if is_app_installed(&sub_name, installed_apps) {
+            continue;
+        }
+
+        // 跳过系统级目录
+        if is_system_app_support_dir(&sub_name) {
+            continue;
+        }
+
+        // 对于 AndroidStudioXXXX 这类带版本号的目录，额外检查
+        // 例如 "AndroidStudio2025.1.3" 应该匹配 "Android Studio"
+        if is_versioned_app_dir(&sub_name, installed_apps) {
+            continue;
+        }
+
+        let size = dir_size(&sub_path);
+        if size > min_size {
+            items.push(ScanItem {
+                path: sub_path.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: category.to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend,
+                description: format!("{} 中 {} 的残留数据（App 可能已卸载）", vendor_name, sub_name),
+            });
+        }
+    }
+
+    items
+}
+
+/// 检测带版本号的 App 目录（如 AndroidStudio2025.1.3 → Android Studio）
+fn is_versioned_app_dir(name: &str, installed_apps: &std::collections::HashSet<String>) -> bool {
+    let name_alnum: String = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    for app in installed_apps {
+        let app_alnum: String = app.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        // 至少 4 个字符前缀匹配，避免误判
+        if app_alnum.len() >= 4 && name_alnum.starts_with(&app_alnum) {
+            return true;
+        }
+    }
     false
 }
 
