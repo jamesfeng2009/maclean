@@ -192,27 +192,18 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     }
 
     // ================================================================
-    //  第 5 层: 白名单校验
+    //  第 5 层: 黑名单策略（已替代白名单）
     // ================================================================
-    // 策略分类：
-    //   - 用户主动扫描并勾选的类别（大文件/大目录）跳过白名单
-    //     因为这些是用户明确要删除的，黑名单已保证系统安全
-    //   - 自动批量清理类别（缓存/日志/App卸载关联文件）保留白名单
-    //     防止扫描器意外扫到非预期路径
-    let user_initiated = matches!(
-        category,
-        "大文件" | "大目录"
-    );
-
-    if !user_initiated {
-        let is_in_safe_zone = check_whitelist(&canonical, &home, category);
-        if !is_in_safe_zone {
-            return SafetyCheck::Danger(format!(
-                "路径不在安全白名单内，拒绝删除: {}",
-                canonical_str
-            ));
-        }
-    }
+    // 不再使用白名单（只允许特定路径），改为纯黑名单（只禁止危险路径）。
+    // 这样更通用，适配任意机器，无需为每台电脑配置白名单。
+    //
+    // 安全保障：
+    //   - 第 3 层：系统关键目录黑名单（/System, /usr, /bin 等 60+ 路径）
+    //   - 第 4 层：用户数据黑名单（Keychains, Mail, Messages 等）
+    //   - 扫描器只扫描已知缓存/构建目录，不会扫到随机危险路径
+    //   - 第 6 层：敏感文件名检测（.env, id_rsa 等）
+    //
+    // 原 check_whitelist 函数保留但不再调用，以备未来需要时恢复
 
     // ================================================================
     //  第 6 层: 敏感文件名检测
@@ -311,6 +302,19 @@ fn is_critical_system_path(path: &str) -> bool {
         "/var/db/",
         "/var/audit/",
         "/var/root/",
+        // Homebrew 已安装的核心组件（保护，不允许删除）
+        // Caskroom 旧版本不在保护范围内，由扫描器决定哪些是旧版本
+        "/opt/homebrew/Cellar/",
+        "/opt/homebrew/bin/",
+        "/opt/homebrew/opt/",
+        "/opt/homebrew/lib/",
+        "/opt/homebrew/include/",
+        "/opt/homebrew/sbin/",
+        "/usr/local/Cellar/",
+        "/usr/local/bin/",
+        "/usr/local/opt/",
+        "/usr/local/lib/",
+        "/usr/local/sbin/",
     ];
 
     for &p in &prefix_match {
@@ -322,14 +326,11 @@ fn is_critical_system_path(path: &str) -> bool {
     false
 }
 
-/// 检查路径是否在安全白名单内
+/// 检查路径是否在安全白名单内（已弃用，保留备查）
 ///
-/// 采用分层安全策略：
-/// 1. 黑名单拦截危险路径（系统目录、用户配置等）
-/// 2. 全局工具缓存标准路径放行（跨 macOS 通用）
-/// 3. 项目目录下的已知缓存/构建目录名放行
-/// 4. 用户 Library 下的 Caches / Logs / Application Support 子目录放行
-/// 5. 大文件/目录类别放行用户主目录下直接子项（用户主动扫描并选择删除）
+/// 以前采用白名单策略，现已改为纯黑名单策略，更通用。
+/// 此函数保留供未来需要时参考，但不再被调用。
+#[allow(dead_code)]
 fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
     let canonical_str = canonical.to_string_lossy();
     let home_str = home.to_string_lossy();
