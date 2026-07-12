@@ -280,95 +280,175 @@ fn is_critical_system_path(path: &str) -> bool {
 
 /// 检查路径是否在安全白名单内
 ///
-/// 只有以下路径模式下的文件/目录才允许删除:
+/// 采用分层安全策略：
+/// 1. 黑名单拦截危险路径（系统目录、用户配置等）
+/// 2. 全局工具缓存标准路径放行（跨 macOS 通用）
+/// 3. 项目目录下的已知缓存/构建目录名放行
+/// 4. 用户 Library 下的 Caches / Logs / Application Support 子目录放行
 fn check_whitelist(canonical: &Path, home: &Path) -> bool {
     let canonical_str = canonical.to_string_lossy();
     let home_str = home.to_string_lossy();
 
-    // 安全路径前缀列表
-    // 注意：叶子目录（精确匹配的缓存目录）末尾不带 /，前缀目录（允许子目录）末尾带 /
-    let safe_prefixes: Vec<String> = vec![
-        // Rust 编译产物
+    // ================================================================
+    //  第 1 层: 全局工具缓存标准路径
+    //  这些路径是各工具在 macOS 上的默认位置，任何机器都一样
+    // ================================================================
+    let global_tool_caches: Vec<String> = vec![
+        // Rust
         format!("{}/.cargo/registry", home_str),
-        // Xcode
-        format!("{}/Library/Developer/Xcode/DerivedData", home_str),
-        format!("{}/Library/Developer/Xcode/iOS DeviceSupport", home_str),
-        format!("{}/Library/Developer/Xcode/Archives", home_str),
-        // 模拟器缓存（不是运行时镜像）
-        "/Library/Developer/CoreSimulator/Caches".to_string(),
-        // Node.js
+        // Node.js / npm / pnpm / yarn
         format!("{}/.npm", home_str),
+        format!("{}/.yarn", home_str),
+        format!("{}/.config/yarn/global", home_str),
         format!("{}/Library/pnpm/store", home_str),
         // Go
         format!("{}/go/pkg/mod", home_str),
-        // Homebrew 缓存
-        format!("{}/Library/Caches/Homebrew", home_str),
-        // pip 缓存
-        format!("{}/Library/Caches/pip", home_str),
-        // Gradle 缓存
+        format!("{}/go/bin", home_str),
+        // Java / Gradle / Maven
         format!("{}/.gradle/caches", home_str),
         format!("{}/.gradle/daemon", home_str),
         format!("{}/.gradle/wrapper/dists", home_str),
-        // JetBrains 缓存
-        format!("{}/Library/Caches/JetBrains", home_str),
-        // 系统日志
+        format!("{}/.m2/repository", home_str),
+        // Flutter / Dart
+        format!("{}/.pub-cache", home_str),
+        format!("{}/.flutter", home_str),
+        // Python
+        format!("{}/.cache/pip", home_str),
+        format!("{}/.local/share/pip", home_str),
+        format!("{}/Library/Caches/pip", home_str),
+        // Homebrew
+        format!("{}/Library/Caches/Homebrew", home_str),
+        format!("{}/Library/Caches/Homebrew/Cask", home_str),
+        // C/C++
+        format!("{}/.conan/data", home_str),
+        format!("{}/.cache/ccache", home_str),
+        // Ruby
+        format!("{}/.gem", home_str),
+        format!("{}/.rbenv/versions", home_str),
+        // .NET
+        format!("{}/.nuget/packages", home_str),
+        // 系统级 Xcode / 模拟器缓存
+        format!("{}/Library/Developer/Xcode/DerivedData", home_str),
+        format!("{}/Library/Developer/Xcode/iOS DeviceSupport", home_str),
+        format!("{}/Library/Developer/Xcode/Archives", home_str),
+        format!("{}/Library/Developer/Xcode/Products", home_str),
+        "/Library/Developer/CoreSimulator/Caches".to_string(),
+        // 日志
         format!("{}/Library/Logs", home_str),
-        // App 容器内的缓存
-        format!("{}/Library/Containers/", home_str),
-        format!("{}/Library/Group Containers/", home_str),
-        // Application Support（需配合黑名单排除关键子目录）
-        format!("{}/Library/Application Support/", home_str),
-        // Library/Caches 下的子目录
-        format!("{}/Library/Caches/", home_str),
-        // Downloads 和 Desktop 下的文件
-        format!("{}/Downloads/", home_str),
-        format!("{}/Desktop/", home_str),
-        // 项目目录下的 target/node_modules
-        format!("{}/Downloads/myproject/workspace/", home_str),
-        format!("{}/Downloads/myStudy/project/", home_str),
-        format!("{}/FrontProject/", home_str),
+        // JetBrains
+        format!("{}/Library/Caches/JetBrains", home_str),
+        format!("{}/Library/Application Support/JetBrains/Toolbox/apps", home_str),
     ];
 
-    // 检查路径是否以任一安全前缀开头
-    for prefix in &safe_prefixes {
-        if canonical_str.starts_with(prefix) {
-            // 额外检查：对于 Containers 和 Group Containers，
-            // 只允许删除 Caches 子目录
-            if canonical_str.contains("/Library/Containers/")
-                && !canonical_str.contains("/Data/Library/Caches/")
-                && !canonical_str.contains("/Documents/xwechat_files/")
-            {
-                return false;
-            }
-            if canonical_str.contains("/Library/Group Containers/")
-                && !canonical_str.contains("/Library/Caches/")
-            {
-                return false;
-            }
-
-            // 对于 Application Support，排除黑名单目录
-            if canonical_str.contains("/Library/Application Support/") {
-                let forbidden_app_support = [
-                    "MobileSync",
-                    "AddressBook",
-                    "CallHistoryDB",
-                    "CloudDocs",
-                    "iCloud",
-                    "AppleShare",
-                    "syncervices",
-                ];
-                for forbidden in &forbidden_app_support {
-                    if canonical_str.contains(forbidden) {
-                        return false;
-                    }
-                }
-            }
-
+    for prefix in &global_tool_caches {
+        if is_same_or_under(&canonical_str, prefix) {
             return true;
         }
     }
 
+    // ================================================================
+    //  第 2 层: 用户 Library/Caches 和 Application Support 下的子目录
+    //  黑名单已在 is_critical_system_path / forbidden_home_paths 中排除危险项
+    // ================================================================
+    let user_library_caches = format!("{}/Library/Caches/", home_str);
+    if canonical_str.starts_with(&user_library_caches) {
+        return true;
+    }
+
+    let user_app_support = format!("{}/Library/Application Support/", home_str);
+    if canonical_str.starts_with(&user_app_support) {
+        // 黑名单已在 forbidden_home_paths 中处理，这里放行其余子目录
+        return true;
+    }
+
+    let user_containers = format!("{}/Library/Containers/", home_str);
+    if canonical_str.starts_with(&user_containers) {
+        // 只允许删除 Containers 内的 Caches
+        return canonical_str.contains("/Data/Library/Caches/")
+            || canonical_str.contains("/Documents/xwechat_files/");
+    }
+
+    let user_group_containers = format!("{}/Library/Group Containers/", home_str);
+    if canonical_str.starts_with(&user_group_containers) {
+        // 只允许删除 Group Containers 内的 Caches
+        return canonical_str.contains("/Library/Caches/");
+    }
+
+    // ================================================================
+    //  第 3 层: 常见项目根目录下的缓存/构建目录
+    //  扫描器识别出的项目级缓存，只要位于常见项目目录下就放行
+    // ================================================================
+    let project_roots: Vec<String> = vec![
+        format!("{}/Downloads/", home_str),
+        format!("{}/Desktop/", home_str),
+        format!("{}/Documents/", home_str),
+        format!("{}/workspace/", home_str),
+        format!("{}/projects/", home_str),
+        format!("{}/project/", home_str),
+        format!("{}/FrontProject/", home_str),
+        format!("{}/IdeaProjects/", home_str),
+        format!("{}/AndroidStudioProjects/", home_str),
+        format!("{}/StudioProjects/", home_str),
+        format!("{}/dev/", home_str),
+        format!("{}/Development/", home_str),
+    ];
+
+    // 已知缓存/构建目录名（项目级）
+    let project_cache_names = [
+        "node_modules",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        ".output",
+        ".turbo",
+        ".parcel-cache",
+        "target",
+        "build",
+        "dist",
+        "out",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "venv",
+        // 注意：不放行 .env 文件，避免误删配置/密钥
+        ".gradle",
+        ".idea",
+        ".vs",
+        ".angular",
+        ".nyc_output",
+        "coverage",
+        ".DS_Store", // 文件
+    ];
+
+    for root in &project_roots {
+        if canonical_str.starts_with(root) {
+            for name in &project_cache_names {
+                if path_contains_component(&canonical_str, name) {
+                    return true;
+                }
+            }
+        }
+    }
+
     false
+}
+
+/// 检查 path 是否等于 prefix 或位于 prefix 之下
+/// 自动处理末尾 / 的差异
+fn is_same_or_under(path: &str, prefix: &str) -> bool {
+    let normalized_path = path.trim_end_matches('/');
+    let normalized_prefix = prefix.trim_end_matches('/');
+    normalized_path == normalized_prefix
+        || normalized_path.starts_with(&format!("{}/", normalized_prefix))
+}
+
+/// 检查路径中是否包含某个目录/文件名组件
+/// 例如 /a/b/node_modules/c 包含 node_modules
+fn path_contains_component(path: &str, name: &str) -> bool {
+    path.split('/').any(|component| component == name)
 }
 
 /// 记录删除日志到文件
