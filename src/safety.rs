@@ -363,6 +363,12 @@ fn check_whitelist(canonical: &Path, home: &Path) -> bool {
         return true;
     }
 
+    // Preferences 下的 plist 文件（App 残留清理）
+    let user_prefs = format!("{}/Library/Preferences/", home_str);
+    if canonical_str.starts_with(&user_prefs) {
+        return true;
+    }
+
     let user_containers = format!("{}/Library/Containers/", home_str);
     if canonical_str.starts_with(&user_containers) {
         // 只允许删除 Containers 内的 Caches

@@ -50,6 +50,10 @@ impl Scanner for DevCacheScanner {
         // 更多语言缓存
         scan_more_dev_caches(&mut items);
 
+        // 安装包清理、App 卸载残留
+        scan_installer_files(&mut items);
+        scan_app_leftovers(&mut items);
+
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
 
@@ -504,6 +508,67 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
             recommend: Recommend::Safe,
             description: "Homebrew 下载缓存，可安全删除".to_string(),
         });
+    }
+
+    // ~/Library/Caches/Homebrew/downloads (具体下载文件)
+    let brew_downloads = home.join("Library/Caches/Homebrew/downloads");
+    if brew_downloads.is_dir() {
+        let size = dir_size(&brew_downloads);
+        if size > 10 * 1024 * 1024 {
+            items.push(ScanItem {
+                path: brew_downloads.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Homebrew下载".to_string(),
+                selected: false,
+                deletable: true,
+                            undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "Homebrew 已下载的安装包，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // Homebrew Caskroom 旧版本缓存（/opt/homebrew/Caskroom 或 /usr/local/Caskroom）
+    for caskroom in ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"] {
+        let cask_path = PathBuf::from(caskroom);
+        if cask_path.is_dir() {
+            // 检查每个 cask 是否有多个版本
+            if let Ok(entries) = std::fs::read_dir(&cask_path) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let cask_dir = entry.path();
+                    let cask_name = entry.file_name().to_string_lossy().to_string();
+                    if let Ok(version_entries) = std::fs::read_dir(&cask_dir) {
+                        let versions: Vec<_> = version_entries.filter_map(|e| e.ok()).collect();
+                        if versions.len() > 1 {
+                            // 有多个版本，旧版本可清理
+                            let mut total_old_size: u64 = 0;
+                            let mut old_paths: Vec<String> = Vec::new();
+                            for (i, v) in versions.iter().enumerate() {
+                                if i < versions.len() - 1 {
+                                    let size = dir_size(&v.path());
+                                    total_old_size += size;
+                                    old_paths.push(v.path().to_string_lossy().to_string());
+                                }
+                            }
+                            if total_old_size > 10 * 1024 * 1024 {
+                                items.push(ScanItem {
+                                    path: format!("{} ({}个旧版本)", cask_name, old_paths.len()),
+                                    size_bytes: total_old_size,
+                                    category: "Homebrew旧版".to_string(),
+                                    selected: false,
+                                    deletable: true,
+                                    undeletable_reason: String::new(),
+                                    batch_paths: old_paths,
+                                    recommend: Recommend::Safe,
+                                    description: format!("{} 的旧版本，最新版已保留", cask_name),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     items
@@ -1004,4 +1069,291 @@ fn scan_more_dev_caches(items: &mut Vec<ScanItem>) {
             }
         }
     }
+}
+
+// =========================================================================
+//  安装包清理（Downloads 下的 dmg/pkg/zip 等）
+// =========================================================================
+
+/// 扫描 Downloads 目录下的安装包文件
+fn scan_installer_files(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+    let downloads = home.join("Downloads");
+
+    if !downloads.is_dir() {
+        return;
+    }
+
+    // 安装包扩展名
+    let installer_exts = [".dmg", ".pkg", ".iso", ".zip", ".tar.gz", ".tgz", ".7z"];
+
+    let mut installers: Vec<(String, u64, String)> = Vec::new(); // (path, size, filename)
+
+    // 递归扫描 Downloads（最多 2 层深度）
+    for entry in walkdir::WalkDir::new(&downloads)
+        .max_depth(2)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let filename = entry.file_name().to_string_lossy().to_lowercase();
+        let path_str = path.to_string_lossy().to_string();
+
+        // 检查是否是安装包
+        let is_installer = installer_exts.iter().any(|ext| filename.ends_with(ext));
+        if !is_installer {
+            continue;
+        }
+
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if size < 50 * 1024 * 1024 {
+            // 小于 50MB 的不展示
+            continue;
+        }
+
+        installers.push((path_str, size, entry.file_name().to_string_lossy().to_string()));
+    }
+
+    if installers.is_empty() {
+        return;
+    }
+
+    // 按大小降序排序
+    installers.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // 聚合为单项展示（如果有很多个）
+    let total_size: u64 = installers.iter().map(|(_, s, _)| s).sum();
+    let count = installers.len();
+
+    if count <= 3 {
+        // 少量时逐个展示
+        for (path, size, filename) in installers {
+            items.push(ScanItem {
+                path,
+                size_bytes: size,
+                category: "安装包".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: format!("{} ({})", filename, format_size_local(size)),
+            });
+        }
+    } else {
+        // 多个时聚合展示，batch_paths 存储真实路径
+        let paths: Vec<String> = installers.iter().map(|(p, _, _)| p.clone()).collect();
+        items.push(ScanItem {
+            path: format!("{}个安装包", count),
+            size_bytes: total_size,
+            category: "安装包".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: paths,
+            recommend: Recommend::Caution,
+            description: format!("Downloads 下的安装包，共 {} 个，总计 {}", count, format_size_local(total_size)),
+        });
+    }
+}
+
+/// 格式化文件大小（本地辅助函数）
+fn format_size_local(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+// =========================================================================
+//  App 卸载残留清理
+// =========================================================================
+
+/// 扫描已卸载 App 的残留文件
+///
+/// 检测策略：
+/// 1. 扫描 ~/Library/Application Support/、~/Library/Caches/、~/Library/Preferences/
+/// 2. 对每个子目录，检查 /Applications/ 下是否有对应的 .app
+/// 3. 如果 App 不存在，标记为残留
+fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+
+    // 获取已安装的 app 名称集合
+    let installed_apps = get_installed_app_names();
+    if installed_apps.is_empty() {
+        return;
+    }
+
+    // 扫描 ~/Library/Application Support/ 下的残留
+    let app_support = home.join("Library/Application Support");
+    if app_support.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&app_support) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let path = entry.path();
+
+                // 跳过系统级和开发工具目录
+                if is_system_app_support_dir(&name) {
+                    continue;
+                }
+
+                // 检查是否有对应的 App
+                if !is_app_installed(&name, &installed_apps) {
+                    let size = dir_size(&path);
+                    if size > 50 * 1024 * 1024 {
+                        items.push(ScanItem {
+                            path: path.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: "App残留".to_string(),
+                            selected: false,
+                            deletable: true,
+                            undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
+                            recommend: Recommend::Advanced,
+                            description: format!("{} 的残留数据（App 可能已卸载）", name),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 扫描 ~/Library/Caches/ 下的残留（大于 100MB 的）
+    let caches = home.join("Library/Caches");
+    if caches.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&caches) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let path = entry.path();
+
+                // 跳过系统缓存
+                if name.starts_with("com.apple.") || name.starts_with("CloudKit") {
+                    continue;
+                }
+
+                if !is_app_installed(&name, &installed_apps) {
+                    let size = dir_size(&path);
+                    if size > 100 * 1024 * 1024 {
+                        items.push(ScanItem {
+                            path: path.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: "App残留缓存".to_string(),
+                            selected: false,
+                            deletable: true,
+                            undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
+                            recommend: Recommend::Caution,
+                            description: format!("{} 的残留缓存（App 可能已卸载）", name),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 扫描 ~/Library/Preferences/ 下的残留 plist（按数量聚合）
+    let prefs = home.join("Library/Preferences");
+    if prefs.is_dir() {
+        let mut leftover_prefs: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&prefs) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("com.apple.") || name.starts_with(".") {
+                    continue;
+                }
+                if !is_app_installed(&name, &installed_apps) {
+                    leftover_prefs.push(entry.path().to_string_lossy().to_string());
+                }
+            }
+        }
+        if leftover_prefs.len() > 10 {
+            items.push(ScanItem {
+                path: format!("{}个残留配置文件", leftover_prefs.len()),
+                size_bytes: 0,
+                category: "App残留配置".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: leftover_prefs,
+                recommend: Recommend::Advanced,
+                description: "已卸载 App 的偏好设置文件，可安全删除".to_string(),
+            });
+        }
+    }
+}
+
+/// 获取已安装 App 的名称集合
+fn get_installed_app_names() -> std::collections::HashSet<String> {
+    let mut apps = std::collections::HashSet::new();
+
+    let home_str = home_dir().to_string_lossy().to_string();
+    for apps_dir in ["/Applications", &format!("{}/Applications", home_str)] {
+        let apps_path = PathBuf::from(apps_dir);
+        if let Ok(entries) = std::fs::read_dir(&apps_path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".app") {
+                    let app_name = name.trim_end_matches(".app").to_string();
+                    apps.insert(app_name.clone());
+                    apps.insert(app_name.to_lowercase());
+                }
+            }
+        }
+    }
+
+    apps
+}
+
+/// 检查名称是否对应已安装的 App
+fn is_app_installed(name: &str, installed_apps: &std::collections::HashSet<String>) -> bool {
+    let name_lower = name.to_lowercase();
+
+    // 直接匹配
+    if installed_apps.contains(name) || installed_apps.contains(&name_lower) {
+        return true;
+    }
+
+    // 去掉常见前缀（如 com.example.）
+    if let Some(stripped) = name.split('.').last() {
+        if !stripped.is_empty() && (installed_apps.contains(stripped) || installed_apps.contains(&stripped.to_lowercase())) {
+            return true;
+        }
+    }
+
+    // 模糊匹配
+    for app in installed_apps {
+        if name_lower.contains(&app.to_lowercase()) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 判断是否为系统级 Application Support 目录（不应标记为残留）
+fn is_system_app_support_dir(name: &str) -> bool {
+    let system_dirs = [
+        "Apple", "AppleSetup", "com.apple", "CrashReporter", "Dock",
+        "FaceTime", "iCloud", "KeyboardServices", "MobileSync",
+        "SyncServices", "AddressBook", "Calendar", "Mail", "Messages",
+        "Notes", "Reminders", "Safari", "Siri", "Spotlight",
+        "System Preferences", "TelephonyUtilities", "WebKit",
+        "Homebrew", "JetBrains", "CoreSimulator", "Caches", "CloudDocs",
+    ];
+
+    for sys in &system_dirs {
+        if name.eq_ignore_ascii_case(sys) || name.starts_with(&format!("{}.", sys)) {
+            return true;
+        }
+    }
+
+    false
 }
