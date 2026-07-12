@@ -338,6 +338,33 @@ fn is_app_running(app_name: &str) -> bool {
     false
 }
 
+/// 检查 MacBook 是否处于合盖状态（clamshell mode）
+///
+/// 通过 `ioreg` 读取 AppleClamshellState 属性判断屏幕开合状态。
+/// 合盖时 Touch ID 传感器不可用（电源按钮 Touch ID 在合盖时无法触达），
+/// 需要回退到密码输入流程。
+///
+/// 返回 true 表示屏幕已合上，false 表示打开或无法检测（按打开处理）。
+pub fn is_clamshell_closed() -> bool {
+    if let Ok(output) = std::process::Command::new("ioreg")
+        .arg("-r")
+        .arg("-k")
+        .arg("AppleClamshellState")
+        .arg("-d")
+        .arg("4")
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 查找 "AppleClamshellState" = Yes 的行
+        for line in stdout.lines() {
+            if line.contains("AppleClamshellState") && line.contains("Yes") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// EDR / Endpoint Security 代理的 bundle ID 前缀
 ///
 /// 这些是企业安全代理的标识前缀，其缓存文件通常位于

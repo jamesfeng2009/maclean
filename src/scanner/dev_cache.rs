@@ -61,6 +61,12 @@ impl Scanner for DevCacheScanner {
         // 安装包清理
         scan_installer_files(&mut items);
 
+        // 孤儿 LaunchAgent/LaunchDaemon 检测（指向已卸载应用的 plist）
+        items.extend(scan_orphaned_launchd());
+
+        // .DS_Store 文件清理（用户主目录下递归扫描）
+        items.extend(scan_ds_store_files());
+
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
 
@@ -1794,4 +1800,274 @@ fn scan_monorepo_caches() -> Vec<ScanItem> {
     }
 
     items
+}
+
+// =========================================================================
+//  孤儿 LaunchAgent/LaunchDaemon 检测
+// =========================================================================
+
+/// 扫描指向已卸载应用的 LaunchAgent/LaunchDaemon plist 文件
+///
+/// 扫描以下目录中的 .plist 文件：
+/// - ~/Library/LaunchAgents（用户级，可删除）
+/// - /Library/LaunchAgents（系统级，仅展示不可删）
+/// - /Library/LaunchDaemons（系统级，仅展示不可删）
+///
+/// 使用 `plutil -p` 解析 plist，提取 Program 或 ProgramArguments 中的可执行路径，
+/// 若路径指向的程序不存在，则判定为孤儿项。
+fn scan_orphaned_launchd() -> Vec<ScanItem> {
+    let home = home_dir();
+    let scan_dirs: Vec<(PathBuf, bool)> = vec![
+        // (目录, 是否用户级可删除)
+        (home.join("Library/LaunchAgents"), true),
+        (PathBuf::from("/Library/LaunchAgents"), false),
+        (PathBuf::from("/Library/LaunchDaemons"), false),
+    ];
+
+    let mut items = Vec::new();
+
+    for (dir, is_user_level) in scan_dirs {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.is_empty() || !name.ends_with(".plist") {
+                continue;
+            }
+
+            // 使用 plutil -p 解析 plist
+            let program_path = match extract_program_from_plist(&path) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // 检查程序是否存在
+            if std::path::Path::new(&program_path).exists() {
+                continue;
+            }
+
+            // 程序不存在 → 孤儿项
+            let size = entry
+                .metadata()
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            let level_label = if is_user_level { "用户级" } else { "系统级" };
+            let category = format!("孤儿服务-{}", level_label);
+
+            let (deletable, reason, recommend) = if is_user_level {
+                (
+                    true,
+                    String::new(),
+                    Recommend::Safe,
+                )
+            } else {
+                (
+                    false,
+                    "系统级 LaunchDaemon/Agent，需在终端用 sudo 手动删除".to_string(),
+                    Recommend::Advanced,
+                )
+            };
+
+            items.push(ScanItem {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: size,
+                category,
+                selected: false,
+                deletable,
+                undeletable_reason: reason,
+                batch_paths: Vec::new(),
+                recommend,
+                description: format!(
+                    "指向 {} 的服务已失效（程序已被卸载），{}",
+                    program_path,
+                    if is_user_level {
+                        "可安全删除此 plist".to_string()
+                    } else {
+                        format!("需手动清理：sudo rm \"{}\"", path.display())
+                    }
+                ),
+            });
+        }
+    }
+
+    items
+}
+
+/// 从 plist 文件中提取程序路径
+///
+/// 使用 `plutil -p` 输出人类可读格式，然后查找 Program 或 ProgramArguments 键。
+/// plutil -p 输出格式示例：
+///   "Program" => "/usr/bin/foo"
+///   "ProgramArguments" => [
+///     0 => "/usr/bin/foo"
+///     1 => "-bar"
+///   ]
+fn extract_program_from_plist(plist_path: &Path) -> Option<String> {
+    let output = Command::new("/usr/bin/plutil")
+        .arg("-p")
+        .arg(plist_path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut in_program_args = false;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+
+        // 优先匹配 "Program" => "/path"（单值键）
+        if trimmed.contains("\"Program\"") && trimmed.contains("=>") {
+            if let Some(p) = extract_quoted_value(trimmed) {
+                return Some(p);
+            }
+        }
+
+        // 跟踪 ProgramArguments 数组
+        if trimmed.contains("\"ProgramArguments\"") {
+            in_program_args = true;
+            continue;
+        }
+
+        if in_program_args {
+            // 数组结束
+            if trimmed.starts_with(']') {
+                in_program_args = false;
+                continue;
+            }
+            // 数组第一个元素（索引 0）通常是可执行路径
+            if trimmed.starts_with("0") || trimmed.contains("\"/") {
+                if let Some(p) = extract_quoted_value(trimmed) {
+                    // 只接受绝对路径
+                    if p.starts_with('/') {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// 从 plutil 输出行中提取引号包裹的路径值
+fn extract_quoted_value(line: &str) -> Option<String> {
+    // 查找 => 后面的引号字符串
+    let after_arrow = line.split("=>").nth(1)?;
+    let after_arrow = after_arrow.trim();
+
+    // 匹配 "..." 格式
+    if after_arrow.starts_with('"') {
+        let rest = &after_arrow[1..];
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_string());
+        }
+    }
+
+    None
+}
+
+// =========================================================================
+//  .DS_Store 文件清理
+// =========================================================================
+
+/// 扫描用户主目录下的 .DS_Store 文件
+///
+/// .DS_Store 是 Finder 自动生成的目录元数据文件（保存图标位置、排序方式等），
+/// 可安全删除，Finder 会在下次访问目录时自动重建。
+///
+/// 递归扫描主目录（最大深度 5），跳过系统保护目录和大型缓存目录，
+/// 将所有 .DS_Store 路径聚合为单个 ScanItem，通过 batch_paths 批量删除。
+fn scan_ds_store_files() -> Vec<ScanItem> {
+    let home = home_dir();
+    let mut ds_store_paths: Vec<String> = Vec::new();
+    let mut total_size: u64 = 0;
+
+    // 跳过这些子目录（避免深入无意义的缓存/系统目录）
+    let skip_dirs: &[&str] = &[
+        ".Trash",
+        ".git",
+        "Library/Caches",
+        "Library/Developer",
+        "Library/Application Support",
+        "Library/Containers",
+        "Library/Group Containers",
+        "Library/Mail",
+        "Library/Messages",
+        "Library/Metadata",
+        "Library/Mobile Documents",
+        "Library/Photos",
+        "Library/Suggestions",
+        "Library/VoiceTrigger",
+        "node_modules",
+        "target",
+        ".npm",
+        ".cargo",
+        ".gradle",
+        ".m2",
+        "Movies",
+        "Pictures",
+        "Music",
+    ];
+
+    for entry in WalkDir::new(&home)
+        .max_depth(5)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() > 0 && e.file_type().is_dir() {
+                let name = e.file_name().to_string_lossy().to_string();
+                // 跳过黑名单目录
+                for skip in skip_dirs {
+                    if name == *skip {
+                        return false;
+                    }
+                }
+                // 跳过隐藏目录（.开头），但允许 .DS_Store 所在的当前层
+                if name.starts_with('.') && e.depth() > 0 {
+                    return false;
+                }
+            }
+            true
+        })
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            let name = entry.file_name().to_string_lossy();
+            if name == ".DS_Store" {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                total_size += size;
+                ds_store_paths.push(entry.path().to_string_lossy().to_string());
+            }
+        }
+    }
+
+    if ds_store_paths.is_empty() {
+        return Vec::new();
+    }
+
+    let count = ds_store_paths.len();
+
+    vec![ScanItem {
+        path: format!("~/ 下的 .DS_Store 文件 ({} 个)", count),
+        size_bytes: total_size,
+        category: "DS_Store".to_string(),
+        selected: false,
+        deletable: true,
+        undeletable_reason: String::new(),
+        batch_paths: ds_store_paths,
+        recommend: Recommend::Safe,
+        description: format!(
+            "Finder 自动生成的目录元数据文件，共 {} 个。\n删除后 Finder 会在访问目录时自动重建，无任何风险。",
+            count
+        ),
+    }]
 }

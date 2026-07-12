@@ -173,6 +173,12 @@ pub struct App {
     pub disk_analyzer_path: Option<std::path::PathBuf>,
     /// 磁盘分析器：导航历史栈（用于返回上一级）
     pub disk_analyzer_history: Vec<std::path::PathBuf>,
+    /// sudo 会话是否活跃（通过 keepalive 保活）
+    pub sudo_session_active: bool,
+    /// 过滤/搜索输入框内容
+    pub filter_query: String,
+    /// 过滤输入框是否获得焦点
+    pub filter_active: bool,
 }
 
 impl App {
@@ -222,6 +228,9 @@ impl App {
             expanded_items: std::collections::HashSet::new(),
             disk_analyzer_path: None,
             disk_analyzer_history: Vec::new(),
+            sudo_session_active: false,
+            filter_query: String::new(),
+            filter_active: false,
         }
     }
 
@@ -259,6 +268,35 @@ impl App {
     /// 获取当前 Tab 的扫描结果
     pub fn current_items(&self) -> &Vec<ScanItem> {
         &self.results[self.tab_index()]
+    }
+
+    /// 获取经过过滤后的当前 Tab 扫描项索引列表
+    ///
+    /// 当 `filter_query` 非空时，只返回路径、类别或描述中包含查询字符串
+    /// （大小写不敏感）的项的索引。查询为空时返回所有项的索引。
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        let idx = self.tab_index();
+        let items = &self.results[idx];
+        let query = self.filter_query.trim().to_lowercase();
+        if query.is_empty() {
+            return (0..items.len()).collect();
+        }
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                item.path.to_lowercase().contains(&query)
+                    || item.category.to_lowercase().contains(&query)
+                    || item.description.to_lowercase().contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 清除过滤条件
+    pub fn clear_filter(&mut self) {
+        self.filter_query.clear();
+        self.filter_active = false;
     }
 
     /// 获取当前 Tab 的扫描状态
@@ -747,6 +785,11 @@ impl App {
                 "unknown" => "unknown",
                 "no_items_hint" => "No items yet - click Scan to find cleanable files",
                 "click_to_start" => "Click to start",
+                // 过滤/搜索
+                "filter" => "Filter",
+                "filter_placeholder" => "Filter by path, category, or description... (/ to focus, Esc to clear)",
+                "filter_results" => "{0} of {1} items matched",
+                "no_match" => "No items match the filter",
                 // 删除确认
                 "about_to_delete" => "About to delete",
                 "irreversible" => "This operation is irreversible!",
@@ -804,6 +847,11 @@ impl App {
                 "unknown" => "未知",
                 "no_items_hint" => "暂无数据 - 点击「扫描」查找可清理文件",
                 "click_to_start" => "点击开始",
+                // 过滤/搜索
+                "filter" => "过滤",
+                "filter_placeholder" => "按路径、类别或描述过滤...（/ 聚焦，Esc 清除）",
+                "filter_results" => "匹配 {0} / {1} 项",
+                "no_match" => "没有匹配过滤条件的项",
                 // 删除确认
                 "about_to_delete" => "即将删除",
                 "irreversible" => "此操作不可逆！",

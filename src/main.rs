@@ -6,6 +6,7 @@ mod aewp;
 mod app;
 mod safety;
 mod scanner;
+mod sudo_keepalive;
 mod touchid;
 mod menubar;
 
@@ -21,6 +22,8 @@ use scanner::{format_size, Recommend, ScanItem, Scanner};
 enum ScanMessage {
     /// 扫描进度更新
     Progress(f32),
+    /// 增量结果（扫描中部分项）— (items, tab_index)
+    PartialItems(Vec<ScanItem>, u64),
     /// 扫描完成
     Done(Vec<ScanItem>, u64, u64), // (items, scan_time_ms, tab_index)
 }
@@ -210,6 +213,13 @@ fn main() -> eframe::Result {
                                 app.scan_progress = p;
                             }
                         }
+                        Ok(ScanMessage::PartialItems(items, tab_idx)) => {
+                            // 增量结果：扫描中已发现的部分项，直接追加到当前 Tab 的结果列表
+                            if let Some(app) = &mut APP {
+                                let idx = tab_idx as usize;
+                                app.results[idx].extend(items);
+                            }
+                        }
                         Ok(ScanMessage::Done(items, time_ms, tab_idx)) => {
                             if let Some(app) = &mut APP {
                                 app.results[tab_idx as usize] = items;
@@ -271,18 +281,27 @@ fn main() -> eframe::Result {
                                 app.touch_id_available = touchid::touch_id_available();
                                 app.touch_id_enabled = touchid::sudo_touch_id_enabled();
 
-                                if app.touch_id_enabled {
+                                // 合盖检测：Touch ID 在合盖时不可用，回退到密码输入
+                                let clamshell_closed = safety::is_clamshell_closed();
+                                if clamshell_closed {
+                                    app.touch_id_error = Some(
+                                        "屏幕已合上，Touch ID 不可用，请输入密码".to_string()
+                                    );
+                                    app.touch_id_available = false;
+                                }
+
+                                if app.touch_id_enabled && !clamshell_closed {
                                     // Touch ID 已启用：直接用 sudo（Touch ID 自动触发）
                                     app.confirm = ConfirmState::SudoWithTouchId;
                                     let items = app.sudo_failed_items.clone();
                                     app.delete_done = 0;
                                     app.delete_total = items.len();
                                     start_sudo_delete_touchid(items, &mut DELETE_RX);
-                                } else if app.touch_id_available {
+                                } else if app.touch_id_available && !clamshell_closed {
                                     // Touch ID 可用但未启用：提示用户是否启用
                                     app.confirm = ConfirmState::OfferTouchIdSetup;
                                 } else {
-                                    // 无 Touch ID：走密码输入流程
+                                    // 无 Touch ID 或合盖：走密码输入流程
                                     app.confirm = ConfirmState::NeedSudoPassword;
                                 }
                             }
@@ -293,6 +312,8 @@ fn main() -> eframe::Result {
                             if let Some(app) = &mut APP {
                                 app.sudo_password = None;
                                 app.sudo_password_input.clear();
+                                // 刷新 sudo 会话状态（keepalive 可能仍活跃）
+                                app.sudo_session_active = sudo_keepalive::is_sudo_active();
                                 app.finish_delete();
                             }
                             DELETE_RX = None;
@@ -535,8 +556,8 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
 
         if is_scanning {
-            // 扫描中：显示带百分比的进度长条
-            ui.add_space(40.0);
+            // 扫描中：显示带百分比的进度长条 + 已发现的部分项
+            ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.add(egui::Spinner::new().size(40.0));
                 ui.add_space(10.0);
@@ -551,6 +572,64 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     .fill(egui::Color32::from_rgb(0, 200, 255))
                     .text(format!("{}%", pct)));
             });
+
+            // 增量显示已发现的部分项
+            if !items.is_empty() {
+                ui.add_space(10.0);
+                let partial_count = items.len();
+                let partial_size: u64 = items.iter().map(|i| i.size_bytes).sum();
+                ui.colored_label(
+                    egui::Color32::from_rgb(0, 200, 255),
+                    egui::RichText::new(format!(
+                        "🔍 {} {} ({})",
+                        partial_count,
+                        app.t("items_found"),
+                        format_size(partial_size)
+                    )).size(13.0),
+                );
+                ui.add_space(5.0);
+
+                // 可滚动的部分项列表
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for item in &items {
+                            let rec_color = if !item.deletable {
+                                egui::Color32::from_gray(80)
+                            } else {
+                                recommend_color(&item.recommend)
+                            };
+                            let badge = if !item.deletable {
+                                "🔒"
+                            } else {
+                                recommend_badge(&item.recommend)
+                            };
+
+                            let row_bg = egui::Color32::from_rgb(35, 35, 42);
+
+                            egui::Frame::none()
+                                .fill(row_bg)
+                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(rec_color, badge);
+                                        ui.add_space(3.0);
+                                        ui.colored_label(category_color(&item.category), &item.category);
+                                        let size_str = if item.size_bytes == 0 { "—".to_string() } else { format_size(item.size_bytes) };
+                                        ui.colored_label(egui::Color32::from_rgb(100, 200, 100), &size_str);
+                                        ui.add_space(5.0);
+                                        ui.colored_label(
+                                            egui::Color32::from_gray(130),
+                                            egui::RichText::new(truncate_path(&item.path, 60)).size(11.0),
+                                        );
+                                    });
+                                });
+                            ui.add_space(1.0);
+                        }
+                    });
+            }
+
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if items.is_empty() {
             ui.vertical_centered(|ui| {
@@ -650,6 +729,58 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.separator();
             ui.add_space(3.0);
 
+            // ====== 过滤/搜索输入框 ======
+            // / 键聚焦输入框，Esc 清除过滤
+            let filter_placeholder = app.t("filter_placeholder").to_string();
+            let filter_response = ui.horizontal(|ui| {
+                ui.label("🔍");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut app.filter_query)
+                        .hint_text(&filter_placeholder)
+                        .desired_width(400.0),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    app.clear_filter();
+                }
+                if !app.filter_query.is_empty() {
+                    if ui.button("✕").clicked() {
+                        app.clear_filter();
+                    }
+                }
+                app.filter_active = resp.has_focus();
+            });
+
+            // 全局 / 键快捷聚焦过滤输入框
+            if ui.input(|i| i.key_pressed(egui::Key::Slash) && !app.filter_active) {
+                // 标记需要聚焦（下一帧通过 request_focus 实现）
+                app.filter_active = true;
+            }
+
+            // 显示过滤结果计数
+            let total_count = items.len();
+            let filtered_indices = app.filtered_indices();
+            let filtered_count = filtered_indices.len();
+            if !app.filter_query.trim().is_empty() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 200, 255),
+                    egui::RichText::new(app.tf("filter_results", &[&filtered_count.to_string(), &total_count.to_string()])).size(12.0),
+                );
+            }
+
+            let _ = filter_response;
+
+            ui.add_space(3.0);
+
+            // 过滤后无结果
+            if filtered_count == 0 && !app.filter_query.trim().is_empty() {
+                let no_match_text = app.t("no_match").to_string();
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.label(egui::RichText::new(&no_match_text).size(14.0).color(egui::Color32::GRAY));
+                });
+                return;
+            }
+
             // ====== 可滚动列表 ======
             // 提前克隆关联明细和展开状态，避免借用冲突
             let associated_details = app.associated_details.clone();
@@ -660,7 +791,9 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let mut toggled_indices: Vec<usize> = Vec::new();
                 let mut expand_toggles: Vec<String> = Vec::new();
 
-                for (i, item) in items.iter().enumerate() {
+                for display_idx in &filtered_indices {
+                    let i = *display_idx;
+                    let item = &items[i];
                     let rec_color = if !item.deletable {
                         egui::Color32::from_gray(80)
                     } else {
@@ -913,6 +1046,8 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     let tab_idx = app.tab_index();
     app.scan_states[tab_idx] = ScanState::Scanning;
     app.scan_progress = 0.0;
+    // 清空上一次扫描结果，为增量显示做准备
+    app.results[tab_idx].clear();
 
     // 磁盘分析器：获取当前浏览路径
     let disk_path = if tab == Tab::LargeFiles {
@@ -984,6 +1119,8 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                         item.undeletable_reason = reason;
                     }
                 }
+                // 缓存命中也按批次发送，提供增量显示体验
+                send_items_in_batches(&tx, &items, tab_idx as u64);
                 let _ = tx.send(ScanMessage::Done(items, cached.scan_time_ms, tab_idx as u64));
                 return;
             }
@@ -1026,6 +1163,9 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                         item.undeletable_reason = reason;
                     }
                 }
+
+                // 增量显示：按大小降序排序后分批发送，最后 Done 发送完整列表替换
+                send_items_in_batches(&tx, &items, tab_idx as u64);
                 let _ = tx.send(ScanMessage::Done(items, scan_result.scan_time_ms, tab_idx as u64));
             }
             Err(_) => {
@@ -1034,6 +1174,27 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
             }
         }
     });
+}
+
+/// 将扫描结果按大小降序分批发送，实现增量显示
+///
+/// 排序后按每批最多 10 项分割，每批之间 sleep 50ms，
+/// 让 UI 有机会渲染已发现的项。发送完毕后调用方再发送 Done
+/// （Done 携带完整列表，会覆盖累积的部分项，保证最终结果一致）。
+fn send_items_in_batches(
+    tx: &mpsc::Sender<ScanMessage>,
+    items: &[ScanItem],
+    tab_idx: u64,
+) {
+    // 按大小降序排序，让用户先看到最大的项
+    let mut sorted: Vec<ScanItem> = items.to_vec();
+    sorted.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+
+    const BATCH_SIZE: usize = 10;
+    for chunk in sorted.chunks(BATCH_SIZE) {
+        let _ = tx.send(ScanMessage::PartialItems(chunk.to_vec(), tab_idx));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// 尽力删除：优先用系统 rm -rf（对 node_modules 等大目录更快），
@@ -2140,6 +2301,17 @@ fn show_sudo_password_window(
                         let password = app.sudo_password_input.clone();
                         app.sudo_password = Some(password.clone());
                         app.sudo_error = None;
+
+                        // 启动 sudo keepalive 会话（保活票据，避免重复弹密码框）
+                        match sudo_keepalive::start_sudo_session(&password) {
+                            Ok(_) => {
+                                app.sudo_session_active = true;
+                            }
+                            Err(e) => {
+                                // keepalive 启动失败不阻断流程，仅记录
+                                log_scan_step(&format!("sudo keepalive 启动失败: {}", e));
+                            }
+                        }
 
                         if is_setup_mode {
                             // 启用 Touch ID 模式：先创建 sudo_local
