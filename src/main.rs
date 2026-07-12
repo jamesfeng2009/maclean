@@ -136,6 +136,9 @@ fn main() -> eframe::Result {
             // 轮询菜单栏事件
             if let Some(ref mb) = MENUBAR {
                 let actions = mb.poll_events();
+                if !actions.is_empty() {
+                    log_scan_step(&format!("菜单栏事件: {:?}", actions));
+                }
                 for action in actions {
                     match action {
                         menubar::TrayAction::ShowWindow => {
@@ -151,9 +154,21 @@ fn main() -> eframe::Result {
                             }
                         }
                         menubar::TrayAction::QuickClean => {
-                            // 显示主窗口让用户选择清理
+                            // 1. 显示并聚焦主窗口
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+
+                            // 2. 实际执行一键清理：扫描 + 删除所有 Safe 项
+                            if let Some(app) = &mut APP {
+                                // 切换到开发者缓存 Tab
+                                app.tab = Tab::DevCache;
+                                let state = app.current_scan_state().clone();
+                                if !matches!(state, ScanState::Scanning) {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                                    start_scan(app, &mut SCAN_RX);
+                                }
+                            }
                         }
                         menubar::TrayAction::Quit => {
                             std::process::exit(0);

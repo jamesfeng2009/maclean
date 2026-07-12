@@ -3,8 +3,8 @@
 //! 在 macOS 菜单栏（右上角）显示常驻图标，
 //! 实时显示磁盘使用率，点击展开快捷操作菜单。
 
-use std::sync::mpsc;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use std::collections::HashMap;
+use tray_icon::menu::{MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// 菜单栏操作事件
@@ -24,7 +24,10 @@ pub enum TrayAction {
 pub struct MenuBarHud {
     tray_icon: Option<TrayIcon>,
     /// 菜单项 ID → 操作 的映射
-    menu_items: Vec<(String, TrayAction)>,
+    action_map: HashMap<String, TrayAction>,
+    /// 保留 MenuItem 实例，防止它们被提前 drop。
+    /// Submenu::append 内部会 clone，但显式持有可避免生命周期歧义。
+    _menu_items: Vec<MenuItem>,
     /// 上次更新的磁盘使用率
     last_disk_pct: f32,
 }
@@ -34,7 +37,8 @@ impl MenuBarHud {
     pub fn new() -> Self {
         Self {
             tray_icon: None,
-            menu_items: Vec::new(),
+            action_map: HashMap::new(),
+            _menu_items: Vec::new(),
             last_disk_pct: -1.0,
         }
     }
@@ -43,7 +47,18 @@ impl MenuBarHud {
     pub fn init(&mut self) {
         let icon = create_icon(0.0);
 
-        let menu = build_menu(&mut self.menu_items);
+        // macOS 上必须用 Submenu 作为托盘右键菜单的根，
+        // Menu::append 在 macOS 只允许添加 Submenu。
+        let menu = Submenu::new("Maclean", true);
+
+        let mut items = Vec::new();
+        add_title(&menu, &mut items);
+        add_action(&menu, &mut items, &mut self.action_map, "quick_scan", "⚡ 快速扫描", TrayAction::QuickScan);
+        add_action(&menu, &mut items, &mut self.action_map, "quick_clean", "🗑️ 一键清理 (安全项)", TrayAction::QuickClean);
+        add_action(&menu, &mut items, &mut self.action_map, "show_window", "📊 打开主窗口", TrayAction::ShowWindow);
+        add_action(&menu, &mut items, &mut self.action_map, "quit", "退出 Maclean", TrayAction::Quit);
+
+        self._menu_items = items;
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -84,11 +99,13 @@ impl MenuBarHud {
 
         while let Ok(event) = receiver.try_recv() {
             let id: &str = event.id().0.as_ref();
-            for (menu_id, action) in &self.menu_items {
-                if menu_id.as_str() == id {
-                    actions.push(action.clone());
-                    break;
-                }
+            log::log(&format!("收到菜单事件 id={}", id));
+
+            if let Some(action) = self.action_map.get(id) {
+                log::log(&format!("匹配到操作: {:?}", action));
+                actions.push(action.clone());
+            } else {
+                log::log("未匹配到任何操作");
             }
         }
 
@@ -96,44 +113,28 @@ impl MenuBarHud {
     }
 }
 
-/// 构建菜单
-fn build_menu(menu_items: &mut Vec<(String, TrayAction)>) -> Menu {
-    let mut menu = Menu::new();
+/// 添加不可点击的标题项
+fn add_title(menu: &Submenu, items: &mut Vec<MenuItem>) {
+    let title = MenuItem::with_id("maclean.title", "🧹 Maclean", false, None);
+    let _ = menu.append(&title);
+    let _ = menu.append(&PredefinedMenuItem::separator());
+    items.push(title);
+}
 
-    // 标题项（不可点击）
-    let title = MenuItem::new("🧹 Maclean", false, None);
-    menu.append(&title).ok();
-
-    let separator1 = PredefinedMenuItem::separator();
-    menu.append(&separator1).ok();
-
-    // 快速扫描
-    let quick_scan = MenuItem::new("⚡ 快速扫描", true, None);
-    menu_items.push((quick_scan.id().0.to_string(), TrayAction::QuickScan));
-    menu.append(&quick_scan).ok();
-
-    // 一键清理
-    let quick_clean = MenuItem::new("🗑️ 一键清理 (安全项)", true, None);
-    menu_items.push((quick_clean.id().0.to_string(), TrayAction::QuickClean));
-    menu.append(&quick_clean).ok();
-
-    let separator2 = PredefinedMenuItem::separator();
-    menu.append(&separator2).ok();
-
-    // 打开主窗口
-    let show_window = MenuItem::new("📊 打开主窗口", true, None);
-    menu_items.push((show_window.id().0.to_string(), TrayAction::ShowWindow));
-    menu.append(&show_window).ok();
-
-    let separator3 = PredefinedMenuItem::separator();
-    menu.append(&separator3).ok();
-
-    // 退出
-    let quit = MenuItem::new("退出 Maclean", true, None);
-    menu_items.push((quit.id().0.to_string(), TrayAction::Quit));
-    menu.append(&quit).ok();
-
-    menu
+/// 添加一个可点击菜单项，并注册 ID → 操作映射
+fn add_action(
+    menu: &Submenu,
+    items: &mut Vec<MenuItem>,
+    map: &mut HashMap<String, TrayAction>,
+    id: &str,
+    text: &str,
+    action: TrayAction,
+) {
+    let item = MenuItem::with_id(id, text, true, None);
+    map.insert(item.id().0.to_string(), action);
+    let _ = menu.append(&item);
+    items.push(item);
+    let _ = menu.append(&PredefinedMenuItem::separator());
 }
 
 /// 根据磁盘使用率创建图标

@@ -12,7 +12,6 @@ rayon = "1.10"
 dirs = "5.0"
 libc = "0.2"
 tray-icon = "0.14"
-muda = "0.14"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
