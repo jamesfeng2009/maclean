@@ -202,6 +202,20 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     }
 
     // ================================================================
+    //  第 4.5 层: EDR / Endpoint Security 代理保护
+    // ================================================================
+    // 检测 CrowdStrike、SentinelOne、ESET、Jamf 等企业安全代理的缓存路径。
+    // 误删这些路径会触发安全代理的 tamper 检测（MITRE T1562.001），
+    // 可能导致设备被隔离或告警。这些路径通常位于 /private/var/folders/ 或
+    // /var/folders/ 下，以厂商前缀命名（如 com.crowdstrike.、com.sentinelone.）。
+    if is_endpoint_security_cache_path(&canonical_str) {
+        return SafetyCheck::Danger(format!(
+            "EDR 安全代理缓存路径，删除会触发篡改告警: {}",
+            canonical_str
+        ));
+    }
+
+    // ================================================================
     //  第 5 层: 黑名单策略（已替代白名单）
     // ================================================================
     // 不再使用白名单（只允许特定路径），改为纯黑名单（只禁止危险路径）。
@@ -319,6 +333,53 @@ fn is_app_running(app_name: &str) -> bool {
     if let Ok(out) = output {
         // pgrep 有匹配时 exit code = 0，无匹配时 exit code = 1
         return out.status.success() && !out.stdout.is_empty();
+    }
+
+    false
+}
+
+/// EDR / Endpoint Security 代理的 bundle ID 前缀
+///
+/// 这些是企业安全代理的标识前缀，其缓存文件通常位于
+/// /private/var/folders/ 或 /var/folders/ 下。
+/// 误删会触发 tamper 检测（MITRE T1562.001）。
+const EDR_BUNDLE_PREFIXES: &[&str] = &[
+    "com.crowdstrike.",
+    "com.sentinelone.",
+    "com.sentinel-labs.",
+    "com.eset.",
+    "com.jamf.",
+    "com.jamfsoftware.",
+    "com.paloaltonetworks.",
+    "com.cisco.anyconnect",
+    "com.cisco.secureclient",
+];
+
+/// 检测路径是否为 EDR / Endpoint Security 代理的缓存路径
+///
+/// EDR 代理的临时缓存通常位于 macOS 的临时目录下：
+/// - `/private/var/folders/<XX>/<YYYY...>/T/` (用户级临时目录)
+/// - `/var/folders/<XX>/<YYYY...>/T/` (同上，符号链接)
+/// - `/private/var/folders/<XX>/<YYYY...>/C/` (用户级缓存目录)
+///
+/// 这些目录下以 `com.crowdstrike.`、`com.sentinelone.` 等前缀命名的
+/// 子目录是安全代理的运行时缓存，删除后会触发 tamper 检测。
+///
+/// 注意：此检查不依赖 HOME 环境变量，防止 `env -u HOME` 绕过。
+pub fn is_endpoint_security_cache_path(path: &str) -> bool {
+    // 只检查 /private/var/folders/ 和 /var/folders/ 下的路径
+    let is_var_folders = path.starts_with("/private/var/folders/")
+        || path.starts_with("/var/folders/");
+
+    if !is_var_folders {
+        return false;
+    }
+
+    // 检查路径中是否包含 EDR 厂商前缀
+    for prefix in EDR_BUNDLE_PREFIXES {
+        if path.contains(prefix) {
+            return true;
+        }
     }
 
     false
@@ -680,5 +741,53 @@ fn chrono_like_timestamp() -> String {
     match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(_) => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_edr_detection_crowdstrike() {
+        assert!(is_endpoint_security_cache_path(
+            "/private/var/folders/ab/com.crowdstrike.falcon.T/abc"
+        ));
+    }
+
+    #[test]
+    fn test_edr_detection_sentinelone() {
+        assert!(is_endpoint_security_cache_path(
+            "/var/folders/xy/com.sentinelone.agent/C/xyz"
+        ));
+    }
+
+    #[test]
+    fn test_edr_detection_jamf() {
+        assert!(is_endpoint_security_cache_path(
+            "/private/var/folders/cd/com.jamf.management/C/data"
+        ));
+    }
+
+    #[test]
+    fn test_edr_detection_non_edr_path() {
+        // 普通 var/folders 路径不应被标记为 EDR
+        assert!(!is_endpoint_security_cache_path(
+            "/private/var/folders/ab/abc123/T/com.apple.something"
+        ));
+        assert!(!is_endpoint_security_cache_path(
+            "/Users/test/Library/Caches/com.crowdstrike.falcon"
+        ));
+        assert!(!is_endpoint_security_cache_path("/tmp/test"));
+    }
+
+    #[test]
+    fn test_edr_detection_blocks_deletion() {
+        // EDR 路径应返回 Danger
+        let result = check_path_safety_with_category(
+            "/private/var/folders/ab/com.crowdstrike.falcon.T/abc",
+            "",
+        );
+        assert!(matches!(result, SafetyCheck::Danger(_)));
     }
 }

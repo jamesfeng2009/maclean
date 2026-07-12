@@ -108,7 +108,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([760.0, 540.0])
-            .with_title("Maclean - macOS 磁盘清理"),
+            .with_title("Maclean"),
         ..Default::default()
     };
 
@@ -388,6 +388,9 @@ fn recommend_badge(rec: &Recommend) -> &'static str {
 
 /// 渲染 GUI 主界面
 fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+    // 动态更新窗口标题（跟随语言切换）
+    ctx.send_viewport_cmd(egui::ViewportCommand::Title(app.t("window_title").to_string()));
+
     // ========== 顶部：标题栏 + 磁盘概览 ==========
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -448,7 +451,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     let total: u64 = app.current_items().iter().map(|i| i.size_bytes).sum();
                     ui.colored_label(
                         egui::Color32::GREEN,
-                        format!("✓ {} {} {}, {} {}", count, app.t("items_found"), app.t("items"), app.t("total"), format_size(total)),
+                        app.tf("found_items_total", &[&count.to_string(), &format_size(total)]),
                     );
                 }
             }
@@ -456,7 +459,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.separator();
 
             // 日志按钮
-            if ui.small_button("📋 日志").clicked() {
+            if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
                 let home = std::env::var("HOME").unwrap_or_default();
                 let log_dir = format!("{}/.maclean/logs", home);
                 // 在 Finder 中打开日志目录
@@ -496,11 +499,33 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             if scan_button.clicked() {
                 start_scan(app, scan_rx);
             }
+
+            // 强制刷新按钮（清除缓存后重新扫描）
+            let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
+            if refresh_btn.clicked() {
+                let tab_name = match app.tab {
+                    Tab::DevCache => "dev_cache",
+                    Tab::LargeFiles => "large_files",
+                    Tab::AppCache => "app_cache",
+                    Tab::AppData => "app_data",
+                    Tab::AppUninstall => "app_uninstall",
+                    Tab::SystemOptimize => "system_optimize",
+                    Tab::Apfs => "apfs",
+                };
+                scanner::cache::invalidate_cache(tab_name);
+                start_scan(app, scan_rx);
+            }
         });
 
         // --- 系统优化 Tab：特殊渲染（操作面板而非列表选择）---
         if app.tab == Tab::SystemOptimize {
             render_optimize_panel(ui, app, scan_rx);
+            return;
+        }
+
+        // --- 磁盘分析器 Tab：目录钻取式浏览 ---
+        if app.tab == Tab::LargeFiles {
+            render_disk_analyzer(ui, app, scan_rx);
             return;
         }
 
@@ -818,66 +843,68 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 }
             });
         }
+    });
 
-        // 权限引导弹窗（首次启动时显示）
-        if app.show_permission_guide {
-            show_permission_guide_window(ctx, app);
-        }
+    // ========== 弹窗层（必须在 CentralPanel 闭包外部，确保不被 return 跳过） ==========
 
-        // 删除确认弹窗
-        if matches!(app.confirm, ConfirmState::Pending) {
-            show_confirm_window(ctx, app, delete_rx);
-        }
+    // 权限引导弹窗（首次启动时显示）
+    if app.show_permission_guide {
+        show_permission_guide_window(ctx, app);
+    }
 
-        // sudo 密码输入弹窗
-        if matches!(app.confirm, ConfirmState::NeedSudoPassword) {
-            show_sudo_password_window(ctx, app, delete_rx);
-        }
+    // 删除确认弹窗
+    if matches!(app.confirm, ConfirmState::Pending) {
+        show_confirm_window(ctx, app, delete_rx);
+    }
 
-        // Touch ID 启用提示弹窗
-        if matches!(app.confirm, ConfirmState::OfferTouchIdSetup) {
-            show_touch_id_setup_window(ctx, app, delete_rx);
-        }
+    // sudo 密码输入弹窗
+    if matches!(app.confirm, ConfirmState::NeedSudoPassword) {
+        show_sudo_password_window(ctx, app, delete_rx);
+    }
 
-        // Touch ID 启用等待中（轮询检测 Terminal 中用户是否已完成授权）
-        if matches!(app.confirm, ConfirmState::WaitForTouchIdSetup) {
-            show_touch_id_waiting_window(ctx, app);
+    // Touch ID 启用提示弹窗
+    if matches!(app.confirm, ConfirmState::OfferTouchIdSetup) {
+        show_touch_id_setup_window(ctx, app, delete_rx);
+    }
 
-            // 检查是否已启用成功
-            if touchid::sudo_touch_id_enabled() {
-                // Touch ID 已启用，开始 sudo 删除
-                app.touch_id_enabled = true;
+    // Touch ID 启用等待中（轮询检测 Terminal 中用户是否已完成授权）
+    if matches!(app.confirm, ConfirmState::WaitForTouchIdSetup) {
+        show_touch_id_waiting_window(ctx, app);
+
+        // 检查是否已启用成功
+        if touchid::sudo_touch_id_enabled() {
+            // Touch ID 已启用，开始 sudo 删除
+            app.touch_id_enabled = true;
+            app.touch_id_wait_start = None;
+            app.confirm = ConfirmState::SudoWithTouchId;
+            let items = app.sudo_failed_items.clone();
+            app.delete_done = 0;
+            app.delete_total = items.len();
+            start_sudo_delete_touchid(items, delete_rx);
+        } else if let Some(start) = app.touch_id_wait_start {
+            // 检查超时（120 秒）
+            if start.elapsed().as_secs() > 120 {
                 app.touch_id_wait_start = None;
-                app.confirm = ConfirmState::SudoWithTouchId;
-                let items = app.sudo_failed_items.clone();
-                app.delete_done = 0;
-                app.delete_total = items.len();
-                start_sudo_delete_touchid(items, delete_rx);
-            } else if let Some(start) = app.touch_id_wait_start {
-                // 检查超时（120 秒）
-                if start.elapsed().as_secs() > 120 {
-                    app.touch_id_wait_start = None;
-                    app.touch_id_error = Some("操作超时：未检测到 Touch ID 启用，请重试或使用密码".to_string());
-                    app.confirm = ConfirmState::OfferTouchIdSetup;
-                }
+                app.touch_id_error = Some("操作超时：未检测到 Touch ID 启用，请重试或使用密码".to_string());
+                app.confirm = ConfirmState::OfferTouchIdSetup;
             }
         }
+    }
 
-        // Touch ID 删除中弹窗
-        if matches!(app.confirm, ConfirmState::SudoWithTouchId) {
-            show_touch_id_deleting_window(ctx, app);
-        }
+    // Touch ID 删除中弹窗
+    if matches!(app.confirm, ConfirmState::SudoWithTouchId) {
+        show_touch_id_deleting_window(ctx, app);
+    }
 
-        // 删除中弹窗
-        if matches!(app.confirm, ConfirmState::Deleting) {
-            show_deleting_window(ctx, app);
-        }
+    // 删除中弹窗
+    if matches!(app.confirm, ConfirmState::Deleting) {
+        show_deleting_window(ctx, app);
+    }
 
-        // 删除完成汇总弹窗
-        if let Some((ok, fail, skip)) = app.delete_summary {
-            show_summary_window(ctx, app, ok, fail, skip, delete_rx);
-        }
-    });
+    // 删除完成汇总弹窗
+    if let Some((ok, fail, skip)) = app.delete_summary {
+        show_summary_window(ctx, app, ok, fail, skip, delete_rx);
+    }
 }
 
 /// 启动后台扫描
@@ -886,6 +913,13 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
     let tab_idx = app.tab_index();
     app.scan_states[tab_idx] = ScanState::Scanning;
     app.scan_progress = 0.0;
+
+    // 磁盘分析器：获取当前浏览路径
+    let disk_path = if tab == Tab::LargeFiles {
+        Some(app.disk_analyzer_current_path())
+    } else {
+        None
+    };
 
     let (tx, rx) = mpsc::channel();
     *scan_rx = Some(rx);
@@ -918,11 +952,56 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
 
     // 实际扫描线程
     std::thread::spawn(move || {
+        // 获取 Tab 名称用于缓存
+        // 磁盘分析器在非主目录浏览时不使用缓存（路径不同，结果不同）
+        let tab_name = match tab {
+            Tab::DevCache => Some("dev_cache"),
+            Tab::LargeFiles => {
+                // 仅在主目录时缓存
+                if disk_path.as_ref().map(|p| *p == scanner::home_dir()).unwrap_or(true) {
+                    Some("large_files")
+                } else {
+                    None
+                }
+            }
+            Tab::AppCache => Some("app_cache"),
+            Tab::AppData => Some("app_data"),
+            Tab::AppUninstall => Some("app_uninstall"),
+            Tab::SystemOptimize => None, // 不缓存
+            Tab::Apfs => Some("apfs"),
+        };
+
+        // 尝试从磁盘缓存加载
+        if let Some(name) = tab_name {
+            if let Some(cached) = scanner::cache::load_cache(name) {
+                // 缓存命中：直接使用缓存结果
+                let mut items = cached.items;
+                // 后处理：重新检测可删除性（路径可能已变化）
+                for item in &mut items {
+                    let (deletable, reason) = scanner::check_deletable(&item.path);
+                    item.deletable = deletable && item.deletable;
+                    if !item.deletable && !reason.is_empty() {
+                        item.undeletable_reason = reason;
+                    }
+                }
+                let _ = tx.send(ScanMessage::Done(items, cached.scan_time_ms, tab_idx as u64));
+                return;
+            }
+        }
+
+        // 缓存未命中：执行全量扫描
         // 用 catch_unwind 兜底，防止扫描 panic 后 UI 卡死
         let result = std::panic::catch_unwind(|| {
             match tab {
                 Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
-                Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
+                Tab::LargeFiles => {
+                    // 磁盘分析器：扫描指定目录（默认为主目录）
+                    if let Some(ref path) = disk_path {
+                        scanner::large_files::scan_directory(path)
+                    } else {
+                        scanner::large_files::LargeFileScanner::new().scan()
+                    }
+                }
                 Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
                 Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
                 Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
@@ -933,6 +1012,11 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
 
         match result {
             Ok(scan_result) => {
+                // 保存到磁盘缓存
+                if let Some(name) = tab_name {
+                    scanner::cache::save_cache(name, &scan_result);
+                }
+
                 // 后处理：检测每个 item 的可删除性
                 let mut items = scan_result.items;
                 for item in &mut items {
@@ -2957,6 +3041,241 @@ fn truncate_path(path: &str, max_len: usize) -> String {
 
 /// 渲染系统优化面板（特殊 UI，不是列表选择模式）
 /// 注意：直接复用外层 CentralPanel 传入的 ui，避免嵌套 CentralPanel 导致状态异常
+/// 渲染磁盘分析器（目录钻取式磁盘浏览器）
+///
+/// 功能：
+/// - 显示当前浏览路径（面包屑导航）
+/// - 返回上一级按钮
+/// - 列出当前目录下所有子项（按大小降序）
+/// - 每项显示大小、进度条（相对于当前目录总大小）
+/// - 目录可点击进入，文件可勾选删除
+fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+    let tab_idx = app.tab_index();
+    let items = app.results[tab_idx].clone();
+    let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
+    let current_path = app.disk_analyzer_current_path();
+    let has_history = !app.disk_analyzer_history.is_empty();
+
+    // ====== 面包屑导航栏 ======
+    ui.horizontal(|ui| {
+        // 返回上一级按钮
+        let back_enabled = has_history && !is_scanning;
+        if ui.add_enabled(back_enabled, egui::Button::new(format!("⬆ {}", app.t("back")))).clicked() {
+            app.disk_analyzer_back();
+            // 返回后重新扫描上一级目录
+            start_scan(app, scan_rx);
+            return;
+        }
+
+        ui.separator();
+
+        // 显示当前路径（用 ~ 替换主目录）
+        let home = scanner::home_dir();
+        let display_path = if current_path.starts_with(&home) {
+            let suffix = current_path.strip_prefix(&home).unwrap_or(std::path::Path::new(""));
+            format!("~ {}", suffix.display())
+        } else {
+            current_path.display().to_string()
+        };
+
+        ui.label(egui::RichText::new(format!("📁 {}", display_path))
+            .size(14.0)
+            .color(egui::Color32::from_rgb(100, 200, 255)));
+
+        ui.separator();
+
+        // 主目录按钮（快速回到 home）
+        if has_history && !is_scanning {
+            if ui.button(format!("🏠 {}", app.t("home"))).clicked() {
+                app.disk_analyzer_path = None;
+                app.disk_analyzer_history.clear();
+                start_scan(app, scan_rx);
+                return;
+            }
+        }
+    });
+
+    ui.add_space(5.0);
+
+    if is_scanning {
+        // 扫描中
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Spinner::new().size(40.0));
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new(app.tf("analyzing", &[&display_path_short(&current_path, app.lang_en)]))
+                    .size(16.0)
+                    .color(egui::Color32::from_rgb(0, 200, 255)),
+            );
+            ui.add_space(15.0);
+            let pct = (app.scan_progress * 100.0) as u32;
+            ui.add(egui::ProgressBar::new(app.scan_progress)
+                .desired_width(500.0)
+                .fill(egui::Color32::from_rgb(0, 200, 255))
+                .text(format!("{}%", pct)));
+        });
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    }
+
+    if items.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(80.0);
+            ui.label(egui::RichText::new(app.t("no_large_files")).size(16.0).color(egui::Color32::GRAY));
+            ui.add_space(10.0);
+            if ui.button(egui::RichText::new(format!("🔍 {}", app.t("rescan"))).size(16.0)).clicked() {
+                start_scan(app, scan_rx);
+            }
+        });
+        return;
+    }
+
+    // ====== 汇总信息 ======
+    let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
+    let selected_cnt: usize = items.iter().filter(|i| i.selected && i.deletable).count();
+    let selected_sz: u64 = items.iter().filter(|i| i.selected && i.deletable).map(|i| i.size_bytes).sum();
+
+    ui.horizontal(|ui| {
+        ui.colored_label(
+            egui::Color32::from_rgb(100, 200, 255),
+            app.tf("items_total_size", &[&items.len().to_string(), &format_size(total_size)]),
+        );
+        if selected_cnt > 0 {
+            ui.separator();
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 159, 10),
+                app.tf("selected_count_size", &[&selected_cnt.to_string(), &format_size(selected_sz)]),
+            );
+        }
+    });
+
+    ui.add_space(5.0);
+
+    // ====== 操作按钮栏 ======
+    ui.horizontal(|ui| {
+        if ui.button(app.t("select_all")).clicked() {
+            app.select_all();
+        }
+        if ui.button(app.t("deselect_all")).clicked() {
+            app.deselect_all();
+        }
+
+        ui.separator();
+
+        // 删除选中项
+        let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
+        if ui.add_enabled(delete_enabled, egui::Button::new(
+            egui::RichText::new(app.tf("delete_selected_count", &[&selected_cnt.to_string()]))
+                .color(egui::Color32::from_rgb(255, 69, 58))
+        )).clicked() {
+            app.prepare_delete();
+        }
+    });
+
+    ui.add_space(5.0);
+
+    // ====== 目录项列表 ======
+    let max_size = items.first().map(|i| i.size_bytes).unwrap_or(1).max(1);
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (i, item) in items.iter().enumerate() {
+                let is_dir = item.category == "目录";
+                let pct = if max_size > 0 {
+                    item.size_bytes as f32 / max_size as f32
+                } else {
+                    0.0
+                };
+
+                let name = std::path::Path::new(&item.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+
+                let icon = if is_dir { "📁" } else { "📄" };
+                let size_str = format_size(item.size_bytes);
+
+                // 每行：[图标+名称] [进度条] [大小] [操作]
+                ui.horizontal(|ui| {
+                    // 选中 checkbox（仅文件或非当前目录可删除）
+                    if item.deletable {
+                        let mut selected = item.selected;
+                        if ui.checkbox(&mut selected, "").changed() {
+                            app.results[tab_idx][i].selected = selected;
+                        }
+                    }
+
+                    // 图标 + 名称（目录可点击进入）
+                    let name_label = if is_dir {
+                        format!("{} {}", icon, name)
+                    } else {
+                        format!("{} {}", icon, name)
+                    };
+
+                    let name_btn = ui.add(
+                        egui::Label::new(egui::RichText::new(&name_label).size(13.0))
+                            .sense(egui::Sense::click())
+                    );
+
+                    if is_dir && name_btn.clicked() && !is_scanning {
+                        // 进入子目录
+                        let new_path = std::path::PathBuf::from(&item.path);
+                        app.disk_analyzer_enter(new_path);
+                        start_scan(app, scan_rx);
+                        return;
+                    }
+
+                    // 进度条（相对大小可视化）
+                    ui.add(egui::ProgressBar::new(pct)
+                        .desired_width(200.0)
+                        .fill(if pct > 0.5 {
+                            egui::Color32::from_rgb(255, 69, 58)
+                        } else if pct > 0.2 {
+                            egui::Color32::from_rgb(255, 159, 10)
+                        } else {
+                            egui::Color32::from_rgb(52, 199, 89)
+                        }));
+
+                    // 大小
+                    ui.label(egui::RichText::new(&size_str).size(13.0).strong());
+
+                    // 百分比
+                    let total_pct = if total_size > 0 {
+                        item.size_bytes as f32 / total_size as f32 * 100.0
+                    } else {
+                        0.0
+                    };
+                    ui.label(egui::RichText::new(format!("{:.1}%", total_pct))
+                        .size(11.0)
+                        .color(egui::Color32::GRAY));
+
+                    // 目录：显示"进入"提示
+                    if is_dir {
+                        ui.label(egui::RichText::new("→")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(100, 200, 255)));
+                    }
+                });
+
+                ui.separator();
+            }
+        });
+}
+
+/// 路径显示简化（用于扫描中提示）
+fn display_path_short(path: &std::path::Path, lang_en: bool) -> String {
+    let home = scanner::home_dir();
+    if path == home.as_path() {
+        if lang_en { "Home".to_string() } else { "主目录".to_string() }
+    } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        name.to_string()
+    } else {
+        path.display().to_string()
+    }
+}
+
 fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
     let tab_idx = app.tab_index();
     let items = app.results[tab_idx].clone();

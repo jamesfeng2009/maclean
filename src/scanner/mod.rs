@@ -6,6 +6,9 @@
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+// 导出缓存模块
+pub mod cache;
+
 // 导出子模块
 pub mod apfs;
 pub mod app_cache;
@@ -16,7 +19,7 @@ pub mod optimize;
 pub mod uninstall;
 
 /// 推荐等级 - 帮助用户判断是否应该清理
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Recommend {
     /// 推荐清理 - 安全可删，重新构建/使用时会自动恢复
     Safe,
@@ -47,7 +50,7 @@ impl Recommend {
 }
 
 /// 扫描项 - 表示一个可清理的文件或目录
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScanItem {
     /// 完整路径（或快照名称/UUID）
     pub path: String,
@@ -71,7 +74,7 @@ pub struct ScanItem {
 }
 
 /// 扫描结果
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScanResult {
     /// 所有扫描到的项目
     pub items: Vec<ScanItem>,

@@ -169,6 +169,10 @@ pub struct App {
     pub associated_details: std::collections::HashMap<String, Vec<(String, u64, String)>>,
     /// 已展开的项路径集合（用于展开/收起状态）
     pub expanded_items: std::collections::HashSet<String>,
+    /// 磁盘分析器：当前浏览的目录路径
+    pub disk_analyzer_path: Option<std::path::PathBuf>,
+    /// 磁盘分析器：导航历史栈（用于返回上一级）
+    pub disk_analyzer_history: Vec<std::path::PathBuf>,
 }
 
 impl App {
@@ -216,6 +220,8 @@ impl App {
             touch_id_wait_start: None,
             associated_details: std::collections::HashMap::new(),
             expanded_items: std::collections::HashSet::new(),
+            disk_analyzer_path: None,
+            disk_analyzer_history: Vec::new(),
         }
     }
 
@@ -308,6 +314,38 @@ impl App {
         for item in &mut self.results[idx] {
             item.selected = false;
         }
+    }
+
+    /// 磁盘分析器：进入子目录
+    ///
+    /// 将当前路径压入历史栈，然后切换到新路径。
+    pub fn disk_analyzer_enter(&mut self, path: std::path::PathBuf) {
+        if let Some(current) = &self.disk_analyzer_path {
+            self.disk_analyzer_history.push(current.clone());
+        }
+        self.disk_analyzer_path = Some(path);
+    }
+
+    /// 磁盘分析器：返回上一级
+    ///
+    /// 从历史栈弹出一个路径。如果栈为空，返回到主目录。
+    pub fn disk_analyzer_back(&mut self) -> Option<std::path::PathBuf> {
+        let prev = self.disk_analyzer_history.pop();
+        if prev.is_some() {
+            self.disk_analyzer_path = prev.clone();
+        } else {
+            self.disk_analyzer_path = None; // 回到主目录
+        }
+        prev
+    }
+
+    /// 磁盘分析器：获取当前浏览路径
+    ///
+    /// 如果为 None，表示在主目录（home）。
+    pub fn disk_analyzer_current_path(&self) -> std::path::PathBuf {
+        self.disk_analyzer_path
+            .clone()
+            .unwrap_or_else(|| scanner::home_dir())
     }
 
     /// 统计当前 Tab 中推荐清理（Safe）的项数
@@ -686,6 +724,19 @@ impl App {
                 "items_selected" => "selected",
                 "items" => "items",
                 "total" => "total",
+                "window_title" => "Maclean - macOS Disk Cleaner",
+                "back" => "Back",
+                "home" => "Home",
+                "delete_selected" => "Delete Selected",
+                "delete_selected_count" => "Delete Selected ({0} items)",
+                "items_total_size" => "{0} items, total {1}",
+                "selected_count_size" => "{0} items selected, {1}",
+                "found_items_total" => "{0} found items, total {1}",
+                "logs" => "Logs",
+                "no_large_files" => "No files larger than 1MB in this directory",
+                "rescan" => "Rescan",
+                "analyzing" => "Analyzing {0}...",
+                "home_dir_label" => "Home",
                 "safe_clean" => "safe to clean",
                 "caution_clean" => "need caution",
                 "confirm_clean" => "need confirm",
@@ -734,6 +785,15 @@ impl App {
                 "items_selected" => "已选",
                 "items" => "项",
                 "total" => "共计",
+                "window_title" => "Maclean - macOS 磁盘清理",
+                "back" => "返回",
+                "home" => "主目录",
+                "delete_selected" => "删除选中",
+                "delete_selected_count" => "删除选中 ({0}项)",
+                "items_total_size" => "{0} 项, 总计 {1}",
+                "selected_count_size" => "已选 {0} 项, {1}",
+                "found_items_total" => "{0} 找到项, 共计 {1}",
+                "logs" => "日志",
                 "safe_clean" => "可安全清理",
                 "caution_clean" => "需谨慎确认",
                 "confirm_clean" => "需确认",
@@ -753,6 +813,18 @@ impl App {
                 _ => "",
             }
         }
+    }
+
+    /// 格式化多语言文本（支持 {0}, {1}, {2} 占位符）
+    ///
+    /// 用于需要动态参数的 UI 文本，例如 "{} 项, 总计 {}" 在英文中应为
+    /// "{} items, total {}"。占位符按顺序替换为 args 中的值。
+    pub fn tf(&self, key: &str, args: &[&str]) -> String {
+        let mut s = self.t(key).to_string();
+        for (i, arg) in args.iter().enumerate() {
+            s = s.replace(&format!("{{{}}}", i), arg);
+        }
+        s
     }
 }
 

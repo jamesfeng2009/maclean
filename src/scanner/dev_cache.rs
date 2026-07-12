@@ -1191,38 +1191,18 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
     // 按大小降序排序
     installers.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // 聚合为单项展示（如果有很多个）
-    let total_size: u64 = installers.iter().map(|(_, s, _)| s).sum();
-    let count = installers.len();
-
-    if count <= 3 {
-        // 少量时逐个展示
-        for (path, size, filename) in installers {
-            items.push(ScanItem {
-                path,
-                size_bytes: size,
-                category: "安装包".to_string(),
-                selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
-                batch_paths: Vec::new(),
-                recommend: Recommend::Caution,
-                description: format!("{} ({})", filename, format_size_local(size)),
-            });
-        }
-    } else {
-        // 多个时聚合展示，batch_paths 存储真实路径
-        let paths: Vec<String> = installers.iter().map(|(p, _, _)| p.clone()).collect();
+    // 每个安装包作为独立项展示，用户可以单独选择删除
+    for (path, size, filename) in installers {
         items.push(ScanItem {
-            path: format!("{}个安装包", count),
-            size_bytes: total_size,
+            path,
+            size_bytes: size,
             category: "安装包".to_string(),
             selected: false,
             deletable: true,
             undeletable_reason: String::new(),
-            batch_paths: paths,
+            batch_paths: Vec::new(),
             recommend: Recommend::Caution,
-            description: format!("Downloads 下的安装包，共 {} 个，总计 {}", count, format_size_local(total_size)),
+            description: format!("Downloads 下的安装包: {}", filename),
         });
     }
 }

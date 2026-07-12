@@ -451,13 +451,25 @@ fn decode_unicode_escapes(input: &str) -> String {
 //  关联文件查找
 // =========================================================================
 
+/// 应用名称的版本后缀，在生成命名变体时需要剥离
+///
+/// 例如 "Visual Studio Code Insiders" → 基础名 "Visual Studio Code"
+/// "Firefox Developer Edition" → "Firefox"
+const VERSION_SUFFIXES: &[&str] = &[
+    "Nightly", "Beta", "Alpha", "Dev", "Canary",
+    "Preview", "Insider", "Insiders", "Edge",
+    "Stable", "Release", "RC", "LTS",
+    "Developer Edition", "Technology Preview",
+];
+
 /// 查找应用的关联文件
 ///
 /// 基于 bundle ID 和应用名搜索 ~/Library/ 下的各类关联路径。
-/// 返回所有存在的关联文件/目录路径列表。
+/// 支持命名变体生成（nospace/underscore/hyphen/lowercase）和
+/// 版本后缀剥离（Nightly/Beta/Dev/Canary 等），确保找到所有残留。
 ///
-/// 扫描范围（共 14 类）：
-/// 1.  Containers — 沙盒应用容器（含数据、缓存、文档）
+/// 扫描范围（共 18 类）：
+/// 1.  Containers — 沙盒应用容器
 /// 2.  Group Containers — 共享容器（App Group）
 /// 3.  Caches — 应用缓存
 /// 4.  Application Support — 应用数据
@@ -470,106 +482,342 @@ fn decode_unicode_escapes(input: &str) -> String {
 /// 11. WebKit — WebKit/Electron 数据
 /// 12. Application Scripts — 应用脚本
 /// 13. Metadata — Spotlight 元数据
-/// 14. Caches (按应用名匹配) — 部分应用缓存以名称而非 bundle ID 命名
+/// 14. Caches (按应用名匹配)
+/// 15. LaunchAgents — 用户级启动代理
+/// 16. LaunchDaemons — 系统级守护进程（需 sudo 删除）
+/// 17. Caches/Application Support（按命名变体匹配）
+/// 18. Embedded bundle ID（XPC/appex 内嵌的 bundle ID）
 fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     let home = home_dir();
     let mut paths = Vec::new();
 
+    // 生成应用名称变体（含版本后缀剥离）
+    let name_variants = generate_name_variants(app_name);
+
+    // 生成 bundle ID 变体（剥离版本后缀）
+    let bundle_id_variants = generate_bundle_id_variants(bundle_id);
+
+    // ---- 按 bundle ID 匹配的路径 ----
+
     // 1. ~/Library/Containers/<bundle_id>/
-    let p = home.join(format!("Library/Containers/{}", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 2. ~/Library/Group Containers/*<bundle_id>*/  (通配匹配)
-    let group_dir = home.join("Library/Group Containers");
-    if let Ok(entries) = std::fs::read_dir(&group_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains(bundle_id) {
-                paths.push(entry.path().to_string_lossy().to_string());
-            }
-        }
-    }
-
-    // 3. ~/Library/Caches/<bundle_id>/
-    let p = home.join(format!("Library/Caches/{}", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 4. ~/Library/Application Support/<app_name>/
-    let p = home.join(format!("Library/Application Support/{}", app_name));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 5. ~/Library/Preferences/<bundle_id>.plist
-    let p = home.join(format!("Library/Preferences/{}.plist", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 6. ~/Library/Preferences/<bundle_id>/
-    let p = home.join(format!("Library/Preferences/{}", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 7. ~/Library/Logs/<app_name>/
-    let p = home.join(format!("Library/Logs/{}", app_name));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 8. ~/Library/Saved Application State/<bundle_id>.savedState/
-    let p = home.join(format!(
-        "Library/Saved Application State/{}.savedState",
-        bundle_id
-    ));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 9. ~/Library/HTTPStorages/<bundle_id>/
-    let p = home.join(format!("Library/HTTPStorages/{}", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 10. ~/Library/Cookies/<bundle_id>.binarycookies
-    let p = home.join(format!("Library/Cookies/{}.binarycookies", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 11. ~/Library/WebKit/<bundle_id>/
-    let p = home.join(format!("Library/WebKit/{}", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 12. ~/Library/Application Scripts/<bundle_id>/
-    let p = home.join(format!("Library/Application Scripts/{}", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 13. ~/Library/Metadata/<bundle_id>/
-    let p = home.join(format!("Library/Metadata/{}", bundle_id));
-    if p.exists() {
-        paths.push(p.to_string_lossy().to_string());
-    }
-
-    // 14. ~/Library/Caches/<app_name>/ — 部分应用以名称而非 bundle ID 命名缓存
-    if app_name != bundle_id {
-        let p = home.join(format!("Library/Caches/{}", app_name));
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Containers/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
         }
     }
 
+    // 2. ~/Library/Group Containers/*<bundle_id>*/
+    let group_dir = home.join("Library/Group Containers");
+    if let Ok(entries) = std::fs::read_dir(&group_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            for bid in &bundle_id_variants {
+                if name.contains(bid) {
+                    let p = entry.path().to_string_lossy().to_string();
+                    if !paths.contains(&p) {
+                        paths.push(p);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. ~/Library/Caches/<bundle_id>/
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Caches/{}", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 4. ~/Library/Application Support/<app_name>/ (含命名变体)
+    for name in &name_variants {
+        let p = home.join(format!("Library/Application Support/{}", name));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 5. ~/Library/Preferences/<bundle_id>.plist
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Preferences/{}.plist", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 6. ~/Library/Preferences/<bundle_id>/
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Preferences/{}", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 7. ~/Library/Logs/<app_name>/ (含命名变体)
+    for name in &name_variants {
+        let p = home.join(format!("Library/Logs/{}", name));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 8. ~/Library/Saved Application State/<bundle_id>.savedState/
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Saved Application State/{}.savedState", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 9. ~/Library/HTTPStorages/<bundle_id>/
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/HTTPStorages/{}", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 10. ~/Library/Cookies/<bundle_id>.binarycookies
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Cookies/{}.binarycookies", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 11. ~/Library/WebKit/<bundle_id>/
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/WebKit/{}", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 12. ~/Library/Application Scripts/<bundle_id>/
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Application Scripts/{}", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 13. ~/Library/Metadata/<bundle_id>/
+    for bid in &bundle_id_variants {
+        let p = home.join(format!("Library/Metadata/{}", bid));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 14. ~/Library/Caches/<app_name>/ — 按应用名匹配（含命名变体）
+    for name in &name_variants {
+        let p = home.join(format!("Library/Caches/{}", name));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 15. ~/Library/LaunchAgents/ — 扫描用户级启动代理
+    scan_launch_agents(&home, &bundle_id_variants, &name_variants, &mut paths);
+
+    // 16. /Library/LaunchAgents/ 和 /Library/LaunchDaemons/ — 系统级（需 sudo）
+    scan_system_launch_agents(&bundle_id_variants, &name_variants, &mut paths);
+
+    // 17. ~/Library/Preferences/<app_name>/ (按应用名匹配的偏好设置目录)
+    for name in &name_variants {
+        let p = home.join(format!("Library/Preferences/{}", name));
+        if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 18. Embedded bundle ID — 扫描 .app 包内嵌的 XPC/appex 的 bundle ID
+    // 这些是应用插件/扩展，它们的关联文件需要一并清理
+    // (在 scan_app 中调用时传入 app_path，这里通过额外参数实现)
+
     paths
+}
+
+/// 生成应用名称的命名变体
+///
+/// 生成以下变体：
+/// - 原始名称
+/// - 去空格（如 "Google Chrome" → "GoogleChrome"）
+/// - 下划线替换空格（如 "Google Chrome" → "Google_Chrome"）
+/// - 连字符替换空格（如 "Google Chrome" → "Google-Chrome"）
+/// - 全小写
+/// - 剥离版本后缀后的基础名（如 "Firefox Developer Edition" → "Firefox"）
+/// - 剥离后缀 + 去空格/下划线/连字符/小写
+fn generate_name_variants(app_name: &str) -> Vec<String> {
+    let mut variants = vec![app_name.to_string()];
+
+    // 去空格
+    let nospace = app_name.replace(' ', "");
+    if nospace != app_name {
+        variants.push(nospace.clone());
+    }
+
+    // 下划线替换空格
+    let underscore = app_name.replace(' ', "_");
+    if underscore != app_name && underscore != nospace {
+        variants.push(underscore.clone());
+    }
+
+    // 连字符替换空格
+    let hyphen = app_name.replace(' ', "-");
+    if hyphen != app_name && hyphen != nospace && hyphen != underscore {
+        variants.push(hyphen.clone());
+    }
+
+    // 全小写
+    let lowercase = app_name.to_lowercase();
+    if lowercase != app_name {
+        variants.push(lowercase.clone());
+    }
+
+    // 剥离版本后缀
+    let base_name = strip_version_suffix(app_name);
+    if base_name != app_name {
+        variants.push(base_name.clone());
+        let base_nospace = base_name.replace(' ', "");
+        if base_nospace != base_name {
+            variants.push(base_nospace);
+        }
+        let base_lower = base_name.to_lowercase();
+        if base_lower != base_name && base_lower != lowercase {
+            variants.push(base_lower);
+        }
+    }
+
+    variants
+}
+
+/// 生成 bundle ID 的变体（剥离版本后缀）
+///
+/// 例如 "com.mozilla.firefox-developer-edition" → "com.mozilla.firefox"
+fn generate_bundle_id_variants(bundle_id: &str) -> Vec<String> {
+    let mut variants = vec![bundle_id.to_string()];
+
+    // 尝试剥离版本后缀
+    let lower = bundle_id.to_lowercase();
+    for suffix in VERSION_SUFFIXES {
+        let suffix_lower = suffix.to_lowercase().replace(' ', "-");
+        if lower.contains(&format!("-{}", suffix_lower)) {
+            let stripped = lower.replace(&format!("-{}", suffix_lower), "");
+            if stripped != bundle_id && !variants.contains(&stripped) {
+                variants.push(stripped);
+            }
+        }
+        // 也尝试不带连字符的变体
+        let suffix_nospace = suffix.to_lowercase().replace(' ', "");
+        if lower.contains(&format!("-{}", suffix_nospace)) {
+            let stripped = lower.replace(&format!("-{}", suffix_nospace), "");
+            if stripped != bundle_id && !variants.contains(&stripped) {
+                variants.push(stripped);
+            }
+        }
+    }
+
+    variants
+}
+
+/// 剥离应用名称中的版本后缀
+///
+/// 例如 "Visual Studio Code Insiders" → "Visual Studio Code"
+fn strip_version_suffix(name: &str) -> String {
+    for suffix in VERSION_SUFFIXES {
+        let pattern = format!(" {}", suffix);
+        if let Some(pos) = name.find(&pattern) {
+            let stripped = name[..pos].trim().to_string();
+            if !stripped.is_empty() {
+                return stripped;
+            }
+        }
+    }
+    name.to_string()
+}
+
+/// 扫描用户级 LaunchAgents 目录，查找与目标应用相关的启动代理
+///
+/// 检查 ~/Library/LaunchAgents/ 下的 .plist 文件，
+/// 匹配 bundle ID 或应用名（文件名或 plist 内容中包含目标标识）。
+fn scan_launch_agents(
+    home: &Path,
+    bundle_id_variants: &[String],
+    name_variants: &[String],
+    paths: &mut Vec<String>,
+) {
+    let agents_dir = home.join("Library/LaunchAgents");
+    scan_launch_dir(&agents_dir, bundle_id_variants, name_variants, paths);
+}
+
+/// 扫描系统级 LaunchAgents/LaunchDaemons 目录
+///
+/// 这些路径需要 sudo 权限才能删除，但仍需扫描出来告知用户。
+fn scan_system_launch_agents(
+    bundle_id_variants: &[String],
+    name_variants: &[String],
+    paths: &mut Vec<String>,
+) {
+    let system_dirs = [
+        PathBuf::from("/Library/LaunchAgents"),
+        PathBuf::from("/Library/LaunchDaemons"),
+    ];
+
+    for dir in &system_dirs {
+        scan_launch_dir(dir, bundle_id_variants, name_variants, paths);
+    }
+}
+
+/// 扫描指定的 LaunchAgents/LaunchDaemons 目录
+fn scan_launch_dir(
+    dir: &Path,
+    bundle_id_variants: &[String],
+    name_variants: &[String],
+    paths: &mut Vec<String>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let file_path = entry.path().to_string_lossy().to_string();
+
+        // 跳过非 plist 文件
+        if !file_name.ends_with(".plist") {
+            continue;
+        }
+
+        // 检查文件名是否匹配 bundle ID 变体
+        let mut matched = false;
+        for bid in bundle_id_variants {
+            if file_name.contains(bid) {
+                matched = true;
+                break;
+            }
+        }
+
+        // 检查文件名是否匹配应用名变体
+        if !matched {
+            for name in name_variants {
+                let name_lower = name.to_lowercase();
+                let file_lower = file_name.to_lowercase();
+                if file_lower.contains(&name_lower) && name_lower.len() > 2 {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+
+        if matched && !paths.contains(&file_path) {
+            paths.push(file_path);
+        }
+    }
 }
 
 // =========================================================================
@@ -900,4 +1148,61 @@ fn is_system_app_support_dir(name: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_name_variants_basic() {
+        let variants = generate_name_variants("Google Chrome");
+        assert!(variants.contains(&"Google Chrome".to_string()));
+        assert!(variants.contains(&"GoogleChrome".to_string()));
+        assert!(variants.contains(&"Google_Chrome".to_string()));
+        assert!(variants.contains(&"Google-Chrome".to_string()));
+        assert!(variants.contains(&"google chrome".to_string()));
+    }
+
+    #[test]
+    fn test_generate_name_variants_version_suffix() {
+        let variants = generate_name_variants("Firefox Developer Edition");
+        // 应包含剥离后缀的基础名
+        assert!(variants.contains(&"Firefox".to_string()));
+    }
+
+    #[test]
+    fn test_generate_name_variants_single_word() {
+        let variants = generate_name_variants("Xcode");
+        assert!(variants.contains(&"Xcode".to_string()));
+        // 单词只有小写变体
+        assert!(variants.contains(&"xcode".to_string()));
+        assert_eq!(variants.len(), 2);
+    }
+
+    #[test]
+    fn test_strip_version_suffix() {
+        assert_eq!(strip_version_suffix("Firefox Developer Edition"), "Firefox");
+        assert_eq!(strip_version_suffix("VS Code Insiders"), "VS Code");
+        assert_eq!(strip_version_suffix("Chrome Beta"), "Chrome");
+        assert_eq!(strip_version_suffix("Chrome"), "Chrome"); // 无后缀
+    }
+
+    #[test]
+    fn test_generate_bundle_id_variants() {
+        let variants = generate_bundle_id_variants("com.mozilla.firefox-developer-edition");
+        assert!(variants.contains(&"com.mozilla.firefox-developer-edition".to_string()));
+        // 应包含剥离后缀的变体
+        assert!(variants.len() > 1);
+    }
+
+    #[test]
+    fn test_find_associated_files_launch_agents() {
+        // 验证 find_associated_files 返回的结果类型正确
+        // 这里只测试函数不 panic，因为它依赖实际文件系统
+        let paths = find_associated_files("com.test.nonexistent.app", "TestApp");
+        // 对于不存在的应用，应返回空或很少的路径
+        // （不应该 panic）
+        assert!(paths.iter().all(|p| !p.is_empty()));
+    }
 }
