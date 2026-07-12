@@ -96,6 +96,8 @@ pub enum ConfirmState {
     NeedSudoPassword,
     /// 提示用户是否启用 Touch ID
     OfferTouchIdSetup,
+    /// 等待用户在 Terminal 中完成 Touch ID 启用（轮询中）
+    WaitForTouchIdSetup,
     /// 正在通过 Touch ID 删除（sudo 已配置 pam_tid.so）
     SudoWithTouchId,
 }
@@ -156,6 +158,8 @@ pub struct App {
     pub touch_id_enabled: bool,
     /// Touch ID 设置/执行中的错误提示
     pub touch_id_error: Option<String>,
+    /// Touch ID 启用等待开始时间（用于超时检测）
+    pub touch_id_wait_start: Option<std::time::Instant>,
 }
 
 impl App {
@@ -199,6 +203,7 @@ impl App {
             touch_id_available: crate::touchid::touch_id_available(),
             touch_id_enabled: crate::touchid::sudo_touch_id_enabled(),
             touch_id_error: None,
+            touch_id_wait_start: None,
         }
     }
 

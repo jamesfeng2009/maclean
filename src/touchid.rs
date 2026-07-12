@@ -1,31 +1,45 @@
 //! Touch ID 支持
 //!
-//! 通过修改 /etc/pam.d/sudo 启用 Touch ID 认证，
-//! 之后所有 sudo 操作自动使用 Touch ID，无需输入密码。
+//! 通过创建 /etc/pam.d/sudo_local 启用 Touch ID 认证（macOS 14+ 官方推荐方式）。
+//! /etc/pam.d/sudo 中已包含 `auth include sudo_local`，只需创建 sudo_local 文件
+//! 并取消注释 pam_tid.so 行即可。
+//!
+//! 注意：由于 SIP 保护，osascript 的 administrator 权限无法修改 /etc/pam.d/。
+//! 必须通过 Terminal.app 中的 sudo 命令来创建/删除 sudo_local 文件。
 
 use std::path::Path;
 use std::process::Command;
 
+/// sudo_local 文件路径
+const SUDO_LOCAL_PATH: &str = "/etc/pam.d/sudo_local";
+
 /// 检查系统是否支持 Touch ID（pam_tid.so 存在）
 pub fn touch_id_supported() -> bool {
-    Path::new("/usr/libexec/pam_tid.so").exists()
+    // macOS 上 pam_tid.so 可能位于以下路径
+    Path::new("/usr/lib/pam/pam_tid.so.2").exists()
+        || Path::new("/usr/lib/pam/pam_tid.so").exists()
+        || Path::new("/usr/libexec/pam_tid.so").exists()
 }
 
 /// 检查用户是否已录入指纹
 pub fn touch_id_enrolled() -> bool {
-    // bioutil 在 Apple Silicon 上可能不存在，用 system_profiler 作为 fallback
+    // bioutil -c 检查当前用户的指纹数量（不需要 sudo）
     let output = Command::new("/usr/bin/bioutil")
-        .args(["-c", "-s"])
+        .args(["-c"])
         .output();
 
     if let Ok(out) = output {
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // 输出格式: "UserTouchIDCount: N" 或类似
+        // 输出格式: "User 501:       1 biometric template(s)"
+        // 提取数字部分
         for line in stdout.lines() {
-            let lower = line.to_lowercase();
-            if lower.contains("touchid") || lower.contains("touch_id") {
-                if let Some(num) = line.split(':').nth(1) {
-                    if let Ok(n) = num.trim().parse::<u32>() {
+            if line.contains("biometric template") {
+                // 提取 "N biometric template" 中的 N
+                if let Some(num) = line
+                    .split_whitespace()
+                    .find(|s| s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty())
+                {
+                    if let Ok(n) = num.parse::<u32>() {
                         return n > 0;
                     }
                 }
@@ -33,18 +47,15 @@ pub fn touch_id_enrolled() -> bool {
         }
     }
 
-    // Fallback: 检查 Touch ID 配置数据库
-    let home = std::env::var("HOME").unwrap_or_default();
-    let touchid_db = format!("{}/Library/Preferences/com.apple.TouchID.plist", home);
-    if Path::new(&touchid_db).exists() {
-        // 如果配置文件存在，且包含 fingerprint 数据
-        let output = Command::new("/usr/bin/defaults")
-            .args(["read", &touchid_db])
-            .output();
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            return stdout.contains("Fingerprint") || stdout.contains(" fingerprint");
-        }
+    // Fallback: 检查 bioutil -r 输出
+    let output = Command::new("/usr/bin/bioutil")
+        .args(["-r"])
+        .output();
+
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // 输出包含 "Biometrics for unlock: 1" 表示已启用
+        return stdout.contains("Biometrics for unlock: 1");
     }
 
     false
@@ -56,17 +67,48 @@ pub fn touch_id_available() -> bool {
 }
 
 /// 检查 sudo 是否已启用 Touch ID 认证
+///
+/// 检查两个位置：
+/// 1. /etc/pam.d/sudo_local（macOS 14+ 推荐方式，通过 include 引入）
+/// 2. /etc/pam.d/sudo（旧方式，直接修改）
 pub fn sudo_touch_id_enabled() -> bool {
-    std::fs::read_to_string("/etc/pam.d/sudo")
-        .map(|c| c.contains("pam_tid.so"))
-        .unwrap_or(false)
+    // 优先检查 sudo_local（推荐方式）
+    if let Ok(content) = std::fs::read_to_string(SUDO_LOCAL_PATH) {
+        // 确认 pam_tid.so 行未被注释
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.contains("pam_tid.so") {
+                return true;
+            }
+        }
+    }
+
+    // 兼容旧方式：直接在 sudo 文件中
+    if let Ok(content) = std::fs::read_to_string("/etc/pam.d/sudo") {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.contains("pam_tid.so") {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
-/// 启用 sudo Touch ID 认证
+/// 异步触发启用 Touch ID（非阻塞）
 ///
-/// 在 /etc/pam.d/sudo 中 pam_smartcard.so 行后插入 pam_tid.so
-/// 需要管理员权限（通过 osascript 提权）
-pub fn enable_touch_id_sudo() -> Result<(), String> {
+/// 打开 Terminal.app 执行 sudo cp 命令，立即返回。
+/// 调用者应通过 `sudo_touch_id_enabled()` 轮询检测是否启用成功。
+///
+/// 返回 Ok 表示 Terminal 已成功打开，Err 表示无法打开 Terminal。
+pub fn trigger_enable_touch_id() -> Result<(), String> {
     if sudo_touch_id_enabled() {
         return Ok(());
     }
@@ -75,122 +117,63 @@ pub fn enable_touch_id_sudo() -> Result<(), String> {
         return Err("系统不支持 Touch ID".to_string());
     }
 
-    // 构建安全的 sed 命令：在 pam_smartcard.so 行后插入 pam_tid.so
-    // 如果没有 pam_smartcard.so，则在第一行 auth 后插入
-    let shell_script = r#"
-set +e
-# 备份原文件
-timestamp=$(date +%s)
-cp /etc/pam.d/sudo /etc/pam.d/sudo.bak.$timestamp
+    // 1. 准备 sudo_local 内容到临时文件
+    let sudo_local_content = "# sudo_local: local config file which survives system update and is included for sudo\n\
+# uncomment following line to enable Touch ID for sudo\n\
+auth       sufficient     pam_tid.so\n";
 
-# 检查是否已存在 pam_tid.so
-if grep -q 'pam_tid\.so' /etc/pam.d/sudo; then
-    echo "ALREADY_ENABLED"
-    exit 0
-fi
+    let tmp_path = "/tmp/maclean_sudo_local.tmp";
+    std::fs::write(tmp_path, sudo_local_content)
+        .map_err(|e| format!("无法写入临时文件: {}", e))?;
 
-# 尝试在 pam_smartcard.so 行后插入
-if grep -q 'pam_smartcard\.so' /etc/pam.d/sudo; then
-    sed -i '' '/pam_smartcard\.so/a\
-auth       sufficient     pam_tid.so
-' /etc/pam.d/sudo
-else
-    # 在第一个 auth 行后插入
-    sed -i '' '0,/^auth/s/^auth/auth\
-auth       sufficient     pam_tid.so\
-/' /etc/pam.d/sudo
-fi
-
-# 验证
-if grep -q 'pam_tid\.so' /etc/pam.d/sudo; then
-    echo "OK"
-else
-    # 恢复备份
-    cp /etc/pam.d/sudo.bak.$timestamp /etc/pam.d/sudo
-    echo "FAILED: verification failed, restored backup"
-    exit 1
-fi
-"#;
-
-    let apple_script = format!(
-        r#"do shell script "{}" with administrator privileges"#,
-        shell_script.replace('\\', "\\\\").replace('"', "\\\"")
+    // 2. 通过 Terminal.app 执行 sudo cp（非阻塞）
+    let terminal_script = format!(
+        "sudo cp {} {} && sudo chmod 444 {} && echo MACLEAN_TOUCHID_DONE && sleep 1 && exit",
+        tmp_path, SUDO_LOCAL_PATH, SUDO_LOCAL_PATH
     );
 
-    let output = Command::new("/usr/bin/osascript")
+    let apple_script = format!(
+        r#"tell application "Terminal"
+    activate
+    do script "{}"
+end tell"#,
+        terminal_script.replace('"', "\\\"")
+    );
+
+    Command::new("/usr/bin/osascript")
         .args(["-e", &apple_script])
         .output()
-        .map_err(|e| format!("无法启动 osascript: {}", e))?;
+        .map_err(|e| format!("无法打开 Terminal: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !output.status.success() {
-        // 用户取消或密码错误
-        if stderr.contains("User canceled") || stderr.contains("user canceled") {
-            return Err("用户取消授权".to_string());
-        }
-        if stderr.contains("Authentication failed") || stderr.contains("incorrect") {
-            return Err("管理员密码错误".to_string());
-        }
-        return Err(format!("启用失败: {}", stderr.trim()));
-    }
-
-    if stdout.contains("OK") || stdout.contains("ALREADY_ENABLED") {
-        Ok(())
-    } else {
-        Err(format!("启用失败: {}", stdout.trim()))
-    }
+    Ok(())
 }
 
-/// 禁用 sudo Touch ID 认证（恢复原状）
-pub fn disable_touch_id_sudo() -> Result<(), String> {
+/// 异步触发禁用 Touch ID（非阻塞）
+///
+/// 打开 Terminal.app 执行 sudo rm 命令，立即返回。
+/// 调用者应通过 `sudo_touch_id_enabled()` 轮询检测是否禁用成功。
+pub fn trigger_disable_touch_id() -> Result<(), String> {
     if !sudo_touch_id_enabled() {
         return Ok(());
     }
 
-    let shell_script = r#"
-set +e
-timestamp=$(date +%s)
-cp /etc/pam.d/sudo /etc/pam.d/sudo.bak.$timestamp
-
-# 删除 pam_tid.so 行
-sed -i '' '/pam_tid\.so/d' /etc/pam.d/sudo
-
-# 验证
-if grep -q 'pam_tid\.so' /etc/pam.d/sudo; then
-    cp /etc/pam.d/sudo.bak.$timestamp /etc/pam.d/sudo
-    echo "FAILED"
-    exit 1
-else
-    echo "OK"
-    exit 0
-fi
-"#;
-
-    let apple_script = format!(
-        r#"do shell script "{}" with administrator privileges"#,
-        shell_script.replace('\\', "\\\\").replace('"', "\\\"")
+    let terminal_script = format!(
+        "sudo rm {} && echo MACLEAN_TOUCHID_DISABLED && sleep 1 && exit",
+        SUDO_LOCAL_PATH
     );
 
-    let output = Command::new("/usr/bin/osascript")
+    let apple_script = format!(
+        r#"tell application "Terminal"
+    activate
+    do script "{}"
+end tell"#,
+        terminal_script.replace('"', "\\\"")
+    );
+
+    Command::new("/usr/bin/osascript")
         .args(["-e", &apple_script])
         .output()
-        .map_err(|e| format!("无法启动 osascript: {}", e))?;
+        .map_err(|e| format!("无法打开 Terminal: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !output.status.success() {
-        if stderr.contains("User canceled") || stderr.contains("user canceled") {
-            return Err("用户取消授权".to_string());
-        }
-        return Err(format!("禁用失败: {}", stderr.trim()));
-    }
-
-    if stdout.contains("OK") {
-        Ok(())
-    } else {
-        Err(format!("禁用失败: {}", stdout.trim()))
-    }
+    Ok(())
 }
