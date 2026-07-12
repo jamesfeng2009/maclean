@@ -371,15 +371,36 @@ fn check_whitelist(canonical: &Path, home: &Path) -> bool {
 
     let user_containers = format!("{}/Library/Containers/", home_str);
     if canonical_str.starts_with(&user_containers) {
-        // 只允许删除 Containers 内的 Caches
+        // 允许删除整个 Container 子目录（App 卸载场景）
+        // 或 Container 内的 Caches（缓存清理场景）
         return canonical_str.contains("/Data/Library/Caches/")
-            || canonical_str.contains("/Documents/xwechat_files/");
+            || canonical_str.contains("/Documents/xwechat_files/")
+            || is_direct_child(&canonical_str, &user_containers);
     }
 
     let user_group_containers = format!("{}/Library/Group Containers/", home_str);
     if canonical_str.starts_with(&user_group_containers) {
-        // 只允许删除 Group Containers 内的 Caches
-        return canonical_str.contains("/Library/Caches/");
+        // 允许删除整个 Group Container 子目录（App 卸载场景）
+        // 或其中的 Caches（缓存清理场景）
+        return canonical_str.contains("/Library/Caches/")
+            || is_direct_child(&canonical_str, &user_group_containers);
+    }
+
+    // Saved Application State 子目录（App 卸载场景）
+    let user_saved_state = format!("{}/Library/Saved Application State/", home_str);
+    if canonical_str.starts_with(&user_saved_state) {
+        return is_direct_child(&canonical_str, &user_saved_state);
+    }
+
+    // HTTPStorages 子目录（App 卸载场景）
+    let user_http_storages = format!("{}/Library/HTTPStorages/", home_str);
+    if canonical_str.starts_with(&user_http_storages) {
+        return is_direct_child(&canonical_str, &user_http_storages);
+    }
+
+    // /Applications/ 下的 .app 包（App 卸载场景）
+    if canonical_str.starts_with("/Applications/") && canonical_str.ends_with(".app") {
+        return true;
     }
 
     // ================================================================
@@ -451,6 +472,17 @@ fn is_same_or_under(path: &str, prefix: &str) -> bool {
     let normalized_prefix = prefix.trim_end_matches('/');
     normalized_path == normalized_prefix
         || normalized_path.starts_with(&format!("{}/", normalized_prefix))
+}
+
+/// 检查 path 是否是 prefix 的直接子项（即 path = prefix + name，无更多层级）
+/// 用于确保只允许删除 Containers/Group Containers 等目录的直接子目录，而非任意深层路径
+fn is_direct_child(path: &str, prefix: &str) -> bool {
+    if !path.starts_with(prefix) {
+        return false;
+    }
+    let suffix = &path[prefix.len()..];
+    // 直接子项：suffix 中不包含额外的 /
+    !suffix.is_empty() && !suffix.contains('/')
 }
 
 /// 检查路径中是否包含某个目录/文件名组件

@@ -18,6 +18,10 @@ pub enum Tab {
     AppCache,
     /// App 数据（Application Support 整目录，高风险）
     AppData,
+    /// App 卸载
+    AppUninstall,
+    /// 系统优化
+    SystemOptimize,
     /// APFS 快照
     Apfs,
 }
@@ -30,13 +34,15 @@ impl Tab {
             Tab::LargeFiles => "大文件",
             Tab::AppCache => "App缓存",
             Tab::AppData => "App数据",
+            Tab::AppUninstall => "App卸载",
+            Tab::SystemOptimize => "系统优化",
             Tab::Apfs => "APFS快照",
         }
     }
 
     /// 所有 Tab
-    pub fn all() -> [Tab; 5] {
-        [Tab::DevCache, Tab::LargeFiles, Tab::AppCache, Tab::AppData, Tab::Apfs]
+    pub fn all() -> [Tab; 7] {
+        [Tab::DevCache, Tab::LargeFiles, Tab::AppCache, Tab::AppData, Tab::AppUninstall, Tab::SystemOptimize, Tab::Apfs]
     }
 
     /// 下一个 Tab
@@ -45,7 +51,9 @@ impl Tab {
             Tab::DevCache => Tab::LargeFiles,
             Tab::LargeFiles => Tab::AppCache,
             Tab::AppCache => Tab::AppData,
-            Tab::AppData => Tab::Apfs,
+            Tab::AppData => Tab::AppUninstall,
+            Tab::AppUninstall => Tab::SystemOptimize,
+            Tab::SystemOptimize => Tab::Apfs,
             Tab::Apfs => Tab::DevCache,
         }
     }
@@ -57,7 +65,9 @@ impl Tab {
             Tab::LargeFiles => Tab::DevCache,
             Tab::AppCache => Tab::LargeFiles,
             Tab::AppData => Tab::AppCache,
-            Tab::Apfs => Tab::AppData,
+            Tab::AppUninstall => Tab::AppData,
+            Tab::SystemOptimize => Tab::AppUninstall,
+            Tab::Apfs => Tab::SystemOptimize,
         }
     }
 }
@@ -91,9 +101,9 @@ pub struct App {
     /// 当前 Tab
     pub tab: Tab,
     /// 每个 Tab 的扫描结果
-    pub results: [Vec<ScanItem>; 5],
+    pub results: [Vec<ScanItem>; 7],
     /// 每个 Tab 的扫描状态
-    pub scan_states: [ScanState; 5],
+    pub scan_states: [ScanState; 7],
     /// 列表选中索引
     pub list_index: usize,
     /// 磁盘总空间（字节）
@@ -109,7 +119,7 @@ pub struct App {
     /// 是否应该退出
     pub should_quit: bool,
     /// 扫描耗时（毫秒）
-    pub scan_time_ms: [u64; 5],
+    pub scan_time_ms: [u64; 7],
     /// 语言切换（true=英文, false=中文）
     pub lang_en: bool,
     /// 删除进度：已完成的项数
@@ -145,8 +155,10 @@ impl App {
 
         Self {
             tab: Tab::DevCache,
-            results: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            results: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             scan_states: [
+                ScanState::Idle,
+                ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
@@ -160,7 +172,7 @@ impl App {
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
             should_quit: false,
-            scan_time_ms: [0; 5],
+            scan_time_ms: [0; 7],
             lang_en: false, // 默认中文
             delete_done: 0,
             delete_total: 0,
@@ -184,7 +196,9 @@ impl App {
             Tab::LargeFiles => 1,
             Tab::AppCache => 2,
             Tab::AppData => 3,
-            Tab::Apfs => 4,
+            Tab::AppUninstall => 4,
+            Tab::SystemOptimize => 5,
+            Tab::Apfs => 6,
         }
     }
 
@@ -327,6 +341,8 @@ impl App {
             Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
             Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
             Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
+            Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
+            Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
             Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
         };
 
@@ -517,6 +533,8 @@ impl App {
                 "tab_large_files" => "Large Files",
                 "tab_app_cache" => "App Cache",
                 "tab_app_data" => "App Data",
+                "tab_app_uninstall" => "Uninstall",
+                "tab_system_optimize" => "Optimize",
                 "tab_apfs" => "APFS Snapshots",
                 // 按钮
                 "scan" => "Scan",
@@ -563,6 +581,8 @@ impl App {
                 "tab_large_files" => "大文件",
                 "tab_app_cache" => "App缓存",
                 "tab_app_data" => "App数据",
+                "tab_app_uninstall" => "App卸载",
+                "tab_system_optimize" => "系统优化",
                 "tab_apfs" => "APFS快照",
                 // 按钮
                 "scan" => "扫描",

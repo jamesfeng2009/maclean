@@ -12,6 +12,8 @@ pub mod app_cache;
 pub mod app_data;
 pub mod dev_cache;
 pub mod large_files;
+pub mod optimize;
+pub mod uninstall;
 
 /// 推荐等级 - 帮助用户判断是否应该清理
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

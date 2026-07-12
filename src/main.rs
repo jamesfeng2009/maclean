@@ -383,6 +383,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             }
         });
 
+        // --- 系统优化 Tab：特殊渲染（操作面板而非列表选择）---
+        if app.tab == Tab::SystemOptimize {
+            render_optimize_panel(ctx, app, scan_rx);
+            return;
+        }
+
         // --- 扫描结果区 ---
         let tab_idx = app.tab_index();
         let items = app.results[tab_idx].clone();
@@ -696,6 +702,8 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
                 Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
                 Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
+                Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
+                Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
             }
         });
@@ -2019,6 +2027,8 @@ fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
         Tab::LargeFiles => app.t("tab_large_files"),
         Tab::AppCache => app.t("tab_app_cache"),
         Tab::AppData => app.t("tab_app_data"),
+        Tab::AppUninstall => app.t("tab_app_uninstall"),
+        Tab::SystemOptimize => app.t("tab_system_optimize"),
         Tab::Apfs => app.t("tab_apfs"),
     }
 }
@@ -2049,4 +2059,207 @@ fn truncate_path(path: &str, max_len: usize) -> String {
     }
     let suffix = &path[path.len() - max_len + 3..];
     format!("...{}", suffix)
+}
+
+// =========================================================================
+//  系统优化面板
+// =========================================================================
+
+/// 渲染系统优化面板（特殊 UI，不是列表选择模式）
+fn render_optimize_panel(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+    let tab_idx = app.tab_index();
+    let items = app.results[tab_idx].clone();
+    let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
+
+    if is_scanning {
+        ui_scanning(ctx, app);
+        return;
+    }
+
+    if items.is_empty() {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.label(egui::RichText::new("点击扫描查看可用的优化任务").size(16.0).color(egui::Color32::GRAY));
+                ui.add_space(10.0);
+                if ui.button(egui::RichText::new("🔍 扫描").size(16.0)).clicked() {
+                    start_scan(app, scan_rx);
+                }
+            });
+        });
+        return;
+    }
+
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.add_space(10.0);
+        ui.heading(egui::RichText::new("⚙️ 系统优化").size(18.0));
+        ui.label(egui::RichText::new("以下优化任务安全可执行，不会影响系统稳定性").size(12.0).color(egui::Color32::GRAY));
+        ui.add_space(10.0);
+
+        // 优化任务列表
+        let mut task_to_run: Option<usize> = None;
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (i, item) in items.iter().enumerate() {
+                egui::Frame::group(ui.style())
+                    .fill(egui::Color32::from_rgb(30, 30, 40))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 70)))
+                    .inner_margin(12.0)
+                    .outer_margin(4.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            // 图标
+                            ui.label(egui::RichText::new("⚙️").size(20.0));
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&item.path).strong().size(14.0));
+                                    ui.label(egui::RichText::new(recommend_badge(&item.recommend)).size(11.0));
+                                });
+                                ui.label(egui::RichText::new(&item.description).size(12.0).color(egui::Color32::from_rgb(160, 160, 170)));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button(egui::RichText::new("▶ 执行").size(13.0)).clicked() {
+                                    task_to_run = Some(i);
+                                }
+                            });
+                        });
+                    });
+            }
+        });
+
+        // 执行选中的优化任务
+        if let Some(task_idx) = task_to_run {
+            if let Some(item) = items.get(task_idx) {
+                let log = execute_optimize_task(&item.path);
+                app.logs.push(log);
+            }
+        }
+
+        // 显示优化日志
+        if !app.logs.is_empty() {
+            ui.add_space(5.0);
+            ui.collapsing("📋 优化日志", |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        for log in &app.logs {
+                            ui.label(egui::RichText::new(log).size(11.0).color(egui::Color32::from_rgb(160, 160, 170)));
+                        }
+                    });
+            });
+        }
+    });
+}
+
+/// 执行单个优化任务
+fn execute_optimize_task(task_name: &str) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let result = match task_name {
+        "DNS 缓存刷新" => {
+            let r1 = std::process::Command::new("dscacheutil")
+                .arg("-flushcache")
+                .output();
+            let r2 = std::process::Command::new("killall")
+                .arg("-HUP")
+                .arg("mDNSResponder")
+                .output();
+            match (r1, r2) {
+                (Ok(_), Ok(_)) => "✅ DNS 缓存已刷新".to_string(),
+                _ => "⚠️ DNS 缓存刷新需要管理员权限".to_string(),
+            }
+        }
+        "QuickLook 缩略图重建" => {
+            let r = std::process::Command::new("qlmanage")
+                .arg("-r")
+                .arg("cache")
+                .output();
+            match r {
+                Ok(_) => "✅ QuickLook 缩略图缓存已重建".to_string(),
+                Err(_) => "⚠️ QuickLook 缓存重建失败".to_string(),
+            }
+        }
+        "LaunchServices 重建" => {
+            let lsregister = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
+            let r = std::process::Command::new(lsregister)
+                .arg("-gc")
+                .output();
+            match r {
+                Ok(_) => "✅ LaunchServices 数据库已重建".to_string(),
+                Err(_) => "⚠️ LaunchServices 重建失败".to_string(),
+            }
+        }
+        "Saved State 清理" => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let state_dir = format!("{}/Library/Saved Application State", home);
+            let mut count = 0;
+            if let Ok(entries) = std::fs::read_dir(&state_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        // 检查修改时间是否超过 30 天
+                        if let Ok(meta) = path.metadata() {
+                            if let Ok(mtime) = meta.modified() {
+                                if let Ok(age) = mtime.elapsed() {
+                                    if age.as_secs() > 30 * 86400 {
+                                        let _ = std::fs::remove_dir_all(&path);
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            format!("✅ 清理了 {} 个旧的应用保存状态", count)
+        }
+        "隔离数据库清理" => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let db_path = format!("{}/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2", home);
+            if std::path::Path::new(&db_path).exists() {
+                let r = std::process::Command::new("sqlite3")
+                    .arg(&db_path)
+                    .arg("DELETE FROM LSQuarantineEvent; VACUUM;")
+                    .output();
+                match r {
+                    Ok(_) => "✅ 隔离数据库已清理".to_string(),
+                    Err(_) => "⚠️ 隔离数据库清理失败".to_string(),
+                }
+            } else {
+                "✅ 隔离数据库已为空".to_string()
+            }
+        }
+        "内存压力释放" => {
+            let r = std::process::Command::new("purge").output();
+            match r {
+                Ok(_) => "✅ 非活跃内存已释放".to_string(),
+                Err(_) => "⚠️ 内存释放需要管理员权限".to_string(),
+            }
+        }
+        _ => format!("⚠️ 未知优化任务: {}", task_name),
+    };
+
+    format!("[{}] {}", timestamp, result)
+}
+
+/// 扫描中 UI
+fn ui_scanning(ctx: &egui::Context, app: &mut App) {
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Spinner::new().size(40.0));
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(egui::Color32::from_rgb(0, 200, 255)));
+            ui.add_space(15.0);
+            let pct = (app.scan_progress * 100.0) as u32;
+            ui.add(egui::ProgressBar::new(app.scan_progress)
+                .desired_width(500.0)
+                .fill(egui::Color32::from_rgb(0, 200, 255))
+                .text(format!("{}%", pct)));
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    });
 }
