@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 pub mod cache;
 
 // 导出子模块
+#[cfg(target_os = "macos")]
 pub mod apfs;
 pub mod app_cache;
 pub mod app_data;
@@ -93,42 +94,9 @@ pub trait Scanner {
 
 /// 检测路径是否可被当前用户删除
 /// 返回 (deletable, reason)
-/// 不可删除的情况:
-/// 1. 路径位于系统 SIP 保护目录下，即使 root 也无法修改
-/// 可删除但需要 sudo 的情况:
-/// 2. 文件属主为 root (需要管理员权限)
+/// 跨平台实现：委托给 platform 模块
 pub fn check_deletable(path: &str) -> (bool, String) {
-    let p = std::path::Path::new(path);
-
-    // APFS 快照由专门的删除逻辑处理，总是可删除
-    if path.starts_with("snapshot:") {
-        return (true, String::new());
-    }
-
-    // CoreSimulator 运行时镜像 — 通过 xcrun simctl runtime delete 安全删除
-    if path.starts_with("/Library/Developer/CoreSimulator/Volumes") {
-        return (true, String::new());
-    }
-
-    // CoreSimulator/Caches — root 属主，sudo rm -rf 可删
-    if path.starts_with("/Library/Developer/CoreSimulator/Caches") {
-        return (true, String::new());
-    }
-
-    // 检查属主和扩展属性
-    if let Ok(meta) = p.symlink_metadata() {
-        use std::os::unix::fs::MetadataExt;
-
-        let uid = meta.uid();
-
-        // 属主为 root → 需要 sudo，但允许尝试删除
-        // com.apple.provenance 只是下载来源标记，不代表 SIP 保护
-        if uid == 0 {
-            return (true, String::new());
-        }
-    }
-
-    (true, String::new())
+    crate::platform::check_deletable(path)
 }
 
 /// 格式化字节大小为人类可读字符串

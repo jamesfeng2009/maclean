@@ -2,6 +2,7 @@
 //!
 //! 使用 egui 构建，专注开发者缓存与深度清理。
 
+#[cfg(target_os = "macos")]
 mod aewp;
 mod app;
 mod app_protection;
@@ -9,9 +10,13 @@ mod cli;
 mod i18n;
 mod safety;
 mod scanner;
+#[cfg(target_os = "macos")]
 mod sudo_keepalive;
+#[cfg(target_os = "macos")]
 mod touchid;
+#[cfg(target_os = "macos")]
 mod menubar;
+mod platform;
 
 use std::sync::mpsc;
 use std::path::PathBuf;
@@ -45,8 +50,7 @@ enum DeleteMessage {
 
 /// 初始化崩溃日志文件，返回日志路径
 fn init_crash_log() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let log_dir = PathBuf::from(&home).join(".maclean/logs");
+    let log_dir = platform::app_data_dir().join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("crash.log");
 
@@ -69,8 +73,7 @@ fn init_crash_log() -> PathBuf {
 
 /// 写入扫描日志（用于追踪扫描进度，崩溃时定位问题）
 pub fn log_scan_step(msg: &str) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let log_path = PathBuf::from(&home).join(".maclean/logs/scan.log");
+    let log_path = platform::app_data_dir().join("logs/scan.log");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -381,8 +384,9 @@ fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// 获取磁盘信息
-fn get_disk_info() -> (u64, u64) {
+/// 获取磁盘信息 (macOS 实现)
+#[cfg(target_os = "macos")]
+fn get_disk_info_macos() -> (u64, u64) {
     let output = std::process::Command::new("df")
         .arg("-k")
         .arg("/")
@@ -404,6 +408,48 @@ fn get_disk_info() -> (u64, u64) {
     }
 
     (0, 0)
+}
+
+/// 获取磁盘信息 (Windows 实现)
+#[cfg(target_os = "windows")]
+fn get_disk_info_windows() -> (u64, u64) {
+    // Windows: 用 fsutil 或 wmic 获取磁盘信息
+    // 这里用 PowerShell 调用 Get-PSDrive
+    let output = std::process::Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Get-PSDrive C | Select-Object Used,Free | ConvertTo-Json")
+        .output();
+
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 解析 JSON: {"Used":123,"Free":456}
+        let mut used: u64 = 0;
+        let mut free: u64 = 0;
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.starts_with("\"Used\"") {
+                if let Some(val) = line.split(':').nth(1) {
+                    let val = val.trim().trim_end_matches(',').trim();
+                    used = val.parse::<u64>().unwrap_or(0);
+                }
+            } else if line.starts_with("\"Free\"") {
+                if let Some(val) = line.split(':').nth(1) {
+                    let val = val.trim().trim_end_matches(',').trim();
+                    free = val.parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        return (used + free, free);
+    }
+
+    (0, 0)
+}
+
+/// 获取磁盘信息（跨平台入口）
+fn get_disk_info() -> (u64, u64) {
+    platform::disk_info()
 }
 
 /// 推荐等级颜色
@@ -1252,45 +1298,94 @@ fn send_items_in_batches(
     }
 }
 
-/// 尽力删除：优先用系统 rm -rf（对 node_modules 等大目录更快），
-/// 失败则尝试解除 immutable/只读标志后再删，再失败就放弃
+/// 尽力删除：优先用系统命令（对 node_modules 等大目录更快），
+/// 失败则尝试解除只读标志后再删，再失败就放弃
 fn best_effort_delete(path: &std::path::Path) -> bool {
     let path_str = path.to_string_lossy().to_string();
 
-    // 优先用系统 rm -rf，对包含大量小文件的目录（如 node_modules）比 Rust API 快很多
-    if std::process::Command::new("/bin/rm")
-        .arg("-rf")
-        .arg(&path_str)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-        && !path.exists()
+    #[cfg(target_os = "macos")]
     {
-        return true;
+        // macOS: 优先用系统 rm -rf
+        if std::process::Command::new("/bin/rm")
+            .arg("-rf")
+            .arg(&path_str)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+            && !path.exists()
+        {
+            return true;
+        }
+
+        // rm -rf 失败，尝试解除可能存在的 immutable/只读标志后再删除
+        let _ = std::process::Command::new("/usr/bin/chflags")
+            .arg("-R")
+            .arg("nouchg")
+            .arg(&path_str)
+            .output();
+        let _ = std::process::Command::new("/bin/chmod")
+            .arg("-R")
+            .arg("u+w")
+            .arg(&path_str)
+            .output();
+
+        let _ = std::process::Command::new("/bin/rm")
+            .arg("-rf")
+            .arg(&path_str)
+            .output();
+
+        !path.exists() && path.symlink_metadata().is_err()
     }
 
-    // rm -rf 失败，尝试解除可能存在的 immutable/只读标志后再删除
-    let _ = std::process::Command::new("/usr/bin/chflags")
-        .arg("-R")
-        .arg("nouchg")
-        .arg(&path_str)
-        .output();
-    let _ = std::process::Command::new("/bin/chmod")
-        .arg("-R")
-        .arg("u+w")
-        .arg(&path_str)
-        .output();
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: 用 rd /s /q 删除目录，del /f /q 删除文件
+        let success = if path.is_dir() {
+            std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("rd")
+                .arg("/S")
+                .arg("/Q")
+                .arg(&path_str)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("del")
+                .arg("/F")
+                .arg("/Q")
+                .arg(&path_str)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
 
-    let _ = std::process::Command::new("/bin/rm")
-        .arg("-rf")
-        .arg(&path_str)
-        .output();
+        if success {
+            return true;
+        }
 
-    // 检查是否已删除
-    !path.exists() && path.symlink_metadata().is_err()
+        // fallback: Rust API
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).is_ok()
+        } else {
+            std::fs::remove_file(path).is_ok()
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).is_ok()
+        } else {
+            std::fs::remove_file(path).is_ok()
+        }
+    }
 }
 
-/// 获取系统所有挂载点
+/// 获取系统所有挂载点 (macOS 专属)
+#[cfg(target_os = "macos")]
 fn get_mount_points() -> Vec<String> {
     let output = std::process::Command::new("/sbin/mount")
         .output();
@@ -1308,7 +1403,8 @@ fn get_mount_points() -> Vec<String> {
     }
 }
 
-/// 检查路径是否被挂载使用（即路径本身或其子路径是挂载点）
+/// 检查路径是否被挂载使用（macOS 专属）
+#[cfg(target_os = "macos")]
 fn is_path_mounted(path: &str, mount_points: &[String]) -> bool {
     for mp in mount_points {
         if mp == path || mp.starts_with(&format!("{}/", path)) {
@@ -1320,33 +1416,9 @@ fn is_path_mounted(path: &str, mount_points: &[String]) -> bool {
 
 /// 移动文件/目录到废纸篓（可恢复）
 /// 用于 Caution/Advanced 级别的文件，给用户后悔的机会
+/// 移动文件到废纸篓（跨平台，委托给 platform 模块）
 fn move_to_trash(path: &str) -> bool {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let trash = format!("{}/.Trash", home);
-
-    // 确保 .Trash 存在
-    let _ = std::fs::create_dir_all(&trash);
-
-    let p = std::path::Path::new(path);
-    let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-
-    // 生成不冲突的目标文件名
-    let mut dest = format!("{}/{}", trash, file_name);
-    if std::path::Path::new(&dest).exists() {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        dest = format!("{}/{}.{}", trash, file_name, timestamp);
-    }
-
-    // 用 mv 移动到废纸篓
-    std::process::Command::new("/bin/mv")
-        .arg(path)
-        .arg(&dest)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    platform::move_to_trash(path)
 }
 
 /// 从文本中提取所有 UUID（格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
@@ -1386,6 +1458,7 @@ fn extract_all_uuids(text: &str) -> Vec<String> {
 /// 2. 挂载点检测：正在挂载使用的运行时跳过，只删 UNUSED 的
 /// 3. 使用 `xcrun simctl runtime delete <uuid>` 安全删除
 /// 4. 如果 xcrun 失败，返回 Err 让调用方 fallback 到 sudo rm -rf（仅 UNUSED 项）
+#[cfg(target_os = "macos")]
 fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<String, String> {
     // 1. 进程检测：模拟器运行中时拒绝删除
     if safety::is_simulator_running() {
@@ -1589,65 +1662,77 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                             safety::SafetyCheck::Safe => {}
                         }
 
-                        // APFS 快照特殊处理
-                        if category == "APFS快照" {
-                            match scanner::apfs::delete_snapshot(&path) {
-                                Ok(_) => {
-                                    let _ = tx.send(DeleteMessage::Log(
-                                        format!("✓ {}", App::tf_lang(lang_en, "log_snapshot_deleted", &[&path])), path.clone(), category.clone(), true));
-                                    safety::log_deletion(&path, &category, true, None);
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(DeleteMessage::Log(
-                                        format!("✗ {}", App::tf_lang(lang_en, "log_delete_failed", &[&path, &e])), path.clone(), category.clone(), false));
-                                    safety::log_deletion(&path, &category, false, Some(&e));
-                                }
-                            }
-                            continue;
-                        }
-
-                        if category == "模拟器运行时" {
-                            match scanner::apfs::delete_simulator_runtime(&path) {
-                                Ok(_) => {
-                                    let _ = tx.send(DeleteMessage::Log(
-                                        format!("✓ {}", App::tf_lang(lang_en, "log_runtime_deleted", &[&path])), path.clone(), category.clone(), true));
-                                    safety::log_deletion(&path, &category, true, None);
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(DeleteMessage::Log(
-                                        format!("✗ {}", App::tf_lang(lang_en, "log_delete_failed", &[&path, &e])), path.clone(), category.clone(), false));
-                                    safety::log_deletion(&path, &category, false, Some(&e));
+                        // APFS 快照特殊处理 (macOS 专属)
+                        if cfg!(target_os = "macos") && category == "APFS快照" {
+                            #[cfg(target_os = "macos")]
+                            {
+                                match scanner::apfs::delete_snapshot(&path) {
+                                    Ok(_) => {
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("✓ {}", App::tf_lang(lang_en, "log_snapshot_deleted", &[&path])), path.clone(), category.clone(), true));
+                                        safety::log_deletion(&path, &category, true, None);
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("✗ {}", App::tf_lang(lang_en, "log_delete_failed", &[&path, &e])), path.clone(), category.clone(), false));
+                                        safety::log_deletion(&path, &category, false, Some(&e));
+                                    }
                                 }
                             }
                             continue;
                         }
 
-                        // 模拟器镜像/Cryptex — 通过 xcrun simctl runtime delete 安全删除
-                        if category == "模拟器镜像" || category == "模拟器Cryptex" {
-                            match delete_simulator_volumes(&path, lang_en) {
-                                Ok(msg) => {
-                                    let _ = tx.send(DeleteMessage::Log(
-                                        format!("✓ {}", msg), path.clone(), category.clone(), true));
-                                    safety::log_deletion(&path, &category, true, None);
-                                }
-                                Err(e) => {
-                                    // xcrun 失败，加入 sudo 重试列表
-                                    failed_items.lock().unwrap().push((path.clone(), category.clone()));
-                                    let _ = tx.send(DeleteMessage::Info(
-                                        format!("🔄 {}", App::tf_lang(lang_en, "log_xcrun_failed", &[&e])),
-                                    ));
+                        if cfg!(target_os = "macos") && category == "模拟器运行时" {
+                            #[cfg(target_os = "macos")]
+                            {
+                                match scanner::apfs::delete_simulator_runtime(&path) {
+                                    Ok(_) => {
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("✓ {}", App::tf_lang(lang_en, "log_runtime_deleted", &[&path])), path.clone(), category.clone(), true));
+                                        safety::log_deletion(&path, &category, true, None);
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("✗ {}", App::tf_lang(lang_en, "log_delete_failed", &[&path, &e])), path.clone(), category.clone(), false));
+                                        safety::log_deletion(&path, &category, false, Some(&e));
+                                    }
                                 }
                             }
                             continue;
                         }
 
-                        // 模拟器缓存 — 进程检测后删除
-                        if category == "模拟器缓存" {
+                        // 模拟器镜像/Cryptex — 通过 xcrun simctl runtime delete 安全删除 (macOS 专属)
+                        if cfg!(target_os = "macos") && (category == "模拟器镜像" || category == "模拟器Cryptex") {
+                            #[cfg(target_os = "macos")]
+                            {
+                                match delete_simulator_volumes(&path, lang_en) {
+                                    Ok(msg) => {
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("✓ {}", msg), path.clone(), category.clone(), true));
+                                        safety::log_deletion(&path, &category, true, None);
+                                    }
+                                    Err(e) => {
+                                        // xcrun 失败，加入 sudo 重试列表
+                                        failed_items.lock().unwrap().push((path.clone(), category.clone()));
+                                        let _ = tx.send(DeleteMessage::Info(
+                                            format!("🔄 {}", App::tf_lang(lang_en, "log_xcrun_failed", &[&e])),
+                                        ));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        // 模拟器缓存 — 进程检测后删除 (macOS 专属)
+                        if cfg!(target_os = "macos") && category == "模拟器缓存" {
+                            #[cfg(target_os = "macos")]
+                            {
                                 if safety::is_simulator_running() {
-                                let _ = tx.send(DeleteMessage::Log(
-                                    format!("⏭️ {}", App::tf_lang(lang_en, "log_skip_running", &[&path])), path.clone(), category.clone(), false));
-                                safety::log_deletion(&path, &category, false, Some(&App::t_lang(lang_en, "log_skip_running").replace("[{}]", "").trim().to_string()));
-                                continue;
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("⏭️ {}", App::tf_lang(lang_en, "log_skip_running", &[&path])), path.clone(), category.clone(), false));
+                                    safety::log_deletion(&path, &category, false, Some(&App::t_lang(lang_en, "log_skip_running").replace("[{}]", "").trim().to_string()));
+                                    continue;
+                                }
                             }
                             // 走普通删除流程（会自动 fallback 到 sudo）
                         }

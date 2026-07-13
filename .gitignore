@@ -1,7 +1,8 @@
-# Website
-website/node_modules/
-website/dist/
-website/.astro/
+# Website (独立仓库: https://github.com/jamesfeng2009/macleanwebsite.git)
+website/
+
+# TRAE 文档
+.trae/
 
 # Rust
 target/
