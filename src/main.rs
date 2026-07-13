@@ -625,12 +625,14 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
             // 日志按钮
             if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let log_dir = format!("{}/.maclean/logs", home);
-                // 在 Finder 中打开日志目录
-                let _ = std::process::Command::new("open")
-                    .arg(&log_dir)
-                    .spawn();
+                let log_dir = logger::log_dir();
+                // 跨平台打开日志目录
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&log_dir).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                let _ = std::process::Command::new("xdg-open").arg(&log_dir).spawn();
             }
         });
     });
