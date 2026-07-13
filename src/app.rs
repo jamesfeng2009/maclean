@@ -525,7 +525,7 @@ impl App {
                 } else {
                     0
                 };
-                let label = classify_associated_path(bp);
+                let label = classify_associated_path(bp, self.lang_en);
                 details.push((bp.clone(), size, label));
 
                 // 对于大于 100MB 的目录，枚举直接子目录展示子明细
@@ -655,8 +655,8 @@ impl App {
         self.delete_summary = Some((success_count, failed_count, 0));
 
         self.logs.push(format!(
-            "✅ 清理完成: 成功 {} 项, 失败 {} 项",
-            success_count, failed_count
+            "✅ {}",
+            self.tf("finish_summary", &[&success_count.to_string(), &failed_count.to_string()])
         ));
 
         // 刷新磁盘信息
@@ -732,7 +732,12 @@ impl App {
     /// 简单的 key-value 映射，不依赖外部 i18n 库。
     /// `lang_en == true` 时返回英文，否则返回中文。
     pub fn t(&self, key: &str) -> &'static str {
-        if self.lang_en {
+        Self::t_lang(self.lang_en, key)
+    }
+
+    /// 静态版本，供后台线程等无法访问 `&App` 的地方使用
+    pub fn t_lang(lang_en: bool, key: &str) -> &'static str {
+        if lang_en {
             match key {
                 // Tab 标题
                 "tab_dev_cache" => "Dev Cache",
@@ -785,6 +790,7 @@ impl App {
                 "unknown" => "unknown",
                 "no_items_hint" => "No items yet - click Scan to find cleanable files",
                 "click_to_start" => "Click to start",
+                "badge_undeletable" => "🔒 Undeletable",
                 // 过滤/搜索
                 "filter" => "Filter",
                 "filter_placeholder" => "Filter by path, category, or description... (/ to focus, Esc to clear)",
@@ -805,6 +811,158 @@ impl App {
                 "optimize_saved_state_cleanup" => "Clean Saved States",
                 "optimize_gatekeeper_cleanup" => "Clean Gatekeeper Records",
                 "optimize_memory_pressure_release" => "Release Memory Pressure",
+                "optimize_logs" => "📋 Optimize Logs",
+                // 优化任务执行结果
+                "opt_dns_success" => "✅ DNS cache flushed",
+                "opt_dns_fail" => "⚠️ DNS flush requires admin privileges. Run in Terminal: sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder",
+                "opt_quicklook_success" => "✅ QuickLook thumbnail cache rebuilt",
+                "opt_quicklook_fail" => "⚠️ QuickLook cache rebuild failed",
+                "opt_launchservices_success" => "✅ LaunchServices database rebuilt",
+                "opt_launchservices_fail" => "⚠️ LaunchServices rebuild failed",
+                "opt_saved_state_success" => "✅ Cleaned {0} old saved application states",
+                "opt_gatekeeper_success" => "✅ Gatekeeper records cleaned",
+                "opt_gatekeeper_fail" => "⚠️ Gatekeeper cleanup failed",
+                "opt_gatekeeper_empty" => "✅ Gatekeeper records already empty",
+                "opt_memory_success" => "✅ Inactive memory released",
+                "opt_memory_fail" => "⚠️ Memory release requires admin privileges. Run in Terminal: sudo purge",
+                "opt_unknown" => "⚠️ Unknown optimization task: {0}",
+                // 权限引导
+                "permission_title" => "Permission Settings",
+                "permission_headline" => "Grant Full Disk Access",
+                "permission_desc" => "Maclean needs Full Disk Access permission to delete developer cache files.",
+                "permission_sub_desc" => "Some cache files are created by root with macOS security attributes; without this permission they cannot be deleted.",
+                "permission_steps_title" => "Please follow these steps:",
+                "permission_step1" => "Click the \"Open System Settings\" button below",
+                "permission_step2" => "Find Maclean in the Full Disk Access list",
+                "permission_step3" => "If missing, click the + button to add Maclean.app",
+                "permission_step4" => "Make sure the switch next to Maclean is turned on",
+                "permission_step5" => "Restart Maclean to use all deletion features",
+                "permission_open_settings" => "Open System Settings",
+                "permission_install_app" => "Install to Applications",
+                "permission_later" => "Later",
+                "permission_hint" => "Hint: Restart Maclean after authorization to use all deletion features",
+                // 删除确认
+                "confirm_fda_warning" => "Full Disk Access not granted",
+                "confirm_fda_sub_warning" => "Some files may not be deleted; authorization is recommended",
+                "confirm_grant" => "Go to Settings",
+                "confirm_preview" => "Preview items to delete",
+                "confirm_preview_summary" => "{} items total, cache permanently deleted, large files moved to Trash",
+                // sudo 密码弹窗
+                "sudo_title_setup" => "Enable Touch ID",
+                "sudo_title_delete" => "Administrator Password Required",
+                "sudo_desc_setup" => "Enter your administrator password once to create /etc/pam.d/sudo_local.\nAfter enabling, you can use Touch ID to authenticate future deletions.",
+                "sudo_desc_delete" => "{} items need administrator privileges to continue deletion.",
+                "sudo_password_hint" => "Enter administrator password...",
+                "sudo_password_note" => "Password is only used for this sudo authorization and will not be saved to Keychain.",
+                "sudo_confirm_setup" => "Enable",
+                "sudo_confirm_delete" => "Confirm Delete",
+                "sudo_cancelled_log" => "Authorization cancelled by user",
+                // Touch ID 启用提示
+                "touchid_setup_title" => "Enable Touch ID",
+                "touchid_setup_headline" => "Use Touch ID instead of password",
+                "touchid_setup_desc" => "{} items need administrator privileges to delete.",
+                "touchid_setup_detail" => "Enabling will create the /etc/pam.d/sudo_local config file (Apple recommended),\nso all future admin operations can use Touch ID instead of a password.\nThis is a one-time setup and persists after macOS updates.",
+                "touchid_enable" => "Enable Touch ID",
+                "touchid_use_password" => "Use Password",
+                // Touch ID 等待
+                "touchid_wait_title" => "Waiting for Touch ID Setup",
+                "touchid_wait_headline" => "Please enter your password in the system dialog",
+                "touchid_wait_desc" => "A password dialog will appear. Enter your administrator password\nto create the /etc/pam.d/sudo_local configuration file.\nDeletion will continue automatically after completion.",
+                "touchid_wait_time" => "Waited {} seconds (timeout 120s)",
+                "touchid_wait_cancel" => "Cancel, use password instead",
+                // Touch ID 删除中
+                "touchid_verify_title" => "Touch ID Verification",
+                "touchid_verify_headline" => "Please authenticate with Touch ID",
+                "touchid_verify_desc" => "Deleting {} items that require administrator privileges...",
+                "touchid_verify_hint" => "A Touch ID dialog will appear; touch the fingerprint sensor.",
+                "touchid_verify_log" => "Recent logs:",
+                "touchid_cancelled" => "Touch ID authorization cancelled",
+                "touchid_clamshell_error" => "Screen is closed, Touch ID is unavailable, please enter password",
+                "touchid_timeout_error" => "Operation timed out: Touch ID setup not detected, please retry or use password",
+                // 删除中
+                "deleting_sudo_phase" => "Deleting with administrator privileges...",
+                // 删除完成汇总
+                "summary_title" => "Cleanup Result",
+                "summary_success" => "Successfully deleted {} items",
+                "summary_fail" => "Failed to delete {} items",
+                "summary_fail_hint" => "Some files could not be deleted due to permissions or system protection. See logs above.",
+                "summary_solution_title" => "Tips: Failure reasons and solutions",
+                "summary_sip_tip" => "SIP/System protection: System paths like /Library/Developer/CoreSimulator cannot be deleted even with sudo; disable SIP or use Apple official tools.",
+                "summary_perm_tip" => "Permission denied: Directories like node_modules may contain root-owned files. Click \"Copy sudo command\" to run manually in Terminal.",
+                "summary_solution_1" => "1. Copy sudo command to Terminal (recommended)",
+                "summary_solution_2" => "2. Disable SIP: Restart → hold Cmd+R → Terminal → csrutil disable → Restart",
+                "summary_solution_3" => "3. Use project tools: cd project dir && npm run clean / npx rimraf .next",
+                "summary_open_settings" => "Open System Settings",
+                "summary_fail_list" => "Failed list:",
+                "summary_copy_paths" => "Copy Paths",
+                "summary_copy_sudo" => "Copy sudo Command",
+                "summary_free_space" => "Available space: {}",
+                "summary_ok" => "OK",
+                "finish_summary" => "Cleanup completed: {} succeeded, {} failed",
+                // 后台日志
+                "log_intercepted" => "Blocked: {} - {}",
+                "log_skipped" => "Skipped: {} - {}",
+                "log_deleted" => "Deleted [{}] {} (success {} / fail {})",
+                "log_deleted_sudo" => "Deleted [{}] {} (admin privileges)",
+                "log_deleted_touchid" => "Deleted [{}] {} (Touch ID)",
+                "log_delete_failed" => "Delete failed: {} - {}",
+                "log_snapshot_deleted" => "Deleted snapshot: {}",
+                "log_runtime_deleted" => "Deleted runtime: {}",
+                "log_action_trashed" => "Moved to Trash",
+                "log_action_deleted" => "Deleted",
+                "log_xcrun_failed" => "xcrun deletion failed, will try sudo: {}",
+                "log_skip_running" => "Skipped [{}] Xcode/Simulator is running",
+                "log_docker_failed" => "Docker cleanup failed: {}",
+                "log_path_not_exist" => "Path does not exist: {}",
+                "log_symlink_rejected" => "Refuse to delete symlink: {}",
+                "log_need_sudo" => "{} items need administrator privileges",
+                "log_sudo_phase" => "Deleting with administrator privileges...",
+                "log_password_wrong" => "Administrator password incorrect, please re-enter",
+                "log_exit_code" => "sudo exit code {}",
+                "log_no_sim_runtimes" => "No installed simulator runtimes found",
+                "log_mount_in_use" => "Simulator runtime is mounted in use, skipping",
+                "log_cannot_get_mount" => "Cannot get mount point info, skipping for safety",
+                "log_sim_deleted" => "Deleted {} simulator runtime(s) via xcrun simctl{}",
+                "log_sim_failed_suffix" => ", {} failed",
+                "log_docker_not_running" => "Docker daemon is not running, please start Docker Desktop",
+                "log_xcrun_done" => "xcrun completed: {}",
+                "log_touchid_verifying" => "Touch ID verifying, please authenticate...",
+                "log_wait_touchid" => "Waiting for Touch ID authorization to execute xcrun...",
+                "log_touchid_prepare_xcrun" => "Preparing xcrun deletion: {}",
+                "log_touchid_xcrun_deleted" => "Deleted {} simulator runtime images via xcrun simctl",
+                "log_touchid_runtime_deleted_path" => "Deleted simulator runtime image via xcrun simctl: {}",
+                "log_sudo_execute" => "Preparing sudo deletion for {} residual items...",
+                "log_sudo_done2" => "sudo deletion completed, parsing results...",
+                "log_no_sudo_needed" => "No sudo needed, all completed via xcrun",
+                "log_touchid_cancel" => "Touch ID cancelled",
+                "log_sip_protected" => "SIP protection, cannot delete: {}",
+                "log_still_exists" => "Still exists after admin deletion",
+                "log_sudo_failed" => "Failed to start sudo: {} - {}",
+                "log_cannot_start_sudo" => "Cannot start sudo: {} - {}",
+                "log_docker_done" => "Docker cleanup completed, reclaimed space: {}",
+                "log_menu_event" => "Menu bar event: {}",
+                "log_quickclean_start" => "QuickClean: {} safe items selected, start deletion",
+                "log_quickclean_none" => "QuickClean: no deletable safe items",
+                "log_keepalive_failed" => "sudo keepalive startup failed: {}",
+                "log_unknown" => "Unknown",
+                "log_cancelled_auth" => "Authorization cancelled: {}",
+                "log_cancel_reason" => "Authorization cancelled",
+                "log_sip_reason" => "SIP protection or system restriction",
+                // 关联文件标签
+                "assoc_app" => "App Bundle",
+                "assoc_container" => "App Container",
+                "assoc_group" => "Shared Container",
+                "assoc_cookie" => "Cookies",
+                "assoc_webkit" => "WebKit Data",
+                "assoc_script" => "App Scripts",
+                "assoc_metadata" => "Metadata",
+                "assoc_cache" => "Cache",
+                "assoc_app_data" => "App Data",
+                "assoc_prefs" => "Preferences",
+                "assoc_logs" => "Logs",
+                "assoc_saved_state" => "Saved State",
+                "assoc_http_storage" => "HTTP Storage",
+                "assoc_other" => "Other",
                 _ => "",
             }
         } else {
@@ -856,6 +1014,7 @@ impl App {
                 "unknown" => "未知",
                 "no_items_hint" => "暂无数据 - 点击「扫描」查找可清理文件",
                 "click_to_start" => "点击开始",
+                "badge_undeletable" => "🔒 不可删除",
                 // 过滤/搜索
                 "filter" => "过滤",
                 "filter_placeholder" => "按路径、类别或描述过滤...（/ 聚焦，Esc 清除）",
@@ -876,6 +1035,158 @@ impl App {
                 "optimize_saved_state_cleanup" => "Saved State 清理",
                 "optimize_gatekeeper_cleanup" => "Gatekeeper 下载清理",
                 "optimize_memory_pressure_release" => "内存压力释放",
+                "optimize_logs" => "📋 优化日志",
+                // 优化任务执行结果
+                "opt_dns_success" => "✅ DNS 缓存已刷新",
+                "opt_dns_fail" => "⚠️ DNS 缓存刷新需要管理员权限。请在终端执行：sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder",
+                "opt_quicklook_success" => "✅ QuickLook 缩略图缓存已重建",
+                "opt_quicklook_fail" => "⚠️ QuickLook 缓存重建失败",
+                "opt_launchservices_success" => "✅ LaunchServices 数据库已重建",
+                "opt_launchservices_fail" => "⚠️ LaunchServices 重建失败",
+                "opt_saved_state_success" => "✅ 已清理 {0} 个旧的应用保存状态",
+                "opt_gatekeeper_success" => "✅ Gatekeeper 下载记录已清理",
+                "opt_gatekeeper_fail" => "⚠️ Gatekeeper 清理失败",
+                "opt_gatekeeper_empty" => "✅ Gatekeeper 下载记录已为空",
+                "opt_memory_success" => "✅ 已释放非活跃内存",
+                "opt_memory_fail" => "⚠️ 内存释放需要管理员权限。请在终端执行：sudo purge",
+                "opt_unknown" => "⚠️ 未知的优化任务: {0}",
+                // 权限引导
+                "permission_title" => "权限设置",
+                "permission_headline" => "授权完全磁盘访问",
+                "permission_desc" => "Maclean 需要完全磁盘访问权限才能删除开发者缓存文件。",
+                "permission_sub_desc" => "部分缓存文件由 root 创建且带有 macOS 安全属性，没有此权限将无法删除。",
+                "permission_steps_title" => "请按以下步骤操作：",
+                "permission_step1" => "点击下方「打开系统设置」按钮",
+                "permission_step2" => "在「完全磁盘访问」列表中找到 Maclean",
+                "permission_step3" => "如果没有，点击 + 号添加 Maclean.app",
+                "permission_step4" => "确保 Maclean 旁边的开关已打开",
+                "permission_step5" => "重启 Maclean 后即可正常删除",
+                "permission_open_settings" => "打开系统设置",
+                "permission_install_app" => "安装到应用程序",
+                "permission_later" => "稍后再说",
+                "permission_hint" => "提示: 授权后重启 Maclean 即可正常使用所有删除功能",
+                // 删除确认
+                "confirm_fda_warning" => "未授予完全磁盘访问权限",
+                "confirm_fda_sub_warning" => "部分文件可能无法删除，建议先授权",
+                "confirm_grant" => "去授权",
+                "confirm_preview" => "预览删除项",
+                "confirm_preview_summary" => "共 {} 项, 缓存类永久删除, 大文件移至废纸篓",
+                // sudo 密码弹窗
+                "sudo_title_setup" => "启用 Touch ID",
+                "sudo_title_delete" => "需要管理员权限",
+                "sudo_desc_setup" => "首次启用 Touch ID 需要输入一次管理员密码，以创建 /etc/pam.d/sudo_local。\n启用后，后续删除操作可使用 Touch ID 验证。",
+                "sudo_desc_delete" => "{} 项文件因权限不足需要输入管理员密码继续删除。",
+                "sudo_password_hint" => "请输入管理员密码...",
+                "sudo_password_note" => "密码仅用于本次 sudo 授权，不会保存到钥匙串。",
+                "sudo_confirm_setup" => "确认启用",
+                "sudo_confirm_delete" => "确认删除",
+                "sudo_cancelled_log" => "用户取消密码授权",
+                // Touch ID 启用提示
+                "touchid_setup_title" => "启用 Touch ID",
+                "touchid_setup_headline" => "使用 Touch ID 代替密码",
+                "touchid_setup_desc" => "{} 项文件需要管理员权限删除。",
+                "touchid_setup_detail" => "启用后会创建 /etc/pam.d/sudo_local 配置文件（macOS 官方推荐方式），\n之后所有管理员操作都可以用 Touch ID 验证，无需输入密码。\n这是一次性操作，系统更新后依然有效。",
+                "touchid_enable" => "启用 Touch ID",
+                "touchid_use_password" => "用密码代替",
+                // Touch ID 等待
+                "touchid_wait_title" => "等待 Touch ID 启用",
+                "touchid_wait_headline" => "请在系统弹窗中输入密码",
+                "touchid_wait_desc" => "系统会弹出密码对话框，请输入管理员密码\n以创建 /etc/pam.d/sudo_local 配置文件。\n完成后会自动继续删除操作。",
+                "touchid_wait_time" => "已等待 {} 秒（超时 120 秒）",
+                "touchid_wait_cancel" => "取消，用密码代替",
+                // Touch ID 删除中
+                "touchid_verify_title" => "Touch ID 验证",
+                "touchid_verify_headline" => "请在 Touch ID 传感器上验证指纹",
+                "touchid_verify_desc" => "正在删除 {} 项需要管理员权限的文件...",
+                "touchid_verify_hint" => "系统会弹出 Touch ID 对话框，请触碰指纹传感器",
+                "touchid_verify_log" => "最近日志:",
+                "touchid_cancelled" => "已取消 Touch ID 授权",
+                "touchid_clamshell_error" => "屏幕已合上，Touch ID 不可用，请输入密码",
+                "touchid_timeout_error" => "操作超时：未检测到 Touch ID 启用，请重试或使用密码",
+                // 删除中
+                "deleting_sudo_phase" => "正在使用管理员权限删除...",
+                // 删除完成汇总
+                "summary_title" => "清理结果",
+                "summary_success" => "成功删除 {} 项",
+                "summary_fail" => "删除失败 {} 项",
+                "summary_fail_hint" => "部分文件因权限或系统保护无法删除，详见上方日志。",
+                "summary_solution_title" => "提示: 失败原因及解决方案",
+                "summary_sip_tip" => "SIP/系统保护: /Library/Developer/CoreSimulator 等系统路径即使 sudo 也无法删除，需关闭 SIP 或使用 Apple 官方工具。",
+                "summary_perm_tip" => "权限不足: node_modules 等目录内部可能存在 root 拥有的文件，可点击「复制 sudo 命令」在终端手动执行。",
+                "summary_solution_1" => "1. 复制 sudo 命令到终端执行（推荐）",
+                "summary_solution_2" => "2. 关闭 SIP: 重启→按住 Cmd+R→终端→csrutil disable→重启",
+                "summary_solution_3" => "3. 用项目工具删除: cd 项目目录 && npm run clean / npx rimraf .next",
+                "summary_open_settings" => "打开系统设置",
+                "summary_fail_list" => "失败列表:",
+                "summary_copy_paths" => "复制路径",
+                "summary_copy_sudo" => "复制 sudo 命令",
+                "summary_free_space" => "当前可用空间: {}",
+                "summary_ok" => "确定",
+                "finish_summary" => "清理完成: 成功 {} 项, 失败 {} 项",
+                // 后台日志
+                "log_intercepted" => "已拦截: {} - {}",
+                "log_skipped" => "已跳过: {} - {}",
+                "log_deleted" => "已删除 [{}] {} (成功 {} / 失败 {})",
+                "log_deleted_sudo" => "已删除 [{}] {} (管理员权限)",
+                "log_deleted_touchid" => "已删除 [{}] {} (Touch ID)",
+                "log_delete_failed" => "删除失败: {} - {}",
+                "log_snapshot_deleted" => "已删除快照: {}",
+                "log_runtime_deleted" => "已删除运行时: {}",
+                "log_action_trashed" => "已移至废纸篓",
+                "log_action_deleted" => "已删除",
+                "log_xcrun_failed" => "xcrun 删除失败，将尝试 sudo: {}",
+                "log_skip_running" => "跳过 [{}] Xcode/Simulator 正在运行",
+                "log_docker_failed" => "Docker 清理失败: {}",
+                "log_path_not_exist" => "路径不存在: {}",
+                "log_symlink_rejected" => "拒绝删除符号链接: {}",
+                "log_need_sudo" => "{} 项需要管理员权限",
+                "log_sudo_phase" => "正在使用管理员权限删除...",
+                "log_password_wrong" => "管理员密码错误，请重新输入",
+                "log_exit_code" => "sudo 退出码 {}",
+                "log_no_sim_runtimes" => "没有找到已安装的模拟器运行时",
+                "log_mount_in_use" => "模拟器运行时正在被挂载使用，跳过删除",
+                "log_cannot_get_mount" => "无法获取挂载点信息，为安全起见跳过删除",
+                "log_sim_deleted" => "已通过 xcrun simctl 删除 {} 个模拟器运行时{}",
+                "log_sim_failed_suffix" => "，{} 个失败",
+                "log_docker_not_running" => "Docker daemon 未运行，请先启动 Docker Desktop",
+                "log_xcrun_done" => "xcrun 执行完成: {}",
+                "log_touchid_verifying" => "Touch ID 验证中，请在传感器上验证指纹...",
+                "log_wait_touchid" => "等待 Touch ID 授权执行 xcrun...",
+                "log_touchid_prepare_xcrun" => "准备通过 xcrun 删除: {}",
+                "log_touchid_xcrun_deleted" => "已通过 xcrun simctl 删除 {} 个模拟器运行时镜像",
+                "log_touchid_runtime_deleted_path" => "已通过 xcrun simctl 删除模拟器运行时镜像: {}",
+                "log_sudo_execute" => "准备 sudo 删除 {} 项残留文件...",
+                "log_sudo_done2" => "sudo 删除执行完成，正在解析结果...",
+                "log_no_sudo_needed" => "无需 sudo 删除，全部通过 xcrun 完成",
+                "log_touchid_cancel" => "Touch ID 取消",
+                "log_sip_protected" => "SIP保护无法删除: {}",
+                "log_still_exists" => "管理员权限删除后仍存在",
+                "log_sudo_failed" => "无法启动 sudo: {} - {}",
+                "log_cannot_start_sudo" => "无法启动 sudo: {} - {}",
+                "log_docker_done" => "Docker 清理完成，释放空间: {}",
+                "log_menu_event" => "菜单栏事件: {}",
+                "log_quickclean_start" => "一键清理：自动选择 {} 个安全项，开始删除",
+                "log_quickclean_none" => "一键清理：没有可删除的安全项",
+                "log_keepalive_failed" => "sudo keepalive 启动失败: {}",
+                "log_unknown" => "未知",
+                "log_cancelled_auth" => "已取消授权: {}",
+                "log_cancel_reason" => "用户取消授权",
+                "log_sip_reason" => "SIP保护或系统限制",
+                // 关联文件标签
+                "assoc_app" => "应用本体",
+                "assoc_container" => "应用容器",
+                "assoc_group" => "共享容器",
+                "assoc_cookie" => "Cookie",
+                "assoc_webkit" => "WebKit数据",
+                "assoc_script" => "应用脚本",
+                "assoc_metadata" => "元数据",
+                "assoc_cache" => "缓存",
+                "assoc_app_data" => "应用数据",
+                "assoc_prefs" => "偏好设置",
+                "assoc_logs" => "日志",
+                "assoc_saved_state" => "窗口状态",
+                "assoc_http_storage" => "网络存储",
+                "assoc_other" => "其他",
                 _ => "",
             }
         }
@@ -886,7 +1197,12 @@ impl App {
     /// 用于需要动态参数的 UI 文本，例如 "{} 项, 总计 {}" 在英文中应为
     /// "{} items, total {}"。占位符按顺序替换为 args 中的值。
     pub fn tf(&self, key: &str, args: &[&str]) -> String {
-        let mut s = self.t(key).to_string();
+        Self::tf_lang(self.lang_en, key, args)
+    }
+
+    /// 静态版本，供后台线程等无法访问 `&App` 的地方使用
+    pub fn tf_lang(lang_en: bool, key: &str, args: &[&str]) -> String {
+        let mut s = Self::t_lang(lang_en, key).to_string();
         for (i, arg) in args.iter().enumerate() {
             s = s.replace(&format!("{{{}}}", i), arg);
         }
@@ -929,45 +1245,35 @@ fn get_disk_info() -> (u64, u64) {
 /// - Preferences → 偏好设置
 /// - Logs → 日志
 /// - .app → 应用本体
-fn classify_associated_path(path: &str) -> String {
-    if path.ends_with(".app") {
-        return "应用本体".to_string();
-    }
-    if path.contains("/Containers/") {
-        return "应用容器".to_string();
-    }
-    if path.contains("/Group Containers/") {
-        return "共享容器".to_string();
-    }
-    if path.contains("/Cookies/") {
-        return "Cookie".to_string();
-    }
-    if path.contains("/WebKit/") {
-        return "WebKit数据".to_string();
-    }
-    if path.contains("/Application Scripts/") {
-        return "应用脚本".to_string();
-    }
-    if path.contains("/Metadata/") {
-        return "元数据".to_string();
-    }
-    if path.contains("/Caches/") {
-        return "缓存".to_string();
-    }
-    if path.contains("/Application Support/") {
-        return "应用数据".to_string();
-    }
-    if path.contains("/Preferences/") {
-        return "偏好设置".to_string();
-    }
-    if path.contains("/Logs/") {
-        return "日志".to_string();
-    }
-    if path.contains("/Saved Application State/") {
-        return "窗口状态".to_string();
-    }
-    if path.contains("/HTTPStorages/") {
-        return "网络存储".to_string();
-    }
-    "其他".to_string()
+fn classify_associated_path(path: &str, lang_en: bool) -> String {
+    let key = if path.ends_with(".app") {
+        "assoc_app"
+    } else if path.contains("/Containers/") {
+        "assoc_container"
+    } else if path.contains("/Group Containers/") {
+        "assoc_group"
+    } else if path.contains("/Cookies/") {
+        "assoc_cookie"
+    } else if path.contains("/WebKit/") {
+        "assoc_webkit"
+    } else if path.contains("/Application Scripts/") {
+        "assoc_script"
+    } else if path.contains("/Metadata/") {
+        "assoc_metadata"
+    } else if path.contains("/Caches/") {
+        "assoc_cache"
+    } else if path.contains("/Application Support/") {
+        "assoc_app_data"
+    } else if path.contains("/Preferences/") {
+        "assoc_prefs"
+    } else if path.contains("/Logs/") {
+        "assoc_logs"
+    } else if path.contains("/Saved Application State/") {
+        "assoc_saved_state"
+    } else if path.contains("/HTTPStorages/") {
+        "assoc_http_storage"
+    } else {
+        "assoc_other"
+    };
+    App::t_lang(lang_en, key).to_string()
 }

@@ -29,10 +29,18 @@ struct CacheEntry {
 
 /// 获取缓存目录路径
 ///
-/// ~/.maclean/scan_cache/
+/// 生产环境：~/.maclean/scan_cache/
+/// 测试环境：系统临时目录下的 maclean_test_scan_cache/
 fn cache_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".maclean").join("scan_cache")
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join("maclean_test_scan_cache")
+    }
+    #[cfg(not(test))]
+    {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        home.join(".maclean").join("scan_cache")
+    }
 }
 
 /// 获取指定 Tab 的缓存文件路径

@@ -167,6 +167,9 @@ fn static_category_en(cat: &str) -> Option<&'static str> {
         "应用数据" => Some("App Data"),
         "废纸篓残留" => Some("Trash Residual"),
         "下载残留" => Some("Download Residual"),
+        "App残留" => Some("App Residual"),
+        "App残留缓存" => Some("App Residual Cache"),
+        "App残留配置" => Some("App Residual Prefs"),
         "应用名称" => Some("Application"),
         "系统优化" => Some("System Optimize"),
         "APFS快照" => Some("APFS Snapshot"),
@@ -385,6 +388,40 @@ fn pattern_description_en(desc: &str) -> Option<String> {
         return Some(format!("{} app data (includes documents, chat history, etc.), deletion may cause data loss", app_name));
     }
 
+    // App uninstall residual descriptions
+    // "Downloads 中的 {}，同名应用已安装，可安全清理"
+    if let Some(rest) = desc.strip_prefix("Downloads 中的 ") {
+        if let Some(name) = rest.strip_suffix("，同名应用已安装，可安全清理") {
+            return Some(format!("{} in Downloads, same-name app installed, safe to clean", name));
+        }
+    }
+    // "Downloads 中的 {}，未检测到同名已安装应用，请确认后再删除"
+    if let Some(rest) = desc.strip_prefix("Downloads 中的 ") {
+        if let Some(name) = rest.strip_suffix("，未检测到同名已安装应用，请确认后再删除") {
+            return Some(format!("{} in Downloads, no same-name installed app detected, confirm before deleting", name));
+        }
+    }
+    // "{} 中 {} 的残留数据（App 可能已卸载）"
+    if let Some(rest) = desc.strip_suffix(" 的残留数据（App 可能已卸载）") {
+        if let Some(idx) = rest.rfind(" 中 ") {
+            let vendor = &rest[..idx];
+            let sub = &rest[idx + " 中 ".len()..];
+            return Some(format!("Residual data of {} in {} (app may be uninstalled)", sub, vendor));
+        }
+    }
+    // "{} 的残留数据（App 可能已卸载）"
+    if let Some(name) = desc.strip_suffix(" 的残留数据（App 可能已卸载）") {
+        return Some(format!("{} residual data (app may be uninstalled)", name));
+    }
+    // "{} 的残留缓存（App 可能已卸载）"
+    if let Some(name) = desc.strip_suffix(" 的残留缓存（App 可能已卸载）") {
+        return Some(format!("{} residual cache (app may be uninstalled)", name));
+    }
+    // "已卸载 App 的偏好设置文件，可安全删除"
+    if desc == "已卸载 App 的偏好设置文件，可安全删除" {
+        return Some("Preferences files of uninstalled app, safe to delete".to_string());
+    }
+
     // "{} 的 {} 目录，删除后自动重建"
     if desc.ends_with("目录，删除后自动重建") {
         return Some(desc
@@ -514,6 +551,41 @@ mod tests {
         assert_eq!(
             translate_description("HuggingFace 模型 bert-base，删除后需重新下载", true),
             "HuggingFace model bert-base, needs re-download after deletion"
+        );
+    }
+
+    #[test]
+    fn test_translate_app_uninstall_categories() {
+        assert_eq!(translate_category("App残留", true), "App Residual");
+        assert_eq!(translate_category("App残留缓存", true), "App Residual Cache");
+        assert_eq!(translate_category("App残留配置", true), "App Residual Prefs");
+    }
+
+    #[test]
+    fn test_translate_app_uninstall_descriptions() {
+        assert_eq!(
+            translate_description("Downloads 中的 Test.app，同名应用已安装，可安全清理", true),
+            "Test.app in Downloads, same-name app installed, safe to clean"
+        );
+        assert_eq!(
+            translate_description("Downloads 中的 Test.app，未检测到同名已安装应用，请确认后再删除", true),
+            "Test.app in Downloads, no same-name installed app detected, confirm before deleting"
+        );
+        assert_eq!(
+            translate_description("Google 中 Chrome 的残留数据（App 可能已卸载）", true),
+            "Residual data of Chrome in Google (app may be uninstalled)"
+        );
+        assert_eq!(
+            translate_description("FooApp 的残留数据（App 可能已卸载）", true),
+            "FooApp residual data (app may be uninstalled)"
+        );
+        assert_eq!(
+            translate_description("FooApp 的残留缓存（App 可能已卸载）", true),
+            "FooApp residual cache (app may be uninstalled)"
+        );
+        assert_eq!(
+            translate_description("已卸载 App 的偏好设置文件，可安全删除", true),
+            "Preferences files of uninstalled app, safe to delete"
         );
     }
 
