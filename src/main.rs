@@ -4,6 +4,7 @@
 
 mod aewp;
 mod app;
+mod i18n;
 mod safety;
 mod scanner;
 mod sudo_keepalive;
@@ -401,10 +402,16 @@ fn recommend_color(rec: &Recommend) -> egui::Color32 {
 /// 推荐等级标签文字
 fn recommend_badge(rec: &Recommend) -> &'static str {
     match rec {
-        Recommend::Safe => "🟢 推荐",
-        Recommend::Caution => "🟡 谨慎",
-        Recommend::Advanced => "🔴 确认",
+        Recommend::Safe => "🟢",
+        Recommend::Caution => "🟡",
+        Recommend::Advanced => "🔴",
     }
+}
+
+/// 推荐等级标签文字（含多语言文字）
+fn recommend_badge_text(rec: &Recommend, lang_en: bool) -> String {
+    let icon = recommend_badge(rec);
+    format!("{} {}", icon, i18n::translate_recommend(rec, lang_en))
 }
 
 /// 渲染 GUI 主界面
@@ -600,9 +607,9 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                 recommend_color(&item.recommend)
                             };
                             let badge = if !item.deletable {
-                                "🔒"
+                                "🔒".to_string()
                             } else {
-                                recommend_badge(&item.recommend)
+                                recommend_badge_text(&item.recommend, app.lang_en)
                             };
 
                             let row_bg = egui::Color32::from_rgb(35, 35, 42);
@@ -613,9 +620,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                 .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.colored_label(rec_color, badge);
+                                        ui.colored_label(rec_color, &badge);
                                         ui.add_space(3.0);
-                                        ui.colored_label(category_color(&item.category), &item.category);
+                                        let cat_en = i18n::translate_category(&item.category, app.lang_en);
+                                        ui.colored_label(category_color(&item.category), &cat_en);
                                         let size_str = if item.size_bytes == 0 { "—".to_string() } else { format_size(item.size_bytes) };
                                         ui.colored_label(egui::Color32::from_rgb(100, 200, 100), &size_str);
                                         ui.add_space(5.0);
@@ -863,7 +871,8 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                     } else {
                                         category_color(&item.category)
                                     };
-                                    ui.colored_label(cat_color, &item.category);
+                                    let cat_en = i18n::translate_category(&item.category, app.lang_en);
+                                    ui.colored_label(cat_color, &cat_en);
                                     // 大小（为 0 时显示 —，可能是空目录或未获取到）
                                     let size_str = if item.size_bytes == 0 {
                                         "—".to_string()
@@ -880,9 +889,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                     ui.colored_label(size_color, &size_str);
                                 });
                                 // 描述说明（告诉用户这是什么，删除后有什么影响）
+                                let desc_en = i18n::translate_description(&item.description, app.lang_en);
                                 ui.colored_label(
                                     egui::Color32::from_gray(140),
-                                    egui::RichText::new(&item.description).size(12.0),
+                                    egui::RichText::new(&desc_en).size(12.0),
                                 );
                                 // 路径
                                 let path_display = truncate_path(&item.path, 70);
@@ -2161,16 +2171,22 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
                                     .collect();
                                 for item in &items {
                                     ui.horizontal(|ui| {
-                                        ui.label(recommend_badge(&item.recommend));
+                                        ui.label(recommend_badge_text(&item.recommend, app.lang_en));
                                         ui.label(format_size(item.size_bytes));
-                                        ui.label(&item.category);
+                                        let cat_en = i18n::translate_category(&item.category, app.lang_en);
+                                        ui.label(&cat_en);
                                         ui.label(egui::RichText::new(&item.path).size(11.0).color(egui::Color32::from_gray(160)));
                                     });
                                 }
                                 ui.add_space(3.0);
+                                let summary_text = if app.lang_en {
+                                    format!("{} items total, cache permanently deleted, large files moved to Trash", items.len())
+                                } else {
+                                    format!("共 {} 项, 缓存类永久删除, 大文件移至废纸篓", items.len())
+                                };
                                 ui.colored_label(
                                     egui::Color32::from_gray(140),
-                                    egui::RichText::new(format!("共 {} 项, 缓存类永久删除, 大文件移至废纸篓", items.len())).size(11.0),
+                                    egui::RichText::new(summary_text).size(11.0),
                                 );
                             });
                         });
@@ -3461,9 +3477,10 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
     if items.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.label(egui::RichText::new("点击扫描查看可用的优化任务").size(16.0).color(egui::Color32::GRAY));
+            ui.label(egui::RichText::new(app.t("optimize_click_to_scan")).size(16.0).color(egui::Color32::GRAY));
             ui.add_space(10.0);
-            if ui.button(egui::RichText::new("🔍 扫描").size(16.0)).clicked() {
+            let scan_button = format!("🔍 {}", app.t("scan"));
+            if ui.button(egui::RichText::new(scan_button).size(16.0)).clicked() {
                 start_scan(app, scan_rx);
             }
         });
@@ -3471,8 +3488,8 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
     }
 
     ui.add_space(10.0);
-    ui.heading(egui::RichText::new("⚙️ 系统优化").size(18.0));
-    ui.label(egui::RichText::new("以下优化任务安全可执行，不会影响系统稳定性").size(12.0).color(egui::Color32::GRAY));
+    ui.heading(egui::RichText::new(app.t("tab_system_optimize")).size(18.0));
+    ui.label(egui::RichText::new(app.t("optimize_safe_hint")).size(12.0).color(egui::Color32::GRAY));
     ui.add_space(10.0);
 
     // 优化任务列表
@@ -3491,13 +3508,19 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
                         ui.label(egui::RichText::new("⚙️").size(20.0));
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&item.path).strong().size(14.0));
-                                ui.label(egui::RichText::new(recommend_badge(&item.recommend)).size(11.0));
+                                let title_key = format!("optimize_{}", item.path);
+                                let title = app.t(&title_key);
+                                // 如果 key 不存在（返回空字符串），fallback 到原始 path
+                                let title = if title.is_empty() { &item.path } else { title };
+                                ui.label(egui::RichText::new(title).strong().size(14.0));
+                                ui.label(egui::RichText::new(recommend_badge_text(&item.recommend, app.lang_en)).size(11.0));
                             });
-                            ui.label(egui::RichText::new(&item.description).size(12.0).color(egui::Color32::from_rgb(160, 160, 170)));
+                            let desc_en = i18n::translate_description(&item.description, app.lang_en);
+                            ui.label(egui::RichText::new(&desc_en).size(12.0).color(egui::Color32::from_rgb(160, 160, 170)));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(egui::RichText::new("▶ 执行").size(13.0)).clicked() {
+                            let run_text = if app.lang_en { "▶ Run" } else { "▶ 执行" };
+                            if ui.button(egui::RichText::new(run_text).size(13.0)).clicked() {
                                 task_to_run = Some(i);
                             }
                         });
@@ -3537,7 +3560,7 @@ fn execute_optimize_task(task_name: &str) -> String {
         .unwrap_or(0);
 
     let result = match task_name {
-        "DNS 缓存刷新" => {
+        "dns_cache_flush" => {
             // dscacheutil 和 killall 在现代 macOS 上需要 sudo
             let r1 = std::process::Command::new("dscacheutil")
                 .arg("-flushcache")
@@ -3549,22 +3572,22 @@ fn execute_optimize_task(task_name: &str) -> String {
             let success = r1.map(|o| o.status.success()).unwrap_or(false)
                 && r2.map(|o| o.status.success()).unwrap_or(false);
             if success {
-                "✅ DNS 缓存已刷新".to_string()
+                "✅ DNS cache flushed".to_string()
             } else {
-                "⚠️ DNS 刷新需要管理员权限，可在终端执行: sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder".to_string()
+                "⚠️ DNS flush requires admin privileges. Run in Terminal: sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder".to_string()
             }
         }
-        "QuickLook 缩略图重建" => {
+        "quicklook_rebuild" => {
             let r = std::process::Command::new("qlmanage")
                 .arg("-r")
                 .arg("cache")
                 .output();
             match r {
-                Ok(_) => "✅ QuickLook 缩略图缓存已重建".to_string(),
-                Err(_) => "⚠️ QuickLook 缓存重建失败".to_string(),
+                Ok(_) => "✅ QuickLook thumbnail cache rebuilt".to_string(),
+                Err(_) => "⚠️ QuickLook cache rebuild failed".to_string(),
             }
         }
-        "LaunchServices 重建" => {
+        "launchservices_rebuild" => {
             // lsregister 路径在 macOS 10.0-15 上一致，但加 fallback 更稳健
             let lsregister_candidates = [
                 "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister",
@@ -3578,11 +3601,11 @@ fn execute_optimize_task(task_name: &str) -> String {
                 .arg("-gc")
                 .output();
             match r {
-                Ok(_) => "✅ LaunchServices 数据库已重建".to_string(),
-                Err(_) => "⚠️ LaunchServices 重建失败".to_string(),
+                Ok(_) => "✅ LaunchServices database rebuilt".to_string(),
+                Err(_) => "⚠️ LaunchServices rebuild failed".to_string(),
             }
         }
-        "Saved State 清理" => {
+        "saved_state_cleanup" => {
             let home = std::env::var("HOME").unwrap_or_default();
             let state_dir = format!("{}/Library/Saved Application State", home);
             let mut count = 0;
@@ -3604,9 +3627,9 @@ fn execute_optimize_task(task_name: &str) -> String {
                     }
                 }
             }
-            format!("✅ 清理了 {} 个旧的应用保存状态", count)
+            format!("✅ Cleaned {} old saved application states", count)
         }
-        "隔离数据库清理" => {
+        "gatekeeper_cleanup" => {
             let home = std::env::var("HOME").unwrap_or_default();
             let db_path = format!("{}/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2", home);
             if std::path::Path::new(&db_path).exists() {
@@ -3615,22 +3638,22 @@ fn execute_optimize_task(task_name: &str) -> String {
                     .arg("DELETE FROM LSQuarantineEvent; VACUUM;")
                     .output();
                 match r {
-                    Ok(_) => "✅ 隔离数据库已清理".to_string(),
-                    Err(_) => "⚠️ 隔离数据库清理失败".to_string(),
+                    Ok(_) => "✅ Gatekeeper records cleaned".to_string(),
+                    Err(_) => "⚠️ Gatekeeper cleanup failed".to_string(),
                 }
             } else {
-                "✅ 隔离数据库已为空".to_string()
+                "✅ Gatekeeper records already empty".to_string()
             }
         }
-        "内存压力释放" => {
+        "memory_pressure_release" => {
             // purge 在所有 macOS 版本上都需要 sudo
             let r = std::process::Command::new("purge").output();
             match r {
-                Ok(o) if o.status.success() => "✅ 非活跃内存已释放".to_string(),
-                _ => "⚠️ 内存释放需要管理员权限，可在终端执行: sudo purge".to_string(),
+                Ok(o) if o.status.success() => "✅ Inactive memory released".to_string(),
+                _ => "⚠️ Memory release requires admin privileges. Run in Terminal: sudo purge".to_string(),
             }
         }
-        _ => format!("⚠️ 未知优化任务: {}", task_name),
+        _ => format!("⚠️ Unknown optimization task: {}", task_name),
     };
 
     format!("[{}] {}", timestamp, result)

@@ -796,6 +796,15 @@ impl App {
                 "cleaning" => "Cleaning",
                 "cleaning_in_progress" => "Cleaning in progress",
                 "cleaning_log" => "Latest logs:",
+                // 系统优化
+                "optimize_click_to_scan" => "Click Scan to view available optimization tasks",
+                "optimize_safe_hint" => "Optimization tasks are safe and will not affect system stability",
+                "optimize_dns_cache_flush" => "Flush DNS Cache",
+                "optimize_quicklook_rebuild" => "Rebuild QuickLook Thumbnails",
+                "optimize_launchservices_rebuild" => "Rebuild LaunchServices",
+                "optimize_saved_state_cleanup" => "Clean Saved States",
+                "optimize_gatekeeper_cleanup" => "Clean Gatekeeper Records",
+                "optimize_memory_pressure_release" => "Release Memory Pressure",
                 _ => "",
             }
         } else {
@@ -858,6 +867,15 @@ impl App {
                 "cleaning" => "清理中",
                 "cleaning_in_progress" => "正在执行清理",
                 "cleaning_log" => "最新日志：",
+                // 系统优化
+                "optimize_click_to_scan" => "点击扫描查看可用的优化任务",
+                "optimize_safe_hint" => "优化任务安全可执行，不会影响系统稳定性",
+                "optimize_dns_cache_flush" => "DNS 缓存刷新",
+                "optimize_quicklook_rebuild" => "QuickLook 缩略图重建",
+                "optimize_launchservices_rebuild" => "LaunchServices 重建",
+                "optimize_saved_state_cleanup" => "Saved State 清理",
+                "optimize_gatekeeper_cleanup" => "Gatekeeper 下载清理",
+                "optimize_memory_pressure_release" => "内存压力释放",
                 _ => "",
             }
         }

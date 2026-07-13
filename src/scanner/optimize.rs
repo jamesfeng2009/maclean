@@ -25,29 +25,30 @@ impl Scanner for OptimizeScanner {
         let start = Instant::now();
 
         // 6 项安全的系统优化任务
+        // path 使用英文 key，UI 层通过 app.t("optimize_xxx") 翻译显示
         let items = vec![
             make_task(
-                "DNS 缓存刷新",
+                "dns_cache_flush",
                 "刷新 DNS 缓存，修复网络解析问题",
             ),
             make_task(
-                "QuickLook 缩略图重建",
+                "quicklook_rebuild",
                 "清理 QuickLook 缩略图缓存，修复预览问题",
             ),
             make_task(
-                "LaunchServices 重建",
+                "launchservices_rebuild",
                 "重建 LaunchServices 数据库，修复\"打开方式\"菜单问题",
             ),
             make_task(
-                "Saved State 清理",
+                "saved_state_cleanup",
                 "清理超过 30 天的应用保存状态",
             ),
             make_task(
-                "隔离数据库清理",
+                "gatekeeper_cleanup",
                 "清理 Gatekeeper 下载追踪记录",
             ),
             make_task(
-                "内存压力释放",
+                "memory_pressure_release",
                 "释放非活跃内存，提升系统响应速度",
             ),
         ];
