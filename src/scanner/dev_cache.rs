@@ -36,39 +36,56 @@ impl Scanner for DevCacheScanner {
         let start = Instant::now();
         let mut items = Vec::new();
 
-        // 依次扫描各类开发者缓存
+        // 依次扫描各类开发者缓存（跨平台）
         items.extend(scan_rust_caches());
+        // Xcode 缓存仅 macOS
+        #[cfg(target_os = "macos")]
         items.extend(scan_xcode_caches());
         items.extend(scan_node_caches());
         items.extend(scan_go_caches());
+        // Homebrew 仅 macOS
+        #[cfg(target_os = "macos")]
         items.extend(scan_homebrew_caches());
         items.extend(scan_pip_caches());
+        // JetBrains 跨平台（macOS 路径，Windows 上会返回空）
+        #[cfg(target_os = "macos")]
         items.extend(scan_jetbrains_caches());
 
-        // Java/Gradle/Maven 和 Python 缓存
+        // Java/Gradle/Maven 和 Python 缓存（跨平台）
         scan_java_caches(&mut items);
         scan_python_caches(&mut items);
 
-        // 更多语言缓存（注册表驱动：37 个固定路径缓存）
+        // 更多语言缓存（注册表驱动：37 个固定路径缓存，跨平台）
         items.extend(super::cache_registry::RegistryScanner::new().scan().items);
 
-        // 构建产物递归扫描（dist/.next/.nuxt 等）
+        // 构建产物递归扫描（dist/.next/.nuxt 等，跨平台）
         scan_build_artifacts(&mut items);
 
-        // K8s/Docker/AI模型/Monorepo 缓存
+        // K8s（跨平台） / Docker（macOS 专属 Docker Desktop 路径）
         items.extend(scan_k8s_caches());
+        #[cfg(target_os = "macos")]
         items.extend(scan_docker_caches());
         items.extend(scan_ai_model_caches());
         items.extend(scan_monorepo_caches());
 
-        // 安装包清理
+        // 安装包清理（跨平台，按平台扩展名过滤）
         scan_installer_files(&mut items);
 
-        // 孤儿 LaunchAgent/LaunchDaemon 检测（指向已卸载应用的 plist）
+        // 孤儿 LaunchAgent/LaunchDaemon 检测（仅 macOS）
+        #[cfg(target_os = "macos")]
         items.extend(scan_orphaned_launchd());
 
-        // .DS_Store 文件清理（用户主目录下递归扫描）
+        // .DS_Store 文件清理（仅 macOS）
+        #[cfg(target_os = "macos")]
         items.extend(scan_ds_store_files());
+
+        // Windows 专属扫描器
+        #[cfg(target_os = "windows")]
+        {
+            items.extend(scan_wsl2_vhdx());
+            items.extend(scan_windows_temp());
+            items.extend(scan_docker_windows());
+        }
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
@@ -444,8 +461,22 @@ fn scan_node_caches() -> Vec<ScanItem> {
         }
     }
 
-    // 2. ~/Library/pnpm/store (pnpm 全局存储)
-    let pnpm_store = home.join("Library/pnpm/store");
+    // 2. pnpm 全局存储 (跨平台)
+    // macOS: ~/Library/pnpm/store
+    // Windows: %LOCALAPPDATA%\pnpm\store
+    let pnpm_store = {
+        #[cfg(target_os = "macos")]
+        { home.join("Library/pnpm/store") }
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join("AppData/Local"))
+                .join("pnpm/store")
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        { home.join(".local/share/pnpm/store") }
+    };
     if pnpm_store.is_dir() {
         let size = dir_size(&pnpm_store);
         items.push(ScanItem {
@@ -609,8 +640,22 @@ fn scan_pip_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
     let home = home_dir();
 
-    // ~/Library/Caches/pip (pip 下载缓存)
-    let pip_cache = home.join("Library/Caches/pip");
+    // pip 下载缓存 (跨平台)
+    // macOS: ~/Library/Caches/pip
+    // Windows: %LOCALAPPDATA%\pip\Cache
+    let pip_cache = {
+        #[cfg(target_os = "macos")]
+        { home.join("Library/Caches/pip") }
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join("AppData/Local"))
+                .join("pip/Cache")
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        { home.join(".cache/pip") }
+    };
     if pip_cache.is_dir() {
         let size = dir_size(&pip_cache);
         items.push(ScanItem {
@@ -943,8 +988,22 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
 fn scan_python_caches(items: &mut Vec<ScanItem>) {
     let home = home_dir();
 
-    // pip 缓存 (~/Library/Caches/pip)
-    let pip_cache = home.join("Library/Caches/pip");
+    // pip 缓存 (跨平台)
+    // macOS: ~/Library/Caches/pip
+    // Windows: %LOCALAPPDATA%\pip\Cache
+    let pip_cache = {
+        #[cfg(target_os = "macos")]
+        { home.join("Library/Caches/pip") }
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join("AppData/Local"))
+                .join("pip/Cache")
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        { home.join(".cache/pip") }
+    };
     if let Ok(size) = dir_size_checked(&pip_cache) {
         if size > 0 {
             items.push(ScanItem {
@@ -961,7 +1020,7 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
         }
     }
 
-    // Conda 缓存 (~/.conda)
+    // Conda 缓存 (~/.conda) - 跨平台
     let conda_pkgs = home.join(".conda/pkgs");
     if let Ok(size) = dir_size_checked(&conda_pkgs) {
         if size > 0 {
@@ -979,8 +1038,22 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
         }
     }
 
-    // Poetry 缓存 (~/Library/Caches/pypoetry)
-    let poetry_cache = home.join("Library/Caches/pypoetry");
+    // Poetry 缓存 (跨平台)
+    // macOS: ~/Library/Caches/pypoetry
+    // Windows: %APPDATA%\pypoetry\Cache
+    let poetry_cache = {
+        #[cfg(target_os = "macos")]
+        { home.join("Library/Caches/pypoetry") }
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join("AppData/Roaming"))
+                .join("pypoetry/Cache")
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        { home.join(".cache/pypoetry") }
+    };
     if let Ok(size) = dir_size_checked(&poetry_cache) {
         if size > 0 {
             items.push(ScanItem {
@@ -1112,8 +1185,13 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
         return;
     }
 
-    // 安装包扩展名
+    // 安装包扩展名 (跨平台)
+    #[cfg(target_os = "macos")]
     let installer_exts = [".dmg", ".pkg", ".iso", ".zip", ".tar.gz", ".tgz", ".7z"];
+    #[cfg(target_os = "windows")]
+    let installer_exts = [".exe", ".msi", ".iso", ".zip", ".7z", ".msix"];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let installer_exts = [".iso", ".zip", ".tar.gz", ".tgz", ".7z"];
 
     let mut installers: Vec<(String, u64, String)> = Vec::new(); // (path, size, filename)
 
@@ -1564,8 +1642,17 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
         }
     }
 
-    // 6. llama.cpp 缓存 (~/Library/Caches/llama)
-    let llama_cache = home.join("Library/Caches/llama");
+    // 6. llama.cpp 缓存 (跨平台)
+    // macOS: ~/Library/Caches/llama
+    // Windows: %USERPROFILE%\.cache\llama
+    let llama_cache = {
+        #[cfg(target_os = "macos")]
+        { home.join("Library/Caches/llama") }
+        #[cfg(target_os = "windows")]
+        { home.join(".cache/llama") }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        { home.join(".cache/llama") }
+    };
     if let Ok(size) = dir_size_checked(&llama_cache) {
         if size > 0 {
             items.push(ScanItem {
@@ -2025,4 +2112,199 @@ fn scan_ds_store_files() -> Vec<ScanItem> {
             count
         ),
     }]
+}
+
+// =========================================================================
+//  Windows 专属扫描器
+// =========================================================================
+
+/// 扫描 WSL2 vhdx 虚拟磁盘文件（Windows 独家卖点）
+///
+/// WSL2 发行版使用 vhdx 虚拟磁盘文件，删除文件后空间不会自动回收，
+/// 需要 `wsl --shutdown` + `diskpart compact` 压缩。这是 maclean Windows 版的差异化功能。
+#[cfg(target_os = "windows")]
+fn scan_wsl2_vhdx() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    let local_appdata = match std::env::var("LOCALAPPDATA") {
+        Ok(v) => PathBuf::from(v),
+        Err(_) => return items,
+    };
+
+    // WSL2 发行版 vhdx 路径: %LOCALAPPDATA%\Packages\{distro}\LocalState\
+    let packages_dir = local_appdata.join("Packages");
+    if !packages_dir.is_dir() {
+        return items;
+    }
+
+    // 扫描所有 WSL 相关的包目录
+    let wsl_patterns = ["CanonicalGroupLimited", "Microsoft.WSL"];
+    for entry in std::fs::read_dir(&packages_dir).into_iter().flatten().flatten() {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if !wsl_patterns.iter().any(|p| dir_name.contains(p)) {
+            continue;
+        }
+
+        let local_state = entry.path().join("LocalState");
+        if !local_state.is_dir() {
+            continue;
+        }
+
+        // 查找 vhdx 文件
+        for vhdx_entry in std::fs::read_dir(&local_state).into_iter().flatten().flatten() {
+            let path = vhdx_entry.path();
+            let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if !filename.ends_with(".vhdx") {
+                continue;
+            }
+
+            if let Ok(meta) = vhdx_entry.metadata() {
+                let size = meta.len();
+                if size > 100 * 1024 * 1024 { // > 100MB
+                    items.push(ScanItem {
+                        path: path.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: "WSL2虚拟磁盘".to_string(),
+                        selected: false,
+                        deletable: false, // 不可直接删除，需要压缩
+                        undeletable_reason: "需要先 wsl --shutdown，再用 diskpart compact 压缩".to_string(),
+                        batch_paths: Vec::new(),
+                        recommend: Recommend::Advanced,
+                        description: format!(
+                            "WSL2 发行版虚拟磁盘（{}）。\n删除文件后空间不会自动回收，需要压缩 vhdx 才能释放空间。",
+                            filename
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    items
+}
+
+/// 扫描 Windows 临时文件
+#[cfg(target_os = "windows")]
+fn scan_windows_temp() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    let home = home_dir();
+
+    // %TEMP% 目录
+    let temp_dir = std::env::var("TEMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Local/Temp"));
+    if temp_dir.is_dir() {
+        let size = dir_size(&temp_dir);
+        if size > 0 {
+            items.push(ScanItem {
+                path: temp_dir.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "Windows临时文件".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Safe,
+                description: "Windows 临时文件目录，可安全删除".to_string(),
+            });
+        }
+    }
+
+    // Windows 更新缓存 (%WINDIR%\SoftwareDistribution\Download)
+    if let Ok(windir) = std::env::var("WINDIR") {
+        let win_update = PathBuf::from(windir).join("SoftwareDistribution/Download");
+        if win_update.is_dir() {
+            let size = dir_size(&win_update);
+            if size > 0 {
+                items.push(ScanItem {
+                    path: win_update.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: "Windows更新缓存".to_string(),
+                    selected: false,
+                    deletable: false, // 需要先停 Windows Update 服务
+                    undeletable_reason: "需要先停止 Windows Update 服务才能删除".to_string(),
+                    batch_paths: Vec::new(),
+                    recommend: Recommend::Advanced,
+                    description: "Windows Update 下载缓存，需停止 wuauserv 服务后清理".to_string(),
+                });
+            }
+        }
+    }
+
+    // 缩略图缓存 (%LOCALAPPDATA%\Microsoft\Windows\Explorer)
+    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+        let thumb_cache = PathBuf::from(local_appdata).join("Microsoft/Windows/Explorer");
+        if thumb_cache.is_dir() {
+            let mut thumb_size: u64 = 0;
+            let mut thumb_paths: Vec<String> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&thumb_cache) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if filename.starts_with("thumbcache_") || filename.starts_with("iconcache_") {
+                        if let Ok(meta) = entry.metadata() {
+                            thumb_size += meta.len();
+                            thumb_paths.push(path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            if thumb_size > 0 {
+                items.push(ScanItem {
+                    path: thumb_cache.to_string_lossy().to_string(),
+                    size_bytes: thumb_size,
+                    category: "Windows缩略图".to_string(),
+                    selected: false,
+                    deletable: true,
+                    undeletable_reason: String::new(),
+                    batch_paths: thumb_paths,
+                    recommend: Recommend::Safe,
+                    description: "Windows 资源管理器缩略图缓存，删除后自动重建".to_string(),
+                });
+            }
+        }
+    }
+
+    items
+}
+
+/// 扫描 Docker Desktop for Windows 数据
+#[cfg(target_os = "windows")]
+fn scan_docker_windows() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+
+    // Docker Desktop 数据: %APPDATA%\Docker\wsl\data\ext4.vhdx
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let docker_data = PathBuf::from(appdata).join("Docker/wsl/data");
+        if docker_data.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&docker_data) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if filename.ends_with(".vhdx") {
+                        if let Ok(meta) = entry.metadata() {
+                            let size = meta.len();
+                            if size > 0 {
+                                items.push(ScanItem {
+                                    path: path.to_string_lossy().to_string(),
+                                    size_bytes: size,
+                                    category: "Docker虚拟机".to_string(),
+                                    selected: false,
+                                    deletable: false,
+                                    undeletable_reason: "需要先退出 Docker Desktop 并运行 docker system prune -a".to_string(),
+                                    batch_paths: Vec::new(),
+                                    recommend: Recommend::Advanced,
+                                    description: format!(
+                                        "Docker Desktop WSL2 虚拟磁盘（{}）。\n建议: docker system prune -a 清理后压缩 vhdx",
+                                        filename
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    items
 }
