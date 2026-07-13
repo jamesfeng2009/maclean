@@ -1644,16 +1644,44 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                         let batch_paths = batch_paths.clone();
                         let use_trash = *use_trash;
 
-                        // Windows 应用卸载特殊处理
+                        // Windows 应用卸载特殊处理（干净卸载：卸载程序 + 注册表 + 环境变量 + 文件残留）
                         #[cfg(target_os = "windows")]
                         if path.starts_with("uwp:") || path.starts_with("uninstall:") {
                             logger::info(&format!("开始卸载应用: {}", path));
-                            let (success, msg) = scanner::windows_apps::uninstall_app(&path);
+
+                            // 查找应用信息以支持干净卸载
+                            let key_name = if path.starts_with("uninstall:") {
+                                &path[10..]
+                            } else {
+                                ""
+                            };
+                            let app_info = scanner::windows_apps::find_app_by_key(key_name);
+                            let app_name = app_info.as_ref().map(|a| a.name.as_str()).unwrap_or("");
+                            let install_path = app_info.as_ref().and_then(|a| a.install_location.as_deref());
+
+                            // 执行干净卸载
+                            let (success, msg, residual) = scanner::windows_apps::clean_uninstall(
+                                &path,
+                                app_name,
+                                install_path,
+                            );
+
                             if success {
                                 logger::info(&format!("卸载成功: {}", msg));
                             } else {
                                 logger::error(&format!("卸载失败: {}", msg));
                             }
+
+                            // 记录残留清理详情
+                            if !residual.is_empty() {
+                                logger::info(&format!(
+                                    "残留清理: 注册表 {} 项, 环境变量 {} 项, 文件 {} 项",
+                                    residual.registry.len(),
+                                    residual.env_vars.len(),
+                                    residual.filesystem.len(),
+                                ));
+                            }
+
                             let _ = tx.send(DeleteMessage::Log(
                                 if success { format!("✓ {}", msg) } else { format!("✗ {}", msg) },
                                 path.clone(), category.clone(), success));

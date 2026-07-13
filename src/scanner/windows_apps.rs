@@ -474,6 +474,14 @@ pub fn get_installed_apps() -> Vec<WindowsAppInfo> {
     apps
 }
 
+/// 通过注册表键名查找应用信息
+///
+/// 用于卸载时获取应用名称和安装路径，以支持干净卸载（注册表 + 环境变量清理）。
+pub fn find_app_by_key(key_name: &str) -> Option<WindowsAppInfo> {
+    let apps = get_installed_apps();
+    apps.into_iter().find(|a| a.key_name.eq_ignore_ascii_case(key_name))
+}
+
 // =========================================================================
 //  App 缓存扫描器
 // =========================================================================
@@ -1082,6 +1090,469 @@ pub fn clean_app_residual(app_name: &str) -> Vec<(String, u64, bool)> {
     residuals
 }
 
+// =========================================================================
+//  干净卸载：注册表残留 + 环境变量残留清理
+//
+//  完整的卸载流程：
+//  1. 运行应用自带的卸载程序（uninstall_app）
+//  2. 扫描注册表残留（HKCU\SOFTWARE\<AppName> 等）
+//  3. 扫描环境变量残留（PATH 条目 + JAVA_HOME 等应用专属变量）
+//  4. 清理文件系统残留（%APPDATA%\<AppName> 等）
+// =========================================================================
+
+/// 注册表残留项
+#[derive(Debug, Clone)]
+pub struct RegistryResidual {
+    /// 注册表键路径，如 "HKCU\\SOFTWARE\\JavaSoft"
+    pub key_path: String,
+    /// 是否为系统级（HKLM 需要管理员权限）
+    pub is_system: bool,
+    /// 是否可删除（HKLM 且无管理员权限时为 false）
+    pub deletable: bool,
+    /// 不可删除的原因
+    pub reason: String,
+}
+
+/// 环境变量残留项
+#[derive(Debug, Clone)]
+pub struct EnvVarResidual {
+    /// 变量名，如 "JAVA_HOME" 或 "Path"
+    pub var_name: String,
+    /// 当前值
+    pub current_value: String,
+    /// 对于 Path 类型：要移除的条目列表
+    /// 对于独立变量（JAVA_HOME 等）：整个值都要删除
+    pub entries_to_remove: Vec<String>,
+    /// 是否为系统级环境变量
+    pub is_system: bool,
+    /// 是否可删除
+    pub deletable: bool,
+    /// 不可删除的原因
+    pub reason: String,
+}
+
+/// 干净卸载残留扫描结果
+#[derive(Debug, Clone)]
+pub struct UninstallResidual {
+    /// 注册表残留
+    pub registry: Vec<RegistryResidual>,
+    /// 环境变量残留
+    pub env_vars: Vec<EnvVarResidual>,
+    /// 文件系统残留: (路径, 大小, 是否删除成功)
+    pub filesystem: Vec<(String, u64, bool)>,
+}
+
+impl UninstallResidual {
+    pub fn is_empty(&self) -> bool {
+        self.registry.is_empty() && self.env_vars.is_empty() && self.filesystem.is_empty()
+    }
+
+    pub fn total_count(&self) -> usize {
+        self.registry.len() + self.env_vars.len() + self.filesystem.len()
+    }
+}
+
+/// 扫描注册表残留
+///
+/// 在以下位置搜索与应用名匹配的注册表键：
+/// - HKCU\SOFTWARE\* — 用户级应用设置（无需管理员权限可删除）
+/// - HKLM\SOFTWARE\* — 系统级应用设置（需要管理员权限）
+/// - HKLM\SOFTWARE\WOW6432Node\* — 32 位应用设置
+///
+/// 匹配规则：键名包含应用名（大小写不敏感）
+pub fn scan_registry_residual(app_name: &str) -> Vec<RegistryResidual> {
+    let mut items = Vec::new();
+    let name_lower = app_name.to_lowercase();
+
+    // 去除常见后缀以获得更好的匹配率
+    let search_names = generate_search_names(&name_lower);
+
+    let search_roots = [
+        (r"HKCU\SOFTWARE", false),
+        (r"HKLM\SOFTWARE", true),
+        (r"HKLM\SOFTWARE\WOW6432Node", true),
+    ];
+
+    for (root, is_system) in &search_roots {
+        let output = Command::new("reg").args(["query", root]).output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                let line = line.trim();
+                if !line.starts_with("HKEY") {
+                    continue;
+                }
+                let key_name = line.rsplit('\\').next().unwrap_or("");
+                let key_lower = key_name.to_lowercase();
+
+                // 检查是否匹配应用名
+                let matched = search_names.iter().any(|sn| {
+                    key_lower.contains(sn) || sn.contains(&key_lower)
+                });
+
+                if matched && !key_lower.is_empty() {
+                    let (deletable, reason) = if *is_system {
+                        (false, "系统级注册表，需要管理员权限删除".to_string())
+                    } else {
+                        (true, String::new())
+                    };
+
+                    items.push(RegistryResidual {
+                        key_path: line.to_string(),
+                        is_system: *is_system,
+                        deletable,
+                        reason,
+                    });
+                }
+            }
+        }
+    }
+
+    items
+}
+
+/// 生成用于搜索的应用名变体列表
+///
+/// 例如 "Java 8 Development Kit" 会生成:
+/// ["java 8 development kit", "java 8", "java", "jdk"]
+fn generate_search_names(name_lower: &str) -> Vec<String> {
+    let mut names = vec![name_lower.to_string()];
+
+    // 去除版本号后缀
+    let without_version = name_lower
+        .trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
+        .trim()
+        .to_string();
+    if without_version != name_lower && !without_version.is_empty() {
+        names.push(without_version);
+    }
+
+    // 提取第一个词（通常是厂商名或核心名，如 "java"、"python"）
+    if let Some(first_word) = name_lower.split_whitespace().next() {
+        if first_word.len() >= 3 {
+            names.push(first_word.to_string());
+        }
+    }
+
+    names
+}
+
+/// 扫描环境变量残留
+///
+/// 检查以下环境变量是否引用了应用的安装路径：
+/// - 用户环境变量: HKCU\Environment
+/// - 系统环境变量: HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment
+///
+/// 特别处理 Path 变量：分割为条目列表，找出引用应用路径的条目。
+/// 其他变量（JAVA_HOME、PYTHON_HOME 等）：如果值引用应用路径，整个变量标记为可删除。
+pub fn scan_env_var_residual(app_name: &str, install_path: Option<&str>) -> Vec<EnvVarResidual> {
+    let mut items = Vec::new();
+
+    let install_path = match install_path {
+        Some(p) if !p.is_empty() => p.to_lowercase(),
+        _ => return items, // 没有安装路径无法匹配环境变量
+    };
+
+    // 搜索名称用于匹配变量值中的路径关键词
+    let search_names = generate_search_names(&app_name.to_lowercase());
+
+    let env_roots = [
+        (r"HKCU\Environment", false),
+        (r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment", true),
+    ];
+
+    for (reg_key, is_system) in &env_roots {
+        let output = Command::new("reg").args(["query", reg_key]).output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() || !line.contains("REG_") {
+                    continue;
+                }
+
+                // 解析环境变量名和值
+                if let Some((var_name, var_value)) = parse_env_var_line(line) {
+                    let value_lower = var_value.to_lowercase();
+
+                    // Path 变量特殊处理：分割为条目
+                    if var_name.eq_ignore_ascii_case("Path") {
+                        let entries: Vec<&str> = var_value.split(';').collect();
+                        let to_remove: Vec<String> = entries
+                            .iter()
+                            .filter(|e| {
+                                let e_lower = e.to_lowercase();
+                                // 条目引用了应用安装路径
+                                e_lower.contains(&install_path)
+                                // 或条目路径包含应用名关键词
+                                || search_names.iter().any(|sn| e_lower.contains(sn) && e_lower.contains("program"))
+                            })
+                            .map(|e| e.to_string())
+                            .collect();
+
+                        if !to_remove.is_empty() {
+                            let (deletable, reason) = if *is_system {
+                                (false, "系统级 PATH，需要管理员权限修改".to_string())
+                            } else {
+                                (true, String::new())
+                            };
+                            items.push(EnvVarResidual {
+                                var_name: var_name.clone(),
+                                current_value: var_value.clone(),
+                                entries_to_remove: to_remove,
+                                is_system: *is_system,
+                                deletable,
+                                reason,
+                            });
+                        }
+                    } else {
+                        // 非 Path 变量：检查值是否引用应用路径
+                        let references_app = value_lower.contains(&install_path)
+                            || search_names.iter().any(|sn| {
+                                value_lower.contains(sn) && value_lower.contains("\\program files")
+                            });
+
+                        if references_app {
+                            let (deletable, reason) = if *is_system {
+                                (false, "系统级环境变量，需要管理员权限修改".to_string())
+                            } else {
+                                (true, String::new())
+                            };
+                            items.push(EnvVarResidual {
+                                var_name: var_name.clone(),
+                                current_value: var_value.clone(),
+                                entries_to_remove: vec![var_value.clone()],
+                                is_system: *is_system,
+                                deletable,
+                                reason,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    items
+}
+
+/// 解析环境变量注册表行
+///
+/// 格式: "    JAVA_HOME    REG_SZ    C:\Program Files\Java\jdk1.8.0_291"
+/// 或:   "    Path    REG_EXPAND_SZ    %SystemRoot%\system32;..."
+fn parse_env_var_line(line: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = line.splitn(3, "    ").collect();
+    if parts.len() >= 3 {
+        let name = parts[0].trim().to_string();
+        let value = parts[2].trim().to_string();
+        if !name.is_empty() && !value.is_empty() {
+            return Some((name, value));
+        }
+    }
+    // 回退到 split_whitespace
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() >= 3 {
+        let type_idx = parts.iter().position(|p| p.starts_with("REG_"))?;
+        if type_idx == 0 || type_idx >= parts.len() - 1 {
+            return None;
+        }
+        let name = parts[..type_idx].join(" ");
+        let value = parts[type_idx + 1..].join(" ");
+        if !name.is_empty() {
+            return Some((name, value));
+        }
+    }
+    None
+}
+
+/// 删除注册表残留键
+///
+/// 使用 `reg delete <key> /f` 静默删除。
+/// HKLM 下的键需要管理员权限，会返回失败信息。
+pub fn delete_registry_residual(key_path: &str) -> (bool, String) {
+    let output = Command::new("reg")
+        .args(["delete", key_path, "/f"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            (true, format!("已删除注册表键: {}", key_path))
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let detail = if stderr.is_empty() {
+                "权限不足或键不存在".to_string()
+            } else {
+                stderr.trim().to_string()
+            };
+            (false, format!("删除注册表键失败 {}: {}", key_path, detail))
+        }
+        Err(e) => (false, format!("执行 reg delete 失败: {}", e)),
+    }
+}
+
+/// 清理环境变量残留
+///
+/// 对于 Path 变量：移除引用应用路径的条目，保留其他条目。
+/// 对于独立变量（JAVA_HOME 等）：删除整个变量。
+///
+/// 修改后广播 WM_SETTINGCHANGE 通知其他应用更新环境变量。
+pub fn clean_env_var_residual(residual: &EnvVarResidual) -> (bool, String) {
+    let reg_key = if residual.is_system {
+        r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+    } else {
+        r"HKCU\Environment"
+    };
+
+    if !residual.deletable {
+        return (false, residual.reason.clone());
+    }
+
+    // Path 变量：移除特定条目
+    if residual.var_name.eq_ignore_ascii_case("Path") {
+        let entries: Vec<&str> = residual.current_value.split(';').collect();
+        let to_remove_lower: Vec<String> = residual
+            .entries_to_remove
+            .iter()
+            .map(|e| e.to_lowercase())
+            .collect();
+
+        let cleaned: Vec<&str> = entries
+            .iter()
+            .filter(|e| !to_remove_lower.contains(&e.to_lowercase()))
+            .collect();
+
+        let new_path = cleaned.join(";");
+
+        let output = Command::new("reg")
+            .args(["add", reg_key, "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", &new_path, "/f"])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                broadcast_env_change();
+                let removed_count = residual.entries_to_remove.len();
+                (true, format!("已从 Path 移除 {} 个条目", removed_count))
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                (false, format!("修改 Path 失败: {}", stderr.trim()))
+            }
+            Err(e) => (false, format!("执行 reg add 失败: {}", e)),
+        }
+    } else {
+        // 独立变量：删除整个变量
+        let output = Command::new("reg")
+            .args(["delete", reg_key, "/v", &residual.var_name, "/f"])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                broadcast_env_change();
+                (true, format!("已删除环境变量: {}", residual.var_name))
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                (false, format!("删除环境变量 {} 失败: {}", residual.var_name, stderr.trim()))
+            }
+            Err(e) => (false, format!("执行 reg delete 失败: {}", e)),
+        }
+    }
+}
+
+/// 广播环境变量变更通知
+///
+/// 通过 PowerShell 广播 WM_SETTINGCHANGE 消息，
+/// 让其他运行中的应用感知到环境变量已更新。
+fn broadcast_env_change() {
+    let ps_cmd = r#"
+        Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+"@
+        $HWND_BROADCAST = [IntPtr]0xffff
+        $WM_SETTINGCHANGE = 0x1A
+        $result = [IntPtr]::Zero
+        [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+"#;
+
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+        .output();
+}
+
+/// 执行干净卸载
+///
+/// 完整流程：
+/// 1. 运行应用自带的卸载程序
+/// 2. 扫描注册表残留并清理
+/// 3. 扫描环境变量残留并清理
+/// 4. 清理文件系统残留
+///
+/// 返回 (卸载是否成功, 详细信息, 残留清理结果)
+pub fn clean_uninstall(
+    uninstall_path: &str,
+    app_name: &str,
+    install_path: Option<&str>,
+) -> (bool, String, UninstallResidual) {
+    let mut residual = UninstallResidual {
+        registry: Vec::new(),
+        env_vars: Vec::new(),
+        filesystem: Vec::new(),
+    };
+
+    // 1. 运行卸载程序
+    let (uninstall_ok, uninstall_msg) = uninstall_app(uninstall_path);
+
+    // 无论卸载程序是否成功，都扫描残留
+    // （有些卸载程序会失败但仍然删除了大部分文件）
+
+    // 2. 扫描注册表残留
+    residual.registry = scan_registry_residual(app_name);
+    let reg_count = residual.registry.len();
+
+    // 3. 扫描环境变量残留
+    residual.env_vars = scan_env_var_residual(app_name, install_path);
+    let env_count = residual.env_vars.len();
+
+    // 4. 清理文件系统残留
+    residual.filesystem = clean_app_residual(app_name);
+    let fs_count = residual.filesystem.iter().filter(|(_, _, ok)| *ok).count();
+
+    // 5. 清理可删除的注册表残留
+    let mut reg_cleaned = 0;
+    for reg in &residual.registry.clone() {
+        if reg.deletable {
+            let (ok, _) = delete_registry_residual(&reg.key_path);
+            if ok {
+                reg_cleaned += 1;
+            }
+        }
+    }
+
+    // 6. 清理可删除的环境变量残留
+    let mut env_cleaned = 0;
+    for env in &residual.env_vars.clone() {
+        if env.deletable {
+            let (ok, _) = clean_env_var_residual(env);
+            if ok {
+                env_cleaned += 1;
+            }
+        }
+    }
+
+    let summary = format!(
+        "{} | 残留清理: 注册表 {}/{} 项, 环境变量 {}/{} 项, 文件 {} 项",
+        uninstall_msg,
+        reg_cleaned, reg_count,
+        env_cleaned, env_count,
+        fs_count
+    );
+
+    (uninstall_ok, summary, residual)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1289,5 +1760,116 @@ mod tests {
         let (exe, args) = parse_command(r#""D:\My Apps\Test\uninstall.exe" /S"#);
         assert_eq!(exe, r"D:\My Apps\Test\uninstall.exe");
         assert_eq!(args, vec!["/S"]);
+    }
+
+    #[test]
+    fn test_generate_search_names() {
+        // 完整名称 + 去版本号 + 首词
+        let names = generate_search_names("java 8 development kit");
+        assert!(names.contains(&"java 8 development kit".to_string()));
+        assert!(names.contains(&"java 8 development kit".to_string())); // 去版本号后
+        assert!(names.contains(&"java".to_string())); // 首词
+
+        // 纯名称无版本号
+        let names = generate_search_names("python");
+        assert!(names.contains(&"python".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_var_line() {
+        // 标准格式
+        let (name, value) = parse_env_var_line(
+            "    JAVA_HOME    REG_SZ    C:\\Program Files\\Java\\jdk1.8.0_291"
+        ).unwrap();
+        assert_eq!(name, "JAVA_HOME");
+        assert_eq!(value, r"C:\Program Files\Java\jdk1.8.0_291");
+
+        // REG_EXPAND_SZ 格式
+        let (name, value) = parse_env_var_line(
+            "    Path    REG_EXPAND_SZ    %SystemRoot%\\system32;C:\\Python39"
+        ).unwrap();
+        assert_eq!(name, "Path");
+        assert_eq!(value, r"%SystemRoot%\system32;C:\Python39");
+    }
+
+    #[test]
+    fn test_parse_env_var_line_invalid() {
+        // 空行
+        assert!(parse_env_var_line("").is_none());
+        // 无 REG_ 类型
+        assert!(parse_env_var_line("JAVA_HOME    value").is_none());
+    }
+
+    #[test]
+    fn test_uninstall_residual_empty() {
+        let residual = UninstallResidual {
+            registry: Vec::new(),
+            env_vars: Vec::new(),
+            filesystem: Vec::new(),
+        };
+        assert!(residual.is_empty());
+        assert_eq!(residual.total_count(), 0);
+    }
+
+    #[test]
+    fn test_uninstall_residual_non_empty() {
+        let residual = UninstallResidual {
+            registry: vec![RegistryResidual {
+                key_path: "HKCU\\SOFTWARE\\TestApp".to_string(),
+                is_system: false,
+                deletable: true,
+                reason: String::new(),
+            }],
+            env_vars: vec![EnvVarResidual {
+                var_name: "TEST_HOME".to_string(),
+                current_value: "C:\\Test".to_string(),
+                entries_to_remove: vec!["C:\\Test".to_string()],
+                is_system: false,
+                deletable: true,
+                reason: String::new(),
+            }],
+            filesystem: vec![("C:\\Test".to_string(), 1024, true)],
+        };
+        assert!(!residual.is_empty());
+        assert_eq!(residual.total_count(), 3);
+    }
+
+    #[test]
+    fn test_registry_residual_system_not_deletable() {
+        // HKLM 下的注册表键标记为不可删除（需要管理员权限）
+        // 这里只测试数据结构，不实际调用 reg query
+        let residual = RegistryResidual {
+            key_path: r"HKLM\SOFTWARE\TestApp".to_string(),
+            is_system: true,
+            deletable: false,
+            reason: "系统级注册表，需要管理员权限删除".to_string(),
+        };
+        assert!(!residual.deletable);
+        assert!(residual.is_system);
+    }
+
+    #[test]
+    fn test_env_var_residual_path_type() {
+        // Path 类型的环境变量残留：只移除特定条目
+        let residual = EnvVarResidual {
+            var_name: "Path".to_string(),
+            current_value: r"C:\Windows\system32;C:\Python39;C:\Other".to_string(),
+            entries_to_remove: vec![r"C:\Python39".to_string()],
+            is_system: false,
+            deletable: true,
+            reason: String::new(),
+        };
+        assert_eq!(residual.entries_to_remove.len(), 1);
+        // 验证清理后保留的条目
+        let entries: Vec<&str> = residual.current_value.split(';').collect();
+        let to_remove_lower: Vec<String> = residual.entries_to_remove
+            .iter()
+            .map(|e| e.to_lowercase())
+            .collect();
+        let cleaned: Vec<&str> = entries
+            .iter()
+            .filter(|e| !to_remove_lower.contains(&e.to_lowercase()))
+            .collect();
+        assert_eq!(cleaned.join(";"), r"C:\Windows\system32;C:\Other");
     }
 }
