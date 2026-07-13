@@ -205,6 +205,15 @@ pub struct App {
     pub filter_active: bool,
     /// 磁盘监控：上次检查时间（用于 5 秒间隔轮询）
     pub disk_last_check: std::time::Instant,
+    /// 是否显示残留清理弹窗（卸载后检测到残留时弹出）
+    pub show_residual_dialog: bool,
+    /// 残留项选中状态（与残留列表一一对应，true=选中清理）
+    pub residual_selected: Vec<bool>,
+    /// 残留清理中（正在执行清理操作）
+    pub residual_cleaning: bool,
+    /// Windows: 卸载后检测到的残留信息
+    #[cfg(target_os = "windows")]
+    pub uninstall_residual: Option<scanner::windows_apps::UninstallResidual>,
 }
 
 impl App {
@@ -258,6 +267,11 @@ impl App {
             filter_query: String::new(),
             filter_active: false,
             disk_last_check: std::time::Instant::now(),
+            show_residual_dialog: false,
+            residual_selected: Vec::new(),
+            residual_cleaning: false,
+            #[cfg(target_os = "windows")]
+            uninstall_residual: None,
         }
     }
 

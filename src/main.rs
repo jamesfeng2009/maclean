@@ -47,6 +47,12 @@ enum DeleteMessage {
     NeedPassword(Vec<(String, String)>),
     /// 全部删除完成
     Done,
+    /// Windows: 卸载后检测到残留，弹出残留清理弹窗
+    #[cfg(target_os = "windows")]
+    ResidualFound(scanner::windows_apps::UninstallResidual),
+    /// Windows: 残留清理完成
+    #[cfg(target_os = "windows")]
+    ResidualCleaned(usize, usize, usize), // (注册表, 环境变量, 文件)
 }
 
 /// 初始化崩溃日志文件，返回日志路径
@@ -315,6 +321,45 @@ fn main() -> eframe::Result {
                             }
                             DELETE_RX = None;
                             break;
+                        }
+                        #[cfg(target_os = "windows")]
+                        Ok(DeleteMessage::ResidualFound(residual)) => {
+                            if let Some(app) = &mut APP {
+                                // 初始化选中状态：所有可删除项默认选中
+                                let total = residual.registry.len()
+                                    + residual.env_vars.len()
+                                    + residual.filesystem.len();
+                                let mut selected = Vec::with_capacity(total);
+                                for r in &residual.registry {
+                                    selected.push(r.deletable);
+                                }
+                                for e in &residual.env_vars {
+                                    selected.push(e.deletable);
+                                }
+                                for f in &residual.filesystem {
+                                    selected.push(f.deletable);
+                                }
+                                app.residual_selected = selected;
+                                app.uninstall_residual = Some(residual);
+                                app.show_residual_dialog = true;
+                            }
+                        }
+                        #[cfg(target_os = "windows")]
+                        Ok(DeleteMessage::ResidualCleaned(reg_c, env_c, fs_c)) => {
+                            if let Some(app) = &mut APP {
+                                logger::info(&format!(
+                                    "残留清理完成: 注册表 {} 项, 环境变量 {} 项, 文件 {} 项",
+                                    reg_c, env_c, fs_c
+                                ));
+                                app.logs.push(format!(
+                                    "✓ 残留清理完成: 注册表 {} 项, 环境变量 {} 项, 文件 {} 项",
+                                    reg_c, env_c, fs_c
+                                ));
+                                app.residual_cleaning = false;
+                                app.show_residual_dialog = false;
+                                app.uninstall_residual = None;
+                                app.residual_selected.clear();
+                            }
                         }
                         Err(_) => break,
                     }
@@ -1142,6 +1187,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
     if let Some((ok, fail, skip)) = app.delete_summary {
         show_summary_window(ctx, app, ok, fail, skip, delete_rx);
     }
+
+    // Windows: 残留清理弹窗（卸载后检测到残留时弹出）
+    #[cfg(target_os = "windows")]
+    if app.show_residual_dialog {
+        show_residual_window(ctx, app, delete_rx);
+    }
 }
 
 /// 启动后台扫描
@@ -1677,7 +1728,7 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                             if !residual.is_empty() {
                                 let fs_size: u64 = residual.filesystem.iter().map(|f| f.size).sum();
                                 logger::info(&format!(
-                                    "残留扫描结果: 注册表 {} 项 (可删 {}), 环境变量 {} 项 (可删 {}), 文件 {} 项 (可删 {}, 共 {}) — 请用户确认是否清理",
+                                    "残留扫描结果: 注册表 {} 项 (可删 {}), 环境变量 {} 项 (可删 {}), 文件 {} 项 (可删 {}, 共 {}) — 等待用户选择",
                                     residual.registry.len(),
                                     residual.registry.iter().filter(|r| r.deletable).count(),
                                     residual.env_vars.len(),
@@ -1686,8 +1737,8 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                                     residual.filesystem.iter().filter(|f| f.deletable).count(),
                                     format_size(fs_size),
                                 ));
-                                // 不自动调用 clean_all_residuals，尊重用户选择权
-                                // 用户可通过日志了解残留情况，手动决定是否清理
+                                // 发送残留信息到 UI，弹出残留清理弹窗让用户选择
+                                let _ = tx.send(DeleteMessage::ResidualFound(residual));
                             }
 
                             let _ = tx.send(DeleteMessage::Log(
@@ -3435,6 +3486,221 @@ fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
         Tab::SystemOptimize => app.t("tab_system_optimize"),
         Tab::Apfs => app.t("tab_apfs"),
     }
+}
+
+/// Windows: 残留清理弹窗
+///
+/// 卸载应用后检测到残留时弹出，让用户选择：
+/// - 一键全部清理
+/// - 只清理选中的残留项
+/// - 跳过（不清理）
+#[cfg(target_os = "windows")]
+fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+    let residual = match &app.uninstall_residual {
+        Some(r) => r.clone(),
+        None => {
+            app.show_residual_dialog = false;
+            return;
+        }
+    };
+
+    let reg_len = residual.registry.len();
+    let env_len = residual.env_vars.len();
+    let fs_len = residual.filesystem.len();
+    let total = reg_len + env_len + fs_len;
+    let deletable_count = residual.deletable_count();
+    let selected_count = app.residual_selected.iter().filter(|&&s| s).count();
+    let fs_total_size: u64 = residual.filesystem.iter().map(|f| f.size).sum();
+
+    // 确保选中列表长度正确
+    if app.residual_selected.len() != total {
+        app.residual_selected.resize(total, false);
+    }
+
+    let is_cleaning = app.residual_cleaning;
+    let delete_in_progress = delete_rx.is_some();
+
+    egui::Window::new("卸载残留清理")
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(560.0);
+            ui.set_min_height(300.0);
+            ui.add_space(8.0);
+
+            ui.vertical(|ui| {
+                // 标题
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 159, 10), "⚠️");
+                    ui.label(egui::RichText::new("检测到卸载残留").size(16.0).strong());
+                });
+                ui.colored_label(
+                    egui::Color32::from_gray(160),
+                    egui::RichText::new(format!(
+                        "共 {} 项残留 (可清理 {} 项), 文件总计 {}",
+                        total, deletable_count, format_size(fs_total_size)
+                    )).size(12.0),
+                );
+                ui.colored_label(
+                    egui::Color32::from_gray(120),
+                    egui::RichText::new("请选择要清理的项目，或一键清理全部可删除项").size(11.0),
+                );
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // 残留列表（可滚动）
+                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    // 注册表残留
+                    if reg_len > 0 {
+                        ui.add_space(4.0);
+                        ui.colored_label(egui::Color32::from_rgb(100, 150, 255), egui::RichText::new(format!("📋 注册表残留 ({} 项)", reg_len)).size(13.0).strong());
+                        for (i, reg) in residual.registry.iter().enumerate() {
+                            let idx = i;
+                            let checked = &mut app.residual_selected[idx];
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(reg.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
+                                if reg.deletable {
+                                    ui.colored_label(egui::Color32::from_gray(200), egui::RichText::new(&reg.key_path).size(11.0));
+                                } else {
+                                    ui.colored_label(egui::Color32::from_gray(100), egui::RichText::new(&reg.key_path).size(11.0));
+                                    ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("({})", reg.reason)).size(10.0));
+                                }
+                            });
+                        }
+                        ui.add_space(4.0);
+                    }
+
+                    // 环境变量残留
+                    if env_len > 0 {
+                        ui.colored_label(egui::Color32::from_rgb(100, 200, 100), egui::RichText::new(format!("环境变量残留 ({} 项)", env_len)).size(13.0).strong());
+                        for (i, env) in residual.env_vars.iter().enumerate() {
+                            let idx = reg_len + i;
+                            let checked = &mut app.residual_selected[idx];
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(env.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
+                                if env.deletable {
+                                    ui.colored_label(egui::Color32::from_gray(200), egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
+                                } else {
+                                    ui.colored_label(egui::Color32::from_gray(100), egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
+                                    ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("({})", env.reason)).size(10.0));
+                                }
+                            });
+                        }
+                        ui.add_space(4.0);
+                    }
+
+                    // 文件系统残留
+                    if fs_len > 0 {
+                        ui.colored_label(egui::Color32::from_rgb(255, 180, 100), egui::RichText::new(format!("文件系统残留 ({} 项, {})", fs_len, format_size(fs_total_size))).size(13.0).strong());
+                        for (i, fs) in residual.filesystem.iter().enumerate() {
+                            let idx = reg_len + env_len + i;
+                            let checked = &mut app.residual_selected[idx];
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(fs.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
+                                if fs.deletable {
+                                    ui.colored_label(egui::Color32::from_gray(200), egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
+                                } else {
+                                    ui.colored_label(egui::Color32::from_gray(100), egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
+                                    ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("({})", fs.reason)).size(10.0));
+                                }
+                            });
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(5.0);
+
+                // 操作按钮
+                ui.horizontal(|ui| {
+                    // 一键清理全部
+                    let clean_all_enabled = deletable_count > 0 && !is_cleaning && !delete_in_progress;
+                    if ui.add_enabled(clean_all_enabled, egui::Button::new(egui::RichText::new(format!("🧹 一键清理全部 ({} 项)", deletable_count)).size(13.0)))
+                        .clicked()
+                    {
+                        logger::info(&format!("用户选择: 一键清理全部 {} 项可删除残留", deletable_count));
+                        app.residual_cleaning = true;
+                        let residual = app.uninstall_residual.take().unwrap();
+                        let (tx, rx) = mpsc::channel();
+                        *delete_rx = Some(rx);
+                        std::thread::spawn(move || {
+                            let (reg_c, env_c, fs_c) = scanner::windows_apps::clean_all_residuals(&residual);
+                            let _ = tx.send(DeleteMessage::ResidualCleaned(reg_c, env_c, fs_c));
+                        });
+                    }
+
+                    // 清理选中
+                    let clean_selected_enabled = selected_count > 0 && !is_cleaning && !delete_in_progress;
+                    if ui.add_enabled(clean_selected_enabled, egui::Button::new(egui::RichText::new(format!("✓ 清理选中 ({} 项)", selected_count)).size(13.0)))
+                        .clicked()
+                    {
+                        logger::info(&format!("用户选择: 清理选中 {} 项残留", selected_count));
+                        app.residual_cleaning = true;
+                        let residual = app.uninstall_residual.take().unwrap();
+                        let selected = app.residual_selected.clone();
+                        let (tx, rx) = mpsc::channel();
+                        *delete_rx = Some(rx);
+                        std::thread::spawn(move || {
+                            let mut reg_c = 0;
+                            let mut env_c = 0;
+                            let mut fs_c = 0;
+                            let rl = residual.registry.len();
+                            let el = residual.env_vars.len();
+
+                            for (i, &sel) in selected.iter().enumerate() {
+                                if !sel {
+                                    continue;
+                                }
+                                if i < rl {
+                                    if residual.registry[i].deletable {
+                                        let (ok, _) = scanner::windows_apps::delete_registry_residual(&residual.registry[i].key_path);
+                                        if ok { reg_c += 1; }
+                                    }
+                                } else if i < rl + el {
+                                    let j = i - rl;
+                                    if residual.env_vars[j].deletable {
+                                        let (ok, _) = scanner::windows_apps::clean_env_var_residual(&residual.env_vars[j]);
+                                        if ok { env_c += 1; }
+                                    }
+                                } else {
+                                    let j = i - rl - el;
+                                    if residual.filesystem[j].deletable {
+                                        let (ok, _) = scanner::windows_apps::delete_filesystem_residual(&residual.filesystem[j].path);
+                                        if ok { fs_c += 1; }
+                                    }
+                                }
+                            }
+                            let _ = tx.send(DeleteMessage::ResidualCleaned(reg_c, env_c, fs_c));
+                        });
+                    }
+
+                    // 跳过
+                    let skip_enabled = !is_cleaning;
+                    if ui.add_enabled(skip_enabled, egui::Button::new(egui::RichText::new("跳过").size(13.0)))
+                        .clicked()
+                    {
+                        logger::info("用户选择: 跳过残留清理");
+                        app.show_residual_dialog = false;
+                        app.uninstall_residual = None;
+                        app.residual_selected.clear();
+                    }
+                });
+
+                // 清理中提示
+                if is_cleaning {
+                    ui.add_space(5.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0, 200, 255),
+                        egui::RichText::new("⏳ 正在清理残留...").size(12.0),
+                    );
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            });
+        });
 }
 
 /// 类别颜色
