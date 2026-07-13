@@ -380,14 +380,31 @@ fn main() -> eframe::Result {
     })
 }
 
-/// 加载 macOS 系统中文字体
+/// 加载系统中文字体（跨平台）
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
+    // 按平台选择字体路径
+    #[cfg(target_os = "macos")]
     let font_paths = [
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/Library/Fonts/Arial Unicode.ttf",
+    ];
+
+    #[cfg(target_os = "windows")]
+    let font_paths = [
+        "C:\\Windows\\Fonts\\msyh.ttc",      // 微软雅黑
+        "C:\\Windows\\Fonts\\msyhbd.ttc",     // 微软雅黑粗体
+        "C:\\Windows\\Fonts\\simhei.ttf",     // 黑体
+        "C:\\Windows\\Fonts\\simsun.ttc",     // 宋体
+    ];
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let font_paths = [
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     ];
 
     for path in &font_paths {
@@ -1270,14 +1287,21 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                         scanner::large_files::LargeFileScanner::new().scan()
                     }
                 }
+                #[cfg(target_os = "macos")]
                 Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
+                #[cfg(target_os = "macos")]
                 Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
+                #[cfg(target_os = "macos")]
                 Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
+                #[cfg(target_os = "macos")]
                 Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
                 #[cfg(target_os = "macos")]
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+                // Windows/Linux: 这些 Tab 返回空结果
                 #[cfg(not(target_os = "macos"))]
-                Tab::Apfs => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
+                Tab::AppCache | Tab::AppData | Tab::AppUninstall | Tab::SystemOptimize | Tab::Apfs => {
+                    scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
+                }
             }
         });
 

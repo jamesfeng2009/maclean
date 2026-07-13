@@ -296,73 +296,105 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
 /// 时会锁定 /Library/Developer/CoreSimulator/Volumes 下的 runtime 镜像，
 /// 导致 xcrun simctl runtime delete 无法删除。此时不应展示或删除这些项。
 pub fn is_simulator_running() -> bool {
-    let processes = ["Xcode", "Simulator", "CoreSimulatorService", "simdiskimaged"];
-    for proc in &processes {
+    #[cfg(target_os = "macos")]
+    {
+        let processes = ["Xcode", "Simulator", "CoreSimulatorService", "simdiskimaged"];
+        for proc in &processes {
+            if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
+                .arg("-x")
+                .arg(proc)
+                .output()
+            {
+                if output.status.success() && !output.stdout.is_empty() {
+                    return true;
+                }
+            }
+        }
+        // 额外检查 com.apple.CoreSimulator
         if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
-            .arg("-x")
-            .arg(proc)
+            .arg("-f")
+            .arg("com.apple.CoreSimulator")
             .output()
         {
             if output.status.success() && !output.stdout.is_empty() {
                 return true;
             }
         }
+        false
     }
-    // 额外检查 com.apple.CoreSimulator
-    if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
-        .arg("-f")
-        .arg("com.apple.CoreSimulator")
-        .output()
+    #[cfg(not(target_os = "macos"))]
     {
-        if output.status.success() && !output.stdout.is_empty() {
-            return true;
-        }
+        // Windows/Linux 无 iOS 模拟器
+        false
     }
-    false
 }
 
 /// 检查指定应用是否正在运行
 ///
-/// 通过 `pgrep -f` 搜索进程列表中是否包含该应用名称的进程。
+/// macOS: 通过 `pgrep -f` 搜索进程列表
+/// Windows: 通过 `tasklist` 搜索进程列表
 fn is_app_running(app_name: &str) -> bool {
-    // 使用 pgrep 检查进程
-    let output = std::process::Command::new("/usr/bin/pgrep")
-        .args(["-f", app_name])
-        .output();
-
-    if let Ok(out) = output {
-        // pgrep 有匹配时 exit code = 0，无匹配时 exit code = 1
-        return out.status.success() && !out.stdout.is_empty();
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", app_name])
+            .output();
+        if let Ok(out) = output {
+            return out.status.success() && !out.stdout.is_empty();
+        }
+        false
     }
-
-    false
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: tasklist + findstr
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {}", app_name), "/NH"])
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return !stdout.contains("INFO: No tasks") && !stdout.trim().is_empty();
+        }
+        false
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = app_name;
+        false
+    }
 }
 
 /// 检查 MacBook 是否处于合盖状态（clamshell mode）
 ///
-/// 通过 `ioreg` 读取 AppleClamshellState 属性判断屏幕开合状态。
+/// macOS: 通过 `ioreg` 读取 AppleClamshellState 属性判断屏幕开合状态。
 /// 合盖时 Touch ID 传感器不可用（电源按钮 Touch ID 在合盖时无法触达），
 /// 需要回退到密码输入流程。
 ///
-/// 返回 true 表示屏幕已合上，false 表示打开或无法检测（按打开处理）。
+/// Windows/Linux: 无合盖概念，始终返回 false。
 pub fn is_clamshell_closed() -> bool {
-    if let Ok(output) = std::process::Command::new("ioreg")
-        .arg("-r")
-        .arg("-k")
-        .arg("AppleClamshellState")
-        .arg("-d")
-        .arg("4")
-        .output()
+    #[cfg(target_os = "macos")]
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // 查找 "AppleClamshellState" = Yes 的行
-        for line in stdout.lines() {
-            if line.contains("AppleClamshellState") && line.contains("Yes") {
-                return true;
+        if let Ok(output) = std::process::Command::new("ioreg")
+            .arg("-r")
+            .arg("-k")
+            .arg("AppleClamshellState")
+            .arg("-d")
+            .arg("4")
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("AppleClamshellState") && line.contains("Yes") {
+                    return true;
+                }
             }
         }
+        false
     }
-    false
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows/Linux 无合盖概念
+        false
+    }
 }
 
 /// EDR / Endpoint Security 代理的 bundle ID 前缀

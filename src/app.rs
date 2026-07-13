@@ -510,14 +510,21 @@ impl App {
         let result = match self.tab {
             Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
             Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
+            #[cfg(target_os = "macos")]
             Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
+            #[cfg(target_os = "macos")]
             Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
+            #[cfg(target_os = "macos")]
             Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
+            #[cfg(target_os = "macos")]
             Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
             #[cfg(target_os = "macos")]
             Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+            // Windows/Linux: 这些 Tab 返回空结果
             #[cfg(not(target_os = "macos"))]
-            Tab::Apfs => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
+            Tab::AppCache | Tab::AppData | Tab::AppUninstall | Tab::SystemOptimize | Tab::Apfs => {
+                scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
+            }
         };
 
         self.scan_time_ms[idx] = result.scan_time_ms;

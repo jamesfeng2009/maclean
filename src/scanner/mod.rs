@@ -12,12 +12,18 @@ pub mod cache;
 // 导出子模块
 #[cfg(target_os = "macos")]
 pub mod apfs;
+// app_cache/app_data/uninstall/optimize 扫描 macOS 专属路径（~/Library/Containers 等）
+// Windows 上暂不支持，用 cfg 包装避免编译错误
+#[cfg(target_os = "macos")]
 pub mod app_cache;
+#[cfg(target_os = "macos")]
 pub mod app_data;
 pub mod cache_registry;
 pub mod dev_cache;
 pub mod large_files;
+#[cfg(target_os = "macos")]
 pub mod optimize;
+#[cfg(target_os = "macos")]
 pub mod uninstall;
 
 /// 推荐等级 - 帮助用户判断是否应该清理

@@ -8,9 +8,13 @@ use clap::{Parser, Subcommand};
 use crate::scanner::{format_size, Scanner};
 use crate::scanner::dev_cache::DevCacheScanner;
 use crate::scanner::large_files::LargeFileScanner;
+#[cfg(target_os = "macos")]
 use crate::scanner::app_cache::AppCacheScanner;
+#[cfg(target_os = "macos")]
 use crate::scanner::app_data::AppDataScanner;
+#[cfg(target_os = "macos")]
 use crate::scanner::uninstall::UninstallScanner;
+#[cfg(target_os = "macos")]
 use crate::scanner::optimize::OptimizeScanner;
 #[cfg(target_os = "macos")]
 use crate::scanner::apfs::ApfsScanner;
@@ -100,9 +104,13 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
     match tab_name {
         "dev-cache" => DevCacheScanner::new().scan().items,
         "large-files" => LargeFileScanner::new().scan().items,
+        #[cfg(target_os = "macos")]
         "app-cache" => AppCacheScanner::new().scan().items,
+        #[cfg(target_os = "macos")]
         "app-data" => AppDataScanner::new().scan().items,
+        #[cfg(target_os = "macos")]
         "app-uninstall" => UninstallScanner::new().scan().items,
+        #[cfg(target_os = "macos")]
         "optimize" => OptimizeScanner::new().scan().items,
         #[cfg(target_os = "macos")]
         "apfs" => ApfsScanner::new().scan().items,
