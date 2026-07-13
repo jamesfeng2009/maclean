@@ -464,10 +464,112 @@ fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
     apps
 }
 
-/// 获取所有已安装应用（注册表 + UWP）
+/// 直接扫描 C:\Program Files\ 和 C:\Program Files (x86)\ 目录
+///
+/// 查找包含卸载程序（uninstall.exe、unins000.exe 等）的应用目录，
+/// 补充注册表中未登记的应用（便携应用、手动解压安装的工具等）。
+///
+/// 也扫描 D:\ 等其他盘符根目录下的 Program Files 目录。
+fn scan_program_files_dirs() -> Vec<WindowsAppInfo> {
+    let mut apps = Vec::new();
+
+    // 卸载程序文件名（按常见程度排序）
+    let uninstaller_names = [
+        "uninstall.exe",
+        "uninst.exe",
+        "unins000.exe",
+        "unins001.exe",
+        "uninstaller.exe",
+        "uninstall-helper.exe",
+    ];
+
+    // 搜索目录：C:\Program Files\、C:\Program Files (x86)\
+    // 以及其他盘符的同类目录（D:\Program Files\ 等）
+    let mut search_dirs: Vec<PathBuf> = vec![
+        PathBuf::from(r"C:\Program Files"),
+        PathBuf::from(r"C:\Program Files (x86)"),
+    ];
+
+    // 检测其他盘符（D:、E: 等）的 Program Files 目录
+    for drive in ['D', 'E', 'F', 'G'] {
+        let pf = PathBuf::from(format!("{}:\\Program Files", drive));
+        let pf_x86 = PathBuf::from(format!("{}:\\Program Files (x86)", drive));
+        if pf.is_dir() {
+            search_dirs.push(pf);
+        }
+        if pf_x86.is_dir() {
+            search_dirs.push(pf_x86);
+        }
+    }
+
+    for base in &search_dirs {
+        let entries = match std::fs::read_dir(base) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+
+            // 跳过系统目录
+            let dir_lower = dir_name.to_lowercase();
+            if dir_lower.starts_with("windows")
+                || dir_lower.starts_with("microsoft")
+                || dir_lower.starts_with("common files")
+                || dir_lower == "internet explorer"
+                || dir_lower == "windowsapps"
+            {
+                continue;
+            }
+
+            // 在应用目录中查找卸载程序
+            for uninst_name in &uninstaller_names {
+                let uninst_path = path.join(uninst_name);
+                if uninst_path.exists() {
+                    let size = dir_size(&path);
+                    apps.push(WindowsAppInfo {
+                        name: dir_name.clone(),
+                        install_location: Some(path.to_string_lossy().to_string()),
+                        uninstall_string: Some(uninst_path.to_string_lossy().to_string()),
+                        quiet_uninstall_string: None,
+                        estimated_size: Some(size / 1024),
+                        publisher: None,
+                        key_name: format!("dir:{}", dir_name),
+                        is_uwp: false,
+                        system_component: false,
+                    });
+                    break; // 每个目录只添加一个卸载入口
+                }
+            }
+        }
+    }
+
+    apps
+}
+
+/// 获取所有已安装应用（注册表 + UWP + Program Files 直接扫描）
 pub fn get_installed_apps() -> Vec<WindowsAppInfo> {
     let mut apps = scan_registry_uninstall();
     apps.extend(scan_uwp_apps());
+
+    // 补充：直接扫描 Program Files 目录，找未注册到注册表的应用
+    let dir_apps = scan_program_files_dirs();
+    for app in dir_apps {
+        // 避免与注册表扫描的结果重复
+        let already_exists = apps.iter().any(|a| {
+            a.name.eq_ignore_ascii_case(&app.name)
+                || a.install_location.as_deref() == app.install_location.as_deref()
+        });
+        if !already_exists {
+            apps.push(app);
+        }
+    }
+
     // 去重（按名称）
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     apps.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
@@ -559,6 +661,67 @@ impl Scanner for WindowsAppCacheScanner {
                 }
             }
         }
+
+        // 补充扫描 C:\Program Files\ 和 C:\Program Files (x86)\ 下的 logs/temp/cache 子目录
+        // 这些目录需要管理员权限删除，标记为 Caution
+        let program_files_dirs = [
+            PathBuf::from(r"C:\Program Files"),
+            PathBuf::from(r"C:\Program Files (x86)"),
+        ];
+        let pf_cache_names = ["logs", "log", "temp", "tmp", "Cache", "cache"];
+
+        for base in &program_files_dirs {
+            if !base.is_dir() {
+                continue;
+            }
+            if let Ok(app_entries) = std::fs::read_dir(base) {
+                for app_entry in app_entries.flatten() {
+                    let app_dir = app_entry.path();
+                    if !app_dir.is_dir() {
+                        continue;
+                    }
+                    let app_name = app_entry.file_name().to_string_lossy().to_string();
+
+                    // 跳过系统目录
+                    let dir_lower = app_name.to_lowercase();
+                    if dir_lower.starts_with("windows") || dir_lower.starts_with("microsoft") {
+                        continue;
+                    }
+
+                    if let Ok(sub_entries) = std::fs::read_dir(&app_dir) {
+                        for sub in sub_entries.flatten() {
+                            let sub_name = sub.file_name().to_string_lossy().to_string();
+                            if pf_cache_names.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
+                                let cache_path = sub.path();
+                                let size = dir_size(&cache_path);
+                                if size > 1024 * 1024 { // 只显示 >1MB 的目录
+                                    items.push(ScanItem {
+                                        path: cache_path.to_string_lossy().to_string(),
+                                        size_bytes: size,
+                                        category: format!("{} 日志/缓存", app_name),
+                                        selected: false,
+                                        deletable: false, // Program Files 需要管理员权限
+                                        undeletable_reason: "需要管理员权限删除".to_string(),
+                                        batch_paths: Vec::new(),
+                                        recommend: Recommend::Caution,
+                                        description: format!(
+                                            "{} 应用的日志/缓存目录（位于 Program Files，需管理员权限）",
+                                            app_name
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        crate::logger::info(&format!(
+            "App缓存扫描完成: {} 项, {}",
+            items.len(),
+            super::format_size(items.iter().map(|i| i.size_bytes).sum())
+        ));
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         ScanResult {
@@ -654,6 +817,11 @@ impl Scanner for WindowsAppDataScanner {
         }
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
+        crate::logger::info(&format!(
+            "App数据扫描完成: {} 项, {}",
+            items.len(),
+            super::format_size(total_size)
+        ));
         ScanResult {
             items,
             total_size,
@@ -680,11 +848,28 @@ impl WindowsUninstallScanner {
 impl Scanner for WindowsUninstallScanner {
     fn scan(&self) -> ScanResult {
         let start = std::time::Instant::now();
+        crate::logger::info("Windows 卸载扫描开始");
         let apps = get_installed_apps();
+        crate::logger::info(&format!("发现 {} 个已安装应用（注册表 + UWP + Program Files 直接扫描）", apps.len()));
         let mut items = Vec::new();
 
         for app in apps {
             let protection = check_protection(&app);
+
+            // 记录保护检测日志
+            match protection {
+                WinProtectionLevel::Critical => {
+                    crate::logger::info(&format!("保护检测: {} -> Critical (系统关键)", app.name));
+                }
+                WinProtectionLevel::RequiresOfficialUninstaller => {
+                    crate::logger::info(&format!("保护检测: {} -> RequiresOfficialUninstaller", app.name));
+                }
+                WinProtectionLevel::DataProtected => {
+                    crate::logger::info(&format!("保护检测: {} -> DataProtected (数据保护)", app.name));
+                }
+                WinProtectionLevel::None => {}
+            }
+
             let (deletable, reason, recommend, desc_suffix) = match protection {
                 WinProtectionLevel::Critical => (
                     false,
@@ -891,18 +1076,22 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
     };
 
     // 尝试 1: 直接执行（可能因权限不足失败）
+    crate::logger::info(&format!("执行卸载命令: {} {}", exe_path, full_args.join(" ")));
     let output = Command::new(&exe_path).args(&full_args).output();
     match output {
         Ok(out) if out.status.success() => {
+            crate::logger::info(&format!("卸载成功: {}", exe_path));
             return (true, format!("应用 {} 已卸载", exe_path));
         }
         Ok(out) => {
+            crate::logger::warn(&format!("直接执行失败 (exit={}), 尝试 PowerShell 提权", out.status.code().unwrap_or(-1)));
             // 尝试 2: 用 PowerShell Start-Process 提权执行
             let ps_result = try_powershell_elevated(&exe_path, &full_args);
             if ps_result.0 {
                 return ps_result;
             }
             // 尝试 3: 原始命令（交互式，不加静默参数）
+            crate::logger::info("尝试交互式卸载（不加静默参数）");
             let output = Command::new(&exe_path).args(&args).output();
             match output {
                 Ok(o) if o.status.success() => (true, format!("应用 {} 已卸载", exe_path)),
@@ -997,6 +1186,8 @@ fn detect_silent_flags(exe_path: &str, existing_args: &[String]) -> Vec<&'static
 /// -Wait 等待卸载完成。
 fn try_powershell_elevated(exe_path: &str, args: &[String]) -> (bool, String) {
     let args_str = args.join(" ");
+    crate::logger::info(&format!("PowerShell 提权卸载: {} {}", exe_path, args_str));
+
     let ps_cmd = format!(
         "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode",
         exe_path.replace('\'', "''"),
@@ -1012,9 +1203,11 @@ fn try_powershell_elevated(exe_path: &str, args: &[String]) -> (bool, String) {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let exit_code: i32 = stdout.parse().unwrap_or(-1);
             if out.status.success() && exit_code == 0 {
+                crate::logger::info(&format!("PowerShell 提权卸载成功: {}", exe_path));
                 (true, format!("应用 {} 已通过 PowerShell 提权卸载", exe_path))
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
+                crate::logger::warn(&format!("PowerShell 提权卸载失败 (exit={}): {}", exit_code, stderr.trim()));
                 (false, format!("PowerShell 提权卸载失败 (exit={}): {}", exit_code, stderr))
             }
         }
@@ -1503,32 +1696,63 @@ pub fn clean_uninstall(
         filesystem: Vec::new(),
     };
 
+    crate::logger::info(&format!(
+        "开始干净卸载: {} (路径: {}, 安装位置: {})",
+        app_name,
+        uninstall_path,
+        install_path.unwrap_or("未知")
+    ));
+
     // 1. 运行卸载程序
+    crate::logger::info("步骤 1/4: 运行卸载程序");
     let (uninstall_ok, uninstall_msg) = uninstall_app(uninstall_path);
+    if uninstall_ok {
+        crate::logger::info(&format!("卸载程序执行成功: {}", uninstall_msg));
+    } else {
+        crate::logger::warn(&format!("卸载程序执行失败: {}", uninstall_msg));
+    }
 
     // 无论卸载程序是否成功，都扫描残留
     // （有些卸载程序会失败但仍然删除了大部分文件）
 
     // 2. 扫描注册表残留
+    crate::logger::info("步骤 2/4: 扫描注册表残留");
     residual.registry = scan_registry_residual(app_name);
     let reg_count = residual.registry.len();
+    if reg_count > 0 {
+        crate::logger::info(&format!("发现 {} 个注册表残留项", reg_count));
+    }
 
     // 3. 扫描环境变量残留
+    crate::logger::info("步骤 3/4: 扫描环境变量残留");
     residual.env_vars = scan_env_var_residual(app_name, install_path);
     let env_count = residual.env_vars.len();
+    if env_count > 0 {
+        crate::logger::info(&format!("发现 {} 个环境变量残留项", env_count));
+    }
 
     // 4. 清理文件系统残留
+    crate::logger::info("步骤 4/4: 清理文件系统残留");
     residual.filesystem = clean_app_residual(app_name);
     let fs_count = residual.filesystem.iter().filter(|(_, _, ok)| *ok).count();
+    if fs_count > 0 {
+        crate::logger::info(&format!("已清理 {} 个文件系统残留项", fs_count));
+    }
 
     // 5. 清理可删除的注册表残留
     let mut reg_cleaned = 0;
     for reg in &residual.registry.clone() {
         if reg.deletable {
-            let (ok, _) = delete_registry_residual(&reg.key_path);
+            crate::logger::info(&format!("删除注册表键: {}", reg.key_path));
+            let (ok, msg) = delete_registry_residual(&reg.key_path);
             if ok {
                 reg_cleaned += 1;
+                crate::logger::info(&format!("注册表键已删除: {}", reg.key_path));
+            } else {
+                crate::logger::warn(&format!("注册表键删除失败: {}", msg));
             }
+        } else {
+            crate::logger::warn(&format!("跳过注册表键（需管理员权限）: {}", reg.key_path));
         }
     }
 
@@ -1536,10 +1760,16 @@ pub fn clean_uninstall(
     let mut env_cleaned = 0;
     for env in &residual.env_vars.clone() {
         if env.deletable {
-            let (ok, _) = clean_env_var_residual(env);
+            crate::logger::info(&format!("清理环境变量: {}", env.var_name));
+            let (ok, msg) = clean_env_var_residual(env);
             if ok {
                 env_cleaned += 1;
+                crate::logger::info(&format!("环境变量已清理: {} ({})", env.var_name, msg));
+            } else {
+                crate::logger::warn(&format!("环境变量清理失败: {} ({})", env.var_name, msg));
             }
+        } else {
+            crate::logger::warn(&format!("跳过环境变量（需管理员权限）: {}", env.var_name));
         }
     }
 
