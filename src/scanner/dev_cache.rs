@@ -49,8 +49,11 @@ impl Scanner for DevCacheScanner {
         scan_java_caches(&mut items);
         scan_python_caches(&mut items);
 
-        // 更多语言缓存
-        scan_more_dev_caches(&mut items);
+        // 更多语言缓存（注册表驱动：37 个固定路径缓存）
+        items.extend(super::cache_registry::RegistryScanner::new().scan().items);
+
+        // 构建产物递归扫描（dist/.next/.nuxt 等）
+        scan_build_artifacts(&mut items);
 
         // K8s/Docker/AI模型/Monorepo 缓存
         items.extend(scan_k8s_caches());
@@ -1053,57 +1056,9 @@ fn dir_size_checked(path: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
-/// 扫描更多语言/工具的缓存
-/// 覆盖 Ruby/PHP/Flutter/Swift/CocoaPods/CMake/Docker 等
-fn scan_more_dev_caches(items: &mut Vec<ScanItem>) {
-    let home = home_dir();
-
-    // 定义缓存路径列表：(路径, 类别, 推荐等级, 描述)
-    let cache_dirs: Vec<(&str, &str, Recommend, &str)> = vec![
-        // Ruby
-        ("~/.gem", "RubyGems", Recommend::Caution, "Ruby Gem 缓存，删除后安装时需重新下载"),
-        ("~/.bundle/cache", "Bundler", Recommend::Safe, "Ruby Bundler 缓存，可安全删除"),
-        ("~/.rbenv/versions", "rbenv", Recommend::Advanced, "rbenv 安装的 Ruby 版本，请确认后删除"),
-        // PHP
-        ("~/.composer/cache", "Composer", Recommend::Safe, "PHP Composer 下载缓存，可安全删除"),
-        // Flutter/Dart
-        ("~/.pub-cache", "Flutter/Dart", Recommend::Caution, "Dart/Flutter 包缓存，删除后需重新下载"),
-        // Swift Package Manager
-        ("~/.swiftpm", "SwiftPM", Recommend::Safe, "Swift Package Manager 缓存，可安全删除"),
-        // CocoaPods
-        ("~/Library/Caches/CocoaPods", "CocoaPods", Recommend::Safe, "CocoaPods 缓存，可安全删除"),
-        // CMake
-        ("~/.cmake", "CMake", Recommend::Safe, "CMake 缓存，可安全删除"),
-        // Android SDK
-        ("~/Library/Android/sdk/system-images", "AndroidSDK", Recommend::Caution, "Android 模拟器系统镜像，删除后需重新下载"),
-        // Yarn (非 nodejs 的独立缓存)
-        ("~/.yarn/cache", "Yarn", Recommend::Safe, "Yarn 包缓存，可安全删除"),
-        // Deno
-        ("~/Library/Caches/deno", "Deno", Recommend::Safe, "Deno 缓存，可安全删除"),
-        // Bun
-        ("~/.bun/install/cache", "Bun", Recommend::Safe, "Bun 包缓存，可安全删除"),
-    ];
-
-    for (path_str, category, recommend, desc) in cache_dirs {
-        let full_path = path_str.replace("~", &home.to_string_lossy());
-        let path = Path::new(&full_path);
-        if let Ok(size) = dir_size_checked(path) {
-            if size > 0 {
-                items.push(ScanItem {
-                    path: full_path,
-                    size_bytes: size,
-                    category: category.to_string(),
-                    selected: false,
-                    deletable: true,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
-                    recommend,
-                    description: desc.to_string(),
-                });
-            }
-        }
-    }
-
+/// 扫描构建产物目录（dist/.next/.nuxt/.turbo/.svelte-kit/.astro/.remix/.gradle）
+/// 固定路径缓存已迁移至 cache_registry 模块统一管理
+fn scan_build_artifacts(items: &mut Vec<ScanItem>) {
     // 通用构建产物目录扫描（dist、build、.next、.nuxt、.turbo、.svelte-kit）
     for search_path in get_project_search_paths() {
         let build_dir_names = vec![

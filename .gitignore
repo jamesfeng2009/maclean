@@ -1,18 +1,25 @@
+# Website
+website/node_modules/
+website/dist/
+website/.astro/
+
 # Rust
-/target/
-**/*.rs.bk
-*.pdb
+target/
 
 # macOS
 .DS_Store
-._*
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
 
-# 打包产物
+# Environment
+.env
+.env.local
+
+# Build artifacts
 *.dmg
 *.pkg
+homebrew/.DS_Store

@@ -13,6 +13,7 @@ pub mod cache;
 pub mod apfs;
 pub mod app_cache;
 pub mod app_data;
+pub mod cache_registry;
 pub mod dev_cache;
 pub mod large_files;
 pub mod optimize;
