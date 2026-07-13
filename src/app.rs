@@ -7,6 +7,30 @@ use std::path::Path;
 use crate::scanner::{self, ScanItem, Scanner};
 use crate::safety;
 
+/// 跨平台 Touch ID 可用性检查（macOS 专属，其他平台返回 false）
+fn touch_id_available_cross() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::touchid::touch_id_available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// 跨平台 sudo Touch ID 启用状态（macOS 专属，其他平台返回 false）
+fn touch_id_enabled_cross() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::touchid::sudo_touch_id_enabled()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// Tab 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -221,8 +245,8 @@ impl App {
             sudo_password: None,
             sudo_failed_items: Vec::new(),
             sudo_error: None,
-            touch_id_available: crate::touchid::touch_id_available(),
-            touch_id_enabled: crate::touchid::sudo_touch_id_enabled(),
+            touch_id_available: touch_id_available_cross(),
+            touch_id_enabled: touch_id_enabled_cross(),
             touch_id_setup_mode: false,
             touch_id_error: None,
             touch_id_wait_start: None,
@@ -490,7 +514,10 @@ impl App {
             Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
             Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
             Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
+            #[cfg(target_os = "macos")]
             Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+            #[cfg(not(target_os = "macos"))]
+            Tab::Apfs => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
         };
 
         self.scan_time_ms[idx] = result.scan_time_ms;

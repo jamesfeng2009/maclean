@@ -12,6 +12,7 @@ use crate::scanner::app_cache::AppCacheScanner;
 use crate::scanner::app_data::AppDataScanner;
 use crate::scanner::uninstall::UninstallScanner;
 use crate::scanner::optimize::OptimizeScanner;
+#[cfg(target_os = "macos")]
 use crate::scanner::apfs::ApfsScanner;
 use crate::scanner::{Recommend, ScanItem};
 
@@ -103,6 +104,7 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
         "app-data" => AppDataScanner::new().scan().items,
         "app-uninstall" => UninstallScanner::new().scan().items,
         "optimize" => OptimizeScanner::new().scan().items,
+        #[cfg(target_os = "macos")]
         "apfs" => ApfsScanner::new().scan().items,
         _ => Vec::new(),
     }
@@ -312,28 +314,9 @@ fn cmd_list() {
 }
 
 // =========================================================================
-//  磁盘信息获取（与 app.rs 中的逻辑一致）
+//  磁盘信息获取（跨平台，委托给 platform 模块）
 // =========================================================================
 
 fn get_disk_info() -> (u64, u64) {
-    let output = std::process::Command::new("df")
-        .arg("-k")
-        .arg("/")
-        .output();
-
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                if let (Ok(total_kb), Ok(free_kb)) =
-                    (parts[1].parse::<u64>(), parts[3].parse::<u64>())
-                {
-                    return (total_kb * 1024, free_kb * 1024);
-                }
-            }
-        }
-    }
-
-    (0, 0)
+    crate::platform::disk_info()
 }

@@ -70,10 +70,18 @@ pub fn expand_path(path: &str) -> PathBuf {
     // 展开 Windows 环境变量 %VAR%
     #[cfg(target_os = "windows")]
     {
-        while let (Some(start), Some(end)) = (result.find('%'), result[start + 1..].find('%')) {
-            let var_name = &result[start + 1..start + 1 + end];
+        loop {
+            let start = match result.find('%') {
+                Some(s) => s,
+                None => break,
+            };
+            let end = match result[start + 1..].find('%') {
+                Some(e) => start + 1 + e,
+                None => break,
+            };
+            let var_name = &result[start + 1..end];
             if let Ok(val) = std::env::var(var_name) {
-                result = format!("{}{}{}", &result[..start], val, &result[start + 2 + end..]);
+                result = format!("{}{}{}", &result[..start], val, &result[end + 1..]);
             } else {
                 // 找不到变量，跳过避免死循环
                 break;

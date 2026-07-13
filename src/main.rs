@@ -130,6 +130,7 @@ fn main() -> eframe::Result {
         static mut APP: Option<App> = None;
         static mut SCAN_RX: Option<mpsc::Receiver<ScanMessage>> = None;
         static mut DELETE_RX: Option<mpsc::Receiver<DeleteMessage>> = None;
+        #[cfg(target_os = "macos")]
         static mut MENUBAR: Option<menubar::MenuBarHud> = None;
         static mut NEEDS_INIT: bool = true;
         static mut LAST_DISK_UPDATE: f64 = 0.0;
@@ -142,14 +143,18 @@ fn main() -> eframe::Result {
                 NEEDS_INIT = false;
                 setup_fonts(ctx);
 
-                // 初始化菜单栏 HUD
-                MENUBAR = Some(menubar::MenuBarHud::new());
-                if let Some(ref mut mb) = MENUBAR {
-                    mb.init();
+                // 初始化菜单栏 HUD (macOS 专属)
+                #[cfg(target_os = "macos")]
+                {
+                    MENUBAR = Some(menubar::MenuBarHud::new());
+                    if let Some(ref mut mb) = MENUBAR {
+                        mb.init();
+                    }
                 }
             }
 
-            // 轮询菜单栏事件
+            // 轮询菜单栏事件 (macOS 专属)
+            #[cfg(target_os = "macos")]
             if let Some(ref mb) = MENUBAR {
                 let actions = mb.poll_events();
                 if !actions.is_empty() {
@@ -210,6 +215,7 @@ fn main() -> eframe::Result {
                     } else {
                         0.0
                     };
+                    #[cfg(target_os = "macos")]
                     if let Some(ref mut mb) = MENUBAR {
                         mb.update_disk_usage(used_pct);
                     }
@@ -289,12 +295,18 @@ fn main() -> eframe::Result {
                                 app.sudo_password = None;
                                 app.sudo_error = None;
                                 app.touch_id_error = None;
-                                // 刷新 Touch ID 状态
-                                app.touch_id_available = touchid::touch_id_available();
-                                app.touch_id_enabled = touchid::sudo_touch_id_enabled();
+                                // 刷新 Touch ID 状态 (macOS 专属)
+                                #[cfg(target_os = "macos")]
+                                {
+                                    app.touch_id_available = touchid::touch_id_available();
+                                    app.touch_id_enabled = touchid::sudo_touch_id_enabled();
+                                }
 
-                                // 合盖检测：Touch ID 在合盖时不可用，回退到密码输入
+                                // 合盖检测：Touch ID 在合盖时不可用，回退到密码输入 (macOS 专属)
+                                #[cfg(target_os = "macos")]
                                 let clamshell_closed = safety::is_clamshell_closed();
+                                #[cfg(not(target_os = "macos"))]
+                                let clamshell_closed = false;
                                 if clamshell_closed {
                                     app.touch_id_error = Some(
                                         app.t("touchid_clamshell_error").to_string()
@@ -303,15 +315,29 @@ fn main() -> eframe::Result {
                                 }
 
                                 if app.touch_id_enabled && !clamshell_closed {
-                                    // Touch ID 已启用：直接用 sudo（Touch ID 自动触发）
-                                    app.confirm = ConfirmState::SudoWithTouchId;
-                                    let items = app.sudo_failed_items.clone();
-                                    app.delete_done = 0;
-                                    app.delete_total = items.len();
-                                    start_sudo_delete_touchid(items, app.lang_en, &mut DELETE_RX);
+                                    // Touch ID 已启用：直接用 sudo（Touch ID 自动触发）(macOS 专属)
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        app.confirm = ConfirmState::SudoWithTouchId;
+                                        let items = app.sudo_failed_items.clone();
+                                        app.delete_done = 0;
+                                        app.delete_total = items.len();
+                                        start_sudo_delete_touchid(items, app.lang_en, &mut DELETE_RX);
+                                    }
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        app.confirm = ConfirmState::NeedSudoPassword;
+                                    }
                                 } else if app.touch_id_available && !clamshell_closed {
-                                    // Touch ID 可用但未启用：提示用户是否启用
-                                    app.confirm = ConfirmState::OfferTouchIdSetup;
+                                    // Touch ID 可用但未启用：提示用户是否启用 (macOS 专属)
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        app.confirm = ConfirmState::OfferTouchIdSetup;
+                                    }
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        app.confirm = ConfirmState::NeedSudoPassword;
+                                    }
                                 } else {
                                     // 无 Touch ID 或合盖：走密码输入流程
                                     app.confirm = ConfirmState::NeedSudoPassword;
@@ -324,8 +350,11 @@ fn main() -> eframe::Result {
                             if let Some(app) = &mut APP {
                                 app.sudo_password = None;
                                 app.sudo_password_input.clear();
-                                // 刷新 sudo 会话状态（keepalive 可能仍活跃）
-                                app.sudo_session_active = sudo_keepalive::is_sudo_active();
+                                // 刷新 sudo 会话状态（keepalive 可能仍活跃）(macOS 专属)
+                                #[cfg(target_os = "macos")]
+                                {
+                                    app.sudo_session_active = sudo_keepalive::is_sudo_active();
+                                }
                                 app.finish_delete();
                             }
                             DELETE_RX = None;
@@ -1101,7 +1130,8 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         show_touch_id_setup_window(ctx, app, delete_rx);
     }
 
-    // Touch ID 启用等待中（轮询检测 Terminal 中用户是否已完成授权）
+    // Touch ID 启用等待中（轮询检测 Terminal 中用户是否已完成授权）(macOS 专属)
+    #[cfg(target_os = "macos")]
     if matches!(app.confirm, ConfirmState::WaitForTouchIdSetup) {
         show_touch_id_waiting_window(ctx, app);
 
@@ -1244,7 +1274,10 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
                 Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
                 Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
+                #[cfg(target_os = "macos")]
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+                #[cfg(not(target_os = "macos"))]
+                Tab::Apfs => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
             }
         });
 
@@ -2453,7 +2486,8 @@ fn show_sudo_password_window(
                         app.sudo_password = Some(password.clone());
                         app.sudo_error = None;
 
-                        // 启动 sudo keepalive 会话（保活票据，避免重复弹密码框）
+                        // 启动 sudo keepalive 会话（保活票据，避免重复弹密码框）(macOS 专属)
+                        #[cfg(target_os = "macos")]
                         match sudo_keepalive::start_sudo_session(&password) {
                             Ok(_) => {
                                 app.sudo_session_active = true;
@@ -2465,7 +2499,8 @@ fn show_sudo_password_window(
                         }
 
                         if is_setup_mode {
-                            // 启用 Touch ID 模式：先创建 sudo_local
+                            // 启用 Touch ID 模式：先创建 sudo_local (macOS 专属)
+                            #[cfg(target_os = "macos")]
                             match touchid::enable_touch_id_with_password(&password) {
                                 Ok(true) => {
                                     app.touch_id_enabled = true;
@@ -2491,6 +2526,15 @@ fn show_sudo_password_window(
                                     app.sudo_error = Some(e);
                                     app.sudo_password_input.clear();
                                 }
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                // Windows 无 Touch ID，直接走密码删除
+                                app.confirm = ConfirmState::Deleting;
+                                let items = std::mem::take(&mut app.sudo_failed_items);
+                                app.delete_done = 0;
+                                app.delete_total = items.len();
+                                start_sudo_delete(items, password, app.lang_en, delete_rx);
                             }
                         } else {
                             app.confirm = ConfirmState::Deleting;
