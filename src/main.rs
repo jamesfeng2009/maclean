@@ -5,6 +5,7 @@
 mod aewp;
 mod app;
 mod app_protection;
+mod cli;
 mod i18n;
 mod safety;
 mod scanner;
@@ -85,6 +86,11 @@ pub fn log_scan_step(msg: &str) {
 }
 
 fn main() -> eframe::Result {
+    // CLI 模式：有子命令时执行并退出，无子命令时启动 GUI
+    if cli::run_cli() {
+        return Ok(());
+    }
+
     // 初始化崩溃日志
     let log_path = init_crash_log();
 
