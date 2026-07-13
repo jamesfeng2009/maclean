@@ -11,8 +11,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::ScanResult;
 
-/// 缓存有效期：7 天（秒）
-const CACHE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// 缓存有效期：1 天（秒）
+///
+/// 用户通常当天清理一次后不会再次清理，1 天 TTL 确保下次打开时重新扫描。
+/// 配合删除后自动 invalidate_cache，保证清理后立即看到最新数据。
+const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// 缓存文件的 JSON 包装结构
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -651,6 +651,20 @@ impl App {
         let deleted = self.deleted_paths.clone();
         self.results[idx].retain(|item| !deleted.contains(&item.path));
 
+        // 失效当前 Tab 的扫描缓存，确保下次扫描看到最新数据
+        let cache_name = match self.tab {
+            Tab::DevCache => Some("dev_cache"),
+            Tab::LargeFiles => Some("large_files"),
+            Tab::AppCache => Some("app_cache"),
+            Tab::AppData => Some("app_data"),
+            Tab::AppUninstall => Some("app_uninstall"),
+            Tab::SystemOptimize => None,
+            Tab::Apfs => Some("apfs"),
+        };
+        if let Some(name) = cache_name {
+            scanner::cache::invalidate_cache(name);
+        }
+
         // 生成汇总
         self.delete_summary = Some((success_count, failed_count, 0));
 
