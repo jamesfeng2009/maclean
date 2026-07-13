@@ -1420,6 +1420,7 @@ pub fn clean_env_var_residual(residual: &EnvVarResidual) -> (bool, String) {
 
         let cleaned: Vec<&str> = entries
             .iter()
+            .copied()
             .filter(|e| !to_remove_lower.contains(&e.to_lowercase()))
             .collect();
 
@@ -1868,6 +1869,7 @@ mod tests {
             .collect();
         let cleaned: Vec<&str> = entries
             .iter()
+            .copied()
             .filter(|e| !to_remove_lower.contains(&e.to_lowercase()))
             .collect();
         assert_eq!(cleaned.join(";"), r"C:\Windows\system32;C:\Other");
