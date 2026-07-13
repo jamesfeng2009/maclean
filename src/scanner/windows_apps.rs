@@ -50,12 +50,17 @@ pub struct WindowsAppInfo {
 // =========================================================================
 
 /// 系统安装路径前缀（安装在这些目录下的应用视为系统级）
+///
+/// 注意：不包含裸 "C:\Program Files\"，因为该目录下大部分是普通第三方应用。
+/// 只匹配 Microsoft 和 Windows 子目录。
 const SYSTEM_INSTALL_PATH_PREFIXES: &[&str] = &[
     "c:\\windows\\",
     "c:\\program files\\windowsapps\\",
     "c:\\program files (x86)\\windowsapps\\",
     "c:\\program files\\microsoft\\",
     "c:\\program files (x86)\\microsoft\\",
+    "c:\\program files\\windows\\",
+    "c:\\program files (x86)\\windows\\",
     "c:\\programdata\\microsoft\\",
 ];
 
@@ -837,85 +842,175 @@ fn uninstall_win32(key_name: &str) -> (bool, String) {
 
 /// 执行卸载命令
 ///
-/// 解析 UninstallString 并执行，支持：
-/// - msiexec /x {ProductCode} -> 加 /quiet /norestart
-/// - "C:\path\uninstall.exe" /S -> 直接执行
-/// - "C:\path\uninstall.exe" -> 尝试加 /S
+/// 解析 UninstallString 并执行，支持多种安装器类型：
+/// - MSI: msiexec /x {ProductCode} -> 加 /quiet /norestart
+/// - NSIS: uninstall.exe -> 加 /S
+/// - Inno Setup: unins000.exe -> 加 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+/// - InstallShield: setup.exe -> 加 /s /f1...
+/// - 通用 exe: 尝试 /S，失败后用 PowerShell 提权重试
+///
+/// 注册表 UninstallString 包含完整路径，支持 C/D/E 任意盘符和自定义目录。
 fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
     let cmd_str = cmd_str.trim();
 
     // MSI 安装的应用: msiexec /x{ProductCode}
     if cmd_str.to_lowercase().contains("msiexec") {
-        // 提取 ProductCode
-        if let Some(start) = cmd_str.find('{') {
-            if let Some(end) = cmd_str[start..].find('}') {
-                let product_code = &cmd_str[start..=start + end];
-                let full_cmd = format!("msiexec /x {} /quiet /norestart", product_code);
-                let parts: Vec<&str> = full_cmd.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let output = Command::new(parts[0])
-                        .args(&parts[1..])
-                        .output();
-                    return match output {
-                        Ok(out) => {
-                            if out.status.success() {
-                                (true, format!("MSI 应用 {} 已静默卸载", product_code))
-                            } else {
-                                // 静默卸载失败，尝试交互式
-                                let interactive_cmd = format!("msiexec /x {} /passive", product_code);
-                                let parts: Vec<&str> = interactive_cmd.split_whitespace().collect();
-                                let output = Command::new(parts[0]).args(&parts[1..]).output();
-                                match output {
-                                    Ok(o) if o.status.success() => (true, format!("MSI 应用 {} 已卸载", product_code)),
-                                    Ok(o) => (false, format!("MSI 卸载失败: {}", String::from_utf8_lossy(&o.stderr))),
-                                    Err(e) => (false, format!("执行 msiexec 失败: {}", e)),
-                                }
-                            }
-                        }
-                        Err(e) => (false, format!("执行 msiexec 失败: {}", e)),
-                    };
-                }
-            }
-        }
+        return execute_msi_uninstall(cmd_str);
     }
 
     // 普通 exe 卸载程序
-    // 尝试解析命令和参数
     let (exe_path, args) = parse_command(cmd_str);
-
-    // 如果没有静默参数，尝试加 /S 或 /quiet
-    let mut full_args = args.clone();
-    if !full_args.iter().any(|a| {
-        let lower = a.to_lowercase();
-        lower == "/s" || lower == "/silent" || lower == "/quiet" || lower == "--silent"
-    }) {
-        full_args.push("/S".to_string());
+    if exe_path.is_empty() {
+        return (false, "卸载命令为空".to_string());
     }
 
-    let output = Command::new(&exe_path)
-        .args(&full_args)
+    // 检测安装器类型，选择对应的静默参数
+    let silent_flags = detect_silent_flags(&exe_path, &args);
+
+    // 如果已有静默参数，直接使用原始参数
+    let has_silent = args.iter().any(|a| {
+        let lower = a.to_lowercase();
+        lower == "/s" || lower == "/silent" || lower == "/quiet"
+            || lower == "/verysilent" || lower == "--silent"
+    });
+
+    let full_args: Vec<String> = if has_silent {
+        args.clone()
+    } else {
+        let mut combined = args.clone();
+        combined.extend(silent_flags.iter().map(|s| s.to_string()));
+        combined
+    };
+
+    // 尝试 1: 直接执行（可能因权限不足失败）
+    let output = Command::new(&exe_path).args(&full_args).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            return (true, format!("应用 {} 已卸载", exe_path));
+        }
+        Ok(out) => {
+            // 尝试 2: 用 PowerShell Start-Process 提权执行
+            let ps_result = try_powershell_elevated(&exe_path, &full_args);
+            if ps_result.0 {
+                return ps_result;
+            }
+            // 尝试 3: 原始命令（交互式，不加静默参数）
+            let output = Command::new(&exe_path).args(&args).output();
+            match output {
+                Ok(o) if o.status.success() => (true, format!("应用 {} 已卸载", exe_path)),
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    let detail = if stderr.is_empty() {
+                        format!("退出码: {}", o.status.code().unwrap_or(-1))
+                    } else {
+                        stderr.to_string()
+                    };
+                    (false, format!("卸载失败: {}", detail))
+                }
+                Err(e) => (false, format!("执行卸载程序失败: {}", e)),
+            }
+        }
+        Err(e) => {
+            // 直接执行失败（可能是权限不足），尝试 PowerShell 提权
+            let ps_result = try_powershell_elevated(&exe_path, &full_args);
+            if ps_result.0 {
+                return ps_result;
+            }
+            (false, format!("执行卸载程序失败（直接执行和提权均失败）: {}", e))
+        }
+    }
+}
+
+/// 执行 MSI 卸载
+fn execute_msi_uninstall(cmd_str: &str) -> (bool, String) {
+    if let Some(start) = cmd_str.find('{') {
+        if let Some(end) = cmd_str[start..].find('}') {
+            let product_code = &cmd_str[start..=start + end];
+            let full_cmd = format!("msiexec /x {} /quiet /norestart", product_code);
+            let parts: Vec<&str> = full_cmd.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let output = Command::new(parts[0]).args(&parts[1..]).output();
+                return match output {
+                    Ok(out) if out.status.success() => {
+                        (true, format!("MSI 应用 {} 已静默卸载", product_code))
+                    }
+                    Ok(_) => {
+                        // 静默失败，尝试 /passive（显示进度条但无需交互）
+                        let passive_cmd = format!("msiexec /x {} /passive", product_code);
+                        let parts: Vec<&str> = passive_cmd.split_whitespace().collect();
+                        let output = Command::new(parts[0]).args(&parts[1..]).output();
+                        match output {
+                            Ok(o) if o.status.success() => (true, format!("MSI 应用 {} 已卸载", product_code)),
+                            Ok(o) => (false, format!("MSI 卸载失败: {}", String::from_utf8_lossy(&o.stderr))),
+                            Err(e) => (false, format!("执行 msiexec 失败: {}", e)),
+                        }
+                    }
+                    Err(e) => (false, format!("执行 msiexec 失败: {}", e)),
+                };
+            }
+        }
+    }
+    (false, "MSI 卸载命令格式异常".to_string())
+}
+
+/// 检测安装器类型，返回对应的静默卸载参数
+///
+/// 不同安装器的静默卸载参数：
+/// - NSIS: /S
+/// - Inno Setup: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+/// - InstallShield: /s /f2<logpath>（简化为 /s）
+/// - WiX/MSI: 已由 msiexec 分支处理
+/// - 通用: /S（NSIS 最常见）
+fn detect_silent_flags(exe_path: &str, existing_args: &[String]) -> Vec<&'static str> {
+    let path_lower = exe_path.to_lowercase();
+
+    // Inno Setup: 卸载程序通常名为 unins000.exe / unins001.exe
+    if path_lower.contains("unins0")
+        || path_lower.contains("unins1")
+        || path_lower.contains("unins2")
+    {
+        return vec!["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"];
+    }
+
+    // InstallShield: setup.exe 且带 -runfromtemp 或类似参数
+    if (path_lower.ends_with("setup.exe") || path_lower.ends_with("_is1.exe"))
+        && existing_args.iter().any(|a| a.contains("-runfromtemp") || a.contains("-removeonly"))
+    {
+        return vec!["/s"];
+    }
+
+    // 默认: NSIS 风格 /S
+    vec!["/S"]
+}
+
+/// 通过 PowerShell Start-Process 提权执行卸载
+///
+/// 使用 -Verb RunAs 触发 UAC 提权对话框，
+/// -Wait 等待卸载完成。
+fn try_powershell_elevated(exe_path: &str, args: &[String]) -> (bool, String) {
+    let args_str = args.join(" ");
+    let ps_cmd = format!(
+        "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait -PassThru | Select-Object -ExpandProperty ExitCode",
+        exe_path.replace('\'', "''"),
+        args_str.replace('\'', "''")
+    );
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
         .output();
 
     match output {
         Ok(out) => {
-            if out.status.success() {
-                (true, format!("应用 {} 已卸载", exe_path))
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let exit_code: i32 = stdout.parse().unwrap_or(-1);
+            if out.status.success() && exit_code == 0 {
+                (true, format!("应用 {} 已通过 PowerShell 提权卸载", exe_path))
             } else {
-                // 静默卸载失败，尝试原始命令（交互式）
-                let output = Command::new(&exe_path)
-                    .args(&args) // 不加 /S
-                    .output();
-                match output {
-                    Ok(o) if o.status.success() => (true, format!("应用 {} 已卸载", exe_path)),
-                    Ok(o) => (false, format!(
-                        "卸载失败: {}",
-                        String::from_utf8_lossy(&o.stderr)
-                    )),
-                    Err(e) => (false, format!("执行卸载程序失败: {}", e)),
-                }
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                (false, format!("PowerShell 提权卸载失败 (exit={}): {}", exit_code, stderr))
             }
         }
-        Err(e) => (false, format!("执行卸载程序失败: {}", e)),
+        Err(e) => (false, format!("执行 PowerShell 失败: {}", e)),
     }
 }
 
@@ -1121,5 +1216,78 @@ mod tests {
         // 非 Microsoft 发布的应用即使名称含 "windows" 也不是 Critical
         let app = make_app("Windows Media Player Classic", Some("Some Random Corp"), None, false);
         assert!(!is_critical_system_app(&app));
+    }
+
+    #[test]
+    fn test_critical_windows_subdir_in_program_files() {
+        // C:\Program Files\Windows Defender\ 应被识别为系统路径
+        assert_eq!(
+            check_protection(&make_app("Windows Defender", None, Some(r"C:\Program Files\Windows Defender"), false)),
+            WinProtectionLevel::Critical
+        );
+        // C:\Program Files\Windows NT\Accessories\ 应被识别为系统路径
+        assert_eq!(
+            check_protection(&make_app("WordPad", None, Some(r"C:\Program Files\Windows NT\Accessories"), false)),
+            WinProtectionLevel::Critical
+        );
+        // 32 位路径
+        assert_eq!(
+            check_protection(&make_app("Some Tool", None, Some(r"C:\Program Files (x86)\Windows Kits\10"), false)),
+            WinProtectionLevel::Critical
+        );
+    }
+
+    #[test]
+    fn test_d_drive_app_not_critical() {
+        // D 盘安装的应用不应被识别为系统关键
+        let app = make_app("My App", Some("Some Corp"), Some(r"D:\Apps\MyApp"), false);
+        assert!(!is_critical_system_app(&app));
+        assert_eq!(check_protection(&app), WinProtectionLevel::None);
+
+        // E 盘同理
+        let app = make_app("Game", Some("Game Studio"), Some(r"E:\Games\Game"), false);
+        assert!(!is_critical_system_app(&app));
+
+        // 自定义路径
+        let app = make_app("Tool", Some("Tool Inc"), Some(r"C:\MyTools\Tool"), false);
+        assert!(!is_critical_system_app(&app));
+    }
+
+    #[test]
+    fn test_program_files_not_all_critical() {
+        // C:\Program Files\ 下的普通第三方应用不应是 Critical
+        let app = make_app("Spotify", Some("Spotify AB"), Some(r"C:\Program Files\Spotify"), false);
+        assert!(!is_critical_system_app(&app));
+        assert_eq!(check_protection(&app), WinProtectionLevel::None);
+    }
+
+    #[test]
+    fn test_detect_silent_flags_inno_setup() {
+        // Inno Setup 卸载程序通常名为 unins000.exe
+        let flags = detect_silent_flags(r"C:\Program Files\App\unins000.exe", &[]);
+        assert!(flags.contains(&"/VERYSILENT"));
+        assert!(flags.contains(&"/SUPPRESSMSGBOXES"));
+    }
+
+    #[test]
+    fn test_detect_silent_flags_nsis_default() {
+        // 默认使用 NSIS 的 /S
+        let flags = detect_silent_flags(r"C:\Program Files\App\uninstall.exe", &[]);
+        assert_eq!(flags, vec!["/S"]);
+    }
+
+    #[test]
+    fn test_detect_silent_flags_d_drive() {
+        // D 盘的 Inno Setup 卸载程序也能正确检测
+        let flags = detect_silent_flags(r"D:\Apps\MyApp\unins000.exe", &[]);
+        assert!(flags.contains(&"/VERYSILENT"));
+    }
+
+    #[test]
+    fn test_parse_command_d_drive() {
+        // D 盘带空格路径
+        let (exe, args) = parse_command(r#""D:\My Apps\Test\uninstall.exe" /S"#);
+        assert_eq!(exe, r"D:\My Apps\Test\uninstall.exe");
+        assert_eq!(args, vec!["/S"]);
     }
 }
