@@ -225,7 +225,7 @@ fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
         quiet_uninstall_string,
         estimated_size, // KB
         publisher,
-        key_name,
+        key_name: key_name.to_string(),
         is_uwp: false,
     })
 }
@@ -732,7 +732,7 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
     let (exe_path, args) = parse_command(cmd_str);
 
     // 如果没有静默参数，尝试加 /S 或 /quiet
-    let mut full_args = args;
+    let mut full_args = args.clone();
     if !full_args.iter().any(|a| {
         let lower = a.to_lowercase();
         lower == "/s" || lower == "/silent" || lower == "/quiet" || lower == "--silent"
