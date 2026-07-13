@@ -62,6 +62,17 @@ pub enum Commands {
 
     /// 列出所有可用的扫描类别
     List,
+
+    /// 查看日志文件路径或输出最近日志
+    Log {
+        /// 输出最近 N 行日志（默认显示路径）
+        #[arg(long)]
+        tail: Option<usize>,
+
+        /// 在资源管理器/Finder 中打开日志目录
+        #[arg(long)]
+        open: bool,
+    },
 }
 
 /// 运行 CLI 命令，返回是否处理了 CLI（true=已处理，应退出；false=无命令，启动 GUI）
@@ -83,6 +94,7 @@ fn run_command(cmd: Commands) {
         Commands::Clean { tab, safe_only, dry_run } => cmd_clean(tab, safe_only, dry_run),
         Commands::CheckDisk => cmd_check_disk(),
         Commands::List => cmd_list(),
+        Commands::Log { tail, open } => cmd_log(tail, open),
     }
 }
 
@@ -334,4 +346,59 @@ fn cmd_list() {
 
 fn get_disk_info() -> (u64, u64) {
     crate::platform::disk_info()
+}
+
+// =========================================================================
+//  日志命令
+// =========================================================================
+
+fn cmd_log(tail: Option<usize>, open: bool) {
+    let log_dir = crate::logger::log_dir();
+
+    if open {
+        // 在文件管理器中打开日志目录
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&log_dir).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
+        }
+        println!("已在文件管理器中打开: {}", log_dir.display());
+        return;
+    }
+
+    if let Some(n) = tail {
+        // 输出最近 N 行日志
+        if let Some(log_file) = crate::logger::latest_log_file() {
+            if let Ok(content) = std::fs::read_to_string(&log_file) {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = if lines.len() > n { lines.len() - n } else { 0 };
+                for line in &lines[start..] {
+                    println!("{}", line);
+                }
+                println!("\n--- 日志文件: {} ---", log_file.display());
+            } else {
+                println!("无法读取日志文件: {}", log_file.display());
+            }
+        } else {
+            println!("未找到日志文件");
+        }
+    } else {
+        // 显示日志路径和大小
+        println!("日志目录: {}", log_dir.display());
+        if let Some(log_file) = crate::logger::latest_log_file() {
+            let size = std::fs::metadata(&log_file)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            println!("最新日志: {}", log_file.display());
+            println!("日志大小: {}", crate::scanner::format_size(size));
+        } else {
+            println!("暂无日志文件");
+        }
+        println!("\n用法:");
+        println!("  maclean log --tail 50    # 查看最近 50 行日志");
+        println!("  maclean log --open       # 在文件管理器中打开日志目录");
+    }
 }

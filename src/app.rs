@@ -548,8 +548,15 @@ impl App {
             }
         };
 
+        let item_count = result.items.len();
+        let total_size = result.total_size;
+        let scan_time = result.scan_time_ms;
         self.scan_time_ms[idx] = result.scan_time_ms;
         self.results[idx] = result.items;
+        crate::logger::info(&format!(
+            "扫描完成 [{}]: {} 项, {}, 耗时 {}ms",
+            idx, item_count, crate::scanner::format_size(total_size), scan_time
+        ));
         self.scan_states[idx] = ScanState::Done;
         self.list_index = 0;
 

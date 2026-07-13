@@ -8,6 +8,7 @@ mod app;
 mod app_protection;
 mod cli;
 mod i18n;
+mod logger;
 mod safety;
 mod scanner;
 #[cfg(target_os = "macos")]
@@ -50,73 +51,28 @@ enum DeleteMessage {
 
 /// 初始化崩溃日志文件，返回日志路径
 fn init_crash_log() -> PathBuf {
-    let log_dir = platform::app_data_dir().join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let log_path = log_dir.join("crash.log");
-
-    // 写入启动分隔线
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&log_path)
-    {
-        use std::io::Write;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(f, "\n=== maclean 启动 @ {} ===", timestamp);
-    }
-
-    log_path
+    // 初始化新的 logger 系统
+    logger::init();
+    logger::latest_log_file().unwrap_or_else(|| platform::app_data_dir().join("logs/maclean.log"))
 }
 
 /// 写入扫描日志（用于追踪扫描进度，崩溃时定位问题）
 pub fn log_scan_step(msg: &str) {
-    let log_path = platform::app_data_dir().join("logs/scan.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&log_path)
-    {
-        use std::io::Write;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(f, "[{}] {}", timestamp, msg);
-    }
+    logger::info(msg);
 }
 
 fn main() -> eframe::Result {
+    // 初始化日志系统（CLI 和 GUI 模式都需要）
+    logger::init();
+
     // CLI 模式：有子命令时执行并退出，无子命令时启动 GUI
     if cli::run_cli() {
+        logger::info("CLI 模式执行完毕，退出");
         return Ok(());
     }
 
-    // 初始化崩溃日志
-    let log_path = init_crash_log();
-
-    // 设置全局 panic hook：写入崩溃日志文件，不崩溃
-    let log_path_for_hook = log_path.clone();
-    std::panic::set_hook(Box::new(move |info| {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let msg = format!("[{}] PANIC: {}\n", timestamp, info);
-        eprintln!("{}", msg);
-        // 追加写入崩溃日志
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&log_path_for_hook)
-        {
-            use std::io::Write;
-            let _ = f.write_all(msg.as_bytes());
-            let _ = f.write_all(format!("Backtrace: {}\n", std::backtrace::Backtrace::force_capture()).as_bytes());
-        }
-    }));
+    // GUI 模式
+    logger::info("GUI 模式启动");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1670,6 +1626,8 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
     std::thread::spawn(move || {
         let failed_items: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
+        logger::info(&format!("删除任务开始: {} 项", to_delete.len()));
+
         // ========== 阶段1: 普通删除（多线程并行） ==========
         let worker_count = std::cmp::min(4, to_delete.len().max(1));
         let idx = std::sync::atomic::AtomicUsize::new(0);
@@ -1689,7 +1647,13 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                         // Windows 应用卸载特殊处理
                         #[cfg(target_os = "windows")]
                         if path.starts_with("uwp:") || path.starts_with("uninstall:") {
+                            logger::info(&format!("开始卸载应用: {}", path));
                             let (success, msg) = scanner::windows_apps::uninstall_app(&path);
+                            if success {
+                                logger::info(&format!("卸载成功: {}", msg));
+                            } else {
+                                logger::error(&format!("卸载失败: {}", msg));
+                            }
                             let _ = tx.send(DeleteMessage::Log(
                                 if success { format!("✓ {}", msg) } else { format!("✗ {}", msg) },
                                 path.clone(), category.clone(), success));
@@ -1895,6 +1859,8 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
         });
 
         let mut failed_items: Vec<(String, String)> = failed_items.into_inner().unwrap();
+
+        logger::info(&format!("阶段1删除完成, 失败 {} 项", failed_items.len()));
 
         // 普通删除完成后，若还有失败项，通知 GUI 弹出 egui 内置密码输入框
         if !failed_items.is_empty() {
