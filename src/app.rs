@@ -522,7 +522,28 @@ impl App {
             Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
             // Windows/Linux: 这些 Tab 返回空结果
             #[cfg(not(target_os = "macos"))]
-            Tab::AppCache | Tab::AppData | Tab::AppUninstall | Tab::SystemOptimize | Tab::Apfs => {
+            Tab::AppCache => {
+                #[cfg(target_os = "windows")]
+                { scanner::windows_apps::WindowsAppCacheScanner::new().scan() }
+                #[cfg(not(target_os = "windows"))]
+                { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+            }
+            #[cfg(not(target_os = "macos"))]
+            Tab::AppData => {
+                #[cfg(target_os = "windows")]
+                { scanner::windows_apps::WindowsAppDataScanner::new().scan() }
+                #[cfg(not(target_os = "windows"))]
+                { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+            }
+            #[cfg(not(target_os = "macos"))]
+            Tab::AppUninstall => {
+                #[cfg(target_os = "windows")]
+                { scanner::windows_apps::WindowsUninstallScanner::new().scan() }
+                #[cfg(not(target_os = "windows"))]
+                { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+            }
+            #[cfg(not(target_os = "macos"))]
+            Tab::SystemOptimize | Tab::Apfs => {
                 scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
             }
         };

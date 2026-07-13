@@ -1299,7 +1299,28 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
                 // Windows/Linux: 这些 Tab 返回空结果
                 #[cfg(not(target_os = "macos"))]
-                Tab::AppCache | Tab::AppData | Tab::AppUninstall | Tab::SystemOptimize | Tab::Apfs => {
+                Tab::AppCache => {
+                    #[cfg(target_os = "windows")]
+                    { scanner::windows_apps::WindowsAppCacheScanner::new().scan() }
+                    #[cfg(not(target_os = "windows"))]
+                    { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                }
+                #[cfg(not(target_os = "macos"))]
+                Tab::AppData => {
+                    #[cfg(target_os = "windows")]
+                    { scanner::windows_apps::WindowsAppDataScanner::new().scan() }
+                    #[cfg(not(target_os = "windows"))]
+                    { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                }
+                #[cfg(not(target_os = "macos"))]
+                Tab::AppUninstall => {
+                    #[cfg(target_os = "windows")]
+                    { scanner::windows_apps::WindowsUninstallScanner::new().scan() }
+                    #[cfg(not(target_os = "windows"))]
+                    { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                }
+                #[cfg(not(target_os = "macos"))]
+                Tab::SystemOptimize | Tab::Apfs => {
                     scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
                 }
             }
@@ -1664,6 +1685,20 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                         let category = category.to_string();
                         let batch_paths = batch_paths.clone();
                         let use_trash = *use_trash;
+
+                        // Windows 应用卸载特殊处理
+                        #[cfg(target_os = "windows")]
+                        if path.starts_with("uwp:") || path.starts_with("uninstall:") {
+                            let (success, msg) = scanner::windows_apps::uninstall_app(&path);
+                            let _ = tx.send(DeleteMessage::Log(
+                                if success { format!("✓ {}", msg) } else { format!("✗ {}", msg) },
+                                path.clone(), category.clone(), success));
+                            safety::log_deletion(&path, &category, success, None);
+                            if !success {
+                                failed_items.lock().unwrap().push((path.clone(), category.clone()));
+                            }
+                            continue;
+                        }
 
                         // 批量删除模式（如 __pycache__）：逐个安全删除
                         if !batch_paths.is_empty() {

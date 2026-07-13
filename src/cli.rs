@@ -114,6 +114,13 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
         "optimize" => OptimizeScanner::new().scan().items,
         #[cfg(target_os = "macos")]
         "apfs" => ApfsScanner::new().scan().items,
+        // Windows 扫描器
+        #[cfg(target_os = "windows")]
+        "app-cache" => crate::scanner::windows_apps::WindowsAppCacheScanner::new().scan().items,
+        #[cfg(target_os = "windows")]
+        "app-data" => crate::scanner::windows_apps::WindowsAppDataScanner::new().scan().items,
+        #[cfg(target_os = "windows")]
+        "app-uninstall" => crate::scanner::windows_apps::WindowsUninstallScanner::new().scan().items,
         _ => Vec::new(),
     }
 }

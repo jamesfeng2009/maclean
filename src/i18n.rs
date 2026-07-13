@@ -157,6 +157,7 @@ fn static_category_en(cat: &str) -> Option<&'static str> {
         "Windows临时文件" => Some("Windows Temp Files"),
         "Windows更新缓存" => Some("Windows Update Cache"),
         "Windows缩略图" => Some("Windows Thumbnails"),
+        // Windows App 缓存/数据（动态生成，"{app} 缓存"/"{app} 数据" 已有通用翻译）
         "Docker缓存" => Some("Docker Cache"),
         "AI模型-HF" => Some("AI Model-HF"),
         "AI缓存-HF" => Some("AI Cache-HF"),
@@ -275,6 +276,10 @@ fn exact_description_en(desc: &str) -> Option<&'static str> {
         "Windows 临时文件目录，可安全删除" => Some("Windows temp files directory, safe to delete"),
         "Windows Update 下载缓存，需停止 wuauserv 服务后清理" => Some("Windows Update download cache, stop wuauserv service before cleaning"),
         "Windows 资源管理器缩略图缓存，删除后自动重建" => Some("Windows Explorer thumbnail cache, auto-rebuilt after deletion"),
+        "应用数据删除可能导致应用配置丢失，请确认后手动删除" => Some("App data deletion may cause configuration loss, confirm before manual deletion"),
+        "系统关键应用，禁止卸载" => Some("System critical app, uninstall blocked"),
+        "安全软件，请使用官方卸载工具" => Some("Security software, use official uninstaller"),
+        "未知的卸载路径格式" => Some("Unknown uninstall path format"),
         "Time Machine 本地快照，可安全删除" => Some("Time Machine local snapshots, safe to delete"),
         "iOS 模拟器运行时，删除后需重新下载" => Some("iOS simulator runtime, needs re-download after deletion"),
         "应用组缓存，删除后可能需重新配置" => Some("App group cache, may need reconfiguration after deletion"),

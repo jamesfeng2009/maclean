@@ -25,6 +25,9 @@ pub mod large_files;
 pub mod optimize;
 #[cfg(target_os = "macos")]
 pub mod uninstall;
+// Windows 专属模块
+#[cfg(target_os = "windows")]
+pub mod windows_apps;
 
 /// 推荐等级 - 帮助用户判断是否应该清理
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
