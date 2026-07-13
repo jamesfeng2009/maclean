@@ -495,7 +495,56 @@ fn pattern_description_en(desc: &str) -> Option<String> {
         return Some("Simulator runtime Cryptex extension, safely deleted via xcrun simctl runtime delete".to_string());
     }
 
+    // ===== 应用保护列表相关描述 =====
+
+    // "系统关键应用 | 应用大小 {size}"
+    if desc.starts_with("系统关键应用 | 应用大小 ") {
+        let size = &desc["系统关键应用 | 应用大小 ".len()..];
+        return Some(format!("System critical app | App size: {}", size));
+    }
+
+    // "{vendor} 安全代理 | 应用大小 {size}"
+    if desc.contains(" 安全代理 | 应用大小 ") {
+        return Some(desc
+            .replace(" 安全代理 | 应用大小 ", " security agent | App size: "));
+    }
+
+    // "含敏感数据，卸载前请备份 | 应用大小 {size}，关联文件 {n} 项"
+    if desc.starts_with("含敏感数据，卸载前请备份 | ") {
+        let rest = &desc["含敏感数据，卸载前请备份 | ".len()..];
+        return Some(format!("Contains sensitive data, back up before uninstalling | {}", rest
+            .replace("应用大小 ", "App size: ")
+            .replace("，关联文件 ", ", associated files: ")
+            .replace(" 项", " items")));
+    }
+
     None
+}
+
+/// 翻译不可删除原因
+///
+/// 处理应用保护列表生成的原因 key：
+/// - "protection_critical" -> "系统关键组件，不可卸载" / "System critical, cannot be uninstalled"
+/// - "protection_official_uninstaller:CrowdStrike" -> "请使用 CrowdStrike 官方卸载工具" / "Use CrowdStrike's official uninstaller"
+pub fn translate_undeletable_reason(reason: &str, lang_en: bool) -> String {
+    if !lang_en {
+        if reason == "protection_critical" {
+            return "系统关键组件，不可卸载".to_string();
+        }
+        if let Some(vendor) = reason.strip_prefix("protection_official_uninstaller:") {
+            return format!("请使用 {} 官方卸载工具", vendor);
+        }
+        return reason.to_string();
+    }
+
+    // 英文模式
+    if reason == "protection_critical" {
+        return "System critical, cannot be uninstalled".to_string();
+    }
+    if let Some(vendor) = reason.strip_prefix("protection_official_uninstaller:") {
+        return format!("Use {}'s official uninstaller", vendor);
+    }
+    reason.to_string()
 }
 
 #[cfg(test)]
@@ -595,6 +644,52 @@ mod tests {
         assert_eq!(
             translate_description("some unknown description", true),
             "some unknown description"
+        );
+    }
+
+    #[test]
+    fn test_translate_protection_descriptions() {
+        // 系统关键应用
+        assert_eq!(
+            translate_description("系统关键应用 | 应用大小 1.2G", true),
+            "System critical app | App size: 1.2G"
+        );
+        // 安全代理
+        assert_eq!(
+            translate_description("CrowdStrike 安全代理 | 应用大小 500M", true),
+            "CrowdStrike security agent | App size: 500M"
+        );
+        // 数据保护
+        assert_eq!(
+            translate_description("含敏感数据，卸载前请备份 | 应用大小 200M，关联文件 5 项", true),
+            "Contains sensitive data, back up before uninstalling | App size: 200M, associated files: 5 items"
+        );
+    }
+
+    #[test]
+    fn test_translate_undeletable_reason() {
+        // 中文
+        assert_eq!(
+            translate_undeletable_reason("protection_critical", false),
+            "系统关键组件，不可卸载"
+        );
+        assert_eq!(
+            translate_undeletable_reason("protection_official_uninstaller:CrowdStrike", false),
+            "请使用 CrowdStrike 官方卸载工具"
+        );
+        // 英文
+        assert_eq!(
+            translate_undeletable_reason("protection_critical", true),
+            "System critical, cannot be uninstalled"
+        );
+        assert_eq!(
+            translate_undeletable_reason("protection_official_uninstaller:Jamf", true),
+            "Use Jamf's official uninstaller"
+        );
+        // 未知原因原样返回
+        assert_eq!(
+            translate_undeletable_reason("some other reason", true),
+            "some other reason"
         );
     }
 }

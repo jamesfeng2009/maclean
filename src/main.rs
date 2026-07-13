@@ -4,6 +4,7 @@
 
 mod aewp;
 mod app;
+mod app_protection;
 mod i18n;
 mod safety;
 mod scanner;
@@ -909,9 +910,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
                                 // 不可删除时显示原因
                                 if !item.deletable && !item.undeletable_reason.is_empty() {
+                                    let reason_en = i18n::translate_undeletable_reason(&item.undeletable_reason, app.lang_en);
                                     ui.colored_label(
                                         egui::Color32::from_rgb(200, 80, 80),
-                                        egui::RichText::new(format!("⚠️ {}", item.undeletable_reason)).size(11.0),
+                                        egui::RichText::new(format!("⚠️ {}", reason_en)).size(11.0),
                                     );
                                 }
                             });

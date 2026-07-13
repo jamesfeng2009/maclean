@@ -23,9 +23,14 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
+use crate::app_protection::{self, ProtectionLevel};
+
 use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 /// macOS 系统自带应用名称（不应卸载）
+///
+/// 这些应用即使在 /Applications/ 下（非 /System/）也不应被卸载。
+/// 用于 bundle ID 检查之外的名称匹配后备保护。
 const SYSTEM_APP_NAMES: &[&str] = &[
     "Safari", "Mail", "Notes", "Calendar", "Messages", "FaceTime",
     "Maps", "News", "Stocks", "Weather", "Reminders", "Contacts",
@@ -39,8 +44,7 @@ const SYSTEM_APP_NAMES: &[&str] = &[
     "ColorSync Utility", "AirPort Utility", "Bluetooth File Exchange",
     "Tips", "Home", "App Store", "System Information", "Launchpad",
     "Mission Control", "Find My", "Podcasts", "Music", "TV",
-    "Photos", "Books", "Freeform", "Shortcuts", "Numbers",
-    "Keynote", "Pages", "GarageBand", "iMovie",
+    "Photos", "Books", "Freeform", "Shortcuts",
 ];
 
 /// App 卸载扫描器
@@ -256,22 +260,23 @@ fn collect_installed_app_names() -> std::collections::HashSet<String> {
 
 /// 扫描单个应用，返回 ScanItem
 ///
-/// 跳过系统应用（/System/ 下、com.apple.* bundle ID、已知系统应用名）。
+/// 保护策略（参考 Mole app_protection_data.sh）：
+/// - /System/ 下的应用：跳过（系统只读区域）
+/// - 系统关键应用（Finder、Dock、Safari 等）：显示但标记不可删除
+/// - 安全/MDM 应用（CrowdStrike、Jamf 等）：显示但标记不可删除，提示使用官方卸载工具
+/// - 数据保护应用（1Password、输入法等）：可删除但描述包含警告
+/// - 可卸载的 Apple 应用（Xcode、Final Cut Pro 等）：正常显示
+/// - 普通第三方应用：正常显示
 fn scan_app(app_path: &PathBuf) -> Option<ScanItem> {
     let path_str = app_path.to_string_lossy();
 
-    // 跳过 /System/ 下的应用
+    // 跳过 /System/ 下的应用（系统只读区域，无法删除）
     if path_str.starts_with("/System/") {
         return None;
     }
 
-    // 获取 bundle ID
+    // 获取 bundle ID（无 bundle ID 的应用无法判断保护级别，跳过）
     let bundle_id = get_bundle_id(app_path)?;
-
-    // 跳过 Apple 系统应用
-    if bundle_id.starts_with("com.apple.") {
-        return None;
-    }
 
     // 获取应用显示名称
     let app_name = get_app_display_name(app_path).unwrap_or_else(|| {
@@ -282,10 +287,13 @@ fn scan_app(app_path: &PathBuf) -> Option<ScanItem> {
             .to_string()
     });
 
-    // 跳过 macOS 系统自带应用
-    if is_system_app(&app_name) {
-        return None;
-    }
+    // 检查应用保护级别
+    let protection = app_protection::check_bundle_protection(&bundle_id);
+
+    // 系统关键应用：通过 bundle ID 或名称匹配检测
+    // 即使不在 /System/ 下（如 /Applications/ 中的 Apple 应用），也标记为不可删除
+    let is_system_by_name = is_system_app(&app_name);
+    let is_critical = matches!(protection, ProtectionLevel::Critical) || is_system_by_name;
 
     // 计算 .app 包大小
     let app_size = dir_size(app_path);
@@ -307,26 +315,90 @@ fn scan_app(app_path: &PathBuf) -> Option<ScanItem> {
     }
 
     // 将 .app 本身加入 batch_paths 末尾，确保卸载时 .app 包也被删除
-    // （删除流程中 batch_paths 非空时只删 batch_paths 并 continue，不删主路径）
     batch_paths.push(app_path.to_string_lossy().to_string());
 
     let total_size = app_size + associated_size;
     let file_count = batch_paths.len();
+
+    // 根据保护级别设置可删除性和描述
+    let (deletable, undeletable_reason, recommend, description) = match protection {
+        ProtectionLevel::Critical | ProtectionLevel::None if is_critical => {
+            // 系统关键应用：不可删除
+            (
+                false,
+                "protection_critical".to_string(),
+                Recommend::Advanced,
+                format!(
+                    "系统关键应用 | 应用大小 {}",
+                    format_size_local(app_size)
+                ),
+            )
+        }
+        ProtectionLevel::RequiresOfficialUninstaller => {
+            // 安全/MDM 应用：不可删除，提示使用官方卸载工具
+            let vendor = app_protection::get_security_vendor(&bundle_id)
+                .unwrap_or("官方");
+            (
+                false,
+                format!("protection_official_uninstaller:{}", vendor),
+                Recommend::Advanced,
+                format!(
+                    "{} 安全代理 | 应用大小 {}",
+                    vendor,
+                    format_size_local(app_size)
+                ),
+            )
+        }
+        ProtectionLevel::DataProtected => {
+            // 数据保护应用：可删除但描述包含警告
+            (
+                true,
+                String::new(),
+                Recommend::Advanced,
+                format!(
+                    "含敏感数据，卸载前请备份 | 应用大小 {}，关联文件 {} 项",
+                    format_size_local(app_size),
+                    file_count.saturating_sub(1)
+                ),
+            )
+        }
+        ProtectionLevel::None => {
+            // 普通应用
+            (
+                true,
+                String::new(),
+                Recommend::Advanced,
+                format!(
+                    "应用大小 {}，关联文件 {} 项",
+                    format_size_local(app_size),
+                    file_count.saturating_sub(1)
+                ),
+            )
+        }
+        ProtectionLevel::Critical => {
+            // 上面已处理 is_critical 的组合，这里处理非 is_critical 的 Critical
+            (
+                false,
+                "protection_critical".to_string(),
+                Recommend::Advanced,
+                format!(
+                    "系统关键应用 | 应用大小 {}",
+                    format_size_local(app_size)
+                ),
+            )
+        }
+    };
 
     Some(ScanItem {
         path: app_path.to_string_lossy().to_string(),
         size_bytes: total_size,
         category: app_name,
         selected: false,
-        deletable: true,
-        undeletable_reason: String::new(),
+        deletable,
+        undeletable_reason,
         batch_paths,
-        recommend: Recommend::Advanced,
-        description: format!(
-            "应用大小 {}，关联文件 {} 项",
-            format_size_local(app_size),
-            file_count.saturating_sub(1)
-        ),
+        recommend,
+        description,
     })
 }
 
