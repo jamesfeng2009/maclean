@@ -31,23 +31,11 @@ jobs:
 
       - name: Cargo check (Windows)
         run: cargo check --target x86_64-pc-windows-msvc
-        continue-on-error: true
-        id: check
-
-      - name: Show check result
-        if: always()
-        run: |
-          echo "Windows check exit code: ${{ steps.check.outcome }}"
-          if [ "${{ steps.check.outcome }}" = "failure" ]; then
-            echo "::warning::Windows build has compilation errors - see logs above"
-          fi
-        shell: bash
 
   windows-build:
     name: Windows release build
     runs-on: windows-latest
     needs: windows-check
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
@@ -68,12 +56,9 @@ jobs:
 
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc
-        continue-on-error: true
 
       - name: Upload artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: maclean-windows-x86_64
           path: target/x86_64-pc-windows-msvc/release/maclean.exe
-          if-no-files-found: ignore
