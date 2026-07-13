@@ -278,6 +278,7 @@ fn exact_description_en(desc: &str) -> Option<&'static str> {
         "清理超过 30 天的应用保存状态" => Some("Clear app saved states older than 30 days"),
         "清理 Gatekeeper 下载追踪记录" => Some("Clear Gatekeeper download tracking records"),
         "释放非活跃内存，提升系统响应速度" => Some("Free inactive memory, improves system responsiveness"),
+        "重建 Spotlight 搜索索引，修复搜索不到文件的问题" => Some("Rebuild Spotlight search index, fixes files not found in search"),
         _ => None,
     }
 }
@@ -516,6 +517,18 @@ fn pattern_description_en(desc: &str) -> Option<String> {
             .replace("应用大小 ", "App size: ")
             .replace("，关联文件 ", ", associated files: ")
             .replace(" 项", " items")));
+    }
+
+    // 登录项审计描述（含动态数量）
+    // "审计登录项与启动服务（当前 X 项：登录项 X / 用户服务 X / 系统服务 X / 系统守护进程 X），点击打开系统设置管理"
+    if desc.starts_with("审计登录项与启动服务（当前 ") && desc.contains("），点击打开系统设置管理") {
+        return Some(desc
+            .replace("审计登录项与启动服务（当前 ", "Audit login items and startup services (currently ")
+            .replace(" 项：登录项 ", " items: login items ")
+            .replace(" / 用户服务 ", " / user agents ")
+            .replace(" / 系统服务 ", " / system agents ")
+            .replace(" / 系统守护进程 ", " / system daemons ")
+            .replace("），点击打开系统设置管理", ", click to open System Settings to manage"));
     }
 
     None

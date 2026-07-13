@@ -24,7 +24,7 @@ impl Scanner for OptimizeScanner {
     fn scan(&self) -> ScanResult {
         let start = Instant::now();
 
-        // 6 项安全的系统优化任务
+        // 8 项安全的系统优化任务
         // path 使用英文 key，UI 层通过 app.t("optimize_xxx") 翻译显示
         let items = vec![
             make_task(
@@ -50,6 +50,14 @@ impl Scanner for OptimizeScanner {
             make_task(
                 "memory_pressure_release",
                 "释放非活跃内存，提升系统响应速度",
+            ),
+            make_task(
+                "spotlight_reindex",
+                "重建 Spotlight 搜索索引，修复搜索不到文件的问题",
+            ),
+            make_task(
+                "login_items_audit",
+                &scan_login_items_description(),
             ),
         ];
 
@@ -88,3 +96,66 @@ fn make_task(name: &str, description: &str) -> ScanItem {
         description: description.to_string(),
     }
 }
+
+/// 扫描登录项，生成包含项目数的描述文本
+///
+/// 统计来源：
+/// - `~/Library/Preferences/com.apple.loginitems.plist`（用户登录项）
+/// - `~/Library/LaunchAgents/`（用户 LaunchAgent）
+/// - `/Library/LaunchAgents/`（系统 LaunchAgent）
+/// - `/Library/LaunchDaemons/`（系统 LaunchDaemon）
+fn scan_login_items_description() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut user_login = 0usize;
+    let mut user_agents = 0usize;
+    let mut system_agents = 0usize;
+    let mut system_daemons = 0usize;
+
+    // 用户登录项（Login Items plist）
+    let loginitems_plist = format!("{}/Library/Preferences/com.apple.loginitems.plist", home);
+    if let Ok(output) = std::process::Command::new("defaults")
+        .arg("read")
+        .arg(&loginitems_plist)
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            // 统计 "Path" 键出现次数 = 登录项数量
+            user_login = text.matches("Path =").count();
+        }
+    }
+
+    // 用户 LaunchAgent
+    let user_agents_dir = format!("{}/Library/LaunchAgents", home);
+    user_agents = count_plist_files(&user_agents_dir);
+
+    // 系统 LaunchAgent
+    system_agents = count_plist_files("/Library/LaunchAgents");
+
+    // 系统 LaunchDaemon
+    system_daemons = count_plist_files("/Library/LaunchDaemons");
+
+    let total = user_login + user_agents + system_agents + system_daemons;
+    format!(
+        "审计登录项与启动服务（当前 {} 项：登录项 {} / 用户服务 {} / 系统服务 {} / 系统守护进程 {}），点击打开系统设置管理",
+        total, user_login, user_agents, system_agents, system_daemons
+    )
+}
+
+/// 统计目录中的 .plist 文件数量
+fn count_plist_files(dir: &str) -> usize {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "plist")
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+

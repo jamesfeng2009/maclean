@@ -825,6 +825,8 @@ impl App {
                 "optimize_saved_state_cleanup" => "Clean Saved States",
                 "optimize_gatekeeper_cleanup" => "Clean Gatekeeper Records",
                 "optimize_memory_pressure_release" => "Release Memory Pressure",
+                "optimize_spotlight_reindex" => "Rebuild Spotlight Index",
+                "optimize_login_items_audit" => "Audit Login Items",
                 "optimize_logs" => "📋 Optimize Logs",
                 // 优化任务执行结果
                 "opt_dns_success" => "✅ DNS cache flushed",
@@ -839,6 +841,10 @@ impl App {
                 "opt_gatekeeper_empty" => "✅ Gatekeeper records already empty",
                 "opt_memory_success" => "✅ Inactive memory released",
                 "opt_memory_fail" => "⚠️ Memory release requires admin privileges. Run in Terminal: sudo purge",
+                "opt_spotlight_success" => "✅ Spotlight index rebuild started (may take a few minutes)",
+                "opt_spotlight_fail" => "⚠️ Spotlight reindex requires admin privileges. Run in Terminal: sudo mdutil -E /",
+                "opt_login_items_opened" => "✅ Opened System Settings > Login Items",
+                "opt_login_items_fail" => "⚠️ Failed to open Login Items settings",
                 "opt_unknown" => "⚠️ Unknown optimization task: {0}",
                 // 权限引导
                 "permission_title" => "Permission Settings",
@@ -1049,6 +1055,8 @@ impl App {
                 "optimize_saved_state_cleanup" => "Saved State 清理",
                 "optimize_gatekeeper_cleanup" => "Gatekeeper 下载清理",
                 "optimize_memory_pressure_release" => "内存压力释放",
+                "optimize_spotlight_reindex" => "Spotlight 索引重建",
+                "optimize_login_items_audit" => "登录项审计",
                 "optimize_logs" => "📋 优化日志",
                 // 优化任务执行结果
                 "opt_dns_success" => "✅ DNS 缓存已刷新",
@@ -1063,6 +1071,10 @@ impl App {
                 "opt_gatekeeper_empty" => "✅ Gatekeeper 下载记录已为空",
                 "opt_memory_success" => "✅ 已释放非活跃内存",
                 "opt_memory_fail" => "⚠️ 内存释放需要管理员权限。请在终端执行：sudo purge",
+                "opt_spotlight_success" => "✅ Spotlight 索引重建已启动（可能需要几分钟）",
+                "opt_spotlight_fail" => "⚠️ Spotlight 重建需要管理员权限。请在终端执行：sudo mdutil -E /",
+                "opt_login_items_opened" => "✅ 已打开系统设置 > 登录项",
+                "opt_login_items_fail" => "⚠️ 无法打开登录项设置",
                 "opt_unknown" => "⚠️ 未知的优化任务: {0}",
                 // 权限引导
                 "permission_title" => "权限设置",

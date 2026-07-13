@@ -3662,6 +3662,34 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
                 _ => App::t_lang(lang_en, "opt_memory_fail").to_string(),
             }
         }
+        "spotlight_reindex" => {
+            // mdutil -E / 重建根卷的 Spotlight 索引
+            let r = std::process::Command::new("mdutil")
+                .arg("-E")
+                .arg("/")
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_spotlight_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_spotlight_fail").to_string(),
+            }
+        }
+        "login_items_audit" => {
+            // 打开系统设置 > 通用 > 登录项
+            // macOS 13+ 使用 "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+            // macOS 12 及以下使用 "com.apple.preference.users"
+            let url = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
+            let r = std::process::Command::new("open")
+                .arg(url)
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_login_items_opened").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_login_items_fail").to_string(),
+            }
+        }
         _ => App::tf_lang(lang_en, "opt_unknown", &[task_name]),
     };
 
