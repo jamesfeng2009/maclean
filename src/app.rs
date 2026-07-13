@@ -179,6 +179,8 @@ pub struct App {
     pub filter_query: String,
     /// 过滤输入框是否获得焦点
     pub filter_active: bool,
+    /// 磁盘监控：上次检查时间（用于 5 秒间隔轮询）
+    pub disk_last_check: std::time::Instant,
 }
 
 impl App {
@@ -231,6 +233,7 @@ impl App {
             sudo_session_active: false,
             filter_query: String::new(),
             filter_active: false,
+            disk_last_check: std::time::Instant::now(),
         }
     }
 
@@ -297,6 +300,44 @@ impl App {
     pub fn clear_filter(&mut self) {
         self.filter_query.clear();
         self.filter_active = false;
+    }
+
+    /// 磁盘监控：轮询检查磁盘空间（每 5 秒调用一次）
+    ///
+    /// 在 `update()` 中调用，自动节流避免频繁 statvfs。
+    pub fn poll_disk_space(&mut self) {
+        if self.disk_last_check.elapsed().as_secs() < 5 {
+            return;
+        }
+        let (total, free) = get_disk_info();
+        if total > 0 {
+            self.disk_total = total;
+            self.disk_free = free;
+        }
+        self.disk_last_check = std::time::Instant::now();
+    }
+
+    /// 磁盘告警等级
+    ///
+    /// 返回 (等级, 颜色, 剩余百分比)
+    /// - 0: 正常 (>20%)
+    /// - 1: 注意 (10-20%)
+    /// - 2: 警告 (5-10%)
+    /// - 3: 危险 (<5%)
+    pub fn disk_alert_level(&self) -> (u8, egui::Color32, f64) {
+        if self.disk_total == 0 {
+            return (0, egui::Color32::from_rgb(100, 200, 100), 0.0);
+        }
+        let pct = self.disk_free as f64 / self.disk_total as f64 * 100.0;
+        if pct < 5.0 {
+            (3, egui::Color32::from_rgb(220, 50, 50), pct)
+        } else if pct < 10.0 {
+            (2, egui::Color32::from_rgb(230, 140, 30), pct)
+        } else if pct < 20.0 {
+            (1, egui::Color32::from_rgb(220, 200, 50), pct)
+        } else {
+            (0, egui::Color32::from_rgb(100, 200, 100), pct)
+        }
     }
 
     /// 获取当前 Tab 的扫描状态
@@ -773,6 +814,11 @@ impl App {
                 "disk_used" => "Used",
                 "disk_free" => "Free",
                 "disk_total" => "Total",
+                // 磁盘告警
+                "disk_alert_notice" => "Disk space low: {1} GB free ({0}%), keep an eye on it",
+                "disk_alert_warning" => "Disk space warning: {1} GB free ({0}%), cleanup recommended",
+                "disk_alert_critical" => "Disk critically low! {1} GB free ({0}%), cleanup now",
+                "disk_alert_clean_now" => "Clean Now",
                 // 扫描状态
                 "scanning" => "Scanning",
                 "scanning_hint" => "Scanning disk for cleanable files, please wait...",
@@ -1007,6 +1053,11 @@ impl App {
                 "disk_used" => "已用",
                 "disk_free" => "可用",
                 "disk_total" => "总量",
+                // 磁盘告警
+                "disk_alert_notice" => "磁盘空间注意：剩余 {1} GB ({0}%)，建议关注",
+                "disk_alert_warning" => "磁盘空间警告：剩余 {1} GB ({0}%)，建议立即清理",
+                "disk_alert_critical" => "磁盘空间严重不足！剩余 {1} GB ({0}%)，请立即清理",
+                "disk_alert_clean_now" => "立即清理",
                 // 扫描状态
                 "scanning" => "扫描中",
                 "scanning_hint" => "正在扫描磁盘上的可清理文件，请稍候...",

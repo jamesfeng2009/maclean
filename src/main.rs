@@ -328,6 +328,14 @@ fn main() -> eframe::Result {
             }
 
             if let Some(app) = &mut APP {
+                // 磁盘监控：每 5 秒轮询磁盘空间
+                app.poll_disk_space();
+
+                // 请求重绘以保持告警 UI 实时更新
+                if app.disk_alert_level().0 >= 2 {
+                    ctx.request_repaint();
+                }
+
                 render_gui(ctx, app, &mut SCAN_RX, &mut DELETE_RX);
             }
         }
@@ -464,6 +472,34 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 .text(format!("{:.0}%", used_pct)));
         });
     });
+
+    // ========== 磁盘告警横幅 ==========
+    let (alert_level, alert_color, free_pct) = app.disk_alert_level();
+    if alert_level >= 1 {
+        egui::TopBottomPanel::top("disk_alert_banner").show(ctx, |ui| {
+            let (icon, msg_key) = match alert_level {
+                3 => ("🔴", "disk_alert_critical"),
+                2 => ("🟠", "disk_alert_warning"),
+                1 => ("🟡", "disk_alert_notice"),
+                _ => ("🟢", "disk_alert_notice"),
+            };
+            let free_gb = app.disk_free as f64 / 1_073_741_824.0;
+            let msg = app.tf(msg_key, &[&format!("{:.1}", free_pct), &format!("{:.1}", free_gb)]);
+
+            ui.horizontal(|ui| {
+                ui.colored_label(alert_color, egui::RichText::new(format!("{} {}", icon, msg)).size(14.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if alert_level >= 2 {
+                        if ui.button(app.t("disk_alert_clean_now")).clicked() {
+                            // 跳转到开发者缓存 Tab（通常回收空间最大）
+                            app.tab = crate::app::Tab::DevCache;
+                            app.list_index = 0;
+                        }
+                    }
+                });
+            });
+        });
+    }
 
     // ========== 底部状态栏 ==========
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
