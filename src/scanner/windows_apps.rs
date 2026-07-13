@@ -12,8 +12,43 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+
+// =========================================================================
+//  磁盘扫描配置
+//
+//  默认只扫描 C 盘（大部分应用安装在 C 盘）。
+//  用户可通过 set_scan_all_disks(true) 开启扫描全部磁盘。
+//  注册表扫描始终覆盖所有盘符的应用（UninstallString 含完整路径），
+//  此配置仅影响 Program Files 直接目录扫描。
+// =========================================================================
+
+static SCAN_ALL_DISKS: AtomicBool = AtomicBool::new(false);
+
+/// 设置是否扫描全部磁盘
+pub fn set_scan_all_disks(enabled: bool) {
+    SCAN_ALL_DISKS.store(enabled, Ordering::Relaxed);
+    crate::logger::info(&format!("磁盘扫描配置: {}", if enabled { "全部磁盘" } else { "仅 C 盘" }));
+}
+
+/// 获取当前磁盘扫描配置
+pub fn should_scan_all_disks() -> bool {
+    SCAN_ALL_DISKS.load(Ordering::Relaxed)
+}
+
+/// 列出系统可用的磁盘盘符
+pub fn list_available_disks() -> Vec<char> {
+    let mut disks = vec!['C'];
+    for drive in ['D', 'E', 'F', 'G', 'H', 'I', 'J'] {
+        let path = format!("{}:\\", drive);
+        if Path::new(&path).exists() {
+            disks.push(drive);
+        }
+    }
+    disks
+}
 
 /// Windows 已安装应用信息
 #[derive(Debug, Clone)]
@@ -469,7 +504,7 @@ fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
 /// 查找包含卸载程序（uninstall.exe、unins000.exe 等）的应用目录，
 /// 补充注册表中未登记的应用（便携应用、手动解压安装的工具等）。
 ///
-/// 也扫描 D:\ 等其他盘符根目录下的 Program Files 目录。
+/// 默认只扫描 C 盘，开启 set_scan_all_disks(true) 后扫描所有盘符。
 fn scan_program_files_dirs() -> Vec<WindowsAppInfo> {
     let mut apps = Vec::new();
 
@@ -483,22 +518,24 @@ fn scan_program_files_dirs() -> Vec<WindowsAppInfo> {
         "uninstall-helper.exe",
     ];
 
-    // 搜索目录：C:\Program Files\、C:\Program Files (x86)\
-    // 以及其他盘符的同类目录（D:\Program Files\ 等）
+    // 搜索目录：默认 C:\Program Files\、C:\Program Files (x86)\
     let mut search_dirs: Vec<PathBuf> = vec![
         PathBuf::from(r"C:\Program Files"),
         PathBuf::from(r"C:\Program Files (x86)"),
     ];
 
-    // 检测其他盘符（D:、E: 等）的 Program Files 目录
-    for drive in ['D', 'E', 'F', 'G'] {
-        let pf = PathBuf::from(format!("{}:\\Program Files", drive));
-        let pf_x86 = PathBuf::from(format!("{}:\\Program Files (x86)", drive));
-        if pf.is_dir() {
-            search_dirs.push(pf);
-        }
-        if pf_x86.is_dir() {
-            search_dirs.push(pf_x86);
+    // 开启全盘扫描后，检测其他盘符（D:、E: 等）的 Program Files 目录
+    if should_scan_all_disks() {
+        crate::logger::info("扫描全部磁盘的 Program Files 目录");
+        for drive in ['D', 'E', 'F', 'G', 'H', 'I', 'J'] {
+            let pf = PathBuf::from(format!("{}:\\Program Files", drive));
+            let pf_x86 = PathBuf::from(format!("{}:\\Program Files (x86)", drive));
+            if pf.is_dir() {
+                search_dirs.push(pf);
+            }
+            if pf_x86.is_dir() {
+                search_dirs.push(pf_x86);
+            }
         }
     }
 
@@ -553,14 +590,26 @@ fn scan_program_files_dirs() -> Vec<WindowsAppInfo> {
 }
 
 /// 获取所有已安装应用（注册表 + UWP + Program Files 直接扫描）
+///
+/// 三个数据源并行扫描，加速应用列表获取。
 pub fn get_installed_apps() -> Vec<WindowsAppInfo> {
-    let mut apps = scan_registry_uninstall();
-    apps.extend(scan_uwp_apps());
+    crate::logger::info("应用列表并行扫描开始（注册表 + UWP + Program Files）");
 
-    // 补充：直接扫描 Program Files 目录，找未注册到注册表的应用
-    let dir_apps = scan_program_files_dirs();
+    let (mut apps, uwp_apps, dir_apps) = std::thread::scope(|s| {
+        let h_reg = s.spawn(scan_registry_uninstall);
+        let h_uwp = s.spawn(scan_uwp_apps);
+        let h_dir = s.spawn(scan_program_files_dirs);
+        (
+            h_reg.join().unwrap_or_default(),
+            h_uwp.join().unwrap_or_default(),
+            h_dir.join().unwrap_or_default(),
+        )
+    });
+
+    apps.extend(uwp_apps);
+
+    // 合并 Program Files 直接扫描结果（去重）
     for app in dir_apps {
-        // 避免与注册表扫描的结果重复
         let already_exists = apps.iter().any(|a| {
             a.name.eq_ignore_ascii_case(&app.name)
                 || a.install_location.as_deref() == app.install_location.as_deref()
@@ -573,6 +622,8 @@ pub fn get_installed_apps() -> Vec<WindowsAppInfo> {
     // 去重（按名称）
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     apps.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+
+    crate::logger::info(&format!("应用列表扫描完成: {} 个应用", apps.len()));
     apps
 }
 
@@ -599,13 +650,150 @@ impl WindowsAppCacheScanner {
     }
 }
 
+/// 缓存目录名模式（%LOCALAPPDATA% / %APPDATA% 下）
+const CACHE_DIR_NAMES: &[&str] = &[
+    "Cache", "cache", "Caches", "caches", "GPUCache", "Code Cache", "Service Worker",
+];
+
+/// Program Files 下的日志/缓存目录名模式
+const PF_CACHE_NAMES: &[&str] = &["logs", "log", "temp", "tmp", "Cache", "cache"];
+
+/// 扫描用户 AppData 目录下的缓存（%LOCALAPPDATA% 或 %APPDATA%）
+///
+/// 遍历 base 下的每个应用目录，查找名为 Cache/GPUCache/Code Cache 等的子目录。
+fn scan_user_appdata_cache(base: &Path) -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    if !base.is_dir() {
+        return items;
+    }
+    let entries = match std::fs::read_dir(base) {
+        Ok(e) => e,
+        Err(_) => return items,
+    };
+
+    for entry in entries.flatten() {
+        let app_dir = entry.path();
+        if !app_dir.is_dir() {
+            continue;
+        }
+        let app_name = entry.file_name().to_string_lossy().to_string();
+
+        if let Ok(sub_entries) = std::fs::read_dir(&app_dir) {
+            for sub in sub_entries.flatten() {
+                let sub_name = sub.file_name().to_string_lossy().to_string();
+                if CACHE_DIR_NAMES.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
+                    let cache_path = sub.path();
+                    let size = dir_size(&cache_path);
+                    if size > 0 {
+                        let (deletable, reason, recommend, desc) = if is_safe_cache(&app_name) {
+                            (true, String::new(), Recommend::Safe,
+                             format!("{} 应用的缓存文件，可安全删除", app_name))
+                        } else {
+                            (true, String::new(), Recommend::Caution,
+                             format!("{} 应用的缓存，删除后可能需重新配置", app_name))
+                        };
+                        items.push(ScanItem {
+                            path: cache_path.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: format!("{} 缓存", app_name),
+                            selected: false,
+                            deletable,
+                            undeletable_reason: reason,
+                            batch_paths: Vec::new(),
+                            recommend,
+                            description: desc,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    items
+}
+
+/// 扫描 Program Files 目录下的日志/缓存子目录
+///
+/// 跳过 Windows/Microsoft 系统目录，只显示 >1MB 的目录。
+/// Program Files 下的目录需要管理员权限删除，标记为不可删除。
+fn scan_program_files_cache_dir(base: &Path) -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    if !base.is_dir() {
+        return items;
+    }
+    let entries = match std::fs::read_dir(base) {
+        Ok(e) => e,
+        Err(_) => return items,
+    };
+
+    for app_entry in entries.flatten() {
+        let app_dir = app_entry.path();
+        if !app_dir.is_dir() {
+            continue;
+        }
+        let app_name = app_entry.file_name().to_string_lossy().to_string();
+
+        // 跳过系统目录
+        let dir_lower = app_name.to_lowercase();
+        if dir_lower.starts_with("windows") || dir_lower.starts_with("microsoft") {
+            continue;
+        }
+
+        if let Ok(sub_entries) = std::fs::read_dir(&app_dir) {
+            for sub in sub_entries.flatten() {
+                let sub_name = sub.file_name().to_string_lossy().to_string();
+                if PF_CACHE_NAMES.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
+                    let cache_path = sub.path();
+                    let size = dir_size(&cache_path);
+                    if size > 1024 * 1024 {
+                        // 只显示 >1MB 的目录
+                        items.push(ScanItem {
+                            path: cache_path.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: format!("{} 日志/缓存", app_name),
+                            selected: false,
+                            deletable: false, // Program Files 需要管理员权限
+                            undeletable_reason: "需要管理员权限删除".to_string(),
+                            batch_paths: Vec::new(),
+                            recommend: Recommend::Caution,
+                            description: format!(
+                                "{} 应用的日志/缓存目录（位于 Program Files，需管理员权限）",
+                                app_name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    items
+}
+
+/// 收集需要扫描的 Program Files 目录列表（尊重磁盘扫描配置）
+fn collect_program_files_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from(r"C:\Program Files"),
+        PathBuf::from(r"C:\Program Files (x86)"),
+    ];
+    if should_scan_all_disks() {
+        for drive in ['D', 'E', 'F', 'G', 'H', 'I', 'J'] {
+            let pf = PathBuf::from(format!("{}:\\Program Files", drive));
+            let pf_x86 = PathBuf::from(format!("{}:\\Program Files (x86)", drive));
+            if pf.is_dir() {
+                dirs.push(pf);
+            }
+            if pf_x86.is_dir() {
+                dirs.push(pf_x86);
+            }
+        }
+    }
+    dirs
+}
+
 impl Scanner for WindowsAppCacheScanner {
     fn scan(&self) -> ScanResult {
         let start = std::time::Instant::now();
         let home = home_dir();
-        let mut items = Vec::new();
 
-        // 扫描 %LOCALAPPDATA% 下的缓存目录
         let local_appdata = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join("AppData/Local"));
@@ -613,117 +801,49 @@ impl Scanner for WindowsAppCacheScanner {
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join("AppData/Roaming"));
 
-        // 缓存目录名模式
-        let cache_dir_names = ["Cache", "cache", "Caches", "caches", "GPUCache", "Code Cache", "Service Worker"];
-
-        for base in [&local_appdata, &appdata] {
-            if !base.is_dir() {
-                continue;
-            }
-            if let Ok(entries) = std::fs::read_dir(base) {
-                for entry in entries.flatten() {
-                    let app_dir = entry.path();
-                    if !app_dir.is_dir() {
-                        continue;
-                    }
-                    let app_name = entry.file_name().to_string_lossy().to_string();
-
-                    // 检查子目录是否包含缓存
-                    if let Ok(sub_entries) = std::fs::read_dir(&app_dir) {
-                        for sub in sub_entries.flatten() {
-                            let sub_name = sub.file_name().to_string_lossy().to_string();
-                            if cache_dir_names.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
-                                let cache_path = sub.path();
-                                let size = dir_size(&cache_path);
-                                if size > 0 {
-                                    let (deletable, reason, recommend, desc) = if is_safe_cache(&app_name) {
-                                        (true, String::new(), Recommend::Safe,
-                                         format!("{} 应用的缓存文件，可安全删除", app_name))
-                                    } else {
-                                        (true, String::new(), Recommend::Caution,
-                                         format!("{} 应用的缓存，删除后可能需重新配置", app_name))
-                                    };
-                                    items.push(ScanItem {
-                                        path: cache_path.to_string_lossy().to_string(),
-                                        size_bytes: size,
-                                        category: format!("{} 缓存", app_name),
-                                        selected: false,
-                                        deletable,
-                                        undeletable_reason: reason,
-                                        batch_paths: Vec::new(),
-                                        recommend,
-                                        description: desc,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 补充扫描 C:\Program Files\ 和 C:\Program Files (x86)\ 下的 logs/temp/cache 子目录
-        // 这些目录需要管理员权限删除，标记为 Caution
-        let program_files_dirs = [
-            PathBuf::from(r"C:\Program Files"),
-            PathBuf::from(r"C:\Program Files (x86)"),
-        ];
-        let pf_cache_names = ["logs", "log", "temp", "tmp", "Cache", "cache"];
-
-        for base in &program_files_dirs {
-            if !base.is_dir() {
-                continue;
-            }
-            if let Ok(app_entries) = std::fs::read_dir(base) {
-                for app_entry in app_entries.flatten() {
-                    let app_dir = app_entry.path();
-                    if !app_dir.is_dir() {
-                        continue;
-                    }
-                    let app_name = app_entry.file_name().to_string_lossy().to_string();
-
-                    // 跳过系统目录
-                    let dir_lower = app_name.to_lowercase();
-                    if dir_lower.starts_with("windows") || dir_lower.starts_with("microsoft") {
-                        continue;
-                    }
-
-                    if let Ok(sub_entries) = std::fs::read_dir(&app_dir) {
-                        for sub in sub_entries.flatten() {
-                            let sub_name = sub.file_name().to_string_lossy().to_string();
-                            if pf_cache_names.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
-                                let cache_path = sub.path();
-                                let size = dir_size(&cache_path);
-                                if size > 1024 * 1024 { // 只显示 >1MB 的目录
-                                    items.push(ScanItem {
-                                        path: cache_path.to_string_lossy().to_string(),
-                                        size_bytes: size,
-                                        category: format!("{} 日志/缓存", app_name),
-                                        selected: false,
-                                        deletable: false, // Program Files 需要管理员权限
-                                        undeletable_reason: "需要管理员权限删除".to_string(),
-                                        batch_paths: Vec::new(),
-                                        recommend: Recommend::Caution,
-                                        description: format!(
-                                            "{} 应用的日志/缓存目录（位于 Program Files，需管理员权限）",
-                                            app_name
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let pf_dirs = collect_program_files_dirs();
 
         crate::logger::info(&format!(
-            "App缓存扫描完成: {} 项, {}",
-            items.len(),
-            super::format_size(items.iter().map(|i| i.size_bytes).sum())
+            "App缓存并行扫描开始: AppData 目录 2 个, Program Files 目录 {} 个 (磁盘配置: {})",
+            pf_dirs.len(),
+            if should_scan_all_disks() { "全部磁盘" } else { "仅 C 盘" }
         ));
 
+        // 并行扫描：%LOCALAPPDATA%、%APPDATA%、Program Files 各一个线程
+        // 使用 std::thread::scope 确保线程安全，无需 Arc/Mutex
+        let (local_items, roaming_items, pf_items) = std::thread::scope(|s| {
+            let h_local = s.spawn(|| scan_user_appdata_cache(&local_appdata));
+            let h_roaming = s.spawn(|| scan_user_appdata_cache(&appdata));
+
+            // Program Files 多目录顺序扫描（单线程，因为通常只有 2 个目录）
+            let h_pf = s.spawn(|| {
+                let mut all_pf_items = Vec::new();
+                for dir in &pf_dirs {
+                    let part = scan_program_files_cache_dir(dir);
+                    all_pf_items.extend(part);
+                }
+                all_pf_items
+            });
+
+            (
+                h_local.join().unwrap_or_default(),
+                h_roaming.join().unwrap_or_default(),
+                h_pf.join().unwrap_or_default(),
+            )
+        });
+
+        let mut items = local_items;
+        items.extend(roaming_items);
+        items.extend(pf_items);
+
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
+        crate::logger::info(&format!(
+            "App缓存扫描完成: {} 项, {}, 耗时 {}ms",
+            items.len(),
+            super::format_size(total_size),
+            start.elapsed().as_millis()
+        ));
+
         ScanResult {
             items,
             total_size,
@@ -758,11 +878,62 @@ impl WindowsAppDataScanner {
     }
 }
 
+/// App 数据扫描时跳过的系统目录
+const APPDATA_SKIP_DIRS: &[&str] = &[
+    "Microsoft", "Packages", "ConnectedDevicesPlatform", "Temp",
+    "CrashDumps", "D3DSCache", "DXCache", "NVIDIA", "AMD",
+    "IconCache.db", "cache", "Cache",
+];
+
+/// 扫描 AppData 目录下的应用数据（%LOCALAPPDATA% 或 %APPDATA%）
+fn scan_user_appdata_data(base: &Path) -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    if !base.is_dir() {
+        return items;
+    }
+    let entries = match std::fs::read_dir(base) {
+        Ok(e) => e,
+        Err(_) => return items,
+    };
+
+    for entry in entries.flatten() {
+        let app_dir = entry.path();
+        if !app_dir.is_dir() {
+            continue;
+        }
+        let app_name = entry.file_name().to_string_lossy().to_string();
+
+        // 跳过系统目录
+        if APPDATA_SKIP_DIRS.iter().any(|&s| app_name.eq_ignore_ascii_case(s)) {
+            continue;
+        }
+
+        let size = dir_size(&app_dir);
+        if size > 10 * 1024 * 1024 {
+            // > 10MB
+            items.push(ScanItem {
+                path: app_dir.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: format!("{} 数据", app_name),
+                selected: false,
+                deletable: false, // App 数据默认不可删除（高风险）
+                undeletable_reason: "应用数据删除可能导致应用配置丢失，请确认后手动删除".to_string(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Advanced,
+                description: format!(
+                    "{} 应用的本地数据目录。\n⚠️ 删除可能导致应用配置、登录状态丢失，建议先备份。",
+                    app_name
+                ),
+            });
+        }
+    }
+    items
+}
+
 impl Scanner for WindowsAppDataScanner {
     fn scan(&self) -> ScanResult {
         let start = std::time::Instant::now();
         let home = home_dir();
-        let mut items = Vec::new();
 
         let local_appdata = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
@@ -771,56 +942,27 @@ impl Scanner for WindowsAppDataScanner {
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join("AppData/Roaming"));
 
-        // 系统保护目录（不扫描）
-        let skip_dirs = [
-            "Microsoft", "Packages", "ConnectedDevicesPlatform", "Temp",
-            "CrashDumps", "D3DSCache", "DXCache", "NVIDIA", "AMD",
-            "IconCache.db", "cache", "Cache",
-        ];
+        crate::logger::info("App数据并行扫描开始");
 
-        for base in [&local_appdata, &appdata] {
-            if !base.is_dir() {
-                continue;
-            }
-            if let Ok(entries) = std::fs::read_dir(base) {
-                for entry in entries.flatten() {
-                    let app_dir = entry.path();
-                    if !app_dir.is_dir() {
-                        continue;
-                    }
-                    let app_name = entry.file_name().to_string_lossy().to_string();
+        // 并行扫描 %LOCALAPPDATA% 和 %APPDATA%
+        let (local_items, roaming_items) = std::thread::scope(|s| {
+            let h_local = s.spawn(|| scan_user_appdata_data(&local_appdata));
+            let h_roaming = s.spawn(|| scan_user_appdata_data(&appdata));
+            (
+                h_local.join().unwrap_or_default(),
+                h_roaming.join().unwrap_or_default(),
+            )
+        });
 
-                    // 跳过系统目录
-                    if skip_dirs.iter().any(|&s| app_name.eq_ignore_ascii_case(s)) {
-                        continue;
-                    }
-
-                    let size = dir_size(&app_dir);
-                    if size > 10 * 1024 * 1024 { // > 10MB
-                        items.push(ScanItem {
-                            path: app_dir.to_string_lossy().to_string(),
-                            size_bytes: size,
-                            category: format!("{} 数据", app_name),
-                            selected: false,
-                            deletable: false, // App 数据默认不可删除（高风险）
-                            undeletable_reason: "应用数据删除可能导致应用配置丢失，请确认后手动删除".to_string(),
-                            batch_paths: Vec::new(),
-                            recommend: Recommend::Advanced,
-                            description: format!(
-                                "{} 应用的本地数据目录。\n⚠️ 删除可能导致应用配置、登录状态丢失，建议先备份。",
-                                app_name
-                            ),
-                        });
-                    }
-                }
-            }
-        }
+        let mut items = local_items;
+        items.extend(roaming_items);
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         crate::logger::info(&format!(
-            "App数据扫描完成: {} 项, {}",
+            "App数据扫描完成: {} 项, {}, 耗时 {}ms",
             items.len(),
-            super::format_size(total_size)
+            super::format_size(total_size),
+            start.elapsed().as_millis()
         ));
         ScanResult {
             items,
@@ -1246,51 +1388,19 @@ fn parse_command(cmd: &str) -> (String, Vec<String>) {
     )
 }
 
-/// 卸载后清理残留文件
-///
-/// 扫描 %APPDATA% 和 %LOCALAPPDATA% 下与应用名匹配的残留目录
-pub fn clean_app_residual(app_name: &str) -> Vec<(String, u64, bool)> {
-    let home = home_dir();
-    let mut residuals = Vec::new();
-
-    let local_appdata = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join("AppData/Local"));
-    let appdata = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join("AppData/Roaming"));
-
-    for base in [&local_appdata, &appdata] {
-        if !base.is_dir() {
-            continue;
-        }
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let dir_name = entry.file_name().to_string_lossy().to_string();
-                // 部分名称匹配（类似 macOS 的 App 残留检测）
-                if dir_name.to_lowercase().contains(&app_name.to_lowercase()) {
-                    let path = entry.path();
-                    let size = dir_size(&path);
-                    if size > 0 {
-                        let success = std::fs::remove_dir_all(&path).is_ok();
-                        residuals.push((path.to_string_lossy().to_string(), size, success));
-                    }
-                }
-            }
-        }
-    }
-
-    residuals
-}
-
 // =========================================================================
-//  干净卸载：注册表残留 + 环境变量残留清理
+//  干净卸载：残留扫描 + 用户选择的清理
 //
-//  完整的卸载流程：
-//  1. 运行应用自带的卸载程序（uninstall_app）
-//  2. 扫描注册表残留（HKCU\SOFTWARE\<AppName> 等）
-//  3. 扫描环境变量残留（PATH 条目 + JAVA_HOME 等应用专属变量）
-//  4. 清理文件系统残留（%APPDATA%\<AppName> 等）
+//  设计原则（用户选择权）：
+//  - clean_uninstall 只运行卸载程序 + 扫描残留，不自动清理任何残留
+//  - 所有残留信息返回给调用方，由 UI 呈现给用户
+//  - 用户确认后才调用 clean_all_residuals 或逐项删除函数
+//  - 永远不替用户做选择
+//
+//  残留类型：
+//  1. 注册表残留（HKCU\SOFTWARE\<AppName> 等）
+//  2. 环境变量残留（PATH 条目 + JAVA_HOME 等应用专属变量）
+//  3. 文件系统残留（%APPDATA%\<AppName> 等）
 // =========================================================================
 
 /// 注册表残留项
@@ -1324,6 +1434,19 @@ pub struct EnvVarResidual {
     pub reason: String,
 }
 
+/// 文件系统残留项
+#[derive(Debug, Clone)]
+pub struct FilesystemResidual {
+    /// 残留目录路径
+    pub path: String,
+    /// 目录大小（字节）
+    pub size: u64,
+    /// 是否可删除
+    pub deletable: bool,
+    /// 不可删除的原因
+    pub reason: String,
+}
+
 /// 干净卸载残留扫描结果
 #[derive(Debug, Clone)]
 pub struct UninstallResidual {
@@ -1331,8 +1454,8 @@ pub struct UninstallResidual {
     pub registry: Vec<RegistryResidual>,
     /// 环境变量残留
     pub env_vars: Vec<EnvVarResidual>,
-    /// 文件系统残留: (路径, 大小, 是否删除成功)
-    pub filesystem: Vec<(String, u64, bool)>,
+    /// 文件系统残留
+    pub filesystem: Vec<FilesystemResidual>,
 }
 
 impl UninstallResidual {
@@ -1342,6 +1465,74 @@ impl UninstallResidual {
 
     pub fn total_count(&self) -> usize {
         self.registry.len() + self.env_vars.len() + self.filesystem.len()
+    }
+
+    /// 可删除的残留项数量
+    pub fn deletable_count(&self) -> usize {
+        self.registry.iter().filter(|r| r.deletable).count()
+            + self.env_vars.iter().filter(|e| e.deletable).count()
+            + self.filesystem.iter().filter(|f| f.deletable).count()
+    }
+}
+
+/// 扫描文件系统残留（只扫描，不删除）
+///
+/// 在 %APPDATA% 和 %LOCALAPPDATA% 下查找与应用名匹配的残留目录。
+/// 所有找到的目录都标记为可删除（用户目录下无需管理员权限）。
+pub fn scan_filesystem_residual(app_name: &str) -> Vec<FilesystemResidual> {
+    let home = home_dir();
+    let mut residuals = Vec::new();
+
+    let local_appdata = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Local"));
+    let appdata = std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Roaming"));
+
+    let name_lower = app_name.to_lowercase();
+    if name_lower.is_empty() {
+        return residuals;
+    }
+
+    for base in [&local_appdata, &appdata] {
+        if !base.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                // 部分名称匹配（类似 macOS 的 App 残留检测）
+                if dir_name.to_lowercase().contains(&name_lower) {
+                    let path = entry.path();
+                    let size = dir_size(&path);
+                    if size > 0 {
+                        residuals.push(FilesystemResidual {
+                            path: path.to_string_lossy().to_string(),
+                            size,
+                            deletable: true,
+                            reason: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    residuals
+}
+
+/// 删除单个文件系统残留目录
+///
+/// 返回 (是否成功, 消息)
+pub fn delete_filesystem_residual(path: &str) -> (bool, String) {
+    let p = Path::new(path);
+    if !p.exists() {
+        return (true, format!("路径已不存在: {}", path));
+    }
+    match std::fs::remove_dir_all(p) {
+        Ok(_) => (true, format!("已删除: {}", path)),
+        Err(e) => (false, format!("删除失败 {}: {}", path, e)),
     }
 }
 
@@ -1676,15 +1867,19 @@ fn broadcast_env_change() {
         .output();
 }
 
-/// 执行干净卸载
+/// 执行干净卸载（只卸载 + 扫描残留，不自动清理）
 ///
 /// 完整流程：
 /// 1. 运行应用自带的卸载程序
-/// 2. 扫描注册表残留并清理
-/// 3. 扫描环境变量残留并清理
-/// 4. 清理文件系统残留
+/// 2. 扫描注册表残留（不删除）
+/// 3. 扫描环境变量残留（不删除）
+/// 4. 扫描文件系统残留（不删除）
 ///
-/// 返回 (卸载是否成功, 详细信息, 残留清理结果)
+/// **用户选择权**：本函数只扫描残留，不自动清理。
+/// 残留信息返回给调用方，由 UI 呈现给用户，
+/// 用户确认后调用 `clean_all_residuals` 执行清理。
+///
+/// 返回 (卸载是否成功, 详细信息, 残留扫描结果)
 pub fn clean_uninstall(
     uninstall_path: &str,
     app_name: &str,
@@ -1715,33 +1910,78 @@ pub fn clean_uninstall(
     // 无论卸载程序是否成功，都扫描残留
     // （有些卸载程序会失败但仍然删除了大部分文件）
 
-    // 2. 扫描注册表残留
+    // 2. 扫描注册表残留（只扫描，不删除）
     crate::logger::info("步骤 2/4: 扫描注册表残留");
     residual.registry = scan_registry_residual(app_name);
     let reg_count = residual.registry.len();
     if reg_count > 0 {
-        crate::logger::info(&format!("发现 {} 个注册表残留项", reg_count));
+        crate::logger::info(&format!(
+            "发现 {} 个注册表残留项 (可删除 {} 个, 需管理员 {} 个)",
+            reg_count,
+            residual.registry.iter().filter(|r| r.deletable).count(),
+            residual.registry.iter().filter(|r| !r.deletable).count()
+        ));
     }
 
-    // 3. 扫描环境变量残留
+    // 3. 扫描环境变量残留（只扫描，不删除）
     crate::logger::info("步骤 3/4: 扫描环境变量残留");
     residual.env_vars = scan_env_var_residual(app_name, install_path);
     let env_count = residual.env_vars.len();
     if env_count > 0 {
-        crate::logger::info(&format!("发现 {} 个环境变量残留项", env_count));
+        crate::logger::info(&format!(
+            "发现 {} 个环境变量残留项 (可删除 {} 个, 需管理员 {} 个)",
+            env_count,
+            residual.env_vars.iter().filter(|e| e.deletable).count(),
+            residual.env_vars.iter().filter(|e| !e.deletable).count()
+        ));
     }
 
-    // 4. 清理文件系统残留
-    crate::logger::info("步骤 4/4: 清理文件系统残留");
-    residual.filesystem = clean_app_residual(app_name);
-    let fs_count = residual.filesystem.iter().filter(|(_, _, ok)| *ok).count();
+    // 4. 扫描文件系统残留（只扫描，不删除）
+    crate::logger::info("步骤 4/4: 扫描文件系统残留");
+    residual.filesystem = scan_filesystem_residual(app_name);
+    let fs_count = residual.filesystem.len();
     if fs_count > 0 {
-        crate::logger::info(&format!("已清理 {} 个文件系统残留项", fs_count));
+        let fs_size: u64 = residual.filesystem.iter().map(|f| f.size).sum();
+        crate::logger::info(&format!(
+            "发现 {} 个文件系统残留项, 总计 {}",
+            fs_count,
+            super::format_size(fs_size)
+        ));
     }
 
-    // 5. 清理可删除的注册表残留
+    // 不自动清理！返回残留信息让用户决定
+    let summary = format!(
+        "{} | 残留扫描: 注册表 {} 项, 环境变量 {} 项, 文件 {} 项 (等待用户确认清理)",
+        uninstall_msg, reg_count, env_count, fs_count
+    );
+
+    crate::logger::info(&format!(
+        "干净卸载完成: 卸载={}, 残留 {} 项 (可删除 {} 项)",
+        if uninstall_ok { "成功" } else { "失败" },
+        residual.total_count(),
+        residual.deletable_count()
+    ));
+
+    (uninstall_ok, summary, residual)
+}
+
+/// 清理所有可删除的残留（用户确认后调用）
+///
+/// 遍历残留列表，删除所有标记为 deletable=true 的项目。
+/// 需要管理员权限的项（deletable=false）会被跳过。
+///
+/// 返回 (注册表已清理数, 环境变量已清理数, 文件系统已清理数)
+pub fn clean_all_residuals(residual: &UninstallResidual) -> (usize, usize, usize) {
+    crate::logger::info(&format!(
+        "开始清理残留: 注册表 {} 项, 环境变量 {} 项, 文件 {} 项",
+        residual.registry.len(),
+        residual.env_vars.len(),
+        residual.filesystem.len()
+    ));
+
+    // 1. 清理注册表残留
     let mut reg_cleaned = 0;
-    for reg in &residual.registry.clone() {
+    for reg in &residual.registry {
         if reg.deletable {
             crate::logger::info(&format!("删除注册表键: {}", reg.key_path));
             let (ok, msg) = delete_registry_residual(&reg.key_path);
@@ -1756,9 +1996,9 @@ pub fn clean_uninstall(
         }
     }
 
-    // 6. 清理可删除的环境变量残留
+    // 2. 清理环境变量残留
     let mut env_cleaned = 0;
-    for env in &residual.env_vars.clone() {
+    for env in &residual.env_vars {
         if env.deletable {
             crate::logger::info(&format!("清理环境变量: {}", env.var_name));
             let (ok, msg) = clean_env_var_residual(env);
@@ -1773,15 +2013,31 @@ pub fn clean_uninstall(
         }
     }
 
-    let summary = format!(
-        "{} | 残留清理: 注册表 {}/{} 项, 环境变量 {}/{} 项, 文件 {} 项",
-        uninstall_msg,
-        reg_cleaned, reg_count,
-        env_cleaned, env_count,
-        fs_count
-    );
+    // 3. 清理文件系统残留
+    let mut fs_cleaned = 0;
+    for fs in &residual.filesystem {
+        if fs.deletable {
+            crate::logger::info(&format!("删除文件系统残留: {} ({})", fs.path, super::format_size(fs.size)));
+            let (ok, msg) = delete_filesystem_residual(&fs.path);
+            if ok {
+                fs_cleaned += 1;
+                crate::logger::info(&format!("文件系统残留已删除: {}", msg));
+            } else {
+                crate::logger::warn(&format!("文件系统残留删除失败: {}", msg));
+            }
+        } else {
+            crate::logger::warn(&format!("跳过文件系统残留（{}）: {}", fs.reason, fs.path));
+        }
+    }
 
-    (uninstall_ok, summary, residual)
+    crate::logger::info(&format!(
+        "残留清理完成: 注册表 {}/{} 项, 环境变量 {}/{} 项, 文件 {}/{} 项",
+        reg_cleaned, residual.registry.len(),
+        env_cleaned, residual.env_vars.len(),
+        fs_cleaned, residual.filesystem.len()
+    ));
+
+    (reg_cleaned, env_cleaned, fs_cleaned)
 }
 
 #[cfg(test)]
@@ -2059,10 +2315,16 @@ mod tests {
                 deletable: true,
                 reason: String::new(),
             }],
-            filesystem: vec![("C:\\Test".to_string(), 1024, true)],
+            filesystem: vec![FilesystemResidual {
+                path: "C:\\Test".to_string(),
+                size: 1024,
+                deletable: true,
+                reason: String::new(),
+            }],
         };
         assert!(!residual.is_empty());
         assert_eq!(residual.total_count(), 3);
+        assert_eq!(residual.deletable_count(), 3);
     }
 
     #[test]

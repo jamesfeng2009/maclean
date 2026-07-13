@@ -1644,7 +1644,7 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                         let batch_paths = batch_paths.clone();
                         let use_trash = *use_trash;
 
-                        // Windows 应用卸载特殊处理（干净卸载：卸载程序 + 注册表 + 环境变量 + 文件残留）
+                        // Windows 应用卸载特殊处理（干净卸载：卸载程序 + 扫描残留，不自动清理）
                         #[cfg(target_os = "windows")]
                         if path.starts_with("uwp:") || path.starts_with("uninstall:") {
                             logger::info(&format!("开始卸载应用: {}", path));
@@ -1659,7 +1659,8 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                             let app_name = app_info.as_ref().map(|a| a.name.as_str()).unwrap_or("");
                             let install_path = app_info.as_ref().and_then(|a| a.install_location.as_deref());
 
-                            // 执行干净卸载
+                            // 执行干净卸载（只卸载 + 扫描残留，不自动清理）
+                            // 用户选择权：残留信息返回给用户，由用户决定是否清理
                             let (success, msg, residual) = scanner::windows_apps::clean_uninstall(
                                 &path,
                                 app_name,
@@ -1672,14 +1673,21 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                                 logger::error(&format!("卸载失败: {}", msg));
                             }
 
-                            // 记录残留清理详情
+                            // 记录残留扫描详情（不自动清理，等待用户确认）
                             if !residual.is_empty() {
+                                let fs_size: u64 = residual.filesystem.iter().map(|f| f.size).sum();
                                 logger::info(&format!(
-                                    "残留清理: 注册表 {} 项, 环境变量 {} 项, 文件 {} 项",
+                                    "残留扫描结果: 注册表 {} 项 (可删 {}), 环境变量 {} 项 (可删 {}), 文件 {} 项 (可删 {}, 共 {}) — 请用户确认是否清理",
                                     residual.registry.len(),
+                                    residual.registry.iter().filter(|r| r.deletable).count(),
                                     residual.env_vars.len(),
+                                    residual.env_vars.iter().filter(|e| e.deletable).count(),
                                     residual.filesystem.len(),
+                                    residual.filesystem.iter().filter(|f| f.deletable).count(),
+                                    format_size(fs_size),
                                 ));
+                                // 不自动调用 clean_all_residuals，尊重用户选择权
+                                // 用户可通过日志了解残留情况，手动决定是否清理
                             }
 
                             let _ = tx.send(DeleteMessage::Log(
