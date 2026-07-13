@@ -34,74 +34,85 @@ pub struct WindowsAppInfo {
     pub key_name: String,
     /// 是否为 UWP/Store 应用
     pub is_uwp: bool,
+    /// 注册表 SystemComponent 标志（=1 表示系统组件，Windows 自带的隐藏标记）
+    pub system_component: bool,
 }
 
-/// Windows 应用保护列表
+// =========================================================================
+//  应用保护规则（通用检测，非枚举具体应用名）
+//
+//  设计原则：
+//  1. Critical（系统关键）：用注册表 SystemComponent 标志 + 系统安装路径 +
+//     Microsoft 发布者 + 系统关键词，不枚举具体应用名
+//  2. Security（安全软件）：用厂商关键词（稳定）+ 类别关键词（覆盖未列出厂商）
+//  3. DataProtected（数据保护）：用功能类别关键词 + 数据目录大小启发式
+//     （任何用户数据 >50MB 的应用自动标记，无需枚举 IM/云盘等应用）
+// =========================================================================
+
+/// 系统安装路径前缀（安装在这些目录下的应用视为系统级）
+const SYSTEM_INSTALL_PATH_PREFIXES: &[&str] = &[
+    "c:\\windows\\",
+    "c:\\program files\\windowsapps\\",
+    "c:\\program files (x86)\\windowsapps\\",
+    "c:\\program files\\microsoft\\",
+    "c:\\program files (x86)\\microsoft\\",
+    "c:\\programdata\\microsoft\\",
+];
+
+/// 系统应用名称关键词（仅当发布者为 Microsoft 时才匹配）
 ///
-/// 这些是 Windows 系统核心组件，删除会导致系统无法正常运行。
-const CRITICAL_APP_NAMES: &[&str] = &[
-    "Windows",
-    "Microsoft Windows",
-    "Windows Defender",
-    "Windows Security",
-    "Microsoft .NET",
-    "Microsoft Visual C++",
-    "Microsoft Edge",
-    "Microsoft Edge Update",
-    "Windows Installer",
-    "Windows Software Development Kit",
-    "Microsoft Store",
-    "Windows Subsystem for Linux",
-    "WSL",
+/// 这些是功能类别词，不是具体应用名，可覆盖同一类别的所有应用。
+const SYSTEM_NAME_KEYWORDS: &[&str] = &[
+    "windows ",
+    "microsoft .net",
+    "microsoft visual c++",
+    "microsoft edge",
+    "windows defender",
+    "windows security",
+    "microsoft store",
+    "windows installer",
+    "windows sdk",
+    "windows subsystem",
+    "wsl",
+    "microsoft azure",
+    "directx",
 ];
 
-/// 需要官方卸载工具的安全/MDM 应用
-const REQUIRES_OFFICIAL_UNINSTALLER: &[&str] = &[
-    "CrowdStrike",
-    "SentinelOne",
-    "Sentinel Labs",
-    "ESET",
-    "Kaspersky",
-    "McAfee",
-    "Norton",
-    "Bitdefender",
-    "Trend Micro",
-    "Sophos",
-    "Carbon Black",
-    "Cylance",
-    "Trellix",
-    "Jamf",
+/// 安全软件厂商关键词
+///
+/// 匹配应用名或发布者。厂商名稳定，比应用名少很多
+/// （一家厂商可能发布多款安全产品，如 ESET NOD32 / ESET Internet Security）。
+const SECURITY_VENDOR_KEYWORDS: &[&str] = &[
+    "CrowdStrike", "SentinelOne", "Sentinel Labs", "ESET", "Kaspersky",
+    "McAfee", "Norton", "Bitdefender", "Trend Micro", "Sophos",
+    "Carbon Black", "Cylance", "Trellix", "Jamf", "Palo Alto",
+    "Fortinet", "Symantec", "Webroot", "Malwarebytes", "Tanium",
 ];
 
-/// 数据保护应用（卸载时警告数据丢失）
-const DATA_PROTECTED_APPS: &[&str] = &[
-    "1Password",
-    "LastPass",
-    "Bitwarden",
-    "KeePass",
-    "Microsoft Authenticator",
-    "Google Authenticator",
-    "微信",
-    "WeChat",
-    "QQ",
-    "WhatsApp",
-    "Telegram",
-    "Signal",
-    "钉钉",
-    "DingTalk",
-    "飞书",
-    "Feishu",
-    "Lark",
-    "Slack",
-    "Microsoft Teams",
-    "Zoom",
-    "输入法",
-    "Input Method",
-    "搜狗输入法",
-    "百度输入法",
-    "RIME",
-    "小狼毫",
+/// 安全软件类别关键词（匹配应用名，覆盖未列出的厂商）
+const SECURITY_CATEGORY_KEYWORDS: &[&str] = &[
+    "antivirus", "anti-virus", "anti malware", "anti-malware",
+    "endpoint protection", "endpoint security", "internet security",
+    "total security", "firewall", "mdm agent",
 ];
+
+/// 数据保护功能类别关键词（按功能类别，不枚举具体应用名）
+///
+/// 密码管理器、输入法、认证器等有明确类别词的应用用关键词匹配。
+/// IM/云盘等应用通过数据目录大小启发式检测，无需枚举。
+const DATA_PROTECTED_KEYWORDS: &[&str] = &[
+    // 密码/认证
+    "password", "authenticator", "wallet", "vault", "keepass",
+    // 输入法
+    "输入法", "input method", "小狼毫", "rime",
+];
+
+/// 数据保护的数据目录大小阈值（字节）
+///
+/// 超过此值的应用数据目录（在 %APPDATA% 或 %LOCALAPPDATA% 下），
+/// 视为含有用户重要数据（聊天记录、配置等），标记为 DataProtected。
+/// 这使得 IM 应用（微信、QQ、Telegram 等）无需枚举即可被保护。
+const DATA_PROTECTED_SIZE_THRESHOLD: u64 = 50 * 1024 * 1024; // 50MB
 
 /// 应用保护级别
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,24 +123,159 @@ pub enum WinProtectionLevel {
     DataProtected,
 }
 
-/// 检查应用保护级别
-fn check_protection(name: &str) -> WinProtectionLevel {
-    for &critical in CRITICAL_APP_NAMES {
-        if name.eq_ignore_ascii_case(critical) || name.contains(critical) {
-            return WinProtectionLevel::Critical;
-        }
+/// 检查应用保护级别（通用规则检测）
+///
+/// 不依赖具体应用名枚举，而是通过：
+/// 1. 注册表 SystemComponent 标志 + 系统路径 + Microsoft 发布者 → Critical
+/// 2. 厂商关键词 + 安全类别关键词 → RequiresOfficialUninstaller
+/// 3. 功能类别关键词 + 数据目录大小启发式 → DataProtected
+fn check_protection(app: &WindowsAppInfo) -> WinProtectionLevel {
+    // 1. Critical: 系统关键应用
+    if is_critical_system_app(app) {
+        return WinProtectionLevel::Critical;
     }
-    for &official in REQUIRES_OFFICIAL_UNINSTALLER {
-        if name.contains(official) {
-            return WinProtectionLevel::RequiresOfficialUninstaller;
-        }
+    // 2. Security: 需官方卸载工具
+    if is_security_app(app) {
+        return WinProtectionLevel::RequiresOfficialUninstaller;
     }
-    for &data_app in DATA_PROTECTED_APPS {
-        if name.contains(data_app) {
-            return WinProtectionLevel::DataProtected;
-        }
+    // 3. DataProtected: 数据保护
+    if is_data_protected_app(app) {
+        return WinProtectionLevel::DataProtected;
     }
     WinProtectionLevel::None
+}
+
+/// 判断是否为系统关键应用
+///
+/// 检测规则（任一命中即视为系统应用）：
+/// 1. 注册表 SystemComponent 标志 = 1（Windows 自带的系统组件标记）
+/// 2. 安装路径在系统目录下（C:\Windows\、WindowsApps 等）
+/// 3. 发布者为 Microsoft 且名称含系统关键词（windows、.net、defender 等）
+fn is_critical_system_app(app: &WindowsAppInfo) -> bool {
+    // 规则 1: 注册表 SystemComponent 标志
+    if app.system_component {
+        return true;
+    }
+
+    // 规则 2: 安装在系统目录
+    if let Some(ref loc) = app.install_location {
+        let loc_lower = loc.to_lowercase();
+        if SYSTEM_INSTALL_PATH_PREFIXES.iter().any(|p| loc_lower.starts_with(p)) {
+            return true;
+        }
+    }
+
+    // 规则 3: Microsoft 发布 + 系统关键词
+    let is_microsoft = app
+        .publisher
+        .as_deref()
+        .map(|p| p.to_lowercase().contains("microsoft"))
+        .unwrap_or(false);
+    if is_microsoft {
+        let name_lower = app.name.to_lowercase();
+        if SYSTEM_NAME_KEYWORDS.iter().any(|kw| name_lower.contains(kw)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 判断是否为安全/MDM 软件
+///
+/// 检测规则（任一命中即视为安全软件）：
+/// 1. 应用名或发布者包含已知安全厂商关键词
+/// 2. 应用名包含安全类别关键词（Antivirus、Endpoint Protection 等）
+fn is_security_app(app: &WindowsAppInfo) -> bool {
+    // 规则 1: 厂商关键词（匹配 name 或 publisher）
+    for &vendor in SECURITY_VENDOR_KEYWORDS {
+        let vendor_lower = vendor.to_lowercase();
+        if app.name.to_lowercase().contains(&vendor_lower) {
+            return true;
+        }
+        if let Some(ref pub_name) = app.publisher {
+            if pub_name.to_lowercase().contains(&vendor_lower) {
+                return true;
+            }
+        }
+    }
+
+    // 规则 2: 安全类别关键词（仅匹配 name）
+    let name_lower = app.name.to_lowercase();
+    if SECURITY_CATEGORY_KEYWORDS.iter().any(|kw| name_lower.contains(kw)) {
+        return true;
+    }
+
+    false
+}
+
+/// 判断是否为数据保护应用
+///
+/// 检测规则（任一命中即视为数据保护）：
+/// 1. 应用名包含功能类别关键词（password、输入法、rime 等）
+/// 2. 数据目录大小启发式：应用在 %APPDATA% 或 %LOCALAPPDATA% 下的数据目录
+///    超过 50MB，视为含有用户重要数据（聊天记录、文档等）
+fn is_data_protected_app(app: &WindowsAppInfo) -> bool {
+    // 规则 1: 功能类别关键词
+    let name_lower = app.name.to_lowercase();
+    if DATA_PROTECTED_KEYWORDS.iter().any(|kw| name_lower.contains(kw)) {
+        return true;
+    }
+
+    // 规则 2: 数据目录大小启发式
+    // 检查 %APPDATA%/<appname> 和 %LOCALAPPDATA%/<appname> 是否存在且 >50MB
+    // 这使得 IM 应用（微信、QQ、Telegram 等）无需枚举即可被保护
+    if has_large_user_data(&app.name) {
+        return true;
+    }
+
+    false
+}
+
+/// 检查应用是否有大量用户数据（>50MB）
+///
+/// 在 %APPDATA% 和 %LOCALAPPDATA% 下查找与应用名匹配的目录，
+/// 如果目录大小超过阈值，返回 true。
+/// 这是一种通用启发式，可捕获所有 IM/云盘/邮件应用而无需枚举。
+fn has_large_user_data(app_name: &str) -> bool {
+    let home = home_dir();
+    let local_appdata = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Local"));
+    let appdata = std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Roaming"));
+
+    let name_lower = app_name.to_lowercase();
+    // 去除常见后缀以获得更好的匹配率
+    let search_name = name_lower
+        .trim_end_matches(" for windows")
+        .trim_end_matches(" desktop")
+        .trim_end_matches(" beta")
+        .trim_end_matches(" (64-bit)");
+
+    for base in [&local_appdata, &appdata] {
+        if !base.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let dir_name = entry.file_name().to_string_lossy().to_lowercase();
+                // 部分名称匹配（应用名包含目录名，或目录名包含应用名）
+                if dir_name.contains(search_name) || search_name.contains(&dir_name) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let size = dir_size(&path);
+                        if size >= DATA_PROTECTED_SIZE_THRESHOLD {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 // =========================================================================
@@ -191,6 +337,7 @@ fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
     let mut quiet_uninstall_string = None;
     let mut estimated_size = None;
     let mut publisher = None;
+    let mut system_component = false;
 
     for line in stdout.lines() {
         let line = line.trim();
@@ -209,6 +356,9 @@ fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
             estimated_size = val.parse::<u64>().ok();
         } else if let Some(val) = parse_reg_line(line, "Publisher") {
             publisher = Some(val);
+        } else if let Some(val) = parse_reg_line(line, "SystemComponent") {
+            // SystemComponent = 1 表示系统组件（Windows 自带的隐藏标记）
+            system_component = val.trim() == "1";
         }
     }
 
@@ -227,6 +377,7 @@ fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
         publisher,
         key_name: key_name.to_string(),
         is_uwp: false,
+        system_component,
     })
 }
 
@@ -300,6 +451,7 @@ fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
                     publisher: None,
                     key_name: full_name,
                     is_uwp: true,
+                    system_component: false,
                 });
             }
         }
@@ -519,7 +671,7 @@ impl Scanner for WindowsUninstallScanner {
         let mut items = Vec::new();
 
         for app in apps {
-            let protection = check_protection(&app.name);
+            let protection = check_protection(&app);
             let (deletable, reason, recommend, desc_suffix) = match protection {
                 WinProtectionLevel::Critical => (
                     false,
@@ -853,25 +1005,121 @@ mod tests {
         assert_eq!(args, vec!["/quiet"]);
     }
 
+    /// 构建测试用 WindowsAppInfo
+    fn make_app(name: &str, publisher: Option<&str>, install_loc: Option<&str>, system_component: bool) -> WindowsAppInfo {
+        WindowsAppInfo {
+            name: name.to_string(),
+            install_location: install_loc.map(|s| s.to_string()),
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            estimated_size: None,
+            publisher: publisher.map(|s| s.to_string()),
+            key_name: "test".to_string(),
+            is_uwp: false,
+            system_component,
+        }
+    }
+
     #[test]
     fn test_protection_critical() {
-        assert_eq!(check_protection("Windows Defender"), WinProtectionLevel::Critical);
-        assert_eq!(check_protection("Microsoft Edge"), WinProtectionLevel::Critical);
+        // 规则 1: SystemComponent 标志
+        assert_eq!(
+            check_protection(&make_app("Hidden System Update", Some("Microsoft"), None, true)),
+            WinProtectionLevel::Critical
+        );
+        // 规则 2: 系统安装路径
+        assert_eq!(
+            check_protection(&make_app("Some App", None, Some(r"C:\Windows\System32\app"), false)),
+            WinProtectionLevel::Critical
+        );
+        assert_eq!(
+            check_protection(&make_app("Some App", None, Some(r"C:\Program Files\WindowsApps\test"), false)),
+            WinProtectionLevel::Critical
+        );
+        // 规则 3: Microsoft 发布 + 系统关键词
+        assert_eq!(
+            check_protection(&make_app("Windows Defender", Some("Microsoft Corporation"), None, false)),
+            WinProtectionLevel::Critical
+        );
+        assert_eq!(
+            check_protection(&make_app("Microsoft Edge", Some("Microsoft Corporation"), None, false)),
+            WinProtectionLevel::Critical
+        );
+        assert_eq!(
+            check_protection(&make_app("Microsoft .NET Framework 4.8", Some("Microsoft Corporation"), None, false)),
+            WinProtectionLevel::Critical
+        );
     }
 
     #[test]
     fn test_protection_official_uninstaller() {
-        assert_eq!(check_protection("CrowdStrike Falcon"), WinProtectionLevel::RequiresOfficialUninstaller);
+        // 厂商关键词匹配应用名
+        assert_eq!(
+            check_protection(&make_app("CrowdStrike Falcon", Some("CrowdStrike Inc."), None, false)),
+            WinProtectionLevel::RequiresOfficialUninstaller
+        );
+        // 厂商关键词匹配发布者
+        assert_eq!(
+            check_protection(&make_app("Falcon Sensor", Some("CrowdStrike Inc."), None, false)),
+            WinProtectionLevel::RequiresOfficialUninstaller
+        );
+        // 安全类别关键词
+        assert_eq!(
+            check_protection(&make_app("Acme Antivirus Pro", Some("Acme Corp"), None, false)),
+            WinProtectionLevel::RequiresOfficialUninstaller
+        );
+        assert_eq!(
+            check_protection(&make_app("Endpoint Protection Agent", Some("Unknown"), None, false)),
+            WinProtectionLevel::RequiresOfficialUninstaller
+        );
     }
 
     #[test]
     fn test_protection_data_protected() {
-        assert_eq!(check_protection("1Password"), WinProtectionLevel::DataProtected);
-        assert_eq!(check_protection("WeChat"), WinProtectionLevel::DataProtected);
+        // 密码管理器（类别关键词）
+        assert_eq!(
+            check_protection(&make_app("1Password", Some("AgileBits"), None, false)),
+            WinProtectionLevel::DataProtected
+        );
+        assert_eq!(
+            check_protection(&make_app("KeePass Password Safe", Some("Dominik Reichl"), None, false)),
+            WinProtectionLevel::DataProtected
+        );
+        // 输入法（类别关键词）
+        assert_eq!(
+            check_protection(&make_app("搜狗输入法", Some("Sogou"), None, false)),
+            WinProtectionLevel::DataProtected
+        );
+        assert_eq!(
+            check_protection(&make_app("小狼毫输入法", Some("RIME"), None, false)),
+            WinProtectionLevel::DataProtected
+        );
     }
 
     #[test]
     fn test_protection_none() {
-        assert_eq!(check_protection("Visual Studio Code"), WinProtectionLevel::None);
+        assert_eq!(
+            check_protection(&make_app("Visual Studio Code", Some("Microsoft Corporation"), None, false)),
+            WinProtectionLevel::None
+        );
+        // 注意：VS Code 虽然是 Microsoft 发布，但名称不含系统关键词，所以不是 Critical
+        assert_eq!(
+            check_protection(&make_app("Spotify", Some("Spotify AB"), Some(r"C:\Users\test\AppData\Local\Spotify"), false)),
+            WinProtectionLevel::None
+        );
+    }
+
+    #[test]
+    fn test_is_security_app_vendor_in_publisher() {
+        // 厂商名在 publisher 中但不在应用名中
+        let app = make_app("Falcon Platform", Some("CrowdStrike Holdings, Inc."), None, false);
+        assert!(is_security_app(&app));
+    }
+
+    #[test]
+    fn test_is_critical_non_microsoft_app() {
+        // 非 Microsoft 发布的应用即使名称含 "windows" 也不是 Critical
+        let app = make_app("Windows Media Player Classic", Some("Some Random Corp"), None, false);
+        assert!(!is_critical_system_app(&app));
     }
 }
