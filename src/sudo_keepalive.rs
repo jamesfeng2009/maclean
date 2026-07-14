@@ -37,7 +37,9 @@ pub fn start_sudo_session(password: &str) -> Result<bool, String> {
 
     // 1. 验证密码并获取 sudo 票据
     // 先清除旧票据
-    let _ = std::process::Command::new("/usr/bin/sudo").arg("-k").output();
+    let _ = std::process::Command::new("/usr/bin/sudo")
+        .arg("-k")
+        .output();
 
     let mut child = std::process::Command::new("/usr/bin/sudo")
         .args(["-S", "-p", "", "-v"])
@@ -119,7 +121,9 @@ pub fn is_sudo_active() -> bool {
 pub fn end_sudo_session() {
     stop_keepalive_thread();
     // 清除 sudo 票据
-    let _ = std::process::Command::new("/usr/bin/sudo").arg("-k").output();
+    let _ = std::process::Command::new("/usr/bin/sudo")
+        .arg("-k")
+        .output();
 }
 
 /// 停止保活线程（内部函数）

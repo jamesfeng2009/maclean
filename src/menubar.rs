@@ -53,10 +53,38 @@ impl MenuBarHud {
 
         let mut items = Vec::new();
         add_title(&menu, &mut items);
-        add_action(&menu, &mut items, &mut self.action_map, "quick_scan", "⚡ 快速扫描", TrayAction::QuickScan);
-        add_action(&menu, &mut items, &mut self.action_map, "quick_clean", "🗑️ 一键清理 (安全项)", TrayAction::QuickClean);
-        add_action(&menu, &mut items, &mut self.action_map, "show_window", "📊 打开主窗口", TrayAction::ShowWindow);
-        add_action(&menu, &mut items, &mut self.action_map, "quit", "退出 Maclean", TrayAction::Quit);
+        add_action(
+            &menu,
+            &mut items,
+            &mut self.action_map,
+            "quick_scan",
+            "⚡ 快速扫描",
+            TrayAction::QuickScan,
+        );
+        add_action(
+            &menu,
+            &mut items,
+            &mut self.action_map,
+            "quick_clean",
+            "🗑️ 一键清理 (安全项)",
+            TrayAction::QuickClean,
+        );
+        add_action(
+            &menu,
+            &mut items,
+            &mut self.action_map,
+            "show_window",
+            "📊 打开主窗口",
+            TrayAction::ShowWindow,
+        );
+        add_action(
+            &menu,
+            &mut items,
+            &mut self.action_map,
+            "quit",
+            "退出 Maclean",
+            TrayAction::Quit,
+        );
 
         self._menu_items = items;
 
@@ -196,10 +224,10 @@ fn create_icon(used_pct: f32) -> Icon {
 
             if dist <= inner_radius {
                 let idx = ((y * size + x) * 4) as usize;
-                rgba[idx] = 255;     // R
+                rgba[idx] = 255; // R
                 rgba[idx + 1] = 255; // G
                 rgba[idx + 2] = 255; // B
-                // alpha 保持不变
+                                     // alpha 保持不变
             }
         }
     }

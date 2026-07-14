@@ -32,9 +32,7 @@ pub fn touch_id_supported() -> bool {
 /// 检查用户是否已录入指纹
 pub fn touch_id_enrolled() -> bool {
     // bioutil -c 检查当前用户的指纹数量（不需要 sudo）
-    let output = Command::new("/usr/bin/bioutil")
-        .args(["-c"])
-        .output();
+    let output = Command::new("/usr/bin/bioutil").args(["-c"]).output();
 
     if let Ok(out) = output {
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -54,9 +52,7 @@ pub fn touch_id_enrolled() -> bool {
     }
 
     // Fallback: 检查 bioutil -r 输出
-    let output = Command::new("/usr/bin/bioutil")
-        .args(["-r"])
-        .output();
+    let output = Command::new("/usr/bin/bioutil").args(["-r"]).output();
 
     if let Ok(out) = output {
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -165,16 +161,12 @@ pub fn enable_touch_id_with_password(password: &str) -> Result<bool, String> {
     // 2. 准备 sudo_local 内容到临时文件
     let tmp_path = "/tmp/maclean_sudo_local.tmp";
     let content = prepare_sudo_local_content();
-    std::fs::write(tmp_path, &content)
-        .map_err(|e| format!("无法写入临时文件: {}", e))?;
+    std::fs::write(tmp_path, &content).map_err(|e| format!("无法写入临时文件: {}", e))?;
 
     // 3. 使用 sudo -S 复制临时文件到 /etc/pam.d/sudo_local
     let script = format!(
         "cp \"{}\" \"{}\" && chmod 444 \"{}\" && rm -f \"{}\"",
-        tmp_path,
-        SUDO_LOCAL_PATH,
-        SUDO_LOCAL_PATH,
-        tmp_path
+        tmp_path, SUDO_LOCAL_PATH, SUDO_LOCAL_PATH, tmp_path
     );
 
     let mut child = Command::new("/usr/bin/sudo")

@@ -220,108 +220,246 @@ pub fn translate_description(desc: &str, lang_en: bool) -> String {
 /// 精确匹配的描述翻译
 fn exact_description_en(desc: &str) -> Option<&'static str> {
     match desc {
-        "Rust 编译产物，cargo build 会自动重新生成" => Some("Rust build artifacts, cargo build will regenerate"),
-        "Cargo 包下载缓存，删除后编译时需重新下载" => Some("Cargo package download cache, needs re-download after deletion"),
-        "Xcode 在线文档缓存，可安全删除" => Some("Xcode online documentation cache, safe to delete"),
-        "设备日志和崩溃报告，可安全删除" => Some("Device logs and crash reports, safe to delete"),
-        "Xcode 旧版离线文档，可能不再需要" => Some("Xcode legacy offline docs, may no longer be needed"),
-        "watchOS 设备调试符号，连接手表时会重新生成" => Some("watchOS device debug symbols, regenerated when watch is connected"),
+        "Rust 编译产物，cargo build 会自动重新生成" => {
+            Some("Rust build artifacts, cargo build will regenerate")
+        }
+        "Cargo 包下载缓存，删除后编译时需重新下载" => {
+            Some("Cargo package download cache, needs re-download after deletion")
+        }
+        "Xcode 在线文档缓存，可安全删除" => {
+            Some("Xcode online documentation cache, safe to delete")
+        }
+        "设备日志和崩溃报告，可安全删除" => {
+            Some("Device logs and crash reports, safe to delete")
+        }
+        "Xcode 旧版离线文档，可能不再需要" => {
+            Some("Xcode legacy offline docs, may no longer be needed")
+        }
+        "watchOS 设备调试符号，连接手表时会重新生成" => {
+            Some("watchOS device debug symbols, regenerated when watch is connected")
+        }
         "Apple Connect 日志，可安全删除" => Some("Apple Connect logs, safe to delete"),
-        "Node.js 依赖包，npm install 可恢复" => Some("Node.js dependencies, npm install can restore"),
-        "pnpm 全局存储，删除后需重新安装依赖" => Some("pnpm global store, needs reinstall after deletion"),
+        "Node.js 依赖包，npm install 可恢复" => {
+            Some("Node.js dependencies, npm install can restore")
+        }
+        "pnpm 全局存储，删除后需重新安装依赖" => {
+            Some("pnpm global store, needs reinstall after deletion")
+        }
         "npm 下载缓存，可安全删除" => Some("npm download cache, safe to delete"),
-        "Go 模块缓存，编译时需重新下载" => Some("Go module cache, needs re-download when compiling"),
-        "Homebrew 下载缓存，可安全删除" => Some("Homebrew download cache, safe to delete"),
-        "Homebrew 已下载的安装包，可安全删除" => Some("Homebrew downloaded packages, safe to delete"),
+        "Go 模块缓存，编译时需重新下载" => {
+            Some("Go module cache, needs re-download when compiling")
+        }
+        "Homebrew 下载缓存，可安全删除" => {
+            Some("Homebrew download cache, safe to delete")
+        }
+        "Homebrew 已下载的安装包，可安全删除" => {
+            Some("Homebrew downloaded packages, safe to delete")
+        }
         "pip 下载缓存，可安全删除" => Some("pip download cache, safe to delete"),
-        "JetBrains IDE 旧版本配置，已保留最新版" => Some("JetBrains IDE old version config, latest version retained"),
-        "JetBrains IDE 缓存，重启 IDE 会自动重建" => Some("JetBrains IDE cache, rebuilt on IDE restart"),
-        "Gradle 构建缓存，删除后编译时需重新下载依赖" => Some("Gradle build cache, needs re-download after deletion"),
-        "Gradle Wrapper 下载的版本，可安全删除会自动重新下载" => Some("Gradle Wrapper downloaded versions, safe to delete, auto re-downloads"),
-        "Maven 本地依赖仓库，删除后编译时需重新下载" => Some("Maven local dependency repo, needs re-download after deletion"),
-        "Java/Gradle 项目编译产物，gradle build 会自动重新生成" => Some("Java/Gradle build artifacts, gradle build will regenerate"),
-        "Conda 包缓存，删除后安装时需重新下载" => Some("Conda package cache, needs re-download after deletion"),
+        "JetBrains IDE 旧版本配置，已保留最新版" => {
+            Some("JetBrains IDE old version config, latest version retained")
+        }
+        "JetBrains IDE 缓存，重启 IDE 会自动重建" => {
+            Some("JetBrains IDE cache, rebuilt on IDE restart")
+        }
+        "Gradle 构建缓存，删除后编译时需重新下载依赖" => {
+            Some("Gradle build cache, needs re-download after deletion")
+        }
+        "Gradle Wrapper 下载的版本，可安全删除会自动重新下载" => {
+            Some("Gradle Wrapper downloaded versions, safe to delete, auto re-downloads")
+        }
+        "Maven 本地依赖仓库，删除后编译时需重新下载" => {
+            Some("Maven local dependency repo, needs re-download after deletion")
+        }
+        "Java/Gradle 项目编译产物，gradle build 会自动重新生成" => {
+            Some("Java/Gradle build artifacts, gradle build will regenerate")
+        }
+        "Conda 包缓存，删除后安装时需重新下载" => {
+            Some("Conda package cache, needs re-download after deletion")
+        }
         "Poetry 依赖缓存，可安全删除" => Some("Poetry dependency cache, safe to delete"),
-        "Python 字节码缓存，运行时自动重建" => Some("Python bytecode cache, auto-rebuilt at runtime"),
-        "Ruby Gem 缓存，删除后安装时需重新下载" => Some("Ruby Gem cache, needs re-download after deletion"),
+        "Python 字节码缓存，运行时自动重建" => {
+            Some("Python bytecode cache, auto-rebuilt at runtime")
+        }
+        "Ruby Gem 缓存，删除后安装时需重新下载" => {
+            Some("Ruby Gem cache, needs re-download after deletion")
+        }
         "Ruby Bundler 缓存，可安全删除" => Some("Ruby Bundler cache, safe to delete"),
-        "rbenv 安装的 Ruby 版本，请确认后删除" => Some("rbenv installed Ruby versions, confirm before deleting"),
-        "PHP Composer 下载缓存，可安全删除" => Some("PHP Composer download cache, safe to delete"),
-        "Dart/Flutter 包缓存，删除后需重新下载" => Some("Dart/Flutter package cache, needs re-download after deletion"),
-        "Swift Package Manager 缓存，可安全删除" => Some("Swift Package Manager cache, safe to delete"),
+        "rbenv 安装的 Ruby 版本，请确认后删除" => {
+            Some("rbenv installed Ruby versions, confirm before deleting")
+        }
+        "PHP Composer 下载缓存，可安全删除" => {
+            Some("PHP Composer download cache, safe to delete")
+        }
+        "Dart/Flutter 包缓存，删除后需重新下载" => {
+            Some("Dart/Flutter package cache, needs re-download after deletion")
+        }
+        "Swift Package Manager 缓存，可安全删除" => {
+            Some("Swift Package Manager cache, safe to delete")
+        }
         "CocoaPods 缓存，可安全删除" => Some("CocoaPods cache, safe to delete"),
         "CMake 缓存，可安全删除" => Some("CMake cache, safe to delete"),
-        "Android 模拟器系统镜像，删除后需重新下载" => Some("Android emulator system images, needs re-download after deletion"),
+        "Android 模拟器系统镜像，删除后需重新下载" => {
+            Some("Android emulator system images, needs re-download after deletion")
+        }
         "Yarn 包缓存，可安全删除" => Some("Yarn package cache, safe to delete"),
         "Deno 缓存，可安全删除" => Some("Deno cache, safe to delete"),
         "Bun 包缓存，可安全删除" => Some("Bun package cache, safe to delete"),
-        "前端构建产物，npm run build 会重新生成" => Some("Frontend build artifacts, npm run build will regenerate"),
+        "前端构建产物，npm run build 会重新生成" => {
+            Some("Frontend build artifacts, npm run build will regenerate")
+        }
         "Next.js 构建缓存，可安全删除" => Some("Next.js build cache, safe to delete"),
         "Nuxt.js 构建缓存，可安全删除" => Some("Nuxt.js build cache, safe to delete"),
         "Turborepo 缓存，可安全删除" => Some("Turborepo cache, safe to delete"),
         "SvelteKit 构建缓存，可安全删除" => Some("SvelteKit build cache, safe to delete"),
         "Astro 构建缓存，可安全删除" => Some("Astro build cache, safe to delete"),
         "Remix 构建缓存，可安全删除" => Some("Remix build cache, safe to delete"),
-        "Gradle 项目本地缓存，可安全删除" => Some("Gradle project local cache, safe to delete"),
-        "kubectl 缓存（discovery、mapping 等），删除后下次 kubectl 命令自动重建" => Some("kubectl cache (discovery, mapping, etc.), auto-rebuilt on next kubectl command"),
-        "kubectl HTTP 缓存，删除后自动重建" => Some("kubectl HTTP cache, auto-rebuilt after deletion"),
-        "Helm 仓库索引缓存，删除后执行 helm repo update 恢复" => Some("Helm repo index cache, run helm repo update to restore"),
+        "Gradle 项目本地缓存，可安全删除" => {
+            Some("Gradle project local cache, safe to delete")
+        }
+        "kubectl 缓存（discovery、mapping 等），删除后下次 kubectl 命令自动重建" => {
+            Some("kubectl cache (discovery, mapping, etc.), auto-rebuilt on next kubectl command")
+        }
+        "kubectl HTTP 缓存，删除后自动重建" => {
+            Some("kubectl HTTP cache, auto-rebuilt after deletion")
+        }
+        "Helm 仓库索引缓存，删除后执行 helm repo update 恢复" => {
+            Some("Helm repo index cache, run helm repo update to restore")
+        }
         "Helm 插件缓存，可安全删除" => Some("Helm plugin cache, safe to delete"),
-        "Docker BuildKit 构建缓存，删除后自动重建" => Some("Docker BuildKit build cache, auto-rebuilt after deletion"),
-        "Docker Desktop 虚拟机数据，删除前请先退出 Docker Desktop" => Some("Docker Desktop VM data, quit Docker Desktop before deleting"),
+        "Docker BuildKit 构建缓存，删除后自动重建" => {
+            Some("Docker BuildKit build cache, auto-rebuilt after deletion")
+        }
+        "Docker Desktop 虚拟机数据，删除前请先退出 Docker Desktop" => {
+            Some("Docker Desktop VM data, quit Docker Desktop before deleting")
+        }
         "Docker Desktop 缓存数据" => Some("Docker Desktop cache data"),
-        "HuggingFace datasets 临时缓存，可安全删除" => Some("HuggingFace datasets temp cache, safe to delete"),
-        "HuggingFace transformers 临时缓存，可安全删除" => Some("HuggingFace transformers temp cache, safe to delete"),
-        "PyTorch 缓存（含预训练权重），删除后需重新下载" => Some("PyTorch cache (includes pretrained weights), needs re-download after deletion"),
+        "HuggingFace datasets 临时缓存，可安全删除" => {
+            Some("HuggingFace datasets temp cache, safe to delete")
+        }
+        "HuggingFace transformers 临时缓存，可安全删除" => {
+            Some("HuggingFace transformers temp cache, safe to delete")
+        }
+        "PyTorch 缓存（含预训练权重），删除后需重新下载" => {
+            Some("PyTorch cache (includes pretrained weights), needs re-download after deletion")
+        }
         "llama.cpp 缓存，可安全删除" => Some("llama.cpp cache, safe to delete"),
         // === Windows 专属描述 ===
-        "Windows 临时文件目录，可安全删除" => Some("Windows temp files directory, safe to delete"),
-        "Windows Update 下载缓存，需停止 wuauserv 服务后清理" => Some("Windows Update download cache, stop wuauserv service before cleaning"),
-        "Windows 资源管理器缩略图缓存，删除后自动重建" => Some("Windows Explorer thumbnail cache, auto-rebuilt after deletion"),
-        "应用数据删除可能导致应用配置丢失，请确认后手动删除" => Some("App data deletion may cause configuration loss, confirm before manual deletion"),
+        "Windows 临时文件目录，可安全删除" => {
+            Some("Windows temp files directory, safe to delete")
+        }
+        "Windows Update 下载缓存，需停止 wuauserv 服务后清理" => {
+            Some("Windows Update download cache, stop wuauserv service before cleaning")
+        }
+        "Windows 资源管理器缩略图缓存，删除后自动重建" => {
+            Some("Windows Explorer thumbnail cache, auto-rebuilt after deletion")
+        }
+        "应用数据删除可能导致应用配置丢失，请确认后手动删除" => {
+            Some("App data deletion may cause configuration loss, confirm before manual deletion")
+        }
         "系统关键应用，禁止卸载" => Some("System critical app, uninstall blocked"),
-        "安全软件，请使用官方卸载工具" => Some("Security software, use official uninstaller"),
+        "安全软件，请使用官方卸载工具" => {
+            Some("Security software, use official uninstaller")
+        }
         "未知的卸载路径格式" => Some("Unknown uninstall path format"),
-        "Time Machine 本地快照，可安全删除" => Some("Time Machine local snapshots, safe to delete"),
-        "iOS 模拟器运行时，删除后需重新下载" => Some("iOS simulator runtime, needs re-download after deletion"),
-        "应用组缓存，删除后可能需重新配置" => Some("App group cache, may need reconfiguration after deletion"),
+        "Time Machine 本地快照，可安全删除" => {
+            Some("Time Machine local snapshots, safe to delete")
+        }
+        "iOS 模拟器运行时，删除后需重新下载" => {
+            Some("iOS simulator runtime, needs re-download after deletion")
+        }
+        "应用组缓存，删除后可能需重新配置" => {
+            Some("App group cache, may need reconfiguration after deletion")
+        }
         "系统日志文件，可安全删除" => Some("System log files, safe to delete"),
         "Safari 缓存文件，可安全清理" => Some("Safari cache files, safe to clean"),
-        "WebKit 网络缓存（被 Safari 等 App 共享），可安全清理" => Some("WebKit network cache (shared by Safari etc.), safe to clean"),
-        "刷新 DNS 缓存，修复网络解析问题" => Some("Flush DNS cache, fixes network resolution issues"),
-        "清理 QuickLook 缩略图缓存，修复预览问题" => Some("Clear QuickLook thumbnail cache, fixes preview issues"),
-        "重建 LaunchServices 数据库，修复\"打开方式\"菜单问题" => Some("Rebuild LaunchServices database, fixes \"Open With\" menu issues"),
-        "清理超过 30 天的应用保存状态" => Some("Clear app saved states older than 30 days"),
-        "清理 Gatekeeper 下载追踪记录" => Some("Clear Gatekeeper download tracking records"),
-        "释放非活跃内存，提升系统响应速度" => Some("Free inactive memory, improves system responsiveness"),
-        "重建 Spotlight 搜索索引，修复搜索不到文件的问题" => Some("Rebuild Spotlight search index, fixes files not found in search"),
+        "WebKit 网络缓存（被 Safari 等 App 共享），可安全清理" => {
+            Some("WebKit network cache (shared by Safari etc.), safe to clean")
+        }
+        "刷新 DNS 缓存，修复网络解析问题" => {
+            Some("Flush DNS cache, fixes network resolution issues")
+        }
+        "清理 QuickLook 缩略图缓存，修复预览问题" => {
+            Some("Clear QuickLook thumbnail cache, fixes preview issues")
+        }
+        "重建 LaunchServices 数据库，修复\"打开方式\"菜单问题" => {
+            Some("Rebuild LaunchServices database, fixes \"Open With\" menu issues")
+        }
+        "清理超过 30 天的应用保存状态" => {
+            Some("Clear app saved states older than 30 days")
+        }
+        "清理 Gatekeeper 下载追踪记录" => {
+            Some("Clear Gatekeeper download tracking records")
+        }
+        "释放非活跃内存，提升系统响应速度" => {
+            Some("Free inactive memory, improves system responsiveness")
+        }
+        "重建 Spotlight 搜索索引，修复搜索不到文件的问题" => {
+            Some("Rebuild Spotlight search index, fixes files not found in search")
+        }
         // === 注册表新增缓存描述 ===
-        "Carthage 依赖构建缓存，可安全删除" => Some("Carthage dependency build cache, safe to delete"),
-        ".NET NuGet 包缓存，删除后需重新还原" => Some(".NET NuGet package cache, needs restore after deletion"),
+        "Carthage 依赖构建缓存，可安全删除" => {
+            Some("Carthage dependency build cache, safe to delete")
+        }
+        ".NET NuGet 包缓存，删除后需重新还原" => {
+            Some(".NET NuGet package cache, needs restore after deletion")
+        }
         "Zig 编译缓存，可安全删除" => Some("Zig build cache, safe to delete"),
-        "Elixir Mix 构建缓存，删除后需重新编译" => Some("Elixir Mix build cache, needs recompile after deletion"),
-        "Elixir Hex 包缓存，可安全删除" => Some("Elixir Hex package cache, safe to delete"),
-        "Haskell Stack 编译缓存和工具链，删除后需重新安装" => Some("Haskell Stack build cache and toolchain, needs reinstall after deletion"),
-        "Nix 包管理器数据库，建议用 nix-collect-garbage 清理" => Some("Nix package manager database, use nix-collect-garbage to clean"),
+        "Elixir Mix 构建缓存，删除后需重新编译" => {
+            Some("Elixir Mix build cache, needs recompile after deletion")
+        }
+        "Elixir Hex 包缓存，可安全删除" => {
+            Some("Elixir Hex package cache, safe to delete")
+        }
+        "Haskell Stack 编译缓存和工具链，删除后需重新安装" => {
+            Some("Haskell Stack build cache and toolchain, needs reinstall after deletion")
+        }
+        "Nix 包管理器数据库，建议用 nix-collect-garbage 清理" => {
+            Some("Nix package manager database, use nix-collect-garbage to clean")
+        }
         "Crystal shards 缓存，可安全删除" => Some("Crystal shards cache, safe to delete"),
-        "Julia 包构件缓存，删除后需重新下载" => Some("Julia package artifacts cache, needs re-download after deletion"),
-        "Nimble 包缓存，删除后需重新下载" => Some("Nimble package cache, needs re-download after deletion"),
-        "LuaRocks 包缓存，删除后需重新安装" => Some("LuaRocks package cache, needs reinstall after deletion"),
+        "Julia 包构件缓存，删除后需重新下载" => {
+            Some("Julia package artifacts cache, needs re-download after deletion")
+        }
+        "Nimble 包缓存，删除后需重新下载" => {
+            Some("Nimble package cache, needs re-download after deletion")
+        }
+        "LuaRocks 包缓存，删除后需重新安装" => {
+            Some("LuaRocks package cache, needs reinstall after deletion")
+        }
         "R 语言包缓存，可安全删除" => Some("R language package cache, safe to delete"),
-        "Bazel 构建缓存，删除后需重新构建" => Some("Bazel build cache, needs rebuild after deletion"),
+        "Bazel 构建缓存，删除后需重新构建" => {
+            Some("Bazel build cache, needs rebuild after deletion")
+        }
         "Fastlane lane 缓存，可安全删除" => Some("Fastlane lane cache, safe to delete"),
-        "React Native 依赖缓存，可安全删除" => Some("React Native dependency cache, safe to delete"),
+        "React Native 依赖缓存，可安全删除" => {
+            Some("React Native dependency cache, safe to delete")
+        }
         "Expo CLI 缓存，可安全删除" => Some("Expo CLI cache, safe to delete"),
         "VSCode 编辑器缓存，可安全删除" => Some("VSCode editor cache, safe to delete"),
-        "VSCode 缓存的 V8 字节码，可安全删除" => Some("VSCode cached V8 bytecode, safe to delete"),
+        "VSCode 缓存的 V8 字节码，可安全删除" => {
+            Some("VSCode cached V8 bytecode, safe to delete")
+        }
         "Cursor 编辑器缓存，可安全删除" => Some("Cursor editor cache, safe to delete"),
-        "Postman API 工具缓存，可能包含请求历史" => Some("Postman API tool cache, may contain request history"),
-        "Unity 编辑器缓存，删除后首次打开项目会变慢" => Some("Unity editor cache, first project open will be slower after deletion"),
-        "Unreal Engine DerivedDataCache，删除后需重新编译着色器" => Some("Unreal Engine DerivedDataCache, needs shader recompile after deletion"),
+        "Postman API 工具缓存，可能包含请求历史" => {
+            Some("Postman API tool cache, may contain request history")
+        }
+        "Unity 编辑器缓存，删除后首次打开项目会变慢" => {
+            Some("Unity editor cache, first project open will be slower after deletion")
+        }
+        "Unreal Engine DerivedDataCache，删除后需重新编译着色器" => {
+            Some("Unreal Engine DerivedDataCache, needs shader recompile after deletion")
+        }
         "Godot 编辑器缓存，可安全删除" => Some("Godot editor cache, safe to delete"),
-        "Terraform 插件缓存，可安全删除" => Some("Terraform plugin cache, safe to delete"),
-        "Vagrant box 镜像，删除后需重新下载" => Some("Vagrant box images, needs re-download after deletion"),
-        "Electron 二进制缓存，可安全删除" => Some("Electron binary cache, safe to delete"),
+        "Terraform 插件缓存，可安全删除" => {
+            Some("Terraform plugin cache, safe to delete")
+        }
+        "Vagrant box 镜像，删除后需重新下载" => {
+            Some("Vagrant box images, needs re-download after deletion")
+        }
+        "Electron 二进制缓存，可安全删除" => {
+            Some("Electron binary cache, safe to delete")
+        }
         _ => None,
     }
 }
@@ -331,7 +469,10 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     // "项目 {} 的编译缓存，重新构建会自动恢复"
     if let Some(rest) = desc.strip_prefix("项目 ") {
         if let Some(name) = rest.strip_suffix(" 的编译缓存，重新构建会自动恢复") {
-            return Some(format!("Build cache for project {}, auto-restored on rebuild", name));
+            return Some(format!(
+                "Build cache for project {}, auto-restored on rebuild",
+                name
+            ));
         }
     }
 
@@ -342,20 +483,30 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     }
     if desc.ends_with(" 设备调试符号（最新版，建议保留）") {
         let version = &desc[..desc.len() - " 设备调试符号（最新版，建议保留）".len()];
-        return Some(format!("{} device debug symbols (latest, recommended to keep)", version));
+        return Some(format!(
+            "{} device debug symbols (latest, recommended to keep)",
+            version
+        ));
     }
 
     // "归档 {} ({})，包含构建和调试信息"
     if let Some(rest) = desc.strip_prefix("归档 ") {
         if rest.contains("），包含构建和调试信息") {
-            return Some(format!("Archive {} — includes build and debug info", rest.trim_end_matches("），包含构建和调试信息").trim_end_matches('(')));
+            return Some(format!(
+                "Archive {} — includes build and debug info",
+                rest.trim_end_matches("），包含构建和调试信息")
+                    .trim_end_matches('(')
+            ));
         }
     }
 
     // "iOS 模拟器运行时镜像，将通过 xcrun simctl runtime delete 安全删除"
     if desc.contains("将通过 xcrun simctl runtime delete 安全删除") {
         if desc.starts_with("iOS 模拟器运行时镜像") {
-            return Some("iOS simulator runtime images, safely deleted via xcrun simctl runtime delete".to_string());
+            return Some(
+                "iOS simulator runtime images, safely deleted via xcrun simctl runtime delete"
+                    .to_string(),
+            );
         }
         if desc.starts_with("模拟器运行时 Cryptex 扩展") {
             return Some("Simulator runtime Cryptex extension, safely deleted via xcrun simctl runtime delete".to_string());
@@ -364,7 +515,10 @@ fn pattern_description_en(desc: &str) -> Option<String> {
 
     // "模拟器系统缓存，删除后自动重建，需管理员权限"
     if desc == "模拟器系统缓存，删除后自动重建，需管理员权限" {
-        return Some("Simulator system cache, auto-rebuilt after deletion, requires admin privileges".to_string());
+        return Some(
+            "Simulator system cache, auto-rebuilt after deletion, requires admin privileges"
+                .to_string(),
+        );
     }
 
     // "{} 的旧版本，最新版已保留"
@@ -380,26 +534,34 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     // "HuggingFace 模型 {}，删除后需重新下载"
     if let Some(rest) = desc.strip_prefix("HuggingFace 模型 ") {
         if let Some(model) = rest.strip_suffix("，删除后需重新下载") {
-            return Some(format!("HuggingFace model {}, needs re-download after deletion", model));
+            return Some(format!(
+                "HuggingFace model {}, needs re-download after deletion",
+                model
+            ));
         }
     }
 
     // "{} 本地模型（{} 个），删除后需 ollama pull 重新下载"
-    if desc.contains("本地模型（") && desc.ends_with("），删除后需 ollama pull 重新下载") {
+    if desc.contains("本地模型（") && desc.ends_with("），删除后需 ollama pull 重新下载")
+    {
         let prefix_end = desc.find(" 本地模型（").unwrap_or(0);
         let name = &desc[..prefix_end];
-        return Some(format!("{} local models, needs ollama pull to re-download", name));
+        return Some(format!(
+            "{} local models, needs ollama pull to re-download",
+            name
+        ));
     }
 
     // "{} monorepo，包含 {} 个子包的 node_modules\n 删除后需在 root 目录执行 {} install 恢复"
     if desc.contains("monorepo") && desc.contains("子包的 node_modules") {
-        return Some(desc
-            .replace("monorepo，包含", "monorepo, contains")
-            .replace("个子包的 node_modules", " sub-packages' node_modules")
-            .replace("删除后需在 root 目录执行", "Run")
-            .replace("install 恢复", "install in root directory to restore")
-            .replace("，", ",")
-            .replace("\n ", "\n"));
+        return Some(
+            desc.replace("monorepo，包含", "monorepo, contains")
+                .replace("个子包的 node_modules", " sub-packages' node_modules")
+                .replace("删除后需在 root 目录执行", "Run")
+                .replace("install 恢复", "install in root directory to restore")
+                .replace("，", ",")
+                .replace("\n ", "\n"),
+        );
     }
 
     // "指向 {} 的服务已失效（程序已被卸载），{}"
@@ -407,14 +569,19 @@ fn pattern_description_en(desc: &str) -> Option<String> {
         if rest.contains("的服务已失效（程序已被卸载）") {
             let parts: Vec<&str> = rest.splitn(2, "的服务已失效（程序已被卸载），").collect();
             if parts.len() == 2 {
-                return Some(format!("Service pointing to {} is orphaned (program uninstalled), {}", parts[0], parts[1]));
+                return Some(format!(
+                    "Service pointing to {} is orphaned (program uninstalled), {}",
+                    parts[0], parts[1]
+                ));
             }
         }
     }
 
     // DS_Store description with count
-    if desc.starts_with("Finder 自动生成的目录元数据文件，共 ") && desc.contains(" 个。") {
-        let count_part: String = desc.chars()
+    if desc.starts_with("Finder 自动生成的目录元数据文件，共 ") && desc.contains(" 个。")
+    {
+        let count_part: String = desc
+            .chars()
             .skip("Finder 自动生成的目录元数据文件，共 ".len())
             .take_while(|c| c.is_ascii_digit())
             .collect();
@@ -426,23 +593,38 @@ fn pattern_description_en(desc: &str) -> Option<String> {
 
     // "{} 缓存" or "{} 数据" patterns from app_cache
     if let Some(app_name) = desc.strip_suffix(" 的应用缓存，删除后自动重建") {
-        return Some(format!("{} app cache, auto-rebuilt after deletion", app_name));
+        return Some(format!(
+            "{} app cache, auto-rebuilt after deletion",
+            app_name
+        ));
     }
-    if let Some(app_name) = desc.strip_suffix(" 的应用数据（含文档、聊天记录等），删除可能导致数据丢失") {
-        return Some(format!("{} app data (includes documents, chat history, etc.), deletion may cause data loss", app_name));
+    if let Some(app_name) =
+        desc.strip_suffix(" 的应用数据（含文档、聊天记录等），删除可能导致数据丢失")
+    {
+        return Some(format!(
+            "{} app data (includes documents, chat history, etc.), deletion may cause data loss",
+            app_name
+        ));
     }
 
     // App uninstall residual descriptions
     // "Downloads 中的 {}，同名应用已安装，可安全清理"
     if let Some(rest) = desc.strip_prefix("Downloads 中的 ") {
         if let Some(name) = rest.strip_suffix("，同名应用已安装，可安全清理") {
-            return Some(format!("{} in Downloads, same-name app installed, safe to clean", name));
+            return Some(format!(
+                "{} in Downloads, same-name app installed, safe to clean",
+                name
+            ));
         }
     }
     // "Downloads 中的 {}，未检测到同名已安装应用，请确认后再删除"
     if let Some(rest) = desc.strip_prefix("Downloads 中的 ") {
-        if let Some(name) = rest.strip_suffix("，未检测到同名已安装应用，请确认后再删除") {
-            return Some(format!("{} in Downloads, no same-name installed app detected, confirm before deleting", name));
+        if let Some(name) = rest.strip_suffix("，未检测到同名已安装应用，请确认后再删除")
+        {
+            return Some(format!(
+                "{} in Downloads, no same-name installed app detected, confirm before deleting",
+                name
+            ));
         }
     }
     // "{} 中 {} 的残留数据（App 可能已卸载）"
@@ -450,7 +632,10 @@ fn pattern_description_en(desc: &str) -> Option<String> {
         if let Some(idx) = rest.rfind(" 中 ") {
             let vendor = &rest[..idx];
             let sub = &rest[idx + " 中 ".len()..];
-            return Some(format!("Residual data of {} in {} (app may be uninstalled)", sub, vendor));
+            return Some(format!(
+                "Residual data of {} in {} (app may be uninstalled)",
+                sub, vendor
+            ));
         }
     }
     // "{} 的残留数据（App 可能已卸载）"
@@ -468,9 +653,13 @@ fn pattern_description_en(desc: &str) -> Option<String> {
 
     // "{} 的 {} 目录，删除后自动重建"
     if desc.ends_with("目录，删除后自动重建") {
-        return Some(desc
-            .replace("目录，删除后自动重建", "directory, auto-rebuilt after deletion")
-            .replace("的", "'s"));
+        return Some(
+            desc.replace(
+                "目录，删除后自动重建",
+                "directory, auto-rebuilt after deletion",
+            )
+            .replace("的", "'s"),
+        );
     }
 
     // "系统缓存目录，可安全删除"
@@ -481,15 +670,20 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     // Browser cache descriptions
     // "Firefox ({}) 的 {} 缓存，可安全清理"
     if desc.starts_with("Firefox (") && desc.ends_with("缓存，可安全清理") {
-        return Some(desc
-            .replace("缓存，可安全清理", "cache, safe to clean")
-            .replace("的", "'s"));
+        return Some(
+            desc.replace("缓存，可安全清理", "cache, safe to clean")
+                .replace("的", "'s"),
+        );
     }
     // "{} ({}) 的 {} 缓存，删除后浏览器会自动重建"
     if desc.ends_with("缓存，删除后浏览器会自动重建") {
-        return Some(desc
-            .replace("缓存，删除后浏览器会自动重建", "cache, auto-rebuilt by browser after deletion")
-            .replace("的", "'s"));
+        return Some(
+            desc.replace(
+                "缓存，删除后浏览器会自动重建",
+                "cache, auto-rebuilt by browser after deletion",
+            )
+            .replace("的", "'s"),
+        );
     }
 
     // "⚠️ 高风险：应用数据目录，删除后可能丢失配置、登录状态或本地数据，App 可能无法启动"
@@ -500,7 +694,10 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     // "废纸篓中的 {} 残留，可安全清理释放空间"
     if let Some(rest) = desc.strip_prefix("废纸篓中的 ") {
         if let Some(name) = rest.strip_suffix(" 残留，可安全清理释放空间") {
-            return Some(format!("{} residual in Trash, safe to clean to free space", name));
+            return Some(format!(
+                "{} residual in Trash, safe to clean to free space",
+                name
+            ));
         }
     }
 
@@ -510,20 +707,29 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     }
 
     // "应用大小 {}，关联文件 {} 项"
-    if desc.starts_with("应用大小 ") && desc.contains("，关联文件 ") && desc.ends_with(" 项") {
-        return Some(desc
-            .replace("应用大小 ", "App size: ")
-            .replace("，关联文件 ", ", associated files: ")
-            .replace(" 项", " items"));
+    if desc.starts_with("应用大小 ") && desc.contains("，关联文件 ") && desc.ends_with(" 项")
+    {
+        return Some(
+            desc.replace("应用大小 ", "App size: ")
+                .replace("，关联文件 ", ", associated files: ")
+                .replace(" 项", " items"),
+        );
     }
 
     // Docker prune description with size
     if desc.starts_with("执行 docker system prune") {
-        return Some(desc
-            .replace("清理未使用镜像/容器/卷/网络", "clean unused images/containers/volumes/networks")
+        return Some(
+            desc.replace(
+                "清理未使用镜像/容器/卷/网络",
+                "clean unused images/containers/volumes/networks",
+            )
             .replace("可回收约", "can reclaim approx.")
-            .replace("空间，清理后需重新拉取镜像", "space, needs re-pull after cleanup")
-            .replace("，", ","));
+            .replace(
+                "空间，清理后需重新拉取镜像",
+                "space, needs re-pull after cleanup",
+            )
+            .replace("，", ","),
+        );
     }
 
     // Disk analyzer descriptions
@@ -535,8 +741,12 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     }
 
     // "模拟器系统缓存..." variants
-    if desc == "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除" {
-        return Some("Simulator runtime Cryptex extension, safely deleted via xcrun simctl runtime delete".to_string());
+    if desc == "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除"
+    {
+        return Some(
+            "Simulator runtime Cryptex extension, safely deleted via xcrun simctl runtime delete"
+                .to_string(),
+        );
     }
 
     // ===== 应用保护列表相关描述 =====
@@ -549,29 +759,38 @@ fn pattern_description_en(desc: &str) -> Option<String> {
 
     // "{vendor} 安全代理 | 应用大小 {size}"
     if desc.contains(" 安全代理 | 应用大小 ") {
-        return Some(desc
-            .replace(" 安全代理 | 应用大小 ", " security agent | App size: "));
+        return Some(desc.replace(" 安全代理 | 应用大小 ", " security agent | App size: "));
     }
 
     // "含敏感数据，卸载前请备份 | 应用大小 {size}，关联文件 {n} 项"
     if desc.starts_with("含敏感数据，卸载前请备份 | ") {
         let rest = &desc["含敏感数据，卸载前请备份 | ".len()..];
-        return Some(format!("Contains sensitive data, back up before uninstalling | {}", rest
-            .replace("应用大小 ", "App size: ")
-            .replace("，关联文件 ", ", associated files: ")
-            .replace(" 项", " items")));
+        return Some(format!(
+            "Contains sensitive data, back up before uninstalling | {}",
+            rest.replace("应用大小 ", "App size: ")
+                .replace("，关联文件 ", ", associated files: ")
+                .replace(" 项", " items")
+        ));
     }
 
     // 登录项审计描述（含动态数量）
     // "审计登录项与启动服务（当前 X 项：登录项 X / 用户服务 X / 系统服务 X / 系统守护进程 X），点击打开系统设置管理"
-    if desc.starts_with("审计登录项与启动服务（当前 ") && desc.contains("），点击打开系统设置管理") {
-        return Some(desc
-            .replace("审计登录项与启动服务（当前 ", "Audit login items and startup services (currently ")
+    if desc.starts_with("审计登录项与启动服务（当前 ") && desc.contains("），点击打开系统设置管理")
+    {
+        return Some(
+            desc.replace(
+                "审计登录项与启动服务（当前 ",
+                "Audit login items and startup services (currently ",
+            )
             .replace(" 项：登录项 ", " items: login items ")
             .replace(" / 用户服务 ", " / user agents ")
             .replace(" / 系统服务 ", " / system agents ")
             .replace(" / 系统守护进程 ", " / system daemons ")
-            .replace("），点击打开系统设置管理", ", click to open System Settings to manage"));
+            .replace(
+                "），点击打开系统设置管理",
+                ", click to open System Settings to manage",
+            ),
+        );
     }
 
     None
@@ -610,7 +829,10 @@ mod tests {
     #[test]
     fn test_translate_recommend() {
         assert_eq!(translate_recommend(&Recommend::Safe, true), "Safe");
-        assert_eq!(translate_recommend(&Recommend::CacheOnly, true), "Cache Only");
+        assert_eq!(
+            translate_recommend(&Recommend::CacheOnly, true),
+            "Cache Only"
+        );
         assert_eq!(translate_recommend(&Recommend::Caution, true), "Caution");
         assert_eq!(translate_recommend(&Recommend::Advanced, true), "Advanced");
         assert_eq!(translate_recommend(&Recommend::Safe, false), "推荐");
@@ -628,9 +850,15 @@ mod tests {
 
     #[test]
     fn test_translate_category_dynamic() {
-        assert_eq!(translate_category("Xcode编译-MyProject", true), "Xcode Build-MyProject");
+        assert_eq!(
+            translate_category("Xcode编译-MyProject", true),
+            "Xcode Build-MyProject"
+        );
         assert_eq!(translate_category("iOS设备-17.0", true), "iOS Device-17.0");
-        assert_eq!(translate_category("孤儿服务-user", true), "Orphaned Service-user");
+        assert_eq!(
+            translate_category("孤儿服务-user", true),
+            "Orphaned Service-user"
+        );
     }
 
     #[test]
@@ -664,8 +892,14 @@ mod tests {
     #[test]
     fn test_translate_app_uninstall_categories() {
         assert_eq!(translate_category("App残留", true), "App Residual");
-        assert_eq!(translate_category("App残留缓存", true), "App Residual Cache");
-        assert_eq!(translate_category("App残留配置", true), "App Residual Prefs");
+        assert_eq!(
+            translate_category("App残留缓存", true),
+            "App Residual Cache"
+        );
+        assert_eq!(
+            translate_category("App残留配置", true),
+            "App Residual Prefs"
+        );
     }
 
     #[test]
@@ -675,7 +909,10 @@ mod tests {
             "Test.app in Downloads, same-name app installed, safe to clean"
         );
         assert_eq!(
-            translate_description("Downloads 中的 Test.app，未检测到同名已安装应用，请确认后再删除", true),
+            translate_description(
+                "Downloads 中的 Test.app，未检测到同名已安装应用，请确认后再删除",
+                true
+            ),
             "Test.app in Downloads, no same-name installed app detected, confirm before deleting"
         );
         assert_eq!(

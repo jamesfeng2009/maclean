@@ -9,18 +9,17 @@ mod app_protection;
 mod cli;
 mod i18n;
 mod logger;
+#[cfg(target_os = "macos")]
+mod menubar;
+mod platform;
 mod safety;
 mod scanner;
 #[cfg(target_os = "macos")]
 mod sudo_keepalive;
 #[cfg(target_os = "macos")]
 mod touchid;
-#[cfg(target_os = "macos")]
-mod menubar;
-mod platform;
 
 use std::sync::mpsc;
-use std::path::PathBuf;
 
 use eframe::egui;
 
@@ -32,26 +31,26 @@ use scanner::{format_size, Recommend, ScanItem, Scanner};
 // =========================================================================
 
 // 品牌色系
-const BRAND: egui::Color32 = egui::Color32::from_rgb(75, 63, 227);      // #4B3FE3
+const BRAND: egui::Color32 = egui::Color32::from_rgb(75, 63, 227); // #4B3FE3
 const BRAND_SOFT: egui::Color32 = egui::Color32::from_rgb(242, 247, 255); // #F2F7FF
-const BRAND_TEXT: egui::Color32 = egui::Color32::from_rgb(26, 23, 89);   // #1A1759
-// 表面色
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(247, 247, 248);   // #F7F7F8
+const BRAND_TEXT: egui::Color32 = egui::Color32::from_rgb(26, 23, 89); // #1A1759
+                                                                       // 表面色
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(247, 247, 248); // #F7F7F8
 const SURFACE_ELEVATED: egui::Color32 = egui::Color32::from_rgb(255, 255, 255); // #FFFFFF
-const SURFACE_MUTED: egui::Color32 = egui::Color32::from_rgb(239, 239, 242);    // #EFEFF2
-const SURFACE_SIDEBAR: egui::Color32 = egui::Color32::from_rgb(242, 242, 245);   // #F2F2F5
-// 文本色
-const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(23, 23, 23);      // #171717
-const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(82, 82, 91);     // #52525B
-const TEXT_TERTIARY: egui::Color32 = egui::Color32::from_rgb(113, 113, 122);   // #71717A
-// 边框
-const BORDER_LIGHT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 23, 23, 26);  // ~0.1 alpha
-const BORDER_STRONG: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 23, 23, 46);  // ~0.18 alpha
-// 状态色
-const SAFE_COLOR: egui::Color32 = egui::Color32::from_rgb(29, 201, 129);       // #1DC981
-const CAUTION_COLOR: egui::Color32 = egui::Color32::from_rgb(239, 170, 23);    // #EFAA17
-const ADVANCED_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58);    // #E8463A
-const DANGER_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58);      // #E8463A
+const SURFACE_MUTED: egui::Color32 = egui::Color32::from_rgb(239, 239, 242); // #EFEFF2
+const SURFACE_SIDEBAR: egui::Color32 = egui::Color32::from_rgb(242, 242, 245); // #F2F2F5
+                                                                               // 文本色
+const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(23, 23, 23); // #171717
+const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(82, 82, 91); // #52525B
+const TEXT_TERTIARY: egui::Color32 = egui::Color32::from_rgb(113, 113, 122); // #71717A
+                                                                             // 边框
+const BORDER_LIGHT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 23, 23, 26); // ~0.1 alpha
+const BORDER_STRONG: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 23, 23, 46); // ~0.18 alpha
+                                                                                             // 状态色
+const SAFE_COLOR: egui::Color32 = egui::Color32::from_rgb(29, 201, 129); // #1DC981
+const CAUTION_COLOR: egui::Color32 = egui::Color32::from_rgb(239, 170, 23); // #EFAA17
+const ADVANCED_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58); // #E8463A
+const DANGER_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58); // #E8463A
 
 /// 选中项卡片背景色（浅绿）
 const SELECTED_CARD_BG: egui::Color32 = egui::Color32::from_rgb(240, 255, 244); // #F0FFF4
@@ -62,6 +61,8 @@ enum ScanMessage {
     Progress(f32),
     /// 增量结果（扫描中部分项）— (items, tab_index)
     PartialItems(Vec<ScanItem>, u64),
+    /// 当前扫描路径
+    CurrentPath(String),
     /// 单个 Tab 扫描完成
     Done(Vec<ScanItem>, u64, u64), // (items, scan_time_ms, tab_index)
     /// 全部扫描完成（用于批量扫描）
@@ -84,13 +85,6 @@ enum DeleteMessage {
     /// Windows: 残留清理完成
     #[cfg(target_os = "windows")]
     ResidualCleaned(usize, usize, usize), // (注册表, 环境变量, 文件)
-}
-
-/// 初始化崩溃日志文件，返回日志路径
-fn init_crash_log() -> PathBuf {
-    // 初始化新的 logger 系统
-    logger::init();
-    logger::latest_log_file().unwrap_or_else(|| platform::app_data_dir().join("logs/maclean.log"))
 }
 
 /// 写入扫描日志（用于追踪扫描进度，崩溃时定位问题）
@@ -160,7 +154,11 @@ fn main() -> eframe::Result {
                 let actions = mb.poll_events();
                 if !actions.is_empty() {
                     let lang_en = APP.as_ref().map(|a| a.lang_en).unwrap_or(false);
-                    log_scan_step(&App::tf_lang(lang_en, "log_menu_event", &[&format!("{:?}", actions)]));
+                    log_scan_step(&App::tf_lang(
+                        lang_en,
+                        "log_menu_event",
+                        &[&format!("{:?}", actions)],
+                    ));
                 }
                 for action in actions {
                     match action {
@@ -236,7 +234,21 @@ fn main() -> eframe::Result {
                             // 增量结果：扫描中已发现的部分项，直接追加到当前 Tab 的结果列表
                             if let Some(app) = &mut APP {
                                 let idx = tab_idx as usize;
-                                app.results[idx].extend(items);
+                                app.results[idx].extend(items.clone());
+                                // 报告最后一条路径
+                                if let Some(last) = items.last() {
+                                    let path = if last.path.is_empty() {
+                                        last.category.clone()
+                                    } else {
+                                        last.path.clone()
+                                    };
+                                    app.scan_current_path = path;
+                                }
+                            }
+                        }
+                        Ok(ScanMessage::CurrentPath(path)) => {
+                            if let Some(app) = &mut APP {
+                                app.scan_current_path = path;
                             }
                         }
                         Ok(ScanMessage::Done(items, time_ms, tab_idx)) => {
@@ -266,7 +278,7 @@ fn main() -> eframe::Result {
                                     if selected_count > 0 {
                                         log_scan_step(&app.tf(
                                             "log_quickclean_start",
-                                            &[&selected_count.to_string()]
+                                            &[&selected_count.to_string()],
                                         ));
                                         app.prepare_delete();
                                         let to_delete = app.confirm_delete();
@@ -318,9 +330,8 @@ fn main() -> eframe::Result {
                                 #[cfg(not(target_os = "macos"))]
                                 let clamshell_closed = false;
                                 if clamshell_closed {
-                                    app.touch_id_error = Some(
-                                        app.t("touchid_clamshell_error").to_string()
-                                    );
+                                    app.touch_id_error =
+                                        Some(app.t("touchid_clamshell_error").to_string());
                                     app.touch_id_available = false;
                                 }
 
@@ -332,7 +343,11 @@ fn main() -> eframe::Result {
                                         let items = app.sudo_failed_items.clone();
                                         app.delete_done = 0;
                                         app.delete_total = items.len();
-                                        start_sudo_delete_touchid(items, app.lang_en, &mut DELETE_RX);
+                                        start_sudo_delete_touchid(
+                                            items,
+                                            app.lang_en,
+                                            &mut DELETE_RX,
+                                        );
                                     }
                                     #[cfg(not(target_os = "macos"))]
                                     {
@@ -443,10 +458,10 @@ fn setup_fonts(ctx: &egui::Context) {
 
     #[cfg(target_os = "windows")]
     let font_paths = [
-        "C:\\Windows\\Fonts\\msyh.ttc",      // 微软雅黑
-        "C:\\Windows\\Fonts\\msyhbd.ttc",     // 微软雅黑粗体
-        "C:\\Windows\\Fonts\\simhei.ttf",     // 黑体
-        "C:\\Windows\\Fonts\\simsun.ttc",     // 宋体
+        "C:\\Windows\\Fonts\\msyh.ttc",   // 微软雅黑
+        "C:\\Windows\\Fonts\\msyhbd.ttc", // 微软雅黑粗体
+        "C:\\Windows\\Fonts\\simhei.ttf", // 黑体
+        "C:\\Windows\\Fonts\\simsun.ttc", // 宋体
     ];
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -482,20 +497,16 @@ fn setup_fonts(ctx: &egui::Context) {
 /// 获取磁盘信息 (macOS 实现)
 #[cfg(target_os = "macos")]
 fn get_disk_info_macos() -> (u64, u64) {
-    let output = std::process::Command::new("df")
-        .arg("-k")
-        .arg("/")
-        .output();
+    let output = std::process::Command::new("df").arg("-k").arg("/").output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
-                if let (Ok(total_kb), Ok(free_kb)) = (
-                    parts[1].parse::<u64>(),
-                    parts[3].parse::<u64>(),
-                ) {
+                if let (Ok(total_kb), Ok(free_kb)) =
+                    (parts[1].parse::<u64>(), parts[3].parse::<u64>())
+                {
                     return (total_kb * 1024, free_kb * 1024);
                 }
             }
@@ -547,16 +558,6 @@ fn get_disk_info() -> (u64, u64) {
     platform::disk_info()
 }
 
-/// 推荐等级颜色
-fn recommend_color(rec: &Recommend) -> egui::Color32 {
-    match rec {
-        Recommend::Safe => SAFE_COLOR,      // 绿色
-        Recommend::CacheOnly => SAFE_COLOR, // 青绿色（缓存）
-        Recommend::Caution => CAUTION_COLOR,  // 橙色
-        Recommend::Advanced => ADVANCED_COLOR,  // 红色
-    }
-}
-
 /// 推荐等级标签文字
 fn recommend_badge(rec: &Recommend) -> &'static str {
     match rec {
@@ -587,6 +588,199 @@ fn extract_app_name(category: &str) -> Option<&str> {
     None
 }
 
+/// 从 category 中提取前缀（用于分类过滤标签页）
+///
+/// 例如 "Docker dangling 镜像" -> "Docker"，"Xcode DerivedData — ProjectA" -> "Xcode"。
+fn category_prefix(category: &str) -> String {
+    let delimiters: &[char] = &[' ', '—', '-', '/', '(', '（', '·'];
+    category
+        .split(delimiters)
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| category.to_string())
+}
+
+/// 渲染分类过滤标签
+fn render_category_tab(
+    ui: &mut egui::Ui,
+    label: &str,
+    count: Option<usize>,
+    active: bool,
+) -> egui::Response {
+    let text = match count {
+        Some(c) => format!("{} ({})", label, c),
+        None => label.to_string(),
+    };
+    let text_color = if active { BRAND } else { TEXT_SECONDARY };
+    let bottom_stroke = if active {
+        egui::Stroke::new(2.0, BRAND)
+    } else {
+        egui::Stroke::NONE
+    };
+    let padding = egui::vec2(14.0, 10.0);
+
+    let galley = ui.painter().layout(
+        text,
+        egui::FontId::new(13.0, egui::FontFamily::Proportional),
+        text_color,
+        ui.available_width(),
+    );
+    let desired_size = egui::vec2(
+        galley.size().x + padding.x * 2.0,
+        galley.size().y + padding.y + 2.0,
+    );
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if active {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.min.x, rect.max.y - 1.0),
+                    egui::pos2(rect.max.x, rect.max.y - 1.0),
+                ],
+                bottom_stroke,
+            );
+        }
+        let text_pos = egui::pos2(rect.min.x + padding.x, rect.min.y + padding.y - 2.0);
+        painter.galley(text_pos, galley, text_color);
+    }
+    response
+}
+
+/// 状态徽章颜色与背景
+fn recommend_badge_colors(rec: &Recommend) -> (egui::Color32, egui::Color32, &'static str) {
+    match rec {
+        Recommend::Safe | Recommend::CacheOnly => (
+            egui::Color32::from_rgb(6, 95, 70),
+            egui::Color32::from_rgb(209, 250, 229),
+            "Safe",
+        ),
+        Recommend::Caution => (
+            egui::Color32::from_rgb(146, 64, 14),
+            egui::Color32::from_rgb(254, 243, 199),
+            "Caution",
+        ),
+        Recommend::Advanced => (
+            egui::Color32::from_rgb(153, 27, 27),
+            egui::Color32::from_rgb(254, 226, 226),
+            "Advanced",
+        ),
+    }
+}
+
+/// 渲染状态徽章
+fn render_status_badge(ui: &mut egui::Ui, text: &str, fg: egui::Color32, bg: egui::Color32) {
+    let galley = ui.painter().layout(
+        text.to_string(),
+        egui::FontId::new(11.0, egui::FontFamily::Proportional),
+        fg,
+        ui.available_width(),
+    );
+    let padding = egui::vec2(8.0, 3.0);
+    let size = galley.size() + padding * 2.0;
+    let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::same(999.0), bg);
+        ui.painter().galley(
+            egui::pos2(rect.min.x + padding.x, rect.min.y + padding.y),
+            galley,
+            fg,
+        );
+    }
+}
+
+/// 渲染自定义复选框
+fn render_custom_checkbox(ui: &mut egui::Ui, checked: bool, enabled: bool) -> egui::Response {
+    let size = egui::vec2(16.0, 16.0);
+    let (rect, response) = ui.allocate_exact_size(
+        size,
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let rounding = egui::Rounding::same(4.0);
+        if checked {
+            painter.rect_filled(rect, rounding, BRAND);
+            // 白色对勾
+            let stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+            painter.line_segment(
+                [
+                    egui::pos2(rect.min.x + 4.0, rect.center().y),
+                    egui::pos2(rect.center().x - 1.0, rect.max.y - 5.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(rect.center().x - 1.0, rect.max.y - 5.0),
+                    egui::pos2(rect.max.x - 3.0, rect.min.y + 4.0),
+                ],
+                stroke,
+            );
+        } else {
+            let stroke_color = if enabled { BORDER_STRONG } else { BORDER_LIGHT };
+            painter.rect_filled(rect, rounding, SURFACE_ELEVATED);
+            painter.rect_stroke(rect, rounding, egui::Stroke::new(2.0, stroke_color));
+        }
+    }
+    response
+}
+
+/// 渲染设置页 Toggle 开关
+fn render_settings_toggle(ui: &mut egui::Ui, value: &mut bool, enabled: bool) -> egui::Response {
+    let size = egui::vec2(40.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(
+        size,
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+
+    if response.clicked() && enabled {
+        *value = !*value;
+    }
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let rounding = egui::Rounding::same(11.0);
+        let on = *value && enabled;
+        let bg = if on {
+            BRAND
+        } else if enabled {
+            SURFACE_MUTED
+        } else {
+            egui::Color32::from_rgb(230, 230, 232)
+        };
+        let stroke_color = if on { BRAND } else { BORDER_STRONG };
+        painter.rect_filled(rect, rounding, bg);
+        painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0, stroke_color));
+
+        let knob_radius = 9.0;
+        let knob_y = rect.center().y;
+        let knob_x = if on {
+            rect.max.x - knob_radius - 2.0
+        } else {
+            rect.min.x + knob_radius + 2.0
+        };
+        painter.circle_filled(
+            egui::pos2(knob_x, knob_y),
+            knob_radius,
+            egui::Color32::WHITE,
+        );
+    }
+
+    response
+}
+
 /// 渲染单个扫描项行（含关联明细展开）
 ///
 /// 用于主列表和 App卸载 Tab 分组后的子项渲染。
@@ -603,20 +797,19 @@ fn render_scan_item_row(
     let mut toggled: Option<usize> = None;
     let mut expand_toggle: Option<String> = None;
 
-    let rec_color = if !item.deletable {
-        TEXT_TERTIARY
-    } else {
-        recommend_color(&item.recommend)
-    };
-    let badge = if !item.deletable {
-        app.t("badge_undeletable")
-    } else {
-        recommend_badge(&item.recommend)
-    };
+    let locked = !item.deletable;
+    let selected = item.selected;
 
-    // 卡片背景色：白色（选中时浅绿）
-    let row_bg = if item.selected {
-        SELECTED_CARD_BG
+    // 边框与背景
+    let border_color = if selected {
+        BRAND
+    } else {
+        egui::Color32::from_rgb(226, 226, 229)
+    };
+    let row_bg = if selected {
+        BRAND_SOFT
+    } else if locked {
+        SURFACE_MUTED
     } else {
         SURFACE_ELEVATED
     };
@@ -624,10 +817,9 @@ fn render_scan_item_row(
     let row_frame = egui::Frame::none()
         .fill(row_bg)
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
-        .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+        .stroke(egui::Stroke::new(1.0, border_color))
         .rounding(egui::Rounding::same(8.0));
 
-    // 检查是否有可展开的关联明细
     let has_details = is_uninstall_tab
         && !item.batch_paths.is_empty()
         && associated_details.contains_key(&item.path);
@@ -635,91 +827,100 @@ fn render_scan_item_row(
 
     let row_resp = row_frame.show(ui, |ui| {
         ui.horizontal(|ui| {
-            // 复选框（紫色选中）
-            let checkbox_text = if !item.deletable { "🔒" } else if item.selected { "✅" } else { "⬜" };
-            let cb_color = if !item.deletable {
-                TEXT_TERTIARY
-            } else if item.selected {
-                BRAND
-            } else {
-                TEXT_TERTIARY
-            };
-            if ui.colored_label(cb_color, checkbox_text).clicked() && item.deletable {
+            // 自定义复选框
+            let cb_response = render_custom_checkbox(ui, selected && !locked, !locked);
+            if cb_response.clicked() && !locked {
                 toggled = Some(index);
             }
 
-            // 推荐等级标签（状态徽章）
-            ui.colored_label(rec_color, badge);
+            ui.add_space(10.0);
 
-            // 展开/收起按钮（仅 App卸载 tab 且有明细时显示）
-            if has_details {
-                let expand_icon = if is_expanded { "▼" } else { "▶" };
-                if ui.small_button(expand_icon).clicked() {
-                    expand_toggle = Some(item.path.clone());
-                }
-            } else {
-                ui.add_space(14.0); // 占位对齐
-            }
-
-            ui.add_space(3.0);
-
-            // 类别 + 描述（用户看得懂的信息）
+            // 中间信息区
             ui.vertical(|ui| {
+                ui.set_min_width(180.0);
+
+                // 标题行：title + size
                 ui.horizontal(|ui| {
-                    let cat_color = if !item.deletable {
-                        TEXT_TERTIARY
+                    // 标题
+                    let title_text = if is_uninstall_tab {
+                        i18n::translate_category(&item.category, app.lang_en)
                     } else {
-                        category_color(&item.category)
+                        i18n::translate_category(&item.category, app.lang_en)
                     };
-                    let cat_en = i18n::translate_category(&item.category, app.lang_en);
-                    ui.colored_label(cat_color, &cat_en);
-                    // 大小（为 0 时显示 —，可能是空目录或未获取到）
-                    let size_str = if item.size_bytes == 0 {
-                        "—".to_string()
-                    } else {
-                        format_size(item.size_bytes)
-                    };
-                    let size_color = if item.size_bytes > 100 * 1024 * 1024 * 1024 {
-                        ADVANCED_COLOR
-                    } else if item.size_bytes > 1024 * 1024 * 1024 {
-                        CAUTION_COLOR
-                    } else {
-                        SAFE_COLOR
-                    };
-                    ui.colored_label(size_color, egui::RichText::new(&size_str).strong().monospace().size(13.0));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(title_text)
+                                .size(13.0)
+                                .strong()
+                                .color(if locked { TEXT_TERTIARY } else { TEXT_PRIMARY }),
+                        )
+                        .truncate(),
+                    );
+
+                    // 展开按钮（仅 App卸载 tab 且有明细时显示）
+                    if has_details {
+                        let expand_icon = if is_expanded { "▼" } else { "▶" };
+                        if ui.small_button(expand_icon).clicked() {
+                            expand_toggle = Some(item.path.clone());
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let size_str = if item.size_bytes == 0 {
+                            "—".to_string()
+                        } else {
+                            format_size(item.size_bytes)
+                        };
+                        ui.colored_label(
+                            if locked { TEXT_TERTIARY } else { TEXT_PRIMARY },
+                            egui::RichText::new(&size_str)
+                                .size(14.0)
+                                .strong()
+                                .monospace(),
+                        );
+                    });
                 });
-                // 描述说明（告诉用户这是什么，删除后有什么影响）
-                let desc_en = i18n::translate_description(&item.description, app.lang_en);
-                ui.colored_label(
-                    TEXT_SECONDARY,
-                    egui::RichText::new(&desc_en).size(12.0),
-                );
+
                 // 路径
-                let path_display = truncate_path(&item.path, 70);
-                let path_color = if item.deletable {
-                    TEXT_TERTIARY
-                } else {
-                    TEXT_TERTIARY
-                };
+                let path_display = truncate_path(&item.path, 90);
                 ui.colored_label(
-                    path_color,
-                    egui::RichText::new(&path_display).size(11.0),
+                    TEXT_TERTIARY,
+                    egui::RichText::new(&path_display).size(12.0).monospace(),
                 );
 
-                // 不可删除时显示原因
-                if !item.deletable && !item.undeletable_reason.is_empty() {
-                    let reason_en = i18n::translate_undeletable_reason(&item.undeletable_reason, app.lang_en);
+                // 状态徽章 + 描述
+                ui.horizontal(|ui| {
+                    if locked {
+                        render_status_badge(
+                            ui,
+                            app.t("badge_undeletable"),
+                            TEXT_TERTIARY,
+                            egui::Color32::from_rgb(239, 239, 242),
+                        );
+                    } else {
+                        let (fg, bg, label) = recommend_badge_colors(&item.recommend);
+                        render_status_badge(ui, label, fg, bg);
+                    }
+                    ui.add_space(6.0);
+                    let desc = i18n::translate_description(&item.description, app.lang_en);
+                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(&desc).size(12.0));
+                });
+
+                // 不可删除原因
+                if locked && !item.undeletable_reason.is_empty() {
+                    let reason =
+                        i18n::translate_undeletable_reason(&item.undeletable_reason, app.lang_en);
                     ui.colored_label(
                         ADVANCED_COLOR,
-                        egui::RichText::new(format!("⚠️ {}", reason_en)).size(11.0),
+                        egui::RichText::new(format!("⚠️ {}", reason)).size(11.0),
                     );
                 }
             });
         });
     });
 
-    // 点击行也切换选中
-    if row_resp.response.clicked() && item.deletable {
+    // 整行点击切换选中（锁定项除外），但避免与按钮冲突
+    if row_resp.response.clicked() && !locked && !row_resp.response.drag_started() {
         toggled = Some(index);
     }
 
@@ -737,31 +938,21 @@ fn render_scan_item_row(
                 detail_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_space(40.0); // 缩进对齐
-                        // 标签
-                        ui.colored_label(
-                            BRAND,
-                            egui::RichText::new(detail_label).size(12.0),
-                        );
-                        // 大小
+                        ui.colored_label(BRAND, egui::RichText::new(detail_label).size(12.0));
                         let sz_str = if *detail_size == 0 {
                             "—".to_string()
                         } else {
                             format_size(*detail_size)
                         };
-                        let sz_color = if *detail_size > 1024 * 1024 * 1024 {
-                            CAUTION_COLOR
-                        } else if *detail_size > 100 * 1024 * 1024 {
-                            CAUTION_COLOR
-                        } else {
-                            TEXT_SECONDARY
-                        };
-                        ui.colored_label(sz_color, egui::RichText::new(&sz_str).size(12.0));
+                        ui.colored_label(
+                            TEXT_SECONDARY,
+                            egui::RichText::new(&sz_str).size(12.0).monospace(),
+                        );
                         ui.add_space(8.0);
-                        // 路径
                         let dp = truncate_path(detail_path, 55);
                         ui.colored_label(
                             TEXT_TERTIARY,
-                            egui::RichText::new(&dp).size(10.0),
+                            egui::RichText::new(&dp).size(10.0).monospace(),
                         );
                     });
                 });
@@ -775,9 +966,16 @@ fn render_scan_item_row(
 }
 
 /// 渲染 GUI 主界面
-fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+fn render_gui(
+    ctx: &egui::Context,
+    app: &mut App,
+    scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
     // 动态更新窗口标题（跟随语言切换）
-    ctx.send_viewport_cmd(egui::ViewportCommand::Title(app.t("window_title").to_string()));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+        app.t("window_title").to_string(),
+    ));
 
     // ========== 磁盘告警横幅（顶部）==========
     let (alert_level, alert_color, free_pct) = app.disk_alert_level();
@@ -790,10 +988,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 _ => ("🟢", "disk_alert_notice"),
             };
             let free_gb = app.disk_free as f64 / 1_073_741_824.0;
-            let msg = app.tf(msg_key, &[&format!("{:.1}", free_pct), &format!("{:.1}", free_gb)]);
+            let msg = app.tf(
+                msg_key,
+                &[&format!("{:.1}", free_pct), &format!("{:.1}", free_gb)],
+            );
 
             ui.horizontal(|ui| {
-                ui.colored_label(alert_color, egui::RichText::new(format!("{} {}", icon, msg)).size(14.0));
+                ui.colored_label(
+                    alert_color,
+                    egui::RichText::new(format!("{} {}", icon, msg)).size(14.0),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if alert_level >= 2 {
                         if ui.button(app.t("disk_alert_clean_now")).clicked() {
@@ -819,18 +1023,31 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     let selected_sz = app.selected_total_size();
 
                     // 左侧：已选中 N 项 · 可释放 XX GB
-                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(
-                        format!("{} {} · {} {}", selected_cnt, app.t("items_selected"), app.t("total"), format_size(selected_sz))
-                    ).size(13.0));
+                    ui.colored_label(
+                        TEXT_SECONDARY,
+                        egui::RichText::new(format!(
+                            "{} {} · {} {}",
+                            selected_cnt,
+                            app.t("items_selected"),
+                            app.t("total"),
+                            format_size(selected_sz)
+                        ))
+                        .size(13.0),
+                    );
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
+                        let delete_enabled =
+                            selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
                         let delete_btn = ui.add_enabled(
                             delete_enabled,
                             egui::Button::new(
-                                egui::RichText::new(format!("🗑 {} ({})", app.t("delete"), format_size(selected_sz)))
-                                    .color(egui::Color32::WHITE)
-                                    .size(13.0)
+                                egui::RichText::new(format!(
+                                    "🗑 {} ({})",
+                                    app.t("delete"),
+                                    format_size(selected_sz)
+                                ))
+                                .color(egui::Color32::WHITE)
+                                .size(13.0),
                             )
                             .fill(DANGER_COLOR)
                             .rounding(egui::Rounding::same(8.0)),
@@ -844,117 +1061,198 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
     });
 
     // ========== 左侧导航栏 ==========
-    egui::SidePanel::left("sidebar").exact_width(220.0).show(ctx, |ui| {
-        ui.set_min_width(200.0);
-        ui.vertical(|ui| {
-            // --- 品牌区 ---
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("🧹").size(22.0));
-                ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Maclean").size(16.0).strong().color(BRAND_TEXT));
-                    ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(TEXT_TERTIARY));
-                });
-            });
-            ui.add_space(14.0);
-
-            // --- 磁盘用量卡片 ---
-            let used = app.disk_total.saturating_sub(app.disk_free);
-            let used_pct = if app.disk_total > 0 {
-                used as f32 / app.disk_total as f32 * 100.0
-            } else {
-                0.0
-            };
-            egui::Frame::none()
-                .fill(SURFACE_ELEVATED)
-                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-                .rounding(egui::Rounding::same(8.0))
-                .inner_margin(egui::Margin::same(10.0))
-                .show(ui, |ui| {
-                    ui.set_min_width(180.0);
-                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("disk_used")).size(11.0));
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format_size(used)).size(16.0).strong().color(TEXT_PRIMARY));
-                        ui.label(egui::RichText::new(format!("/ {}", format_size(app.disk_total))).size(11.0).color(TEXT_TERTIARY));
+    egui::SidePanel::left("sidebar")
+        .exact_width(220.0)
+        .frame(egui::Frame::side_top_panel(&ctx.style()).fill(SURFACE_SIDEBAR))
+        .show(ctx, |ui| {
+            ui.set_min_width(200.0);
+            ui.vertical(|ui| {
+                // --- 品牌区 ---
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    // 品牌图标：紫色圆角方块 + 白色 M
+                    let icon_size = egui::vec2(32.0, 32.0);
+                    let (icon_rect, _icon_resp) =
+                        ui.allocate_exact_size(icon_size, egui::Sense::hover());
+                    if ui.is_rect_visible(icon_rect) {
+                        let painter = ui.painter();
+                        painter.rect_filled(icon_rect, egui::Rounding::same(8.0), BRAND);
+                        painter.text(
+                            icon_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "M",
+                            egui::FontId::proportional(14.0),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Maclean")
+                                .size(16.0)
+                                .strong()
+                                .color(BRAND_TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .size(11.0)
+                                .color(TEXT_TERTIARY),
+                        );
                     });
-                    ui.add_space(4.0);
-                    ui.add(egui::ProgressBar::new(used_pct / 100.0)
-                        .fill(BRAND)
-                        .text(format!("{:.0}%", used_pct)));
                 });
-            ui.add_space(14.0);
+                ui.add_space(14.0);
 
-            // --- 导航项列表 ---
-            let nav_icons = ["🏠", "📦", "📁", "🗑", "📦", "🧩", "⚙️", "💾"];
-            for (i, tab) in Tab::all().iter().enumerate() {
-                let count = app.results[i].len();
-                let is_selected = *tab == app.tab;
-                let icon = nav_icons[i];
-                let title = tab_title(tab, app);
-
-                let nav_frame = if is_selected {
-                    egui::Frame::none()
-                        .fill(BRAND_SOFT)
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-                        .stroke(egui::Stroke::NONE)
+                // --- 磁盘用量卡片 ---
+                let free_pct = if app.disk_total > 0 {
+                    app.disk_free as f32 / app.disk_total as f32 * 100.0
                 } else {
-                    egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-                        .stroke(egui::Stroke::NONE)
+                    0.0
                 };
+                egui::Frame::none()
+                    .fill(SURFACE_ELEVATED)
+                    .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(180.0);
+                        ui.colored_label(
+                            TEXT_SECONDARY,
+                            egui::RichText::new(app.t("disk_free")).size(11.0),
+                        );
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format_size(app.disk_free))
+                                    .size(16.0)
+                                    .strong()
+                                    .color(TEXT_PRIMARY),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("/ {}", format_size(app.disk_total)))
+                                    .size(11.0)
+                                    .color(TEXT_TERTIARY),
+                            );
+                        });
+                        ui.add_space(6.0);
+                        // 细进度条（无文字）
+                        let bar_rect = ui.available_rect_before_wrap();
+                        let bar_height = 6.0;
+                        let bar_rect = egui::Rect::from_min_size(
+                            bar_rect.min,
+                            egui::vec2(bar_rect.width(), bar_height),
+                        );
+                        ui.painter().rect_filled(
+                            bar_rect,
+                            egui::Rounding::same(3.0),
+                            SURFACE_MUTED,
+                        );
+                        let fill_width = bar_rect.width() * (free_pct / 100.0);
+                        if fill_width > 0.0 {
+                            let fill_rect = egui::Rect::from_min_size(
+                                bar_rect.min,
+                                egui::vec2(fill_width, bar_height),
+                            );
+                            ui.painter()
+                                .rect_filled(fill_rect, egui::Rounding::same(3.0), BRAND);
+                        }
+                        ui.allocate_rect(bar_rect, egui::Sense::hover());
+                    });
+                ui.add_space(14.0);
 
-                let nav_resp = nav_frame.show(ui, |ui| {
-                    ui.set_min_width(180.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(icon).size(16.0));
-                        ui.label(egui::RichText::new(title).size(13.0).color(if is_selected { BRAND } else { TEXT_PRIMARY }));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if count > 0 {
-                                ui.label(egui::RichText::new(count.to_string()).size(11.0).color(if is_selected { BRAND } else { TEXT_TERTIARY }));
-                            }
+                // --- 导航项列表 ---
+                let nav_icons = ["🏠", "📦", "📁", "🧹", "📂", "🧩", "⚙️", "💾", "🛠"];
+                for (i, tab) in Tab::all().iter().enumerate() {
+                    let count = app.results[i].len();
+                    let is_selected = *tab == app.tab;
+                    let icon = nav_icons[i];
+                    let title = tab_title(tab, app);
+
+                    let nav_frame = if is_selected {
+                        egui::Frame::none()
+                            .fill(BRAND_SOFT)
+                            .rounding(egui::Rounding::same(8.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .stroke(egui::Stroke::NONE)
+                    } else {
+                        egui::Frame::none()
+                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .stroke(egui::Stroke::NONE)
+                    };
+
+                    let nav_resp = nav_frame.show(ui, |ui| {
+                        ui.set_min_width(180.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(icon).size(16.0));
+                            ui.label(egui::RichText::new(title).size(13.0).color(if is_selected {
+                                BRAND_TEXT
+                            } else {
+                                TEXT_PRIMARY
+                            }));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if count > 0 {
+                                        ui.label(
+                                            egui::RichText::new(count.to_string())
+                                                .size(11.0)
+                                                .color(if is_selected {
+                                                    BRAND
+                                                } else {
+                                                    TEXT_TERTIARY
+                                                })
+                                                .background_color(if is_selected {
+                                                    BRAND_SOFT
+                                                } else {
+                                                    SURFACE_MUTED
+                                                }),
+                                        );
+                                    }
+                                },
+                            );
                         });
                     });
-                });
 
-                if nav_resp.response.clicked() && matches!(app.confirm, ConfirmState::None) {
-                    app.tab = *tab;
-                    app.list_index = 0;
-                }
-            }
-        });
-
-        // --- 底部：语言切换 + 日志按钮 ---
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.button(if app.lang_en { "中文" } else { "EN" }).clicked() {
-                    app.toggle_lang();
-                }
-                if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
-                    let log_dir = logger::log_dir();
-                    // 跨平台打开日志目录
-                    #[cfg(target_os = "macos")]
-                    let _ = std::process::Command::new("open").arg(&log_dir).spawn();
-                    #[cfg(target_os = "windows")]
-                    let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
-                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                    let _ = std::process::Command::new("xdg-open").arg(&log_dir).spawn();
+                    if nav_resp.response.clicked() && matches!(app.confirm, ConfirmState::None) {
+                        app.tab = *tab;
+                        app.list_index = 0;
+                    }
                 }
             });
-            ui.add_space(4.0);
+
+            // --- 底部：语言切换 + 日志按钮 ---
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button(if app.lang_en { "中文" } else { "EN" }).clicked() {
+                        app.toggle_lang();
+                    }
+                    if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
+                        let log_dir = logger::log_dir();
+                        // 跨平台打开日志目录
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg(&log_dir).spawn();
+                        #[cfg(target_os = "windows")]
+                        let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
+                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                        let _ = std::process::Command::new("xdg-open").arg(&log_dir).spawn();
+                    }
+                });
+                ui.add_space(4.0);
+            });
         });
-    });
 
     // ========== 右侧内容区 ==========
     egui::CentralPanel::default().show(ctx, |ui| {
         // --- 顶部 Header：当前 Tab 标题 + 副标题 + 扫描/刷新按钮 ---
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new(tab_title(&app.tab, app)).size(20.0).strong().color(TEXT_PRIMARY));
+                ui.label(
+                    egui::RichText::new(tab_title(&app.tab, app))
+                        .size(18.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
                 // 副标题：扫描状态/项目数
                 let tab_idx_h = app.tab_index();
                 let subtitle = match &app.scan_states[tab_idx_h] {
@@ -963,7 +1261,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     ScanState::Done => {
                         let count = app.current_items().len();
                         let total: u64 = app.current_items().iter().map(|i| i.size_bytes).sum();
-                        app.tf("found_items_total", &[&count.to_string(), &format_size(total)])
+                        app.tf(
+                            "found_items_total",
+                            &[&count.to_string(), &format_size(total)],
+                        )
                     }
                 };
                 ui.colored_label(TEXT_TERTIARY, egui::RichText::new(subtitle).size(12.0));
@@ -975,25 +1276,33 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
                 if refresh_btn.clicked() {
                     let tab_name = match app.tab {
-                        Tab::Overview => "overview",
-                        Tab::DevCache => "dev_cache",
-                        Tab::LargeFiles => "large_files",
-                        Tab::AppCache => "app_cache",
-                        Tab::AppData => "app_data",
-                        Tab::AppUninstall => "app_uninstall",
-                        Tab::SystemOptimize => "system_optimize",
-                        Tab::Apfs => "apfs",
+                        Tab::Overview | Tab::Settings => None,
+                        Tab::DevCache => Some("dev_cache"),
+                        Tab::LargeFiles => Some("large_files"),
+                        Tab::AppCache => Some("app_cache"),
+                        Tab::AppData => Some("app_data"),
+                        Tab::AppUninstall => Some("app_uninstall"),
+                        Tab::SystemOptimize => Some("system_optimize"),
+                        Tab::Apfs => Some("apfs"),
                     };
-                    scanner::cache::invalidate_cache(tab_name);
+                    if let Some(name) = tab_name {
+                        scanner::cache::invalidate_cache(name);
+                    }
                     start_scan(app, scan_rx);
                 }
 
                 ui.add_space(4.0);
 
                 // 扫描按钮
-                let scan_button = ui.add_enabled(!is_scanning, egui::Button::new(
-                    egui::RichText::new(if is_scanning { "⏳..." } else { app.t("scan") }).color(egui::Color32::WHITE)
-                ).fill(BRAND).rounding(egui::Rounding::same(8.0)));
+                let scan_button = ui.add_enabled(
+                    !is_scanning,
+                    egui::Button::new(
+                        egui::RichText::new(if is_scanning { "⏳..." } else { app.t("scan") })
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(BRAND)
+                    .rounding(egui::Rounding::same(8.0)),
+                );
                 if scan_button.clicked() {
                     start_scan(app, scan_rx);
                 }
@@ -1015,6 +1324,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             return;
         }
 
+        // --- 设置 Tab：配置面板 ---
+        if app.tab == Tab::Settings {
+            render_settings_panel(ui, app);
+            return;
+        }
+
         // --- 磁盘分析器 Tab：目录钻取式浏览 ---
         if app.tab == Tab::LargeFiles {
             render_disk_analyzer(ui, app, scan_rx);
@@ -1026,91 +1341,66 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         let items = app.results[tab_idx].clone();
         let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
 
-        if is_scanning {
-            // 扫描中：显示带百分比的进度长条 + 已发现的部分项
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                ui.add(egui::Spinner::new().size(40.0));
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(BRAND));
-                ui.add_space(5.0);
-                ui.label(egui::RichText::new(app.t("scanning_hint")).size(12.0).color(TEXT_TERTIARY));
-                ui.add_space(15.0);
-                // 真实进度百分比长条
-                let pct = (app.scan_progress * 100.0) as u32;
-                ui.add(egui::ProgressBar::new(app.scan_progress)
-                    .desired_width(500.0)
-                    .fill(BRAND)
-                    .text(format!("{}%", pct)));
-            });
+        // --- 分类过滤标签页（Overview / LargeFiles / SystemOptimize / Settings 除外）---
+        let show_category_tabs = !matches!(
+            app.tab,
+            Tab::Overview | Tab::LargeFiles | Tab::SystemOptimize | Tab::Settings
+        );
+        if show_category_tabs && !is_scanning && !items.is_empty() {
+            let mut prefixes: Vec<String> = items
+                .iter()
+                .map(|item| category_prefix(&item.category))
+                .filter(|p| !p.is_empty())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            prefixes.sort();
 
-            // 增量显示已发现的部分项
-            if !items.is_empty() {
-                ui.add_space(10.0);
-                let partial_count = items.len();
-                let partial_size: u64 = items.iter().map(|i| i.size_bytes).sum();
-                ui.colored_label(
-                    BRAND,
-                    egui::RichText::new(format!(
-                        "🔍 {} {} ({})",
-                        partial_count,
-                        app.t("items_found"),
-                        format_size(partial_size)
-                    )).size(13.0),
-                );
-                ui.add_space(5.0);
-
-                // 可滚动的部分项列表
-                egui::ScrollArea::vertical()
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        for item in &items {
-                            let rec_color = if !item.deletable {
-                                TEXT_TERTIARY
-                            } else {
-                                recommend_color(&item.recommend)
-                            };
-                            let badge = if !item.deletable {
-                                "🔒".to_string()
-                            } else {
-                                recommend_badge_text(&item.recommend, app.lang_en)
-                            };
-
-                            let row_bg = SURFACE_ELEVATED;
-
-                            egui::Frame::none()
-                                .fill(row_bg)
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-                                .rounding(egui::Rounding::same(6.0))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.colored_label(rec_color, &badge);
-                                        ui.add_space(3.0);
-                                        let cat_en = i18n::translate_category(&item.category, app.lang_en);
-                                        ui.colored_label(category_color(&item.category), &cat_en);
-                                        let size_str = if item.size_bytes == 0 { "—".to_string() } else { format_size(item.size_bytes) };
-                                        ui.colored_label(SAFE_COLOR, &size_str);
-                                        ui.add_space(5.0);
-                                        ui.colored_label(
-                                            TEXT_TERTIARY,
-                                            egui::RichText::new(truncate_path(&item.path, 60)).size(11.0),
-                                        );
-                                    });
-                                });
-                            ui.add_space(1.0);
+            if !prefixes.is_empty() {
+                ui.horizontal(|ui| {
+                    let all_count = items.len();
+                    let all_active = app.filter_category.is_none();
+                    if render_category_tab(ui, app.t("select_all"), Some(all_count), all_active)
+                        .clicked()
+                    {
+                        app.filter_category = None;
+                    }
+                    for prefix in &prefixes {
+                        let count = items
+                            .iter()
+                            .filter(|i| category_prefix(&i.category) == *prefix)
+                            .count();
+                        let active = app.filter_category.as_deref() == Some(prefix);
+                        if render_category_tab(ui, prefix, Some(count), active).clicked() {
+                            app.filter_category = Some(prefix.clone());
                         }
-                    });
+                    }
+                });
+                ui.add_space(4.0);
             }
+        }
 
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        if is_scanning {
+            ui_scanning(ui, app);
+            return;
         } else if items.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
-                ui.label(egui::RichText::new(app.t("no_items_hint")).size(16.0).color(TEXT_TERTIARY));
+                ui.label(
+                    egui::RichText::new(app.t("no_items_hint"))
+                        .size(16.0)
+                        .color(TEXT_TERTIARY),
+                );
                 ui.add_space(10.0);
                 let scan_hint = format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
-                if ui.button(egui::RichText::new(&scan_hint).size(16.0).color(egui::Color32::WHITE)).clicked() {
+                if ui
+                    .button(
+                        egui::RichText::new(&scan_hint)
+                            .size(16.0)
+                            .color(egui::Color32::WHITE),
+                    )
+                    .clicked()
+                {
                     start_scan(app, scan_rx);
                 }
             });
@@ -1138,9 +1428,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.colored_label(SAFE_COLOR, egui::RichText::new("●").size(10.0));
-                            ui.colored_label(SAFE_COLOR, egui::RichText::new(
-                                format!("{} {} · {}", safe_cnt, app.t("safe_clean"), format_size(safe_sz))
-                            ).size(12.0));
+                            ui.colored_label(
+                                SAFE_COLOR,
+                                egui::RichText::new(format!(
+                                    "{} {} · {}",
+                                    safe_cnt,
+                                    app.t("safe_clean"),
+                                    format_size(safe_sz)
+                                ))
+                                .size(12.0),
+                            );
                         });
                     });
                 ui.add_space(6.0);
@@ -1154,9 +1451,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.colored_label(CAUTION_COLOR, egui::RichText::new("●").size(10.0));
-                            ui.colored_label(CAUTION_COLOR, egui::RichText::new(
-                                format!("{} {} · {}", caution_cnt, app.t("caution_clean"), format_size(caution_sz))
-                            ).size(12.0));
+                            ui.colored_label(
+                                CAUTION_COLOR,
+                                egui::RichText::new(format!(
+                                    "{} {} · {}",
+                                    caution_cnt,
+                                    app.t("caution_clean"),
+                                    format_size(caution_sz)
+                                ))
+                                .size(12.0),
+                            );
                         });
                     });
                 ui.add_space(6.0);
@@ -1170,10 +1474,20 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         .inner_margin(egui::Margin::symmetric(12.0, 6.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.colored_label(ADVANCED_COLOR, egui::RichText::new("●").size(10.0));
-                                ui.colored_label(ADVANCED_COLOR, egui::RichText::new(
-                                    format!("{} {} · {}", advanced_cnt, app.t("confirm_clean"), format_size(advanced_sz))
-                                ).size(12.0));
+                                ui.colored_label(
+                                    ADVANCED_COLOR,
+                                    egui::RichText::new("●").size(10.0),
+                                );
+                                ui.colored_label(
+                                    ADVANCED_COLOR,
+                                    egui::RichText::new(format!(
+                                        "{} {} · {}",
+                                        advanced_cnt,
+                                        app.t("confirm_clean"),
+                                        format_size(advanced_sz)
+                                    ))
+                                    .size(12.0),
+                                );
                             });
                         });
                     ui.add_space(6.0);
@@ -1189,9 +1503,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.colored_label(BRAND, egui::RichText::new("✓").size(10.0));
-                                ui.colored_label(BRAND, egui::RichText::new(
-                                    format!("{} {} · {}", selected_cnt, app.t("items_selected"), format_size(selected_sz))
-                                ).size(12.0));
+                                ui.colored_label(
+                                    BRAND,
+                                    egui::RichText::new(format!(
+                                        "{} {} · {}",
+                                        selected_cnt,
+                                        app.t("items_selected"),
+                                        format_size(selected_sz)
+                                    ))
+                                    .size(12.0),
+                                );
                             });
                         });
                 }
@@ -1203,9 +1524,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.horizontal(|ui| {
                 // 智能选择：只选推荐清理
                 let smart_btn = ui.add(
-                    egui::Button::new(egui::RichText::new(format!("🟢 {}", app.t("select_safe"))).color(egui::Color32::WHITE))
-                        .fill(SAFE_COLOR)
-                        .rounding(egui::Rounding::same(8.0)),
+                    egui::Button::new(
+                        egui::RichText::new(format!("🟢 {}", app.t("select_safe")))
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(SAFE_COLOR)
+                    .rounding(egui::Rounding::same(8.0)),
                 );
                 if smart_btn.clicked() {
                     app.select_safe_only();
@@ -1224,9 +1548,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
                 let delete_btn = ui.add_enabled(
                     delete_enabled,
-                    egui::Button::new(egui::RichText::new(format!("🗑 {} ({})", app.t("delete"), format_size(selected_sz))).color(egui::Color32::WHITE))
-                        .fill(DANGER_COLOR)
-                        .rounding(egui::Rounding::same(8.0)),
+                    egui::Button::new(
+                        egui::RichText::new(format!(
+                            "🗑 {} ({})",
+                            app.t("delete"),
+                            format_size(selected_sz)
+                        ))
+                        .color(egui::Color32::WHITE),
+                    )
+                    .fill(DANGER_COLOR)
+                    .rounding(egui::Rounding::same(8.0)),
                 );
                 if delete_btn.clicked() {
                     app.prepare_delete();
@@ -1270,7 +1601,11 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             if !app.filter_query.trim().is_empty() {
                 ui.colored_label(
                     BRAND,
-                    egui::RichText::new(app.tf("filter_results", &[&filtered_count.to_string(), &total_count.to_string()])).size(12.0),
+                    egui::RichText::new(app.tf(
+                        "filter_results",
+                        &[&filtered_count.to_string(), &total_count.to_string()],
+                    ))
+                    .size(12.0),
                 );
             }
 
@@ -1283,7 +1618,11 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let no_match_text = app.t("no_match").to_string();
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
-                    ui.label(egui::RichText::new(&no_match_text).size(14.0).color(TEXT_TERTIARY));
+                    ui.label(
+                        egui::RichText::new(&no_match_text)
+                            .size(14.0)
+                            .color(TEXT_TERTIARY),
+                    );
                 });
                 return;
             }
@@ -1296,13 +1635,15 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let mut toggled_indices: Vec<usize> = Vec::new();
-                let mut expand_toggles: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut expand_toggles: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
 
                 if is_uninstall_tab {
                     // ====== App卸载 Tab：按应用名分组显示 ======
                     // 过滤后按 category 中的应用名分组
                     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-                    let mut group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    let mut group_map: std::collections::HashMap<String, usize> =
+                        std::collections::HashMap::new();
                     for &display_idx in &filtered_indices {
                         let item = &items[display_idx];
                         if let Some(app_name) = extract_app_name(&item.category) {
@@ -1328,8 +1669,29 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         let any_selected = deletable_indices.iter().any(|&i| items[i].selected);
                         let has_deletable = !deletable_indices.is_empty();
 
+                        // 统计子项类型数量
+                        let uninstall_count = indices
+                            .iter()
+                            .filter(|&&i| items[i].category.ends_with(" (卸载)"))
+                            .count();
+                        let data_count = indices
+                            .iter()
+                            .filter(|&&i| items[i].category.ends_with(" 数据"))
+                            .count();
+                        let cache_count = indices
+                            .iter()
+                            .filter(|&&i| items[i].category.ends_with(" 缓存"))
+                            .count();
+                        // 应用路径：取卸载项的路径
+                        let app_path: String = indices
+                            .iter()
+                            .find(|&&i| items[i].category.ends_with(" (卸载)"))
+                            .map(|&i| items[i].path.clone())
+                            .unwrap_or_else(|| items[indices[0]].path.clone());
+
                         // 默认展开所有分组（首次渲染时自动展开）
-                        if !expanded_items.contains(app_name) && !expand_toggles.contains(app_name) {
+                        if !expanded_items.contains(app_name) && !expand_toggles.contains(app_name)
+                        {
                             expand_toggles.insert(app_name.clone());
                         }
                         let is_group_expanded = expanded_items.contains(app_name);
@@ -1367,7 +1729,9 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                 } else {
                                     TEXT_TERTIARY
                                 };
-                                if ui.colored_label(parent_cb_color, parent_cb_text).clicked() && has_deletable {
+                                if ui.colored_label(parent_cb_color, parent_cb_text).clicked()
+                                    && has_deletable
+                                {
                                     let target = !all_selected;
                                     for &idx in &deletable_indices {
                                         if items[idx].selected != target {
@@ -1378,42 +1742,77 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
                                 // 展开/收起图标
                                 let expand_icon = if is_group_expanded { "▼" } else { "▶" };
-                                if ui.small_button(expand_icon).clicked() && !expand_toggles.contains(app_name) {
+                                if ui.small_button(expand_icon).clicked()
+                                    && !expand_toggles.contains(app_name)
+                                {
                                     expand_toggles.insert(app_name.clone());
                                 }
 
                                 ui.add_space(3.0);
 
-                                // 应用名 + 总大小
+                                // 应用名 + 路径
                                 ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.colored_label(
-                                            TEXT_PRIMARY,
-                                            egui::RichText::new(app_name).size(14.0).strong(),
-                                        );
+                                    ui.colored_label(
+                                        TEXT_PRIMARY,
+                                        egui::RichText::new(app_name).size(14.0).strong(),
+                                    );
+                                    ui.colored_label(
+                                        TEXT_TERTIARY,
+                                        egui::RichText::new(truncate_path(&app_path, 80))
+                                            .size(11.0)
+                                            .monospace(),
+                                    );
+                                });
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
                                         let size_str = if total_size == 0 {
                                             "—".to_string()
                                         } else {
                                             format_size(total_size)
                                         };
-                                        let size_color = if total_size > 100 * 1024 * 1024 * 1024 {
-                                            ADVANCED_COLOR
-                                        } else if total_size > 1024 * 1024 * 1024 {
-                                            CAUTION_COLOR
-                                        } else {
-                                            SAFE_COLOR
-                                        };
-                                        ui.colored_label(size_color, egui::RichText::new(&size_str).strong().size(13.0));
-                                    });
-                                    ui.colored_label(
-                                        TEXT_TERTIARY,
-                                        egui::RichText::new(format!(
-                                            "{} 个子项（点击展开查看卸载/数据/缓存）",
-                                            indices.len()
-                                        ))
-                                        .size(11.0),
-                                    );
-                                });
+                                        ui.colored_label(
+                                            TEXT_PRIMARY,
+                                            egui::RichText::new(&size_str)
+                                                .size(14.0)
+                                                .strong()
+                                                .monospace(),
+                                        );
+                                        ui.add_space(10.0);
+                                        // 子项类型徽章：数据 / 缓存 / 应用
+                                        // 注意：right_to_left 布局中先添加的项在最右侧，
+                                        // 因此按「应用 → 缓存 → 数据」顺序添加，
+                                        // 最终从左到右显示为「数据 · 缓存 · 应用 · 大小」。
+                                        if uninstall_count > 0 {
+                                            render_status_badge(
+                                                ui,
+                                                &format!("应用 · {}", uninstall_count),
+                                                egui::Color32::from_rgb(146, 64, 14),
+                                                egui::Color32::from_rgb(254, 243, 199),
+                                            );
+                                            ui.add_space(6.0);
+                                        }
+                                        if cache_count > 0 {
+                                            render_status_badge(
+                                                ui,
+                                                &format!("缓存 · {}", cache_count),
+                                                egui::Color32::from_rgb(6, 95, 70),
+                                                egui::Color32::from_rgb(209, 250, 229),
+                                            );
+                                            ui.add_space(6.0);
+                                        }
+                                        if data_count > 0 {
+                                            render_status_badge(
+                                                ui,
+                                                &format!("数据 · {}", data_count),
+                                                egui::Color32::from_rgb(153, 27, 27),
+                                                egui::Color32::from_rgb(254, 226, 226),
+                                            );
+                                            ui.add_space(6.0);
+                                        }
+                                    },
+                                );
                             });
                         });
 
@@ -1592,7 +1991,10 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 0.99 + 0.005 * (1.0 - (-(elapsed - 15.0) / 10.0).exp())
             };
             // 如果通道关闭（扫描已完成），退出
-            if tx_progress.send(ScanMessage::Progress(progress.min(0.995))).is_err() {
+            if tx_progress
+                .send(ScanMessage::Progress(progress.min(0.995)))
+                .is_err()
+            {
                 break;
             }
         }
@@ -1603,11 +2005,15 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
         // 获取 Tab 名称用于缓存
         // 磁盘分析器在非主目录浏览时不使用缓存（路径不同，结果不同）
         let tab_name = match tab {
-            Tab::Overview => None,
+            Tab::Overview | Tab::Settings => None,
             Tab::DevCache => Some("dev_cache"),
             Tab::LargeFiles => {
                 // 仅在主目录时缓存
-                if disk_path.as_ref().map(|p| *p == scanner::home_dir()).unwrap_or(true) {
+                if disk_path
+                    .as_ref()
+                    .map(|p| *p == scanner::home_dir())
+                    .unwrap_or(true)
+                {
                     Some("large_files")
                 } else {
                     None
@@ -1635,7 +2041,11 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 }
                 // 缓存命中也按批次发送，提供增量显示体验
                 send_items_in_batches(&tx, &items, tab_idx as u64);
-                let _ = tx.send(ScanMessage::Done(items, cached.scan_time_ms, tab_idx as u64));
+                let _ = tx.send(ScanMessage::Done(
+                    items,
+                    cached.scan_time_ms,
+                    tab_idx as u64,
+                ));
                 let _ = tx.send(ScanMessage::AllDone);
                 return;
             }
@@ -1645,7 +2055,11 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
         // 用 catch_unwind 兜底，防止扫描 panic 后 UI 卡死
         let result = std::panic::catch_unwind(|| {
             match tab {
-                Tab::Overview => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
+                Tab::Overview | Tab::Settings => scanner::ScanResult {
+                    items: Vec::new(),
+                    total_size: 0,
+                    scan_time_ms: 0,
+                },
                 Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
                 Tab::LargeFiles => {
                     // 磁盘分析器：扫描指定目录（默认为主目录）
@@ -1669,28 +2083,54 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 #[cfg(not(target_os = "macos"))]
                 Tab::AppCache => {
                     #[cfg(target_os = "windows")]
-                    { scanner::windows_apps::WindowsAppCacheScanner::new().scan() }
+                    {
+                        scanner::windows_apps::WindowsAppCacheScanner::new().scan()
+                    }
                     #[cfg(not(target_os = "windows"))]
-                    { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                    {
+                        scanner::ScanResult {
+                            items: Vec::new(),
+                            total_size: 0,
+                            scan_time_ms: 0,
+                        }
+                    }
                 }
                 #[cfg(not(target_os = "macos"))]
                 Tab::AppData => {
                     #[cfg(target_os = "windows")]
-                    { scanner::windows_apps::WindowsAppDataScanner::new().scan() }
+                    {
+                        scanner::windows_apps::WindowsAppDataScanner::new().scan()
+                    }
                     #[cfg(not(target_os = "windows"))]
-                    { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                    {
+                        scanner::ScanResult {
+                            items: Vec::new(),
+                            total_size: 0,
+                            scan_time_ms: 0,
+                        }
+                    }
                 }
                 #[cfg(not(target_os = "macos"))]
                 Tab::AppUninstall => {
                     #[cfg(target_os = "windows")]
-                    { scanner::windows_apps::WindowsUninstallScanner::new().scan() }
+                    {
+                        scanner::windows_apps::WindowsUninstallScanner::new().scan()
+                    }
                     #[cfg(not(target_os = "windows"))]
-                    { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                    {
+                        scanner::ScanResult {
+                            items: Vec::new(),
+                            total_size: 0,
+                            scan_time_ms: 0,
+                        }
+                    }
                 }
                 #[cfg(not(target_os = "macos"))]
-                Tab::SystemOptimize | Tab::Apfs => {
-                    scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
-                }
+                Tab::SystemOptimize | Tab::Apfs => scanner::ScanResult {
+                    items: Vec::new(),
+                    total_size: 0,
+                    scan_time_ms: 0,
+                },
             }
         });
 
@@ -1713,7 +2153,11 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
 
                 // 增量显示：按大小降序排序后分批发送，最后 Done 发送完整列表替换
                 send_items_in_batches(&tx, &items, tab_idx as u64);
-                let _ = tx.send(ScanMessage::Done(items, scan_result.scan_time_ms, tab_idx as u64));
+                let _ = tx.send(ScanMessage::Done(
+                    items,
+                    scan_result.scan_time_ms,
+                    tab_idx as u64,
+                ));
             }
             Err(_) => {
                 // 扫描 panic，发送空结果让 UI 恢复正常
@@ -1749,7 +2193,10 @@ fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage
             } else {
                 0.99 + 0.005 * (1.0 - (-(elapsed - 30.0) / 20.0).exp())
             };
-            if tx_progress.send(ScanMessage::Progress(progress.min(0.995))).is_err() {
+            if tx_progress
+                .send(ScanMessage::Progress(progress.min(0.995)))
+                .is_err()
+            {
                 break;
             }
         }
@@ -1766,7 +2213,7 @@ fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage
         for (tab, tab_idx) in tabs_to_scan {
             // 检查缓存
             let cache_name = match tab {
-                Tab::Overview => None,
+                Tab::Overview | Tab::Settings => None,
                 Tab::DevCache => Some("dev_cache"),
                 Tab::LargeFiles => Some("large_files"),
                 Tab::AppCache => Some("app_cache"),
@@ -1792,47 +2239,75 @@ fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage
                 }
             }
 
-            let result = std::panic::catch_unwind(|| {
-                match tab {
-                    Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
-                    Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
-                    #[cfg(target_os = "macos")]
-                    Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
-                    #[cfg(target_os = "macos")]
-                    Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
-                    #[cfg(target_os = "macos")]
-                    Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
-                    #[cfg(target_os = "macos")]
-                    Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
-                    #[cfg(target_os = "macos")]
-                    Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
-                    #[cfg(not(target_os = "macos"))]
-                    Tab::AppCache => {
-                        #[cfg(target_os = "windows")]
-                        { scanner::windows_apps::WindowsAppCacheScanner::new().scan() }
-                        #[cfg(not(target_os = "windows"))]
-                        { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+            let result = std::panic::catch_unwind(|| match tab {
+                Tab::Overview | Tab::Settings => scanner::ScanResult {
+                    items: Vec::new(),
+                    total_size: 0,
+                    scan_time_ms: 0,
+                },
+                Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
+                Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
+                #[cfg(target_os = "macos")]
+                Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
+                #[cfg(target_os = "macos")]
+                Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
+                #[cfg(target_os = "macos")]
+                Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
+                #[cfg(target_os = "macos")]
+                Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
+                #[cfg(target_os = "macos")]
+                Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+                #[cfg(not(target_os = "macos"))]
+                Tab::AppCache => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        scanner::windows_apps::WindowsAppCacheScanner::new().scan()
                     }
-                    #[cfg(not(target_os = "macos"))]
-                    Tab::AppData => {
-                        #[cfg(target_os = "windows")]
-                        { scanner::windows_apps::WindowsAppDataScanner::new().scan() }
-                        #[cfg(not(target_os = "windows"))]
-                        { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        scanner::ScanResult {
+                            items: Vec::new(),
+                            total_size: 0,
+                            scan_time_ms: 0,
+                        }
                     }
-                    #[cfg(not(target_os = "macos"))]
-                    Tab::AppUninstall => {
-                        #[cfg(target_os = "windows")]
-                        { scanner::windows_apps::WindowsUninstallScanner::new().scan() }
-                        #[cfg(not(target_os = "windows"))]
-                        { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    Tab::SystemOptimize | Tab::Apfs => {
-                        scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
-                    }
-                    _ => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
                 }
+                #[cfg(not(target_os = "macos"))]
+                Tab::AppData => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        scanner::windows_apps::WindowsAppDataScanner::new().scan()
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        scanner::ScanResult {
+                            items: Vec::new(),
+                            total_size: 0,
+                            scan_time_ms: 0,
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                Tab::AppUninstall => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        scanner::windows_apps::WindowsUninstallScanner::new().scan()
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        scanner::ScanResult {
+                            items: Vec::new(),
+                            total_size: 0,
+                            scan_time_ms: 0,
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                Tab::SystemOptimize | Tab::Apfs => scanner::ScanResult {
+                    items: Vec::new(),
+                    total_size: 0,
+                    scan_time_ms: 0,
+                },
             });
 
             match result {
@@ -1866,17 +2341,22 @@ fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage
 /// 排序后按每批最多 10 项分割，每批之间 sleep 50ms，
 /// 让 UI 有机会渲染已发现的项。发送完毕后调用方再发送 Done
 /// （Done 携带完整列表，会覆盖累积的部分项，保证最终结果一致）。
-fn send_items_in_batches(
-    tx: &mpsc::Sender<ScanMessage>,
-    items: &[ScanItem],
-    tab_idx: u64,
-) {
+fn send_items_in_batches(tx: &mpsc::Sender<ScanMessage>, items: &[ScanItem], tab_idx: u64) {
     // 按大小降序排序，让用户先看到最大的项
     let mut sorted: Vec<ScanItem> = items.to_vec();
     sorted.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
 
     const BATCH_SIZE: usize = 10;
     for chunk in sorted.chunks(BATCH_SIZE) {
+        // 报告当前扫描路径
+        if let Some(last) = chunk.last() {
+            let path = if last.path.is_empty() {
+                last.category.clone()
+            } else {
+                last.path.clone()
+            };
+            let _ = tx.send(ScanMessage::CurrentPath(path));
+        }
         let _ = tx.send(ScanMessage::PartialItems(chunk.to_vec(), tab_idx));
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -1971,15 +2451,19 @@ fn best_effort_delete(path: &std::path::Path) -> bool {
 /// 获取系统所有挂载点 (macOS 专属)
 #[cfg(target_os = "macos")]
 fn get_mount_points() -> Vec<String> {
-    let output = std::process::Command::new("/sbin/mount")
-        .output();
+    let output = std::process::Command::new("/sbin/mount").output();
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines()
+            stdout
+                .lines()
                 .filter_map(|line| {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 { Some(parts[2].to_string()) } else { None }
+                    if parts.len() >= 3 {
+                        Some(parts[2].to_string())
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         }
@@ -2013,17 +2497,17 @@ fn extract_all_uuids(text: &str) -> Vec<String> {
     let mut i = 0;
     while i + 36 <= len {
         // 检查 UUID 格式: 8-4-4-4-12
-        if chars[i..i+8].iter().all(|c| c.is_ascii_hexdigit())
-            && chars[i+8] == '-'
-            && chars[i+9..i+13].iter().all(|c| c.is_ascii_hexdigit())
-            && chars[i+13] == '-'
-            && chars[i+14..i+18].iter().all(|c| c.is_ascii_hexdigit())
-            && chars[i+18] == '-'
-            && chars[i+19..i+23].iter().all(|c| c.is_ascii_hexdigit())
-            && chars[i+23] == '-'
-            && chars[i+24..i+36].iter().all(|c| c.is_ascii_hexdigit())
+        if chars[i..i + 8].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i + 8] == '-'
+            && chars[i + 9..i + 13].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i + 13] == '-'
+            && chars[i + 14..i + 18].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i + 18] == '-'
+            && chars[i + 19..i + 23].iter().all(|c| c.is_ascii_hexdigit())
+            && chars[i + 23] == '-'
+            && chars[i + 24..i + 36].iter().all(|c| c.is_ascii_hexdigit())
         {
-            let uuid: String = chars[i..i+36].iter().collect();
+            let uuid: String = chars[i..i + 36].iter().collect();
             if !uuids.contains(&uuid) {
                 uuids.push(uuid);
             }
@@ -2046,7 +2530,8 @@ fn extract_all_uuids(text: &str) -> Vec<String> {
 fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<String, String> {
     // 1. 进程检测：模拟器运行中时拒绝删除
     if safety::is_simulator_running() {
-        return Err(App::t_lang(lang_en, "log_skip_running").replace("[{}]", "")
+        return Err(App::t_lang(lang_en, "log_skip_running")
+            .replace("[{}]", "")
             .replace("Xcode/Simulator", "Xcode/Simulator")
             .trim()
             .to_string());
@@ -2112,14 +2597,26 @@ fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<String, String>
 
     if success_count > 0 {
         let suffix = if !fail_msgs.is_empty() {
-            App::tf_lang(lang_en, "log_sim_failed_suffix", &[&fail_msgs.len().to_string()])
+            App::tf_lang(
+                lang_en,
+                "log_sim_failed_suffix",
+                &[&fail_msgs.len().to_string()],
+            )
         } else {
             String::new()
         };
-        let msg = App::tf_lang(lang_en, "log_sim_deleted", &[&success_count.to_string(), &suffix]);
+        let msg = App::tf_lang(
+            lang_en,
+            "log_sim_deleted",
+            &[&success_count.to_string(), &suffix],
+        );
         Ok(msg)
     } else {
-        Err(format!("{}: {}", App::t_lang(lang_en, "log_unknown"), fail_msgs.join("; ")))
+        Err(format!(
+            "{}: {}",
+            App::t_lang(lang_en, "log_unknown"),
+            fail_msgs.join("; ")
+        ))
     }
 }
 
@@ -2169,12 +2666,17 @@ fn run_docker_prune(lang_en: bool) -> Result<String, String> {
 /// 启动后台删除线程（两阶段自动删除）
 /// 阶段1: 普通删除（多线程并行 rm -rf）
 /// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
-fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bool, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+fn start_delete(
+    to_delete: Vec<(String, String, Vec<String>, bool)>,
+    lang_en: bool,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
-        let failed_items: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+        let failed_items: std::sync::Mutex<Vec<(String, String)>> =
+            std::sync::Mutex::new(Vec::new());
 
         logger::info(&format!("删除任务开始: {} 项", to_delete.len()));
 
@@ -2448,15 +2950,16 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
             }
         });
 
-        let mut failed_items: Vec<(String, String)> = failed_items.into_inner().unwrap();
+        let failed_items: Vec<(String, String)> = failed_items.into_inner().unwrap();
 
         logger::info(&format!("阶段1删除完成, 失败 {} 项", failed_items.len()));
 
         // 普通删除完成后，若还有失败项，通知 GUI 弹出 egui 内置密码输入框
         if !failed_items.is_empty() {
-            let _ = tx.send(DeleteMessage::Info(
-                format!("🔐 {}", App::tf_lang(lang_en, "log_need_sudo", &[&failed_items.len().to_string()])),
-            ));
+            let _ = tx.send(DeleteMessage::Info(format!(
+                "🔐 {}",
+                App::tf_lang(lang_en, "log_need_sudo", &[&failed_items.len().to_string()])
+            )));
             let _ = tx.send(DeleteMessage::NeedPassword(failed_items));
             return;
         }
@@ -2482,13 +2985,17 @@ fn start_sudo_delete(
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
-        let _ = tx.send(DeleteMessage::Info(
-            format!("🔐 {}", App::t_lang(lang_en, "log_sudo_phase")),
-        ));
+        let _ = tx.send(DeleteMessage::Info(format!(
+            "🔐 {}",
+            App::t_lang(lang_en, "log_sudo_phase")
+        )));
 
         let sudo_debug_log = std::env::temp_dir().join("maclean_sudo_debug.log");
         let mut debug_entries: Vec<String> = Vec::new();
-        debug_entries.push(format!("[sudo phase] started, {} items", failed_items.len()));
+        debug_entries.push(format!(
+            "[sudo phase] started, {} items",
+            failed_items.len()
+        ));
         for (p, c) in &failed_items {
             debug_entries.push(format!("  item: [{}] {}", c, p));
         }
@@ -2518,7 +3025,10 @@ exit 0
 "#;
                 let xcrun_script = std::env::temp_dir().join("maclean_xcrun_delete.sh");
                 let _ = std::fs::write(&xcrun_script, script);
-                let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&xcrun_script).output();
+                let _ = std::process::Command::new("/bin/chmod")
+                    .arg("+x")
+                    .arg(&xcrun_script)
+                    .output();
 
                 let xcrun_result = std::process::Command::new("/usr/bin/sudo")
                     .arg("-S")
@@ -2546,7 +3056,10 @@ exit 0
 
                         // 检查是否密码错误
                         if stderr.contains("incorrect password") || stderr.contains("3 incorrect") {
-                            let _ = tx.send(DeleteMessage::Info(format!("🔒 {}", App::t_lang(lang_en, "log_password_wrong"))));
+                            let _ = tx.send(DeleteMessage::Info(format!(
+                                "🔒 {}",
+                                App::t_lang(lang_en, "log_password_wrong")
+                            )));
                             let _ = tx.send(DeleteMessage::NeedPassword(failed_items.clone()));
                             let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
                             let _ = std::fs::remove_file(&xcrun_script);
@@ -2555,11 +3068,25 @@ exit 0
 
                         // 检查 Volumes 目录是否已清空
                         let p = std::path::Path::new(path);
-                        if !p.exists() || std::fs::read_dir(p).map(|mut d| d.next().is_none()).unwrap_or(true) {
+                        if !p.exists()
+                            || std::fs::read_dir(p)
+                                .map(|mut d| d.next().is_none())
+                                .unwrap_or(true)
+                        {
                             xcrun_success = true;
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ {}", App::tf_lang(lang_en, "log_touchid_runtime_deleted_path", &[path])),
-                                path.clone(), category.clone(), true));
+                                format!(
+                                    "✓ {}",
+                                    App::tf_lang(
+                                        lang_en,
+                                        "log_touchid_runtime_deleted_path",
+                                        &[path]
+                                    )
+                                ),
+                                path.clone(),
+                                category.clone(),
+                                true,
+                            ));
                             safety::log_deletion(path, category, true, None);
                         }
                     }
@@ -2611,16 +3138,17 @@ exit 0
 
         for (i, (path, _)) in failed_items.iter().enumerate() {
             let escaped = path.replace("'", "'\\''");
-            script_content.push_str(&format!(
-                "process_one {} '{}' &\n",
-                i, escaped
-            ));
+            script_content.push_str(&format!("process_one {} '{}' &\n", i, escaped));
         }
         script_content.push_str("\nwait\n");
-        script_content.push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
+        script_content
+            .push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
         script_content.push_str("exit 0\n");
         let _ = std::fs::write(&tmp_script, &script_content);
-        let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&tmp_script).output();
+        let _ = std::process::Command::new("/bin/chmod")
+            .arg("+x")
+            .arg(&tmp_script)
+            .output();
 
         debug_entries.push(format!("delete script: {}", tmp_script.display()));
         debug_entries.push("--- delete script content ---".to_string());
@@ -2644,7 +3172,8 @@ exit 0
             });
 
         // 解析脚本输出，按路径收集错误信息
-        let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut rm_stderr: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         match &sudo_result {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2659,8 +3188,14 @@ exit 0
                     } else if let Some(_rest) = line.strip_prefix(">MACLEAN_EXIT:") {
                         current_path.clear();
                     } else if !line.is_empty() && !current_path.is_empty() {
-                        rm_stderr.entry(current_path.clone()).or_default().push_str(line);
-                        rm_stderr.entry(current_path.clone()).or_default().push('\n');
+                        rm_stderr
+                            .entry(current_path.clone())
+                            .or_default()
+                            .push_str(line);
+                        rm_stderr
+                            .entry(current_path.clone())
+                            .or_default()
+                            .push('\n');
                     }
                 }
             }
@@ -2684,9 +3219,10 @@ exit 0
                         || stderr_all.contains("User canceled"));
 
                 if password_error {
-                    let _ = tx.send(DeleteMessage::Info(
-                        format!("🔒 {}", App::t_lang(lang_en, "log_password_wrong")),
-                    ));
+                    let _ = tx.send(DeleteMessage::Info(format!(
+                        "🔒 {}",
+                        App::t_lang(lang_en, "log_password_wrong")
+                    )));
                     // 密码错误时 sudo 不会执行任何删除，全部项都需要重试
                     let _ = tx.send(DeleteMessage::NeedPassword(failed_items));
                     let _ = std::fs::remove_file(&tmp_script);
@@ -2697,37 +3233,78 @@ exit 0
                     let p = std::path::Path::new(path.as_str());
                     if !p.exists() && p.symlink_metadata().is_err() {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✓ {}", App::tf_lang(lang_en, "log_deleted_sudo", &[category, path])), path.clone(), category.clone(), true));
+                            format!(
+                                "✓ {}",
+                                App::tf_lang(lang_en, "log_deleted_sudo", &[category, path])
+                            ),
+                            path.clone(),
+                            category.clone(),
+                            true,
+                        ));
                         safety::log_deletion(path, category, true, None);
                         continue;
                     }
 
                     // 仍在：判断是 SIP 保护还是普通权限/占用问题
-                    let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or(&stderr_all);
+                    let err_text = rm_stderr
+                        .get(path)
+                        .map(|s| s.as_str())
+                        .unwrap_or(&stderr_all);
                     let is_sip = err_text.contains("Operation not permitted")
                         || std::process::Command::new("/usr/bin/xattr")
                             .arg(path)
                             .output()
-                            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance"))
+                            .map(|o| {
+                                String::from_utf8_lossy(&o.stdout).contains("com.apple.provenance")
+                            })
                             .unwrap_or(false)
                         || path.starts_with("/Library/Developer/CoreSimulator/Caches");
 
                     if is_sip {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("🔒 {}", App::tf_lang(lang_en, "log_sip_protected", &[path])), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some(App::t_lang(lang_en, "log_sip_reason")));
+                            format!("🔒 {}", App::tf_lang(lang_en, "log_sip_protected", &[path])),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
+                        safety::log_deletion(
+                            path,
+                            category,
+                            false,
+                            Some(App::t_lang(lang_en, "log_sip_reason")),
+                        );
                     } else if user_cancelled {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ {}", App::tf_lang(lang_en, "log_cancelled_auth", &[path])), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some(App::t_lang(lang_en, "log_cancel_reason")));
+                            format!("✗ {}", App::tf_lang(lang_en, "log_cancelled_auth", &[path])),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
+                        safety::log_deletion(
+                            path,
+                            category,
+                            false,
+                            Some(App::t_lang(lang_en, "log_cancel_reason")),
+                        );
                     } else if sudo_failed {
                         let detail = if stderr_all.is_empty() {
-                            App::tf_lang(lang_en, "log_exit_code", &[&output.status.code().unwrap_or(-1).to_string()])
+                            App::tf_lang(
+                                lang_en,
+                                "log_exit_code",
+                                &[&output.status.code().unwrap_or(-1).to_string()],
+                            )
                         } else {
                             stderr_all.trim().to_string()
                         };
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ {}", App::tf_lang(lang_en, "log_delete_failed", &[path, &detail])), path.clone(), category.clone(), false));
+                            format!(
+                                "✗ {}",
+                                App::tf_lang(lang_en, "log_delete_failed", &[path, &detail])
+                            ),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
                         safety::log_deletion(path, category, false, Some(&detail));
                     } else {
                         let detail = if err_text.is_empty() {
@@ -2736,7 +3313,14 @@ exit 0
                             err_text.trim().to_string()
                         };
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ {}", App::tf_lang(lang_en, "log_delete_failed", &[path, &detail])), path.clone(), category.clone(), false));
+                            format!(
+                                "✗ {}",
+                                App::tf_lang(lang_en, "log_delete_failed", &[path, &detail])
+                            ),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
                         safety::log_deletion(path, category, false, Some(&detail));
                     }
                 }
@@ -2744,7 +3328,14 @@ exit 0
             Err(e) => {
                 for (path, category) in &failed_items {
                     let _ = tx.send(DeleteMessage::Log(
-                        format!("✗ {}", App::tf_lang(lang_en, "log_cannot_start_sudo", &[path, &e.to_string()])), path.clone(), category.clone(), false));
+                        format!(
+                            "✗ {}",
+                            App::tf_lang(lang_en, "log_cannot_start_sudo", &[path, &e.to_string()])
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
                     safety::log_deletion(path, category, false, Some(&e.to_string()));
                 }
             }
@@ -2887,104 +3478,254 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
         });
 }
 
-/// 删除确认弹窗
-fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+/// 删除确认弹窗（设计稿 4.4 样式）
+fn show_confirm_window(
+    ctx: &egui::Context,
+    app: &mut App,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
     let count = app.selected_count();
     let size = app.selected_total_size();
-    let has_full_disk_access = App::check_full_disk_access();
+    let idx = app.tab_index();
+
+    let mut safe_cnt = 0usize;
+    let mut safe_sz = 0u64;
+    let mut caution_cnt = 0usize;
+    let mut caution_sz = 0u64;
+    let mut advanced_cnt = 0usize;
+    let mut advanced_sz = 0u64;
+    let mut needs_admin = false;
+
+    for item in &app.results[idx] {
+        if !item.selected || !item.deletable {
+            continue;
+        }
+        match item.recommend {
+            crate::scanner::Recommend::Safe | crate::scanner::Recommend::CacheOnly => {
+                safe_cnt += 1;
+                safe_sz += item.size_bytes;
+            }
+            crate::scanner::Recommend::Caution => {
+                caution_cnt += 1;
+                caution_sz += item.size_bytes;
+            }
+            crate::scanner::Recommend::Advanced => {
+                advanced_cnt += 1;
+                advanced_sz += item.size_bytes;
+            }
+        }
+        if item.path.starts_with("/Library")
+            || item.path.contains("CoreSimulator")
+            || item.category.contains("模拟器")
+            || item.category.contains("系统")
+        {
+            needs_admin = true;
+        }
+    }
+    if !App::check_full_disk_access() {
+        needs_admin = true;
+    }
 
     egui::Window::new(app.t("confirm_delete"))
         .collapsible(false)
-        .resizable(true)
+        .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(480.0);
-            ui.set_min_height(200.0);
-            ui.add_space(10.0);
+            ui.set_min_width(420.0);
+            ui.set_max_width(480.0);
+
+            // Header
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new(format!("{} {} {}", app.t("about_to_delete"), count, app.t("items"))).size(16.0));
-                ui.label(egui::RichText::new(format!("{}: {}", app.t("total"), format_size(size))).size(20.0).color(CAUTION_COLOR));
-                ui.add_space(8.0);
-                ui.colored_label(ADVANCED_COLOR, format!("⚠️ {}", app.t("irreversible")));
+                ui.label(
+                    egui::RichText::new(format!("🗑 {}", app.t("confirm_delete")))
+                        .size(15.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                ui.colored_label(
+                    TEXT_SECONDARY,
+                    egui::RichText::new(app.t("confirm_subtitle")).size(12.0),
+                );
+            });
 
-                // 如果没有完全磁盘访问权限，显示警告
-                if !has_full_disk_access {
-                    ui.add_space(8.0);
-                    egui::Frame::group(ui.style())
-                        .fill(egui::Color32::from_rgb(255, 247, 230))
-                        .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
-                        .inner_margin(egui::Margin::same(8.0))
-                        .show(ui, |ui| {
-                            ui.colored_label(
-                                CAUTION_COLOR,
-                                egui::RichText::new(format!("⚠️ {}", app.t("confirm_fda_warning"))).size(13.0).strong(),
-                            );
-                            ui.add_space(2.0);
-                            ui.colored_label(
-                                TEXT_PRIMARY,
-                                egui::RichText::new(app.t("confirm_fda_sub_warning")).size(12.0),
-                            );
-                            ui.add_space(3.0);
-                            if ui.button(egui::RichText::new(format!("⚙️ {}", app.t("confirm_grant"))).size(12.0)).clicked() {
-                                let _ = std::process::Command::new("open")
-                                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-                                    .spawn();
+            ui.add_space(12.0);
+
+            // Body rows
+            egui::Frame::none()
+                .fill(SURFACE_MUTED)
+                .stroke(egui::Stroke::NONE)
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::same(12.0))
+                .show(ui, |ui| {
+                    render_confirm_row(
+                        ui,
+                        app.t("confirm_selected_items"),
+                        &format!("{} {}", count, app.t("items")),
+                        TEXT_PRIMARY,
+                    );
+                    render_confirm_row(ui, app.t("confirm_releasable"), &format_size(size), BRAND);
+                    if safe_cnt > 0 {
+                        render_confirm_row(
+                            ui,
+                            app.t("confirm_safe"),
+                            &format!("{} {} · {}", safe_cnt, app.t("items"), format_size(safe_sz)),
+                            SAFE_COLOR,
+                        );
+                    }
+                    if caution_cnt > 0 {
+                        render_confirm_row(
+                            ui,
+                            app.t("confirm_caution"),
+                            &format!(
+                                "{} {} · {}",
+                                caution_cnt,
+                                app.t("items"),
+                                format_size(caution_sz)
+                            ),
+                            CAUTION_COLOR,
+                        );
+                    }
+                    if advanced_cnt > 0 {
+                        render_confirm_row(
+                            ui,
+                            app.t("confirm_advanced"),
+                            &format!(
+                                "{} {} · {}",
+                                advanced_cnt,
+                                app.t("items"),
+                                format_size(advanced_sz)
+                            ),
+                            ADVANCED_COLOR,
+                        );
+                    }
+                    render_confirm_row(
+                        ui,
+                        app.t("confirm_admin_required"),
+                        if needs_admin {
+                            app.t("confirm_admin_yes")
+                        } else {
+                            app.t("confirm_admin_no")
+                        },
+                        TEXT_PRIMARY,
+                    );
+                });
+
+            ui.add_space(8.0);
+
+            // 预览折叠
+            if ui
+                .button(egui::RichText::new(format!("🔍 {}", app.t("confirm_preview"))).size(12.0))
+                .clicked()
+            {
+                app.show_preview = !app.show_preview;
+            }
+            if app.show_preview {
+                ui.add_space(4.0);
+                egui::Frame::none()
+                    .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.set_max_height(150.0);
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let items: Vec<_> = app.results[idx]
+                                .iter()
+                                .filter(|item| item.selected && item.deletable)
+                                .collect();
+                            for item in &items {
+                                ui.horizontal(|ui| {
+                                    let (fg, _, badge) = recommend_badge_colors(&item.recommend);
+                                    render_status_badge(ui, badge, fg, SURFACE_MUTED);
+                                    ui.colored_label(
+                                        TEXT_PRIMARY,
+                                        egui::RichText::new(format_size(item.size_bytes))
+                                            .size(12.0)
+                                            .monospace(),
+                                    );
+                                    let cat = i18n::translate_category(&item.category, app.lang_en);
+                                    ui.colored_label(
+                                        TEXT_SECONDARY,
+                                        egui::RichText::new(&cat).size(12.0),
+                                    );
+                                    ui.colored_label(
+                                        TEXT_TERTIARY,
+                                        egui::RichText::new(truncate_path(&item.path, 50))
+                                            .size(11.0)
+                                            .monospace(),
+                                    );
+                                });
                             }
+                            ui.add_space(3.0);
+                            let summary_text = App::tf_lang(
+                                app.lang_en,
+                                "confirm_preview_summary",
+                                &[&items.len().to_string()],
+                            );
+                            ui.colored_label(
+                                TEXT_TERTIARY,
+                                egui::RichText::new(summary_text).size(11.0),
+                            );
                         });
-                }
+                    });
+            }
 
-                // 预览按钮
-                ui.add_space(8.0);
-                if ui.button(egui::RichText::new(format!("🔍 {}", app.t("confirm_preview"))).size(13.0)).clicked() {
-                    app.show_preview = !app.show_preview;
-                }
+            ui.add_space(12.0);
 
-                // 预览面板
-                if app.show_preview {
-                    ui.add_space(5.0);
-                    egui::Frame::group(ui.style())
-                        .inner_margin(egui::Margin::same(8.0))
-                        .show(ui, |ui| {
-                            ui.set_max_height(250.0);
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                let idx = app.tab_index();
-                                let items: Vec<_> = app.results[idx].iter()
-                                    .filter(|item| item.selected && item.deletable)
-                                    .collect();
-                                for item in &items {
-                                    ui.horizontal(|ui| {
-                                        ui.label(recommend_badge_text(&item.recommend, app.lang_en));
-                                        ui.label(format_size(item.size_bytes));
-                                        let cat_en = i18n::translate_category(&item.category, app.lang_en);
-                                        ui.label(&cat_en);
-                                        ui.label(egui::RichText::new(&item.path).size(11.0).color(TEXT_TERTIARY));
-                                    });
-                                }
-                                ui.add_space(3.0);
-                                let summary_text = App::tf_lang(app.lang_en, "confirm_preview_summary", &[&items.len().to_string()]);
-                                ui.colored_label(
-                                    TEXT_TERTIARY,
-                                    egui::RichText::new(summary_text).size(11.0),
-                                );
-                            });
-                        });
-                }
-
-                ui.add_space(15.0);
-
-                ui.horizontal(|ui| {
-                    if ui.button(egui::RichText::new(format!("✓ {}", app.t("confirm_delete"))).color(SAFE_COLOR)).clicked() {
+            // Footer
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let danger_btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("🗑 {}", app.t("confirm_delete")))
+                                .color(egui::Color32::WHITE)
+                                .size(13.0),
+                        )
+                        .fill(DANGER_COLOR)
+                        .rounding(egui::Rounding::same(8.0)),
+                    );
+                    if danger_btn.clicked() {
                         app.show_preview = false;
                         let to_delete = app.confirm_delete();
                         start_delete(to_delete, app.lang_en, delete_rx);
                     }
-                    if ui.button(egui::RichText::new(format!("✗ {}", app.t("cancel"))).color(ADVANCED_COLOR)).clicked() {
+
+                    ui.add_space(8.0);
+
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(app.t("cancel")).size(13.0))
+                                .fill(SURFACE_ELEVATED)
+                                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                                .rounding(egui::Rounding::same(8.0)),
+                        )
+                        .clicked()
+                    {
                         app.show_preview = false;
                         app.cancel_delete();
                     }
                 });
             });
         });
+}
+
+/// 确认弹窗中的单行 Key-Value
+fn render_confirm_row(ui: &mut egui::Ui, label: &str, value: &str, value_color: egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.colored_label(TEXT_SECONDARY, egui::RichText::new(label).size(13.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.colored_label(value_color, egui::RichText::new(value).size(13.0).strong());
+        });
+    });
+    ui.add_space(2.0);
+    let available = ui.available_rect_before_wrap();
+    let sep_y = available.min.y;
+    let sep_rect = egui::Rect::from_min_max(
+        egui::pos2(available.min.x, sep_y),
+        egui::pos2(available.max.x, sep_y + 1.0),
+    );
+    ui.painter()
+        .rect_filled(sep_rect, egui::Rounding::ZERO, BORDER_LIGHT);
+    ui.add_space(4.0);
 }
 
 /// sudo 密码输入弹窗（egui 内置输入框）
@@ -3037,37 +3778,23 @@ fn show_sudo_password_window(
 
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(
-                        CAUTION_COLOR,
-                        egui::RichText::new(emoji).size(28.0),
-                    );
-                    ui.label(
-                        egui::RichText::new(headline)
-                            .size(18.0)
-                            .strong(),
-                    );
+                    ui.colored_label(CAUTION_COLOR, egui::RichText::new(emoji).size(28.0));
+                    ui.label(egui::RichText::new(headline).size(18.0).strong());
                 });
 
                 ui.add_space(8.0);
-                ui.colored_label(
-                    TEXT_PRIMARY,
-                    egui::RichText::new(description).size(13.0),
-                );
+                ui.colored_label(TEXT_PRIMARY, egui::RichText::new(description).size(13.0));
                 if !is_setup_mode {
                     ui.add_space(2.0);
                     ui.colored_label(
                         TEXT_SECONDARY,
-                        egui::RichText::new(app.t("sudo_password_note"))
-                            .size(12.0),
+                        egui::RichText::new(app.t("sudo_password_note")).size(12.0),
                     );
                 }
 
                 if let Some(ref err) = app.sudo_error {
                     ui.add_space(8.0);
-                    ui.colored_label(
-                        ADVANCED_COLOR,
-                        egui::RichText::new(err).size(13.0).strong(),
-                    );
+                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(err).size(13.0).strong());
                 }
 
                 ui.add_space(12.0);
@@ -3172,12 +3899,21 @@ fn show_sudo_password_window(
                         // 将需要 sudo 的项标记为失败，结束删除流程
                         for (path, category) in std::mem::take(&mut app.sudo_failed_items) {
                             app.receive_delete_log(
-                                format!("✗ {}: {}", App::t_lang(lang_en, "log_cancel_reason"), path),
+                                format!(
+                                    "✗ {}: {}",
+                                    App::t_lang(lang_en, "log_cancel_reason"),
+                                    path
+                                ),
                                 path.clone(),
                                 category.clone(),
                                 false,
                             );
-                            safety::log_deletion(&path, &category, false, Some(App::t_lang(lang_en, "log_cancel_reason")));
+                            safety::log_deletion(
+                                &path,
+                                &category,
+                                false,
+                                Some(App::t_lang(lang_en, "log_cancel_reason")),
+                            );
                         }
                         app.finish_delete();
                     }
@@ -3190,7 +3926,7 @@ fn show_sudo_password_window(
 fn show_touch_id_setup_window(
     ctx: &egui::Context,
     app: &mut App,
-    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+    _delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
 ) {
     egui::Window::new(app.t("touchid_setup_title"))
         .collapsible(false)
@@ -3217,28 +3953,22 @@ fn show_touch_id_setup_window(
                 ui.add_space(8.0);
                 ui.colored_label(
                     TEXT_PRIMARY,
-                    egui::RichText::new(
-                        App::tf_lang(
-                            app.lang_en,
-                            "touchid_setup_desc",
-                            &[&app.sudo_failed_items.len().to_string()],
-                        )
-                    )
+                    egui::RichText::new(App::tf_lang(
+                        app.lang_en,
+                        "touchid_setup_desc",
+                        &[&app.sudo_failed_items.len().to_string()],
+                    ))
                     .size(13.0),
                 );
                 ui.add_space(4.0);
                 ui.colored_label(
                     TEXT_SECONDARY,
-                    egui::RichText::new(app.t("touchid_setup_detail"))
-                    .size(12.0),
+                    egui::RichText::new(app.t("touchid_setup_detail")).size(12.0),
                 );
 
                 if let Some(ref err) = app.touch_id_error {
                     ui.add_space(8.0);
-                    ui.colored_label(
-                        ADVANCED_COLOR,
-                        egui::RichText::new(err).size(13.0).strong(),
-                    );
+                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(err).size(13.0).strong());
                 }
 
                 ui.add_space(12.0);
@@ -3283,12 +4013,21 @@ fn show_touch_id_setup_window(
                         app.touch_id_error = None;
                         for (path, category) in std::mem::take(&mut app.sudo_failed_items) {
                             app.receive_delete_log(
-                                format!("✗ {}: {}", App::t_lang(lang_en, "log_cancel_reason"), path),
+                                format!(
+                                    "✗ {}: {}",
+                                    App::t_lang(lang_en, "log_cancel_reason"),
+                                    path
+                                ),
                                 path.clone(),
                                 category.clone(),
                                 false,
                             );
-                            safety::log_deletion(&path, &category, false, Some(App::t_lang(lang_en, "log_cancel_reason")));
+                            safety::log_deletion(
+                                &path,
+                                &category,
+                                false,
+                                Some(App::t_lang(lang_en, "log_cancel_reason")),
+                            );
                         }
                         app.finish_delete();
                     }
@@ -3324,8 +4063,7 @@ fn show_touch_id_waiting_window(ctx: &egui::Context, app: &mut App) {
                 ui.add_space(8.0);
                 ui.colored_label(
                     TEXT_SECONDARY,
-                    egui::RichText::new(app.t("touchid_wait_desc"))
-                    .size(13.0),
+                    egui::RichText::new(app.t("touchid_wait_desc")).size(13.0),
                 );
 
                 // 显示已等待时间
@@ -3334,10 +4072,12 @@ fn show_touch_id_waiting_window(ctx: &egui::Context, app: &mut App) {
                     ui.add_space(6.0);
                     ui.colored_label(
                         TEXT_TERTIARY,
-                        egui::RichText::new(
-                            App::tf_lang(app.lang_en, "touchid_wait_time", &[&elapsed.to_string()])
-                        )
-                            .size(12.0),
+                        egui::RichText::new(App::tf_lang(
+                            app.lang_en,
+                            "touchid_wait_time",
+                            &[&elapsed.to_string()],
+                        ))
+                        .size(12.0),
                     );
 
                     // 进度条
@@ -3393,9 +4133,11 @@ fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
                 ui.add_space(8.0);
                 ui.colored_label(
                     TEXT_SECONDARY,
-                    egui::RichText::new(
-                        App::tf_lang(app.lang_en, "touchid_verify_desc", &[&app.delete_total.to_string()])
-                    )
+                    egui::RichText::new(App::tf_lang(
+                        app.lang_en,
+                        "touchid_verify_desc",
+                        &[&app.delete_total.to_string()],
+                    ))
                     .size(13.0),
                 );
 
@@ -3430,19 +4172,18 @@ fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
                     .collect();
                 if !recent_logs.is_empty() {
                     ui.add_space(10.0);
-                    egui::Frame::group(ui.style())
-                        .fill(SURFACE)
-                        .show(ui, |ui| {
-                            ui.set_min_width(360.0);
-                            ui.label(egui::RichText::new(app.t("touchid_verify_log")).size(11.0).strong());
-                            ui.add_space(4.0);
-                            for log in recent_logs {
-                                ui.colored_label(
-                                    TEXT_SECONDARY,
-                                    egui::RichText::new(log).size(10.0),
-                                );
-                            }
-                        });
+                    egui::Frame::group(ui.style()).fill(SURFACE).show(ui, |ui| {
+                        ui.set_min_width(360.0);
+                        ui.label(
+                            egui::RichText::new(app.t("touchid_verify_log"))
+                                .size(11.0)
+                                .strong(),
+                        );
+                        ui.add_space(4.0);
+                        for log in recent_logs {
+                            ui.colored_label(TEXT_SECONDARY, egui::RichText::new(log).size(10.0));
+                        }
+                    });
                 }
 
                 ui.add_space(12.0);
@@ -3476,21 +4217,26 @@ fn start_sudo_delete_touchid(
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
-        let _ = tx.send(DeleteMessage::Info(
-            format!("👆 {}", App::t_lang(lang_en, "log_touchid_verifying")),
-        ));
+        let _ = tx.send(DeleteMessage::Info(format!(
+            "👆 {}",
+            App::t_lang(lang_en, "log_touchid_verifying")
+        )));
 
         let sudo_debug_log = std::env::temp_dir().join("maclean_sudo_touchid.log");
         let mut debug_entries: Vec<String> = Vec::new();
-        debug_entries.push(format!("[touchid sudo] started, {} items", failed_items.len()));
+        debug_entries.push(format!(
+            "[touchid sudo] started, {} items",
+            failed_items.len()
+        ));
 
         // 预处理：模拟器镜像通过 xcrun simctl runtime delete
         let mut remaining_items: Vec<(String, String)> = Vec::new();
         for (path, category) in &failed_items {
             if category == "模拟器镜像" || category == "模拟器Cryptex" {
-                let _ = tx.send(DeleteMessage::Info(
-                    format!("🔄 {}", App::tf_lang(lang_en, "log_touchid_prepare_xcrun", &[category])),
-                ));
+                let _ = tx.send(DeleteMessage::Info(format!(
+                    "🔄 {}",
+                    App::tf_lang(lang_en, "log_touchid_prepare_xcrun", &[category])
+                )));
 
                 let script = r#"#!/bin/bash
 set +e
@@ -3512,14 +4258,20 @@ exit 0
 "#;
                 let xcrun_script = std::env::temp_dir().join("maclean_xcrun_delete.sh");
                 let _ = std::fs::write(&xcrun_script, script);
-                let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&xcrun_script).output();
+                let _ = std::process::Command::new("/bin/chmod")
+                    .arg("+x")
+                    .arg(&xcrun_script)
+                    .output();
 
                 // 先清除 sudo 票据，确保能触发 Touch ID
-                let _ = std::process::Command::new("/usr/bin/sudo").arg("-k").output();
+                let _ = std::process::Command::new("/usr/bin/sudo")
+                    .arg("-k")
+                    .output();
 
-                let _ = tx.send(DeleteMessage::Info(
-                    format!("⏳ {}", App::t_lang(lang_en, "log_wait_touchid")),
-                ));
+                let _ = tx.send(DeleteMessage::Info(format!(
+                    "⏳ {}",
+                    App::t_lang(lang_en, "log_wait_touchid")
+                )));
 
                 let xcrun_log = std::env::temp_dir().join("maclean_xcrun_touchid.log");
                 let xcrun_log_file = std::fs::OpenOptions::new()
@@ -3541,20 +4293,43 @@ exit 0
                 let xcrun_stdout = std::fs::read_to_string(&xcrun_log).unwrap_or_default();
                 debug_entries.push(format!("xcrun touchid stdout:\n{}", xcrun_stdout));
 
-                let _ = tx.send(DeleteMessage::Info(
-                    format!("✅ {}", App::tf_lang(lang_en, "log_xcrun_done", &[&xcrun_stdout.trim().replace('\n', " ")])),
-                ));
+                let _ = tx.send(DeleteMessage::Info(format!(
+                    "✅ {}",
+                    App::tf_lang(
+                        lang_en,
+                        "log_xcrun_done",
+                        &[&xcrun_stdout.trim().replace('\n', " ")]
+                    )
+                )));
 
                 match &xcrun_result {
                     Ok(status) => {
                         if !status.success() {
                             // Touch ID 可能被取消
-                            if xcrun_stdout.contains("canceled") || xcrun_stdout.contains("cancelled") {
-                                let _ = tx.send(DeleteMessage::Info(format!("🔒 {}", App::t_lang(lang_en, "log_touchid_cancel"))));
+                            if xcrun_stdout.contains("canceled")
+                                || xcrun_stdout.contains("cancelled")
+                            {
+                                let _ = tx.send(DeleteMessage::Info(format!(
+                                    "🔒 {}",
+                                    App::t_lang(lang_en, "log_touchid_cancel")
+                                )));
                                 for (p, c) in &failed_items {
                                     let _ = tx.send(DeleteMessage::Log(
-                                        format!("✗ {}: {}", App::t_lang(lang_en, "log_touchid_cancel"), p), p.clone(), c.clone(), false));
-                                    safety::log_deletion(p, c, false, Some(App::t_lang(lang_en, "log_touchid_cancel")));
+                                        format!(
+                                            "✗ {}: {}",
+                                            App::t_lang(lang_en, "log_touchid_cancel"),
+                                            p
+                                        ),
+                                        p.clone(),
+                                        c.clone(),
+                                        false,
+                                    ));
+                                    safety::log_deletion(
+                                        p,
+                                        c,
+                                        false,
+                                        Some(App::t_lang(lang_en, "log_touchid_cancel")),
+                                    );
                                 }
                                 let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
                                 let _ = std::fs::remove_file(&xcrun_script);
@@ -3582,8 +4357,18 @@ exit 0
                         if deleted_count > 0 && failed_count == 0 {
                             xcrun_success = true;
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ {}", App::tf_lang(lang_en, "log_touchid_xcrun_deleted", &[&deleted_count.to_string()])),
-                                path.clone(), category.clone(), true));
+                                format!(
+                                    "✓ {}",
+                                    App::tf_lang(
+                                        lang_en,
+                                        "log_touchid_xcrun_deleted",
+                                        &[&deleted_count.to_string()]
+                                    )
+                                ),
+                                path.clone(),
+                                category.clone(),
+                                true,
+                            ));
                             safety::log_deletion(path, category, true, None);
                         }
                     }
@@ -3606,15 +4391,23 @@ exit 0
         let failed_items = remaining_items;
 
         if failed_items.is_empty() {
-            let _ = tx.send(DeleteMessage::Info(format!("✅ {}", App::t_lang(lang_en, "log_no_sudo_needed"))));
+            let _ = tx.send(DeleteMessage::Info(format!(
+                "✅ {}",
+                App::t_lang(lang_en, "log_no_sudo_needed")
+            )));
             let _ = std::fs::write(&sudo_debug_log, debug_entries.join("\n"));
             let _ = tx.send(DeleteMessage::Done);
             return;
         }
 
-        let _ = tx.send(DeleteMessage::Info(
-            format!("🔄 {}", App::tf_lang(lang_en, "log_sudo_execute", &[&failed_items.len().to_string()])),
-        ));
+        let _ = tx.send(DeleteMessage::Info(format!(
+            "🔄 {}",
+            App::tf_lang(
+                lang_en,
+                "log_sudo_execute",
+                &[&failed_items.len().to_string()]
+            )
+        )));
 
         // 写临时删除脚本：并行删除
         let tmp_script = std::env::temp_dir().join("maclean_sudo_touchid.sh");
@@ -3640,16 +4433,17 @@ exit 0
 
         for (i, (path, _)) in failed_items.iter().enumerate() {
             let escaped = path.replace("'", "'\\''");
-            script_content.push_str(&format!(
-                "process_one {} '{}' &\n",
-                i, escaped
-            ));
+            script_content.push_str(&format!("process_one {} '{}' &\n", i, escaped));
         }
         script_content.push_str("\nwait\n");
-        script_content.push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
+        script_content
+            .push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
         script_content.push_str("exit 0\n");
         let _ = std::fs::write(&tmp_script, &script_content);
-        let _ = std::process::Command::new("/bin/chmod").arg("+x").arg(&tmp_script).output();
+        let _ = std::process::Command::new("/bin/chmod")
+            .arg("+x")
+            .arg(&tmp_script)
+            .output();
 
         debug_entries.push(format!("delete script: {}", tmp_script.display()));
 
@@ -3661,9 +4455,10 @@ exit 0
             .open(&sudo_log)
             .ok();
 
-        let _ = tx.send(DeleteMessage::Info(
-            format!("⏳ {}", App::t_lang(lang_en, "log_wait_touchid")),
-        ));
+        let _ = tx.send(DeleteMessage::Info(format!(
+            "⏳ {}",
+            App::t_lang(lang_en, "log_wait_touchid")
+        )));
 
         // 不用 -S，sudo 自动触发 Touch ID；stdout 重定向到文件避免 pipe 死锁
         let mut sudo_cmd = std::process::Command::new("/usr/bin/sudo");
@@ -3673,16 +4468,21 @@ exit 0
         }
         let sudo_result = sudo_cmd.status();
 
-        let _ = tx.send(DeleteMessage::Info(
-            format!("✅ {}", App::t_lang(lang_en, "log_sudo_done2")),
-        ));
+        let _ = tx.send(DeleteMessage::Info(format!(
+            "✅ {}",
+            App::t_lang(lang_en, "log_sudo_done2")
+        )));
 
         // 解析输出
         let sudo_stdout = std::fs::read_to_string(&sudo_log).unwrap_or_default();
-        debug_entries.push(format!("sudo touchid exit code: {:?}", sudo_result.as_ref().ok().and_then(|s| s.code())));
+        debug_entries.push(format!(
+            "sudo touchid exit code: {:?}",
+            sudo_result.as_ref().ok().and_then(|s| s.code())
+        ));
         debug_entries.push(format!("sudo touchid stdout:\n{}", sudo_stdout));
 
-        let mut rm_stderr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut rm_stderr: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let mut current_path = String::new();
         for line in sudo_stdout.lines() {
             if let Some(p) = line.strip_prefix(">MACLEAN_BEGIN:") {
@@ -3690,8 +4490,14 @@ exit 0
             } else if let Some(_rest) = line.strip_prefix(">MACLEAN_EXIT:") {
                 current_path.clear();
             } else if !line.is_empty() && !current_path.is_empty() {
-                rm_stderr.entry(current_path.clone()).or_default().push_str(line);
-                rm_stderr.entry(current_path.clone()).or_default().push('\n');
+                rm_stderr
+                    .entry(current_path.clone())
+                    .or_default()
+                    .push_str(line);
+                rm_stderr
+                    .entry(current_path.clone())
+                    .or_default()
+                    .push('\n');
             }
         }
 
@@ -3706,11 +4512,23 @@ exit 0
                     || sudo_stdout.contains("User canceled");
 
                 if user_cancelled {
-                    let _ = tx.send(DeleteMessage::Info(format!("🔒 {}", App::t_lang(lang_en, "log_touchid_cancel"))));
+                    let _ = tx.send(DeleteMessage::Info(format!(
+                        "🔒 {}",
+                        App::t_lang(lang_en, "log_touchid_cancel")
+                    )));
                     for (path, category) in &failed_items {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✗ {}: {}", App::t_lang(lang_en, "log_touchid_cancel"), path), path.clone(), category.clone(), false));
-                        safety::log_deletion(path, category, false, Some(App::t_lang(lang_en, "log_touchid_cancel")));
+                            format!("✗ {}: {}", App::t_lang(lang_en, "log_touchid_cancel"), path),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
+                        safety::log_deletion(
+                            path,
+                            category,
+                            false,
+                            Some(App::t_lang(lang_en, "log_touchid_cancel")),
+                        );
                     }
                     let _ = std::fs::remove_file(&tmp_script);
                     let _ = tx.send(DeleteMessage::Done);
@@ -3721,8 +4539,14 @@ exit 0
                     let p = std::path::Path::new(path.as_str());
                     if !p.exists() && p.symlink_metadata().is_err() {
                         let _ = tx.send(DeleteMessage::Log(
-                            format!("✓ {}", App::tf_lang(lang_en, "log_deleted_touchid", &[category, path])),
-                            path.clone(), category.clone(), true));
+                            format!(
+                                "✓ {}",
+                                App::tf_lang(lang_en, "log_deleted_touchid", &[category, path])
+                            ),
+                            path.clone(),
+                            category.clone(),
+                            true,
+                        ));
                         safety::log_deletion(path, category, true, None);
                     } else {
                         let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or("");
@@ -3731,9 +4555,20 @@ exit 0
 
                         if is_sip {
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("🔒 {}", App::tf_lang(lang_en, "log_sip_protected", &[path])),
-                                path.clone(), category.clone(), false));
-                            safety::log_deletion(path, category, false, Some(App::t_lang(lang_en, "log_sip_reason")));
+                                format!(
+                                    "🔒 {}",
+                                    App::tf_lang(lang_en, "log_sip_protected", &[path])
+                                ),
+                                path.clone(),
+                                category.clone(),
+                                false,
+                            ));
+                            safety::log_deletion(
+                                path,
+                                category,
+                                false,
+                                Some(App::t_lang(lang_en, "log_sip_reason")),
+                            );
                         } else {
                             let detail = if err_text.is_empty() {
                                 App::t_lang(lang_en, "log_still_exists").to_string()
@@ -3741,8 +4576,14 @@ exit 0
                                 err_text.trim().to_string()
                             };
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✗ {}", App::tf_lang(lang_en, "log_delete_failed", &[path, &detail])),
-                                path.clone(), category.clone(), false));
+                                format!(
+                                    "✗ {}",
+                                    App::tf_lang(lang_en, "log_delete_failed", &[path, &detail])
+                                ),
+                                path.clone(),
+                                category.clone(),
+                                false,
+                            ));
                             safety::log_deletion(path, category, false, Some(&detail));
                         }
                     }
@@ -3751,8 +4592,14 @@ exit 0
             Err(e) => {
                 for (path, category) in &failed_items {
                     let _ = tx.send(DeleteMessage::Log(
-                        format!("✗ {}", App::tf_lang(lang_en, "log_cannot_start_sudo", &[path, &e.to_string()])),
-                        path.clone(), category.clone(), false));
+                        format!(
+                            "✗ {}",
+                            App::tf_lang(lang_en, "log_cannot_start_sudo", &[path, &e.to_string()])
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
                     safety::log_deletion(path, category, false, Some(&e.to_string()));
                 }
             }
@@ -3763,7 +4610,7 @@ exit 0
     });
 }
 
-/// 删除中弹窗（带进度条）
+/// 删除中弹窗（设计稿 4.5 样式）
 fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
     // 判断是否在 sudo 阶段（最近日志包含管理员权限关键词）
     let in_sudo_phase = app
@@ -3779,56 +4626,146 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
         0.0
     };
 
+    let failed_count = app.failed_paths.len();
+
     egui::Window::new(app.t("cleaning"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(520.0);
-            ui.set_min_height(220.0);
-            ui.add_space(10.0);
+            ui.set_min_width(480.0);
+            ui.set_max_width(520.0);
 
-            // 标题
-            let title = if in_sudo_phase {
-                app.t("deleting_sudo_phase")
-            } else {
-                app.t("cleaning_in_progress")
-            };
-            ui.label(egui::RichText::new(format!("⏳ {}...", title)).size(15.0).color(BRAND));
-            ui.add_space(10.0);
+            // Header
+            ui.vertical(|ui| {
+                let title = if in_sudo_phase {
+                    app.t("deleting_sudo_phase")
+                } else {
+                    app.t("cleaning_in_progress")
+                };
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(15.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                ui.colored_label(
+                    TEXT_SECONDARY,
+                    egui::RichText::new(app.tf(
+                        "deleting_subtitle",
+                        &[&app.delete_done.to_string(), &app.delete_total.to_string()],
+                    ))
+                    .size(12.0),
+                );
+            });
+
+            ui.add_space(14.0);
 
             // 进度条
-            let progress_text = format!(
-                "{}/{} ({}%)",
-                app.delete_done,
-                app.delete_total,
-                (progress * 100.0) as u32
-            );
             ui.add(
                 egui::ProgressBar::new(progress)
-                    .desired_width(480.0)
-                    .fill(if in_sudo_phase { CAUTION_COLOR } else { SAFE_COLOR })
-                    .text(progress_text)
+                    .desired_width(ui.available_width().max(440.0))
+                    .fill(if in_sudo_phase { CAUTION_COLOR } else { BRAND })
+                    .text(format!("{}%", (progress * 100.0) as u32)),
             );
+
             ui.add_space(8.0);
 
+            // 状态计数
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    TEXT_SECONDARY,
+                    egui::RichText::new(format!(
+                        "{}/{} {}",
+                        app.delete_done,
+                        app.delete_total,
+                        app.t("items")
+                    ))
+                    .size(12.0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if failed_count > 0 {
+                        ui.colored_label(
+                            ADVANCED_COLOR,
+                            egui::RichText::new(format!(
+                                "{} {} {}",
+                                failed_count,
+                                app.t("items"),
+                                app.t("summary_fail_hint")
+                            ))
+                            .size(12.0),
+                        );
+                    }
+                });
+            });
+
+            ui.add_space(12.0);
+
             // 最新日志
-            ui.label(egui::RichText::new(app.t("cleaning_log")).size(12.0).color(TEXT_TERTIARY));
-            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                for log in app.logs.iter().rev().take(15) {
-                    let color = if log.starts_with('✓') || log.starts_with('✅') {
-                        SAFE_COLOR
-                    } else if log.starts_with('✗') {
-                        ADVANCED_COLOR
-                    } else if log.starts_with('⛔') {
-                        ADVANCED_COLOR
-                    } else if log.starts_with('⚠') {
-                        CAUTION_COLOR
-                    } else {
-                        BRAND
-                    };
-                    ui.colored_label(color, egui::RichText::new(log).size(12.0));
-                }
+            egui::Frame::none()
+                .fill(SURFACE_MUTED)
+                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::same(10.0))
+                .show(ui, |ui| {
+                    ui.set_max_height(160.0);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for log in app.logs.iter().rev().take(20) {
+                            let color = if log.starts_with('✓') || log.starts_with('✅') {
+                                SAFE_COLOR
+                            } else if log.starts_with('✗') || log.starts_with('⛔') {
+                                ADVANCED_COLOR
+                            } else if log.starts_with('⚠') {
+                                CAUTION_COLOR
+                            } else {
+                                TEXT_SECONDARY
+                            };
+                            ui.colored_label(
+                                color,
+                                egui::RichText::new(log).size(11.0).monospace(),
+                            );
+                        }
+                    });
+                });
+
+            ui.add_space(12.0);
+
+            // Footer
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can_authorize = !app.sudo_failed_items.is_empty() || failed_count > 0;
+                    let auth_btn = ui.add_enabled(
+                        can_authorize,
+                        egui::Button::new(
+                            egui::RichText::new(app.t("progress_authorize"))
+                                .color(egui::Color32::WHITE)
+                                .size(13.0),
+                        )
+                        .fill(BRAND)
+                        .rounding(egui::Rounding::same(8.0)),
+                    );
+                    if auth_btn.clicked() && can_authorize {
+                        app.sudo_failed_items = app.failed_paths.clone();
+                        app.confirm = ConfirmState::NeedSudoPassword;
+                    }
+
+                    ui.add_space(8.0);
+
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(app.t("progress_background_run")).size(13.0),
+                            )
+                            .fill(SURFACE_ELEVATED)
+                            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                            .rounding(egui::Rounding::same(8.0)),
+                        )
+                        .clicked()
+                    {
+                        // 关闭进度弹窗，让删除在后台继续，完成后通过汇总弹窗提示
+                        app.confirm = ConfirmState::None;
+                    }
+                });
             });
         });
 
@@ -3837,8 +4774,15 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
 }
 
 /// 删除完成汇总弹窗
-fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usize, _skip: usize, _delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
-    let has_failures = !app.failed_paths.is_empty();
+fn show_summary_window(
+    ctx: &egui::Context,
+    app: &mut App,
+    ok: usize,
+    fail: usize,
+    _skip: usize,
+    _delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
+    let _has_failures = !app.failed_paths.is_empty();
 
     egui::Window::new(app.t("summary_title"))
         .collapsible(false)
@@ -3989,6 +4933,7 @@ fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
         Tab::AppUninstall => app.t("tab_app_uninstall"),
         Tab::SystemOptimize => app.t("tab_system_optimize"),
         Tab::Apfs => app.t("tab_apfs"),
+        Tab::Settings => app.t("tab_settings"),
     }
 }
 
@@ -3999,7 +4944,11 @@ fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
 /// - 只清理选中的残留项
 /// - 跳过（不清理）
 #[cfg(target_os = "windows")]
-fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
+fn show_residual_window(
+    ctx: &egui::Context,
+    app: &mut App,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
     let residual = match &app.uninstall_residual {
         Some(r) => r.clone(),
         None => {
@@ -4043,8 +4992,11 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                     TEXT_TERTIARY,
                     egui::RichText::new(format!(
                         "共 {} 项残留 (可清理 {} 项), 文件总计 {}",
-                        total, deletable_count, format_size(fs_total_size)
-                    )).size(12.0),
+                        total,
+                        deletable_count,
+                        format_size(fs_total_size)
+                    ))
+                    .size(12.0),
                 );
                 ui.colored_label(
                     TEXT_TERTIARY,
@@ -4056,64 +5008,142 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                 ui.add_space(4.0);
 
                 // 残留列表（可滚动）
-                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    // 注册表残留
-                    if reg_len > 0 {
-                        ui.add_space(4.0);
-                        ui.colored_label(BRAND, egui::RichText::new(format!("📋 注册表残留 ({} 项)", reg_len)).size(13.0).strong());
-                        for (i, reg) in residual.registry.iter().enumerate() {
-                            let idx = i;
-                            let checked = &mut app.residual_selected[idx];
-                            ui.horizontal(|ui| {
-                                ui.add_enabled(reg.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
-                                if reg.deletable {
-                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(&reg.key_path).size(11.0));
-                                } else {
-                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(&reg.key_path).size(11.0));
-                                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(format!("({})", reg.reason)).size(10.0));
-                                }
-                            });
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        // 注册表残留
+                        if reg_len > 0 {
+                            ui.add_space(4.0);
+                            ui.colored_label(
+                                BRAND,
+                                egui::RichText::new(format!("📋 注册表残留 ({} 项)", reg_len))
+                                    .size(13.0)
+                                    .strong(),
+                            );
+                            for (i, reg) in residual.registry.iter().enumerate() {
+                                let idx = i;
+                                let checked = &mut app.residual_selected[idx];
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled(
+                                        reg.deletable && !is_cleaning,
+                                        egui::Checkbox::without_text(checked),
+                                    );
+                                    if reg.deletable {
+                                        ui.colored_label(
+                                            TEXT_PRIMARY,
+                                            egui::RichText::new(&reg.key_path).size(11.0),
+                                        );
+                                    } else {
+                                        ui.colored_label(
+                                            TEXT_TERTIARY,
+                                            egui::RichText::new(&reg.key_path).size(11.0),
+                                        );
+                                        ui.colored_label(
+                                            ADVANCED_COLOR,
+                                            egui::RichText::new(format!("({})", reg.reason))
+                                                .size(10.0),
+                                        );
+                                    }
+                                });
+                            }
+                            ui.add_space(4.0);
                         }
-                        ui.add_space(4.0);
-                    }
 
-                    // 环境变量残留
-                    if env_len > 0 {
-                        ui.colored_label(SAFE_COLOR, egui::RichText::new(format!("环境变量残留 ({} 项)", env_len)).size(13.0).strong());
-                        for (i, env) in residual.env_vars.iter().enumerate() {
-                            let idx = reg_len + i;
-                            let checked = &mut app.residual_selected[idx];
-                            ui.horizontal(|ui| {
-                                ui.add_enabled(env.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
-                                if env.deletable {
-                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
-                                } else {
-                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
-                                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(format!("({})", env.reason)).size(10.0));
-                                }
-                            });
+                        // 环境变量残留
+                        if env_len > 0 {
+                            ui.colored_label(
+                                SAFE_COLOR,
+                                egui::RichText::new(format!("环境变量残留 ({} 项)", env_len))
+                                    .size(13.0)
+                                    .strong(),
+                            );
+                            for (i, env) in residual.env_vars.iter().enumerate() {
+                                let idx = reg_len + i;
+                                let checked = &mut app.residual_selected[idx];
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled(
+                                        env.deletable && !is_cleaning,
+                                        egui::Checkbox::without_text(checked),
+                                    );
+                                    if env.deletable {
+                                        ui.colored_label(
+                                            TEXT_PRIMARY,
+                                            egui::RichText::new(format!(
+                                                "{} = {}",
+                                                env.var_name, env.current_value
+                                            ))
+                                            .size(11.0),
+                                        );
+                                    } else {
+                                        ui.colored_label(
+                                            TEXT_TERTIARY,
+                                            egui::RichText::new(format!(
+                                                "{} = {}",
+                                                env.var_name, env.current_value
+                                            ))
+                                            .size(11.0),
+                                        );
+                                        ui.colored_label(
+                                            ADVANCED_COLOR,
+                                            egui::RichText::new(format!("({})", env.reason))
+                                                .size(10.0),
+                                        );
+                                    }
+                                });
+                            }
+                            ui.add_space(4.0);
                         }
-                        ui.add_space(4.0);
-                    }
 
-                    // 文件系统残留
-                    if fs_len > 0 {
-                        ui.colored_label(egui::Color32::from_rgb(255, 180, 100), egui::RichText::new(format!("文件系统残留 ({} 项, {})", fs_len, format_size(fs_total_size))).size(13.0).strong());
-                        for (i, fs) in residual.filesystem.iter().enumerate() {
-                            let idx = reg_len + env_len + i;
-                            let checked = &mut app.residual_selected[idx];
-                            ui.horizontal(|ui| {
-                                ui.add_enabled(fs.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
-                                if fs.deletable {
-                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
-                                } else {
-                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
-                                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(format!("({})", fs.reason)).size(10.0));
-                                }
-                            });
+                        // 文件系统残留
+                        if fs_len > 0 {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 180, 100),
+                                egui::RichText::new(format!(
+                                    "文件系统残留 ({} 项, {})",
+                                    fs_len,
+                                    format_size(fs_total_size)
+                                ))
+                                .size(13.0)
+                                .strong(),
+                            );
+                            for (i, fs) in residual.filesystem.iter().enumerate() {
+                                let idx = reg_len + env_len + i;
+                                let checked = &mut app.residual_selected[idx];
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled(
+                                        fs.deletable && !is_cleaning,
+                                        egui::Checkbox::without_text(checked),
+                                    );
+                                    if fs.deletable {
+                                        ui.colored_label(
+                                            TEXT_PRIMARY,
+                                            egui::RichText::new(format!(
+                                                "{} ({})",
+                                                fs.path,
+                                                format_size(fs.size)
+                                            ))
+                                            .size(11.0),
+                                        );
+                                    } else {
+                                        ui.colored_label(
+                                            TEXT_TERTIARY,
+                                            egui::RichText::new(format!(
+                                                "{} ({})",
+                                                fs.path,
+                                                format_size(fs.size)
+                                            ))
+                                            .size(11.0),
+                                        );
+                                        ui.colored_label(
+                                            ADVANCED_COLOR,
+                                            egui::RichText::new(format!("({})", fs.reason))
+                                                .size(10.0),
+                                        );
+                                    }
+                                });
+                            }
                         }
-                    }
-                });
+                    });
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -4122,24 +5152,47 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                 // 操作按钮
                 ui.horizontal(|ui| {
                     // 一键清理全部
-                    let clean_all_enabled = deletable_count > 0 && !is_cleaning && !delete_in_progress;
-                    if ui.add_enabled(clean_all_enabled, egui::Button::new(egui::RichText::new(format!("🧹 一键清理全部 ({} 项)", deletable_count)).size(13.0)))
+                    let clean_all_enabled =
+                        deletable_count > 0 && !is_cleaning && !delete_in_progress;
+                    if ui
+                        .add_enabled(
+                            clean_all_enabled,
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "🧹 一键清理全部 ({} 项)",
+                                    deletable_count
+                                ))
+                                .size(13.0),
+                            ),
+                        )
                         .clicked()
                     {
-                        logger::info(&format!("用户选择: 一键清理全部 {} 项可删除残留", deletable_count));
+                        logger::info(&format!(
+                            "用户选择: 一键清理全部 {} 项可删除残留",
+                            deletable_count
+                        ));
                         app.residual_cleaning = true;
                         let residual = app.uninstall_residual.take().unwrap();
                         let (tx, rx) = mpsc::channel();
                         *delete_rx = Some(rx);
                         std::thread::spawn(move || {
-                            let (reg_c, env_c, fs_c) = scanner::windows_apps::clean_all_residuals(&residual);
+                            let (reg_c, env_c, fs_c) =
+                                scanner::windows_apps::clean_all_residuals(&residual);
                             let _ = tx.send(DeleteMessage::ResidualCleaned(reg_c, env_c, fs_c));
                         });
                     }
 
                     // 清理选中
-                    let clean_selected_enabled = selected_count > 0 && !is_cleaning && !delete_in_progress;
-                    if ui.add_enabled(clean_selected_enabled, egui::Button::new(egui::RichText::new(format!("✓ 清理选中 ({} 项)", selected_count)).size(13.0)))
+                    let clean_selected_enabled =
+                        selected_count > 0 && !is_cleaning && !delete_in_progress;
+                    if ui
+                        .add_enabled(
+                            clean_selected_enabled,
+                            egui::Button::new(
+                                egui::RichText::new(format!("✓ 清理选中 ({} 项)", selected_count))
+                                    .size(13.0),
+                            ),
+                        )
                         .clicked()
                     {
                         logger::info(&format!("用户选择: 清理选中 {} 项残留", selected_count));
@@ -4161,20 +5214,34 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                                 }
                                 if i < rl {
                                     if residual.registry[i].deletable {
-                                        let (ok, _) = scanner::windows_apps::delete_registry_residual(&residual.registry[i].key_path);
-                                        if ok { reg_c += 1; }
+                                        let (ok, _) =
+                                            scanner::windows_apps::delete_registry_residual(
+                                                &residual.registry[i].key_path,
+                                            );
+                                        if ok {
+                                            reg_c += 1;
+                                        }
                                     }
                                 } else if i < rl + el {
                                     let j = i - rl;
                                     if residual.env_vars[j].deletable {
-                                        let (ok, _) = scanner::windows_apps::clean_env_var_residual(&residual.env_vars[j]);
-                                        if ok { env_c += 1; }
+                                        let (ok, _) = scanner::windows_apps::clean_env_var_residual(
+                                            &residual.env_vars[j],
+                                        );
+                                        if ok {
+                                            env_c += 1;
+                                        }
                                     }
                                 } else {
                                     let j = i - rl - el;
                                     if residual.filesystem[j].deletable {
-                                        let (ok, _) = scanner::windows_apps::delete_filesystem_residual(&residual.filesystem[j].path);
-                                        if ok { fs_c += 1; }
+                                        let (ok, _) =
+                                            scanner::windows_apps::delete_filesystem_residual(
+                                                &residual.filesystem[j].path,
+                                            );
+                                        if ok {
+                                            fs_c += 1;
+                                        }
                                     }
                                 }
                             }
@@ -4184,7 +5251,11 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
 
                     // 跳过
                     let skip_enabled = !is_cleaning;
-                    if ui.add_enabled(skip_enabled, egui::Button::new(egui::RichText::new("跳过").size(13.0)))
+                    if ui
+                        .add_enabled(
+                            skip_enabled,
+                            egui::Button::new(egui::RichText::new("跳过").size(13.0)),
+                        )
                         .clicked()
                     {
                         logger::info("用户选择: 跳过残留清理");
@@ -4197,32 +5268,11 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                 // 清理中提示
                 if is_cleaning {
                     ui.add_space(5.0);
-                    ui.colored_label(
-                        BRAND,
-                        egui::RichText::new("⏳ 正在清理残留...").size(12.0),
-                    );
+                    ui.colored_label(BRAND, egui::RichText::new("⏳ 正在清理残留...").size(12.0));
                     ctx.request_repaint_after(std::time::Duration::from_millis(50));
                 }
             });
         });
-}
-
-/// 类别颜色
-fn category_color(category: &str) -> egui::Color32 {
-    match category {
-        c if c.contains("Rust") => egui::Color32::from_rgb(222, 120, 50),
-        c if c.contains("Xcode") => BRAND,
-        c if c.contains("模拟器") => egui::Color32::from_rgb(150, 100, 255),
-        c if c.contains("Node") => SAFE_COLOR,
-        c if c.contains("pnpm") | c.contains("npm") => egui::Color32::from_rgb(180, 120, 80),
-        c if c.contains("Go") => egui::Color32::from_rgb(100, 200, 200),
-        c if c.contains("Homebrew") => egui::Color32::from_rgb(255, 150, 50),
-        c if c.contains("pip") => BRAND,
-        c if c.contains("IDE") => egui::Color32::from_rgb(200, 150, 255),
-        c if c.contains("APFS") => egui::Color32::from_rgb(255, 100, 150),
-        c if c.contains("大目录") | c.contains("大文件") => CAUTION_COLOR,
-        _ => TEXT_PRIMARY,
-    }
 }
 
 /// 截断路径
@@ -4248,7 +5298,11 @@ fn truncate_path(path: &str, max_len: usize) -> String {
 /// - 列出当前目录下所有子项（按大小降序）
 /// - 每项显示大小、进度条（相对于当前目录总大小）
 /// - 目录可点击进入，文件可勾选删除
-fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+fn render_disk_analyzer(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+) {
     let tab_idx = app.tab_index();
     let items = app.results[tab_idx].clone();
     let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
@@ -4259,7 +5313,13 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
     ui.horizontal(|ui| {
         // 返回上一级按钮
         let back_enabled = has_history && !is_scanning;
-        if ui.add_enabled(back_enabled, egui::Button::new(format!("⬆ {}", app.t("back")))).clicked() {
+        if ui
+            .add_enabled(
+                back_enabled,
+                egui::Button::new(format!("⬆ {}", app.t("back"))),
+            )
+            .clicked()
+        {
             app.disk_analyzer_back();
             // 返回后重新扫描上一级目录
             start_scan(app, scan_rx);
@@ -4271,15 +5331,19 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
         // 显示当前路径（用 ~ 替换主目录）
         let home = scanner::home_dir();
         let display_path = if current_path.starts_with(&home) {
-            let suffix = current_path.strip_prefix(&home).unwrap_or(std::path::Path::new(""));
+            let suffix = current_path
+                .strip_prefix(&home)
+                .unwrap_or(std::path::Path::new(""));
             format!("~ {}", suffix.display())
         } else {
             current_path.display().to_string()
         };
 
-        ui.label(egui::RichText::new(format!("📁 {}", display_path))
-            .size(14.0)
-            .color(BRAND));
+        ui.label(
+            egui::RichText::new(format!("📁 {}", display_path))
+                .size(14.0)
+                .color(BRAND),
+        );
 
         ui.separator();
 
@@ -4303,27 +5367,40 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
             ui.add(egui::Spinner::new().size(40.0));
             ui.add_space(10.0);
             ui.label(
-                egui::RichText::new(app.tf("analyzing", &[&display_path_short(&current_path, app.lang_en)]))
-                    .size(16.0)
-                    .color(BRAND),
+                egui::RichText::new(app.tf(
+                    "analyzing",
+                    &[&display_path_short(&current_path, app.lang_en)],
+                ))
+                .size(16.0)
+                .color(BRAND),
             );
             ui.add_space(15.0);
             let pct = (app.scan_progress * 100.0) as u32;
-            ui.add(egui::ProgressBar::new(app.scan_progress)
-                .desired_width(500.0)
-                .fill(BRAND)
-                .text(format!("{}%", pct)));
+            ui.add(
+                egui::ProgressBar::new(app.scan_progress)
+                    .desired_width(500.0)
+                    .fill(BRAND)
+                    .text(format!("{}%", pct)),
+            );
         });
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
         return;
     }
 
     if items.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.label(egui::RichText::new(app.t("no_large_files")).size(16.0).color(TEXT_TERTIARY));
+            ui.label(
+                egui::RichText::new(app.t("no_large_files"))
+                    .size(16.0)
+                    .color(TEXT_TERTIARY),
+            );
             ui.add_space(10.0);
-            if ui.button(egui::RichText::new(format!("🔍 {}", app.t("rescan"))).size(16.0)).clicked() {
+            if ui
+                .button(egui::RichText::new(format!("🔍 {}", app.t("rescan"))).size(16.0))
+                .clicked()
+            {
                 start_scan(app, scan_rx);
             }
         });
@@ -4333,18 +5410,28 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
     // ====== 汇总信息 ======
     let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
     let selected_cnt: usize = items.iter().filter(|i| i.selected && i.deletable).count();
-    let selected_sz: u64 = items.iter().filter(|i| i.selected && i.deletable).map(|i| i.size_bytes).sum();
+    let selected_sz: u64 = items
+        .iter()
+        .filter(|i| i.selected && i.deletable)
+        .map(|i| i.size_bytes)
+        .sum();
 
     ui.horizontal(|ui| {
         ui.colored_label(
             BRAND,
-            app.tf("items_total_size", &[&items.len().to_string(), &format_size(total_size)]),
+            app.tf(
+                "items_total_size",
+                &[&items.len().to_string(), &format_size(total_size)],
+            ),
         );
         if selected_cnt > 0 {
             ui.separator();
             ui.colored_label(
                 CAUTION_COLOR,
-                app.tf("selected_count_size", &[&selected_cnt.to_string(), &format_size(selected_sz)]),
+                app.tf(
+                    "selected_count_size",
+                    &[&selected_cnt.to_string(), &format_size(selected_sz)],
+                ),
             );
         }
     });
@@ -4364,10 +5451,18 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
 
         // 删除选中项
         let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
-        if ui.add_enabled(delete_enabled, egui::Button::new(
-            egui::RichText::new(app.tf("delete_selected_count", &[&selected_cnt.to_string()]))
-                .color(ADVANCED_COLOR)
-        )).clicked() {
+        if ui
+            .add_enabled(
+                delete_enabled,
+                egui::Button::new(
+                    egui::RichText::new(
+                        app.tf("delete_selected_count", &[&selected_cnt.to_string()]),
+                    )
+                    .color(ADVANCED_COLOR),
+                ),
+            )
+            .clicked()
+        {
             app.prepare_delete();
         }
     });
@@ -4415,7 +5510,7 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
 
                     let name_btn = ui.add(
                         egui::Label::new(egui::RichText::new(&name_label).size(13.0))
-                            .sense(egui::Sense::click())
+                            .sense(egui::Sense::click()),
                     );
 
                     if is_dir && name_btn.clicked() && !is_scanning {
@@ -4427,15 +5522,17 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
                     }
 
                     // 进度条（相对大小可视化）
-                    ui.add(egui::ProgressBar::new(pct)
-                        .desired_width(200.0)
-                        .fill(if pct > 0.5 {
-                            ADVANCED_COLOR
-                        } else if pct > 0.2 {
-                            CAUTION_COLOR
-                        } else {
-                            SAFE_COLOR
-                        }));
+                    ui.add(
+                        egui::ProgressBar::new(pct)
+                            .desired_width(200.0)
+                            .fill(if pct > 0.5 {
+                                ADVANCED_COLOR
+                            } else if pct > 0.2 {
+                                CAUTION_COLOR
+                            } else {
+                                SAFE_COLOR
+                            }),
+                    );
 
                     // 大小
                     ui.label(egui::RichText::new(&size_str).size(13.0).strong());
@@ -4446,15 +5543,15 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
                     } else {
                         0.0
                     };
-                    ui.label(egui::RichText::new(format!("{:.1}%", total_pct))
-                        .size(11.0)
-                        .color(TEXT_TERTIARY));
+                    ui.label(
+                        egui::RichText::new(format!("{:.1}%", total_pct))
+                            .size(11.0)
+                            .color(TEXT_TERTIARY),
+                    );
 
                     // 目录：显示"进入"提示
                     if is_dir {
-                        ui.label(egui::RichText::new("→")
-                            .size(16.0)
-                            .color(BRAND));
+                        ui.label(egui::RichText::new("→").size(16.0).color(BRAND));
                     }
                 });
 
@@ -4476,14 +5573,18 @@ fn display_path_short(path: &std::path::Path, lang_en: bool) -> String {
 }
 
 /// 概览面板：聚合所有 Tab 的推荐清理项
-fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+fn render_overview_panel(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+) {
     // 聚合所有 Tab 的统计信息（跳过 Overview 自身，索引 0）
     let mut safe_total: u64 = 0;
     let mut caution_total: u64 = 0;
     let mut advanced_total: u64 = 0;
-    let mut safe_count = 0usize;
-    let mut caution_count = 0usize;
-    let mut advanced_count = 0usize;
+    let mut _safe_count = 0usize;
+    let mut _caution_count = 0usize;
+    let mut _advanced_count = 0usize;
     let mut recommendation_items: Vec<(usize, usize, ScanItem)> = Vec::new(); // (tab_index, item_index, item)
 
     for tab_idx in 1..app.results.len() {
@@ -4494,16 +5595,16 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
             match item.recommend {
                 crate::scanner::Recommend::Safe | crate::scanner::Recommend::CacheOnly => {
                     safe_total += item.size_bytes;
-                    safe_count += 1;
+                    _safe_count += 1;
                     recommendation_items.push((tab_idx, item_idx, item.clone()));
                 }
                 crate::scanner::Recommend::Caution => {
                     caution_total += item.size_bytes;
-                    caution_count += 1;
+                    _caution_count += 1;
                 }
                 crate::scanner::Recommend::Advanced => {
                     advanced_total += item.size_bytes;
-                    advanced_count += 1;
+                    _advanced_count += 1;
                 }
             }
         }
@@ -4513,7 +5614,10 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
     recommendation_items.sort_by(|a, b| b.2.size_bytes.cmp(&a.2.size_bytes));
 
     // 判断是否有任一 Tab 正在扫描
-    let any_scanning = app.scan_states.iter().any(|s| matches!(s, ScanState::Scanning));
+    let any_scanning = app
+        .scan_states
+        .iter()
+        .any(|s| matches!(s, ScanState::Scanning));
 
     // --- Summary Pills ---
     ui.add_space(5.0);
@@ -4526,11 +5630,22 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
             .inner_margin(egui::Margin::symmetric(16.0, 10.0))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("overview_releasable")).size(12.0));
+                    ui.colored_label(
+                        TEXT_SECONDARY,
+                        egui::RichText::new(app.t("overview_releasable")).size(12.0),
+                    );
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
-                        ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(safe_total)).size(20.0).strong());
-                        ui.colored_label(SAFE_COLOR, egui::RichText::new("Safe").size(11.0).strong());
+                        ui.colored_label(
+                            TEXT_PRIMARY,
+                            egui::RichText::new(format_size(safe_total))
+                                .size(20.0)
+                                .strong(),
+                        );
+                        ui.colored_label(
+                            SAFE_COLOR,
+                            egui::RichText::new("Safe").size(11.0).strong(),
+                        );
                     });
                 });
             });
@@ -4544,9 +5659,17 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("caution_clean")).size(12.0));
+                    ui.colored_label(
+                        TEXT_SECONDARY,
+                        egui::RichText::new(app.t("caution_clean")).size(12.0),
+                    );
                     ui.add_space(2.0);
-                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(caution_total)).size(18.0).strong());
+                    ui.colored_label(
+                        TEXT_PRIMARY,
+                        egui::RichText::new(format_size(caution_total))
+                            .size(18.0)
+                            .strong(),
+                    );
                 });
             });
         ui.add_space(10.0);
@@ -4559,9 +5682,17 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("confirm_clean")).size(12.0));
+                    ui.colored_label(
+                        TEXT_SECONDARY,
+                        egui::RichText::new(app.t("confirm_clean")).size(12.0),
+                    );
                     ui.add_space(2.0);
-                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(advanced_total)).size(18.0).strong());
+                    ui.colored_label(
+                        TEXT_PRIMARY,
+                        egui::RichText::new(format_size(advanced_total))
+                            .size(18.0)
+                            .strong(),
+                    );
                 });
             });
     });
@@ -4569,13 +5700,21 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
 
     // --- 推荐清理 ---
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(app.t("overview_recommendation")).size(16.0).strong().color(TEXT_PRIMARY));
+        ui.label(
+            egui::RichText::new(app.t("overview_recommendation"))
+                .size(16.0)
+                .strong()
+                .color(TEXT_PRIMARY),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let scan_btn = ui.add_enabled(
                 !any_scanning,
-                egui::Button::new(egui::RichText::new(format!("🔄 {}", app.t("scan_all"))).color(egui::Color32::WHITE))
-                    .fill(BRAND)
-                    .rounding(egui::Rounding::same(8.0)),
+                egui::Button::new(
+                    egui::RichText::new(format!("🔄 {}", app.t("scan_all")))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(BRAND)
+                .rounding(egui::Rounding::same(8.0)),
             );
             if scan_btn.clicked() {
                 start_scan_all(app, scan_rx);
@@ -4583,7 +5722,10 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
         });
     });
     ui.add_space(4.0);
-    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(app.t("overview_recommendation_hint")).size(12.0));
+    ui.colored_label(
+        TEXT_TERTIARY,
+        egui::RichText::new(app.t("overview_recommendation_hint")).size(12.0),
+    );
     ui.add_space(10.0);
 
     if any_scanning {
@@ -4593,22 +5735,45 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
             ui.add_space(60.0);
             ui.label(egui::RichText::new("🧹").size(48.0));
             ui.add_space(10.0);
-            ui.label(egui::RichText::new(app.t("overview_empty_title")).size(16.0).strong().color(TEXT_PRIMARY));
+            ui.label(
+                egui::RichText::new(app.t("overview_empty_title"))
+                    .size(16.0)
+                    .strong()
+                    .color(TEXT_PRIMARY),
+            );
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(app.t("overview_empty_hint")).size(13.0).color(TEXT_TERTIARY));
+            ui.label(
+                egui::RichText::new(app.t("overview_empty_hint"))
+                    .size(13.0)
+                    .color(TEXT_TERTIARY),
+            );
             ui.add_space(16.0);
-            if ui.button(egui::RichText::new(format!("🔍 {}", app.t("scan_all"))).size(16.0)).clicked() {
+            if ui
+                .button(egui::RichText::new(format!("🔍 {}", app.t("scan_all"))).size(16.0))
+                .clicked()
+            {
                 start_scan_all(app, scan_rx);
             }
         });
     } else {
         // 一键清理按钮
-        let total_safe_size: u64 = recommendation_items.iter().map(|(_, _, item)| item.size_bytes).sum();
+        let total_safe_size: u64 = recommendation_items
+            .iter()
+            .map(|(_, _, item)| item.size_bytes)
+            .sum();
         let clean_btn = ui.add(
-            egui::Button::new(egui::RichText::new(format!("🗑 {} {} ({})", app.t("one_click_clean"), recommendation_items.len(), format_size(total_safe_size))).color(egui::Color32::WHITE))
-                .fill(BRAND)
-                .rounding(egui::Rounding::same(8.0))
-                .min_size(egui::vec2(ui.available_width(), 40.0)),
+            egui::Button::new(
+                egui::RichText::new(format!(
+                    "🗑 {} {} ({})",
+                    app.t("one_click_clean"),
+                    recommendation_items.len(),
+                    format_size(total_safe_size)
+                ))
+                .color(egui::Color32::WHITE),
+            )
+            .fill(BRAND)
+            .rounding(egui::Rounding::same(8.0))
+            .min_size(egui::vec2(ui.available_width(), 40.0)),
         );
         if clean_btn.clicked() {
             // 选中所有推荐项并准备删除
@@ -4623,7 +5788,7 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
 
         // 推荐项列表
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for &(tab_idx, item_idx, ref item) in &recommendation_items {
+            for &(tab_idx, _item_idx, ref item) in &recommendation_items {
                 let tab = Tab::all()[tab_idx];
                 let tab_title_text = tab_title(&tab, app);
 
@@ -4634,20 +5799,45 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
                     .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.colored_label(SAFE_COLOR, egui::RichText::new("✓").size(14.0).strong());
+                            ui.colored_label(
+                                SAFE_COLOR,
+                                egui::RichText::new("✓").size(14.0).strong(),
+                            );
                             ui.add_space(10.0);
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(&item.category).size(13.0).strong());
+                                    ui.colored_label(
+                                        TEXT_PRIMARY,
+                                        egui::RichText::new(&item.category).size(13.0).strong(),
+                                    );
                                     ui.add_space(6.0);
-                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(format!("· {}", tab_title_text)).size(11.0));
+                                    ui.colored_label(
+                                        TEXT_TERTIARY,
+                                        egui::RichText::new(format!("· {}", tab_title_text))
+                                            .size(11.0),
+                                    );
                                 });
-                                ui.colored_label(TEXT_SECONDARY, egui::RichText::new(truncate_path(&item.path, 70)).size(11.0));
-                                ui.colored_label(TEXT_SECONDARY, egui::RichText::new(&item.description).size(11.0));
+                                ui.colored_label(
+                                    TEXT_SECONDARY,
+                                    egui::RichText::new(truncate_path(&item.path, 70)).size(11.0),
+                                );
+                                ui.colored_label(
+                                    TEXT_SECONDARY,
+                                    egui::RichText::new(&item.description).size(11.0),
+                                );
                             });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(item.size_bytes)).size(14.0).strong().monospace());
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.colored_label(
+                                        TEXT_PRIMARY,
+                                        egui::RichText::new(format_size(item.size_bytes))
+                                            .size(14.0)
+                                            .strong()
+                                            .monospace(),
+                                    );
+                                },
+                            );
                         });
                     });
                 ui.add_space(6.0);
@@ -4656,7 +5846,11 @@ fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
     }
 }
 
-fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+fn render_optimize_panel(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+) {
     let tab_idx = app.tab_index();
     let items = app.results[tab_idx].clone();
     let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
@@ -4669,10 +5863,17 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
     if items.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.label(egui::RichText::new(app.t("optimize_click_to_scan")).size(16.0).color(TEXT_TERTIARY));
+            ui.label(
+                egui::RichText::new(app.t("optimize_click_to_scan"))
+                    .size(16.0)
+                    .color(TEXT_TERTIARY),
+            );
             ui.add_space(10.0);
             let scan_button = format!("🔍 {}", app.t("scan"));
-            if ui.button(egui::RichText::new(scan_button).size(16.0)).clicked() {
+            if ui
+                .button(egui::RichText::new(scan_button).size(16.0))
+                .clicked()
+            {
                 start_scan(app, scan_rx);
             }
         });
@@ -4681,7 +5882,11 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
 
     ui.add_space(10.0);
     ui.heading(egui::RichText::new(app.t("tab_system_optimize")).size(18.0));
-    ui.label(egui::RichText::new(app.t("optimize_safe_hint")).size(12.0).color(TEXT_TERTIARY));
+    ui.label(
+        egui::RichText::new(app.t("optimize_safe_hint"))
+            .size(12.0)
+            .color(TEXT_TERTIARY),
+    );
     ui.add_space(10.0);
 
     // 优化任务列表
@@ -4705,14 +5910,28 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
                                 // 如果 key 不存在（返回空字符串），fallback 到原始 path
                                 let title = if title.is_empty() { &item.path } else { title };
                                 ui.label(egui::RichText::new(title).strong().size(14.0));
-                                ui.label(egui::RichText::new(recommend_badge_text(&item.recommend, app.lang_en)).size(11.0));
+                                ui.label(
+                                    egui::RichText::new(recommend_badge_text(
+                                        &item.recommend,
+                                        app.lang_en,
+                                    ))
+                                    .size(11.0),
+                                );
                             });
-                            let desc_en = i18n::translate_description(&item.description, app.lang_en);
-                            ui.label(egui::RichText::new(&desc_en).size(12.0).color(TEXT_SECONDARY));
+                            let desc_en =
+                                i18n::translate_description(&item.description, app.lang_en);
+                            ui.label(
+                                egui::RichText::new(&desc_en)
+                                    .size(12.0)
+                                    .color(TEXT_SECONDARY),
+                            );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let run_text = if app.lang_en { "▶ Run" } else { "▶ 执行" };
-                            if ui.button(egui::RichText::new(run_text).size(13.0)).clicked() {
+                            if ui
+                                .button(egui::RichText::new(run_text).size(13.0))
+                                .clicked()
+                            {
                                 task_to_run = Some(i);
                             }
                         });
@@ -4742,6 +5961,149 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
                 });
         });
     }
+}
+
+/// 设置面板（设计稿 4.6 样式）
+fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.add_space(4.0);
+
+        // 通用设置卡片
+        settings_card(ui, app.t("settings_general"), |ui| {
+            render_settings_item(
+                ui,
+                app.t("setting_menubar_icon"),
+                app.t("setting_menubar_icon_desc"),
+                &mut app.settings_menubar_icon,
+                true,
+            );
+            render_settings_item(
+                ui,
+                app.t("setting_keep_sudo"),
+                app.t("setting_keep_sudo_desc"),
+                &mut app.settings_keep_sudo,
+                true,
+            );
+            render_settings_item(
+                ui,
+                app.t("setting_scan_cache"),
+                app.t("setting_scan_cache_desc"),
+                &mut app.settings_scan_cache,
+                true,
+            );
+        });
+
+        ui.add_space(12.0);
+
+        // 安全设置卡片
+        settings_card(ui, app.t("settings_safety"), |ui| {
+            render_settings_item(
+                ui,
+                app.t("setting_confirm_advanced"),
+                app.t("setting_confirm_advanced_desc"),
+                &mut app.settings_confirm_advanced,
+                true,
+            );
+            let lid_enabled = cfg!(target_os = "macos");
+            render_settings_item(
+                ui,
+                app.t("setting_prevent_lid_close"),
+                app.t("setting_prevent_lid_close_desc"),
+                &mut app.settings_prevent_lid_close,
+                lid_enabled,
+            );
+        });
+
+        ui.add_space(12.0);
+
+        // 语言设置卡片
+        settings_card(ui, app.t("settings_language"), |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.colored_label(
+                        TEXT_PRIMARY,
+                        egui::RichText::new(app.t("setting_language"))
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.colored_label(
+                        TEXT_SECONDARY,
+                        egui::RichText::new(app.t("setting_language_current")).size(12.0),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let btn_text = if app.lang_en {
+                        app.t("switch_to_chinese")
+                    } else {
+                        app.t("switch_to_english")
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(btn_text).size(13.0))
+                                .fill(SURFACE_ELEVATED)
+                                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                                .rounding(egui::Rounding::same(8.0)),
+                        )
+                        .clicked()
+                    {
+                        app.toggle_lang();
+                    }
+                });
+            });
+        });
+
+        ui.add_space(20.0);
+    });
+}
+
+/// 设置卡片容器
+fn settings_card<R>(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::none()
+        .fill(SURFACE_ELEVATED)
+        .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+        .rounding(egui::Rounding::same(12.0))
+        .inner_margin(egui::Margin::same(16.0))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .size(14.0)
+                    .strong()
+                    .color(TEXT_PRIMARY),
+            );
+            ui.add_space(12.0);
+            content(ui)
+        })
+        .inner
+}
+
+/// 单个设置项（标签 + 描述 + Toggle）
+fn render_settings_item(
+    ui: &mut egui::Ui,
+    label: &str,
+    desc: &str,
+    value: &mut bool,
+    enabled: bool,
+) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.colored_label(TEXT_PRIMARY, egui::RichText::new(label).size(13.0).strong());
+            ui.colored_label(TEXT_SECONDARY, egui::RichText::new(desc).size(12.0));
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let _ = render_settings_toggle(ui, value, enabled);
+        });
+    });
+    ui.add_space(8.0);
+    // 分隔线
+    let available = ui.available_rect_before_wrap();
+    let sep_y = available.min.y;
+    let sep_rect = egui::Rect::from_min_max(
+        egui::pos2(available.min.x, sep_y),
+        egui::pos2(available.max.x, sep_y + 1.0),
+    );
+    ui.painter()
+        .rect_filled(sep_rect, egui::Rounding::ZERO, BORDER_LIGHT);
+    ui.add_space(8.0);
 }
 
 /// 执行单个优化任务
@@ -4789,9 +6151,7 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
                 .iter()
                 .find(|p| std::path::Path::new(p).exists())
                 .unwrap_or(&lsregister_candidates[0]);
-            let r = std::process::Command::new(lsregister)
-                .arg("-gc")
-                .output();
+            let r = std::process::Command::new(lsregister).arg("-gc").output();
             match r {
                 Ok(_) => App::t_lang(lang_en, "opt_launchservices_success").to_string(),
                 Err(_) => App::t_lang(lang_en, "opt_launchservices_fail").to_string(),
@@ -4823,7 +6183,10 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
         }
         "gatekeeper_cleanup" => {
             let home = std::env::var("HOME").unwrap_or_default();
-            let db_path = format!("{}/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2", home);
+            let db_path = format!(
+                "{}/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2",
+                home
+            );
             if std::path::Path::new(&db_path).exists() {
                 let r = std::process::Command::new("sqlite3")
                     .arg(&db_path)
@@ -4841,7 +6204,9 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
             // purge 在所有 macOS 版本上都需要 sudo
             let r = std::process::Command::new("purge").output();
             match r {
-                Ok(o) if o.status.success() => App::t_lang(lang_en, "opt_memory_success").to_string(),
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_memory_success").to_string()
+                }
                 _ => App::t_lang(lang_en, "opt_memory_fail").to_string(),
             }
         }
@@ -4863,9 +6228,7 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
             // macOS 13+ 使用 "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
             // macOS 12 及以下使用 "com.apple.preference.users"
             let url = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
-            let r = std::process::Command::new("open")
-                .arg(url)
-                .output();
+            let r = std::process::Command::new("open").arg(url).output();
             match r {
                 Ok(o) if o.status.success() => {
                     App::t_lang(lang_en, "opt_login_items_opened").to_string()
@@ -4881,17 +6244,163 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
 
 /// 扫描中 UI
 fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
-    ui.add_space(40.0);
+    let tab_idx = app.tab_index();
+    let tab_title_text = tab_title(&app.tab, app);
+    let pct = (app.scan_progress * 100.0).clamp(0.0, 100.0) as u32;
+    let discovered = app.results[tab_idx].len();
+    let discovered_size: u64 = app.results[tab_idx].iter().map(|i| i.size_bytes).sum();
+    let current_path = if app.scan_current_path.is_empty() {
+        app.t("scanning_hint").to_string()
+    } else {
+        app.scan_current_path.clone()
+    };
+
     ui.vertical_centered(|ui| {
-        ui.add(egui::Spinner::new().size(40.0));
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(BRAND));
-        ui.add_space(15.0);
-        let pct = (app.scan_progress * 100.0) as u32;
-        ui.add(egui::ProgressBar::new(app.scan_progress)
-            .desired_width(500.0)
-            .fill(BRAND)
-            .text(format!("{}%", pct)));
+        ui.add_space(24.0);
+        egui::Frame::none()
+            .fill(SURFACE_ELEVATED)
+            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+            .rounding(egui::Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(20.0))
+            .show(ui, |ui| {
+                ui.set_min_width(420.0);
+                ui.vertical_centered(|ui| {
+                    // 自定义旋转 spinner
+                    let spinner_size = 40.0;
+                    let (rect, _resp) = ui.allocate_exact_size(
+                        egui::vec2(spinner_size, spinner_size),
+                        egui::Sense::hover(),
+                    );
+                    let time = ui.ctx().input(|i| i.time);
+                    let start_angle = (time * 2.0) as f32;
+                    let sweep = std::f32::consts::PI * 1.25;
+                    let painter = ui.painter();
+                    let center = rect.center();
+                    let radius = spinner_size * 0.5 - 2.0;
+                    let stroke_width = 3.0;
+                    // 背景圆环
+                    painter.circle_stroke(
+                        center,
+                        radius,
+                        egui::Stroke::new(stroke_width, SURFACE_MUTED),
+                    );
+                    // 旋转弧
+                    let segments = 24;
+                    let mut points: Vec<egui::Pos2> = Vec::with_capacity(segments + 1);
+                    for i in 0..=segments {
+                        let t = i as f32 / segments as f32;
+                        let a = start_angle + sweep * t;
+                        points.push(egui::pos2(
+                            center.x + radius * a.cos(),
+                            center.y + radius * a.sin(),
+                        ));
+                    }
+                    painter.add(egui::Shape::Path(egui::epaint::PathShape::line(
+                        points,
+                        egui::Stroke::new(stroke_width, BRAND),
+                    )));
+                    ui.ctx().request_repaint();
+
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} {}...",
+                            app.t("analyzing"),
+                            tab_title_text
+                        ))
+                        .size(16.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(app.tf(
+                            "items_total_size",
+                            &[&discovered.to_string(), &format_size(discovered_size)],
+                        ))
+                        .size(13.0)
+                        .color(TEXT_SECONDARY),
+                    );
+                });
+
+                ui.add_space(16.0);
+                // 进度条
+                let progress_rect = ui.available_rect_before_wrap();
+                let bar_rect = egui::Rect::from_min_size(
+                    progress_rect.min,
+                    egui::vec2(progress_rect.width().max(360.0), 8.0),
+                );
+                let painter = ui.painter();
+                painter.rect_filled(bar_rect, egui::Rounding::same(4.0), SURFACE_MUTED);
+                let fill_width = bar_rect.width() * app.scan_progress.clamp(0.0, 1.0);
+                if fill_width > 0.0 {
+                    let fill_rect = egui::Rect::from_min_size(
+                        bar_rect.min,
+                        egui::vec2(fill_width, bar_rect.height()),
+                    );
+                    painter.rect_filled(fill_rect, egui::Rounding::same(4.0), BRAND);
+                }
+                ui.allocate_rect(bar_rect, egui::Sense::hover());
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        TEXT_SECONDARY,
+                        egui::RichText::new(format!(
+                            "{}% · {} {}",
+                            pct,
+                            app.t("scanning"),
+                            current_path
+                        ))
+                        .size(12.0)
+                        .monospace(),
+                    );
+                });
+
+                // 日志区域
+                ui.add_space(12.0);
+                egui::Frame::none()
+                    .fill(SURFACE_MUTED)
+                    .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                if app.logs.is_empty() {
+                                    ui.colored_label(
+                                        TEXT_SECONDARY,
+                                        egui::RichText::new(format!(
+                                            "{} {}",
+                                            app.t("scanning"),
+                                            current_path
+                                        ))
+                                        .size(11.0)
+                                        .monospace(),
+                                    );
+                                } else {
+                                    for log in app.logs.iter().rev().take(20) {
+                                        let color = if log.starts_with('✓') || log.starts_with('✅') {
+                                            SAFE_COLOR
+                                        } else if log.starts_with('✗') || log.starts_with('⛔') {
+                                            ADVANCED_COLOR
+                                        } else if log.starts_with('⚠') {
+                                            CAUTION_COLOR
+                                        } else {
+                                            TEXT_SECONDARY
+                                        };
+                                        ui.colored_label(
+                                            color,
+                                            egui::RichText::new(log).size(11.0).monospace(),
+                                        );
+                                    }
+                                }
+                            });
+                    });
+            });
     });
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(100));
 }
