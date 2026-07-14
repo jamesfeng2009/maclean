@@ -1616,7 +1616,6 @@ fn render_gui(
         });
 
         ui.separator();
-        ui.add_space(4.0);
 
         // --- 概览 Tab：聚合推荐清理 ---
         if app.tab == Tab::Overview {
@@ -1664,6 +1663,7 @@ fn render_gui(
 
             if !prefixes.is_empty() {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
                     let all_count = items.len();
                     let all_active = app.filter_category.is_none();
                     if render_category_tab(ui, app.t("select_all"), Some(all_count), all_active)
@@ -1864,9 +1864,6 @@ fn render_gui(
                     app.prepare_delete();
                 }
             });
-
-            ui.separator();
-            ui.add_space(3.0);
 
             // ====== 过滤/搜索输入框 ======
             // / 键聚焦输入框，Esc 清除过滤
