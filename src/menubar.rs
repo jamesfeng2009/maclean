@@ -211,8 +211,8 @@ fn create_icon(used_pct: f32) -> Icon {
 /// 日志辅助
 mod log {
     pub fn log(msg: &str) {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let log_path = std::path::PathBuf::from(&home).join(".maclean/logs/menubar.log");
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let log_path = home.join(".maclean/logs/menubar.log");
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
