@@ -503,6 +503,7 @@ fn get_disk_info() -> (u64, u64) {
 fn recommend_color(rec: &Recommend) -> egui::Color32 {
     match rec {
         Recommend::Safe => egui::Color32::from_rgb(52, 199, 89),      // 绿色
+        Recommend::CacheOnly => egui::Color32::from_rgb(48, 209, 88), // 青绿色（缓存）
         Recommend::Caution => egui::Color32::from_rgb(255, 159, 10),  // 橙色
         Recommend::Advanced => egui::Color32::from_rgb(255, 69, 58),  // 红色
     }
@@ -512,6 +513,7 @@ fn recommend_color(rec: &Recommend) -> egui::Color32 {
 fn recommend_badge(rec: &Recommend) -> &'static str {
     match rec {
         Recommend::Safe => "🟢",
+        Recommend::CacheOnly => "🧹",
         Recommend::Caution => "🟡",
         Recommend::Advanced => "🔴",
     }
@@ -794,6 +796,8 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
             let safe_cnt = app.safe_count();
             let safe_sz = app.safe_size();
+            let cache_only_cnt = app.cache_only_count();
+            let cache_only_sz = app.cache_only_size();
             let caution_cnt = app.caution_count();
             let caution_sz = app.caution_size();
             let advanced_cnt = app.advanced_count();
@@ -813,6 +817,15 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                             format!("🟢 {} {} ({}), {} {}", safe_cnt, app.t("items"), app.t("safe_clean"), app.t("total"), format_size(safe_sz)),
                         );
                         ui.separator();
+
+                        // 仅缓存可清（如果有）
+                        if cache_only_cnt > 0 {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(48, 209, 88),
+                                format!("🧹 {} {} ({}), {} {}", cache_only_cnt, app.t("items"), app.t("cache_only_clean"), app.t("total"), format_size(cache_only_sz)),
+                            );
+                            ui.separator();
+                        }
 
                         // 谨慎清理
                         ui.colored_label(

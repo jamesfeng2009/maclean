@@ -13,12 +13,14 @@ pub fn translate_recommend(rec: &Recommend, lang_en: bool) -> &'static str {
     if lang_en {
         match rec {
             Recommend::Safe => "Safe",
+            Recommend::CacheOnly => "Cache Only",
             Recommend::Caution => "Caution",
             Recommend::Advanced => "Advanced",
         }
     } else {
         match rec {
             Recommend::Safe => "推荐",
+            Recommend::CacheOnly => "仅缓存",
             Recommend::Caution => "谨慎",
             Recommend::Advanced => "需确认",
         }
@@ -608,9 +610,11 @@ mod tests {
     #[test]
     fn test_translate_recommend() {
         assert_eq!(translate_recommend(&Recommend::Safe, true), "Safe");
+        assert_eq!(translate_recommend(&Recommend::CacheOnly, true), "Cache Only");
         assert_eq!(translate_recommend(&Recommend::Caution, true), "Caution");
         assert_eq!(translate_recommend(&Recommend::Advanced, true), "Advanced");
         assert_eq!(translate_recommend(&Recommend::Safe, false), "推荐");
+        assert_eq!(translate_recommend(&Recommend::CacheOnly, false), "仅缓存");
         assert_eq!(translate_recommend(&Recommend::Caution, false), "谨慎");
         assert_eq!(translate_recommend(&Recommend::Advanced, false), "需确认");
     }

@@ -417,11 +417,11 @@ impl App {
         }
     }
 
-    /// 智能选择：只选中推荐清理（Safe）的项
+    /// 智能选择：只选中推荐清理（Safe / CacheOnly）的项
     pub fn select_safe_only(&mut self) {
         let idx = self.tab_index();
         for item in &mut self.results[idx] {
-            item.selected = item.deletable && item.recommend == crate::scanner::Recommend::Safe;
+            item.selected = item.deletable && item.recommend.default_selected();
         }
     }
 
@@ -465,19 +465,36 @@ impl App {
             .unwrap_or_else(|| scanner::home_dir())
     }
 
-    /// 统计当前 Tab 中推荐清理（Safe）的项数
+    /// 统计当前 Tab 中推荐清理（Safe + CacheOnly）的项数
     pub fn safe_count(&self) -> usize {
         self.current_items()
             .iter()
-            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Safe)
+            .filter(|i| i.deletable && i.recommend.default_selected())
             .count()
     }
 
-    /// 统计当前 Tab 中推荐清理（Safe）的总大小
+    /// 统计当前 Tab 中推荐清理（Safe + CacheOnly）的总大小
     pub fn safe_size(&self) -> u64 {
         self.current_items()
             .iter()
-            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::Safe)
+            .filter(|i| i.deletable && i.recommend.default_selected())
+            .map(|i| i.size_bytes)
+            .sum()
+    }
+
+    /// 统计当前 Tab 中仅缓存（CacheOnly）的项数
+    pub fn cache_only_count(&self) -> usize {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::CacheOnly)
+            .count()
+    }
+
+    /// 统计当前 Tab 中仅缓存（CacheOnly）的总大小
+    pub fn cache_only_size(&self) -> u64 {
+        self.current_items()
+            .iter()
+            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::CacheOnly)
             .map(|i| i.size_bytes)
             .sum()
     }
@@ -728,9 +745,10 @@ impl App {
             .map(|&i| {
                 let item = &self.results[idx][i];
                 let use_trash = match item.recommend {
-                    crate::scanner::Recommend::Safe => false,      // 缓存类：永久删除
-                    crate::scanner::Recommend::Caution => false,   // 系统缓存：永久删除（root 属主无法移到用户废纸篓）
-                    crate::scanner::Recommend::Advanced => true,   // 大文件/高级项：移至废纸篓
+                    crate::scanner::Recommend::Safe => false,       // 缓存类：永久删除
+                    crate::scanner::Recommend::CacheOnly => false,  // 应用缓存/日志：永久删除
+                    crate::scanner::Recommend::Caution => false,    // 系统缓存：永久删除（root 属主无法移到用户废纸篓）
+                    crate::scanner::Recommend::Advanced => true,    // 大文件/高级项：移至废纸篓
                 };
                 (item.path.clone(), item.category.clone(), item.batch_paths.clone(), use_trash)
             })
@@ -917,6 +935,7 @@ impl App {
                 "analyzing" => "Analyzing {0}...",
                 "home_dir_label" => "Home",
                 "safe_clean" => "safe to clean",
+                "cache_only_clean" => "cache only",
                 "caution_clean" => "need caution",
                 "confirm_clean" => "need confirm",
                 // 列表
@@ -1152,6 +1171,7 @@ impl App {
                 "found_items_total" => "{0} 找到项, 共计 {1}",
                 "logs" => "日志",
                 "safe_clean" => "可安全清理",
+                "cache_only_clean" => "仅缓存可清",
                 "caution_clean" => "需谨慎确认",
                 "confirm_clean" => "需确认",
                 // 列表

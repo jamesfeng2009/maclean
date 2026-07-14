@@ -168,9 +168,9 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
         }
 
         let tab_total: u64 = items.iter().map(|i| i.size_bytes).sum();
-        let safe_count = items.iter().filter(|i| i.recommend == Recommend::Safe && i.deletable).count();
+        let safe_count = items.iter().filter(|i| i.recommend.default_selected() && i.deletable).count();
         let safe_size: u64 = items.iter()
-            .filter(|i| i.recommend == Recommend::Safe && i.deletable)
+            .filter(|i| i.recommend.default_selected() && i.deletable)
             .map(|i| i.size_bytes)
             .sum();
 
@@ -183,6 +183,7 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
         for (i, item) in items.iter().take(display_count).enumerate() {
             let recommend_icon = match item.recommend {
                 Recommend::Safe => "✅",
+                Recommend::CacheOnly => "🧹",
                 Recommend::Caution => "⚠️",
                 Recommend::Advanced => "🔴",
             };
@@ -229,7 +230,7 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
         let items = scan_tab(tab_key);
 
         let to_clean: Vec<&ScanItem> = if safe_only {
-            items.iter().filter(|i| i.recommend == Recommend::Safe && i.deletable).collect()
+            items.iter().filter(|i| i.recommend.default_selected() && i.deletable).collect()
         } else {
             items.iter().filter(|i| i.deletable).collect()
         };

@@ -34,6 +34,8 @@ pub mod windows_apps;
 pub enum Recommend {
     /// 推荐清理 - 安全可删，重新构建/使用时会自动恢复
     Safe,
+    /// 应用缓存 - 只含缓存/日志，删除后应用可正常运行并自动重建
+    CacheOnly,
     /// 谨慎清理 - 删除后可能需要重新下载或配置
     Caution,
     /// 高级用户 - 需要了解风险后自行判断
@@ -45,6 +47,7 @@ impl Recommend {
     pub fn label(self) -> &'static str {
         match self {
             Recommend::Safe => "推荐",
+            Recommend::CacheOnly => "仅缓存",
             Recommend::Caution => "谨慎",
             Recommend::Advanced => "高级",
         }
@@ -54,9 +57,15 @@ impl Recommend {
     pub fn description(self) -> &'static str {
         match self {
             Recommend::Safe => "安全可删，自动恢复",
-            Recommend::Caution => "删除后需重新下载",
+            Recommend::CacheOnly => "仅清理缓存/日志，不影响使用",
+            Recommend::Caution => "删除后需重新下载或配置",
             Recommend::Advanced => "请确认后再删除",
         }
+    }
+
+    /// 是否默认被"智能选择"勾选
+    pub fn default_selected(self) -> bool {
+        matches!(self, Recommend::Safe | Recommend::CacheOnly)
     }
 }
 

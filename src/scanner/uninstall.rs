@@ -64,10 +64,10 @@ impl Scanner for UninstallScanner {
         // 收集所有 .app 路径
         let app_paths = collect_app_paths();
 
-        // 并行扫描每个应用
+        // 并行扫描每个应用，每个应用可能拆出多个 ScanItem
         let mut items: Vec<ScanItem> = app_paths
             .par_iter()
-            .filter_map(|app_path| scan_app(app_path))
+            .flat_map(|app_path| scan_app(app_path))
             .collect();
 
         // 扫描废纸篓和 Downloads 中的 .app 残留
@@ -258,7 +258,11 @@ fn collect_installed_app_names() -> std::collections::HashSet<String> {
 //  单个应用扫描
 // =========================================================================
 
-/// 扫描单个应用，返回 ScanItem
+/// 扫描单个应用，返回一组 ScanItem
+///
+/// 把一个应用拆分为多个可独立选择的项：
+/// - 应用卸载项（Advanced）：.app 包 + 数据类关联文件
+/// - 缓存清理项（CacheOnly）：Caches / Logs / HTTPStorages 等，删除后不影响使用
 ///
 /// 保护策略（参考 Mole app_protection_data.sh）：
 /// - /System/ 下的应用：跳过（系统只读区域）
@@ -267,16 +271,20 @@ fn collect_installed_app_names() -> std::collections::HashSet<String> {
 /// - 数据保护应用（1Password、输入法等）：可删除但描述包含警告
 /// - 可卸载的 Apple 应用（Xcode、Final Cut Pro 等）：正常显示
 /// - 普通第三方应用：正常显示
-fn scan_app(app_path: &PathBuf) -> Option<ScanItem> {
+fn scan_app(app_path: &PathBuf) -> Vec<ScanItem> {
+    let mut items = Vec::new();
     let path_str = app_path.to_string_lossy();
 
     // 跳过 /System/ 下的应用（系统只读区域，无法删除）
     if path_str.starts_with("/System/") {
-        return None;
+        return items;
     }
 
     // 获取 bundle ID（无 bundle ID 的应用无法判断保护级别，跳过）
-    let bundle_id = get_bundle_id(app_path)?;
+    let bundle_id = match get_bundle_id(app_path) {
+        Some(id) => id,
+        None => return items,
+    };
 
     // 获取应用显示名称
     let app_name = get_app_display_name(app_path).unwrap_or_else(|| {
@@ -298,108 +306,115 @@ fn scan_app(app_path: &PathBuf) -> Option<ScanItem> {
     // 计算 .app 包大小
     let app_size = dir_size(app_path);
 
-    // 查找关联文件
-    let mut batch_paths = find_associated_files(&bundle_id, &app_name);
+    // 查找关联文件并拆分为缓存类 / 数据类
+    let associated_files = find_associated_files(&bundle_id, &app_name);
+    let (cache_paths, data_paths): (Vec<String>, Vec<String>) = associated_files
+        .into_iter()
+        .partition(|p| is_cache_like_path(p));
 
-    // 计算关联文件总大小
-    let mut associated_size: u64 = 0;
-    for p in &batch_paths {
-        let p_path = std::path::Path::new(p);
-        if p_path.is_dir() {
-            associated_size += dir_size(p_path);
-        } else if p_path.is_file() {
-            if let Ok(meta) = p_path.symlink_metadata() {
-                associated_size += meta.len();
-            }
-        }
+    let cache_size: u64 = cache_paths.iter().map(|p| path_size(p)).sum();
+    let data_size: u64 = data_paths.iter().map(|p| path_size(p)).sum();
+
+    // 不可删除的系统关键 / 安全应用：只展示一个汇总项
+    if is_critical {
+        items.push(ScanItem {
+            path: app_path.to_string_lossy().to_string(),
+            size_bytes: app_size + data_size + cache_size,
+            category: app_name,
+            selected: false,
+            deletable: false,
+            undeletable_reason: "protection_critical".to_string(),
+            batch_paths: Vec::new(),
+            recommend: Recommend::Advanced,
+            description: format!("系统关键应用 | 应用大小 {}", format_size_local(app_size)),
+        });
+        return items;
     }
 
-    // 将 .app 本身加入 batch_paths 末尾，确保卸载时 .app 包也被删除
-    batch_paths.push(app_path.to_string_lossy().to_string());
+    if let ProtectionLevel::RequiresOfficialUninstaller = protection {
+        let vendor = app_protection::get_security_vendor(&bundle_id).unwrap_or("官方");
+        items.push(ScanItem {
+            path: app_path.to_string_lossy().to_string(),
+            size_bytes: app_size + data_size + cache_size,
+            category: app_name,
+            selected: false,
+            deletable: false,
+            undeletable_reason: format!("protection_official_uninstaller:{}", vendor),
+            batch_paths: Vec::new(),
+            recommend: Recommend::Advanced,
+            description: format!("{} 安全代理 | 应用大小 {}", vendor, format_size_local(app_size)),
+        });
+        return items;
+    }
 
-    let total_size = app_size + associated_size;
-    let file_count = batch_paths.len();
-
-    // 根据保护级别设置可删除性和描述
-    let (deletable, undeletable_reason, recommend, description) = match protection {
-        ProtectionLevel::Critical | ProtectionLevel::None if is_critical => {
-            // 系统关键应用：不可删除
-            (
-                false,
-                "protection_critical".to_string(),
-                Recommend::Advanced,
-                format!(
-                    "系统关键应用 | 应用大小 {}",
-                    format_size_local(app_size)
-                ),
-            )
-        }
-        ProtectionLevel::RequiresOfficialUninstaller => {
-            // 安全/MDM 应用：不可删除，提示使用官方卸载工具
-            let vendor = app_protection::get_security_vendor(&bundle_id)
-                .unwrap_or("官方");
-            (
-                false,
-                format!("protection_official_uninstaller:{}", vendor),
-                Recommend::Advanced,
-                format!(
-                    "{} 安全代理 | 应用大小 {}",
-                    vendor,
-                    format_size_local(app_size)
-                ),
-            )
-        }
-        ProtectionLevel::DataProtected => {
-            // 数据保护应用：可删除但描述包含警告
-            (
-                true,
-                String::new(),
-                Recommend::Advanced,
-                format!(
-                    "含敏感数据，卸载前请备份 | 应用大小 {}，关联文件 {} 项",
-                    format_size_local(app_size),
-                    file_count.saturating_sub(1)
-                ),
-            )
-        }
-        ProtectionLevel::None => {
-            // 普通应用
-            (
-                true,
-                String::new(),
-                Recommend::Advanced,
-                format!(
-                    "应用大小 {}，关联文件 {} 项",
-                    format_size_local(app_size),
-                    file_count.saturating_sub(1)
-                ),
-            )
-        }
-        ProtectionLevel::Critical => {
-            // 上面已处理 is_critical 的组合，这里处理非 is_critical 的 Critical
-            (
-                false,
-                "protection_critical".to_string(),
-                Recommend::Advanced,
-                format!(
-                    "系统关键应用 | 应用大小 {}",
-                    format_size_local(app_size)
-                ),
-            )
-        }
+    // 可卸载应用：拆出卸载项和缓存项
+    let description_prefix = if matches!(protection, ProtectionLevel::DataProtected) {
+        "含敏感数据，卸载前请备份"
+    } else {
+        "卸载将删除应用及其数据"
     };
 
-    Some(ScanItem {
+    // 应用卸载项（Advanced）：.app + 数据类文件
+    let mut uninstall_paths = data_paths.clone();
+    uninstall_paths.push(app_path.to_string_lossy().to_string());
+    items.push(ScanItem {
         path: app_path.to_string_lossy().to_string(),
-        size_bytes: total_size,
-        category: app_name,
+        size_bytes: app_size + data_size,
+        category: format!("{} (卸载)", app_name),
         selected: false,
-        deletable,
-        undeletable_reason,
-        batch_paths,
-        recommend,
-        description,
-    })
+        deletable: true,
+        undeletable_reason: String::new(),
+        batch_paths: uninstall_paths,
+        recommend: Recommend::Advanced,
+        description: format!(
+            "{} | 应用大小 {}，关联数据 {} 项",
+            description_prefix,
+            format_size_local(app_size),
+            data_paths.len()
+        ),
+    });
+
+    // 缓存清理项（CacheOnly）：Caches / Logs / HTTPStorages
+    if cache_size > 0 && !cache_paths.is_empty() {
+        items.push(ScanItem {
+            path: cache_paths[0].clone(),
+            size_bytes: cache_size,
+            category: format!("{} 缓存", app_name),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: cache_paths,
+            recommend: Recommend::CacheOnly,
+            description: format!(
+                "{} 的缓存/日志，删除后不影响使用，应用会自动重建",
+                app_name
+            ),
+        });
+    }
+
+    items
+}
+
+/// 判断路径是否为缓存/日志类路径
+///
+/// 缓存类路径删除后应用可正常运行并自动重建。
+fn is_cache_like_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("library/caches/")
+        || lower.contains("library/logs/")
+        || lower.contains("library/httpstorages/")
+}
+
+/// 计算单个路径的大小（文件或目录）
+fn path_size(path: &str) -> u64 {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        dir_size(p)
+    } else if let Ok(meta) = p.symlink_metadata() {
+        meta.len()
+    } else {
+        0
+    }
 }
 
 // =========================================================================
@@ -1006,7 +1021,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 if is_vendor_shared_dir(&name) {
                     items.extend(scan_vendor_subdir_leftovers(
                         &path, &installed_apps, "App残留缓存",
-                        100 * 1024 * 1024, Recommend::Caution,
+                        100 * 1024 * 1024, Recommend::CacheOnly,
                     ));
                     continue;
                 }
@@ -1021,8 +1036,8 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                         deletable: true,
                         undeletable_reason: String::new(),
                         batch_paths: Vec::new(),
-                        recommend: Recommend::Caution,
-                        description: format!("{} 的残留缓存（App 可能已卸载）", name),
+                        recommend: Recommend::CacheOnly,
+                        description: format!("{} 的残留缓存，删除后无影响（App 可能已卸载）", name),
                     });
                 }
             }
