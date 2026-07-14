@@ -525,6 +525,207 @@ fn recommend_badge_text(rec: &Recommend, lang_en: bool) -> String {
     format!("{} {}", icon, i18n::translate_recommend(rec, lang_en))
 }
 
+/// 从 category 中提取应用名（用于 App卸载 Tab 分组）
+///
+/// 例如 "WeChat (卸载)" -> Some("WeChat")，"WeChat 数据" -> Some("WeChat")。
+/// 如果 category 不符合已知的子项后缀，返回 None。
+fn extract_app_name(category: &str) -> Option<&str> {
+    const SUFFIXES: &[&str] = &[" (卸载)", " 数据", " 缓存"];
+    for suffix in SUFFIXES {
+        if let Some(name) = category.strip_suffix(suffix) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// 渲染单个扫描项行（含关联明细展开）
+///
+/// 用于主列表和 App卸载 Tab 分组后的子项渲染。
+/// 返回 (被点击切换选中的原始索引, 请求切换展开的路径)。
+fn render_scan_item_row(
+    ui: &mut egui::Ui,
+    item: &ScanItem,
+    index: usize,
+    app: &App,
+    is_uninstall_tab: bool,
+    associated_details: &std::collections::HashMap<String, Vec<(String, u64, String)>>,
+    expanded_items: &std::collections::HashSet<String>,
+) -> (Option<usize>, Option<String>) {
+    let mut toggled: Option<usize> = None;
+    let mut expand_toggle: Option<String> = None;
+
+    let rec_color = if !item.deletable {
+        egui::Color32::from_gray(80)
+    } else {
+        recommend_color(&item.recommend)
+    };
+    let badge = if !item.deletable {
+        app.t("badge_undeletable")
+    } else {
+        recommend_badge(&item.recommend)
+    };
+
+    // 行背景色
+    let row_bg = if item.selected {
+        egui::Color32::from_rgb(30, 50, 30)
+    } else if index % 2 == 0 {
+        egui::Color32::from_rgb(35, 35, 42)
+    } else {
+        egui::Color32::from_rgb(28, 28, 34)
+    };
+
+    let row_frame = egui::Frame::none()
+        .fill(row_bg)
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)));
+
+    // 检查是否有可展开的关联明细
+    let has_details = is_uninstall_tab
+        && !item.batch_paths.is_empty()
+        && associated_details.contains_key(&item.path);
+    let is_expanded = expanded_items.contains(&item.path);
+
+    let row_resp = row_frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            // 复选框
+            let checkbox_text = if !item.deletable { "🔒" } else if item.selected { "✅" } else { "⬜" };
+            let cb_color = if !item.deletable {
+                egui::Color32::GRAY
+            } else if item.selected {
+                egui::Color32::from_rgb(52, 199, 89)
+            } else {
+                egui::Color32::from_gray(160)
+            };
+            if ui.colored_label(cb_color, checkbox_text).clicked() && item.deletable {
+                toggled = Some(index);
+            }
+
+            // 推荐等级标签
+            ui.colored_label(rec_color, badge);
+
+            // 展开/收起按钮（仅 App卸载 tab 且有明细时显示）
+            if has_details {
+                let expand_icon = if is_expanded { "▼" } else { "▶" };
+                if ui.small_button(expand_icon).clicked() {
+                    expand_toggle = Some(item.path.clone());
+                }
+            } else {
+                ui.add_space(14.0); // 占位对齐
+            }
+
+            ui.add_space(3.0);
+
+            // 类别 + 描述（用户看得懂的信息）
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    let cat_color = if !item.deletable {
+                        egui::Color32::from_gray(80)
+                    } else {
+                        category_color(&item.category)
+                    };
+                    let cat_en = i18n::translate_category(&item.category, app.lang_en);
+                    ui.colored_label(cat_color, &cat_en);
+                    // 大小（为 0 时显示 —，可能是空目录或未获取到）
+                    let size_str = if item.size_bytes == 0 {
+                        "—".to_string()
+                    } else {
+                        format_size(item.size_bytes)
+                    };
+                    let size_color = if item.size_bytes > 100 * 1024 * 1024 * 1024 {
+                        egui::Color32::RED
+                    } else if item.size_bytes > 1024 * 1024 * 1024 {
+                        egui::Color32::from_rgb(255, 159, 10)
+                    } else {
+                        egui::Color32::from_rgb(100, 200, 100)
+                    };
+                    ui.colored_label(size_color, &size_str);
+                });
+                // 描述说明（告诉用户这是什么，删除后有什么影响）
+                let desc_en = i18n::translate_description(&item.description, app.lang_en);
+                ui.colored_label(
+                    egui::Color32::from_gray(140),
+                    egui::RichText::new(&desc_en).size(12.0),
+                );
+                // 路径
+                let path_display = truncate_path(&item.path, 70);
+                let path_color = if item.deletable {
+                    egui::Color32::from_gray(100)
+                } else {
+                    egui::Color32::from_gray(70)
+                };
+                ui.colored_label(
+                    path_color,
+                    egui::RichText::new(&path_display).size(11.0),
+                );
+
+                // 不可删除时显示原因
+                if !item.deletable && !item.undeletable_reason.is_empty() {
+                    let reason_en = i18n::translate_undeletable_reason(&item.undeletable_reason, app.lang_en);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(200, 80, 80),
+                        egui::RichText::new(format!("⚠️ {}", reason_en)).size(11.0),
+                    );
+                }
+            });
+        });
+    });
+
+    // 点击行也切换选中
+    if row_resp.response.clicked() && item.deletable {
+        toggled = Some(index);
+    }
+
+    // 展开时显示关联文件明细
+    if has_details && is_expanded {
+        if let Some(details) = associated_details.get(&item.path) {
+            for (detail_path, detail_size, detail_label) in details {
+                let detail_bg = egui::Color32::from_rgb(22, 22, 28);
+                let detail_frame = egui::Frame::none()
+                    .fill(detail_bg)
+                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                    .stroke(egui::Stroke::new(0.3, egui::Color32::from_rgb(40, 40, 45)));
+
+                detail_frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(40.0); // 缩进对齐
+                        // 标签
+                        ui.colored_label(
+                            egui::Color32::from_rgb(130, 160, 255),
+                            egui::RichText::new(detail_label).size(12.0),
+                        );
+                        // 大小
+                        let sz_str = if *detail_size == 0 {
+                            "—".to_string()
+                        } else {
+                            format_size(*detail_size)
+                        };
+                        let sz_color = if *detail_size > 1024 * 1024 * 1024 {
+                            egui::Color32::from_rgb(255, 159, 10)
+                        } else if *detail_size > 100 * 1024 * 1024 {
+                            egui::Color32::from_rgb(255, 200, 100)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        };
+                        ui.colored_label(sz_color, egui::RichText::new(&sz_str).size(12.0));
+                        ui.add_space(8.0);
+                        // 路径
+                        let dp = truncate_path(detail_path, 55);
+                        ui.colored_label(
+                            egui::Color32::from_gray(90),
+                            egui::RichText::new(&dp).size(10.0),
+                        );
+                    });
+                });
+            }
+        }
+    }
+
+    ui.add_space(1.0);
+
+    (toggled, expand_toggle)
+}
+
 /// 渲染 GUI 主界面
 fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>, delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>) {
     // 动态更新窗口标题（跟随语言切换）
@@ -949,178 +1150,173 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let mut toggled_indices: Vec<usize> = Vec::new();
-                let mut expand_toggles: Vec<String> = Vec::new();
+                let mut expand_toggles: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-                for display_idx in &filtered_indices {
-                    let i = *display_idx;
-                    let item = &items[i];
-                    let rec_color = if !item.deletable {
-                        egui::Color32::from_gray(80)
-                    } else {
-                        recommend_color(&item.recommend)
-                    };
-                    let badge = if !item.deletable {
-                        app.t("badge_undeletable")
-                    } else {
-                        recommend_badge(&item.recommend)
-                    };
-
-                    // 行背景色
-                    let row_bg = if item.selected {
-                        egui::Color32::from_rgb(30, 50, 30)
-                    } else if i % 2 == 0 {
-                        egui::Color32::from_rgb(35, 35, 42)
-                    } else {
-                        egui::Color32::from_rgb(28, 28, 34)
-                    };
-
-                    let row_frame = egui::Frame::none()
-                        .fill(row_bg)
-                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-                        .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)));
-
-                    // 检查是否有可展开的关联明细
-                    let has_details = is_uninstall_tab
-                        && !item.batch_paths.is_empty()
-                        && associated_details.contains_key(&item.path);
-                    let is_expanded = expanded_items.contains(&item.path);
-
-                    let row_resp = row_frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // 复选框
-                            let checkbox_text = if !item.deletable { "🔒" } else if item.selected { "✅" } else { "⬜" };
-                            let cb_color = if !item.deletable {
-                                egui::Color32::GRAY
-                            } else if item.selected {
-                                egui::Color32::from_rgb(52, 199, 89)
-                            } else {
-                                egui::Color32::from_gray(160)
-                            };
-                            if ui.colored_label(cb_color, checkbox_text).clicked() && item.deletable {
-                                toggled_indices.push(i);
-                            }
-
-                            // 推荐等级标签
-                            ui.colored_label(rec_color, badge);
-
-                            // 展开/收起按钮（仅 App卸载 tab 且有明细时显示）
-                            if has_details {
-                                let expand_icon = if is_expanded { "▼" } else { "▶" };
-                                if ui.small_button(expand_icon).clicked() {
-                                    expand_toggles.push(item.path.clone());
-                                }
-                            } else {
-                                ui.add_space(14.0); // 占位对齐
-                            }
-
-                            ui.add_space(3.0);
-
-                            // 类别 + 描述（用户看得懂的信息）
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| {
-                                    let cat_color = if !item.deletable {
-                                        egui::Color32::from_gray(80)
-                                    } else {
-                                        category_color(&item.category)
-                                    };
-                                    let cat_en = i18n::translate_category(&item.category, app.lang_en);
-                                    ui.colored_label(cat_color, &cat_en);
-                                    // 大小（为 0 时显示 —，可能是空目录或未获取到）
-                                    let size_str = if item.size_bytes == 0 {
-                                        "—".to_string()
-                                    } else {
-                                        format_size(item.size_bytes)
-                                    };
-                                    let size_color = if item.size_bytes > 100 * 1024 * 1024 * 1024 {
-                                        egui::Color32::RED
-                                    } else if item.size_bytes > 1024 * 1024 * 1024 {
-                                        egui::Color32::from_rgb(255, 159, 10)
-                                    } else {
-                                        egui::Color32::from_rgb(100, 200, 100)
-                                    };
-                                    ui.colored_label(size_color, &size_str);
-                                });
-                                // 描述说明（告诉用户这是什么，删除后有什么影响）
-                                let desc_en = i18n::translate_description(&item.description, app.lang_en);
-                                ui.colored_label(
-                                    egui::Color32::from_gray(140),
-                                    egui::RichText::new(&desc_en).size(12.0),
-                                );
-                                // 路径
-                                let path_display = truncate_path(&item.path, 70);
-                                let path_color = if item.deletable {
-                                    egui::Color32::from_gray(100)
-                                } else {
-                                    egui::Color32::from_gray(70)
-                                };
-                                ui.colored_label(
-                                    path_color,
-                                    egui::RichText::new(&path_display).size(11.0),
-                                );
-
-                                // 不可删除时显示原因
-                                if !item.deletable && !item.undeletable_reason.is_empty() {
-                                    let reason_en = i18n::translate_undeletable_reason(&item.undeletable_reason, app.lang_en);
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(200, 80, 80),
-                                        egui::RichText::new(format!("⚠️ {}", reason_en)).size(11.0),
-                                    );
-                                }
+                if is_uninstall_tab {
+                    // ====== App卸载 Tab：按应用名分组显示 ======
+                    // 过滤后按 category 中的应用名分组
+                    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+                    let mut group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    for &display_idx in &filtered_indices {
+                        let item = &items[display_idx];
+                        if let Some(app_name) = extract_app_name(&item.category) {
+                            let idx = *group_map.entry(app_name.to_string()).or_insert_with(|| {
+                                groups.push((app_name.to_string(), Vec::new()));
+                                groups.len() - 1
                             });
-                        });
-                    });
-
-                    // 点击行也切换选中
-                    if row_resp.response.clicked() && item.deletable {
-                        toggled_indices.push(i);
-                    }
-
-                    // 展开时显示关联文件明细
-                    if has_details && is_expanded {
-                        if let Some(details) = associated_details.get(&item.path) {
-                            for (detail_path, detail_size, detail_label) in details {
-                                let detail_bg = egui::Color32::from_rgb(22, 22, 28);
-                                let detail_frame = egui::Frame::none()
-                                    .fill(detail_bg)
-                                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                                    .stroke(egui::Stroke::new(0.3, egui::Color32::from_rgb(40, 40, 45)));
-
-                                detail_frame.show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(40.0); // 缩进对齐
-                                        // 标签
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(130, 160, 255),
-                                            egui::RichText::new(detail_label).size(12.0),
-                                        );
-                                        // 大小
-                                        let sz_str = if *detail_size == 0 {
-                                            "—".to_string()
-                                        } else {
-                                            format_size(*detail_size)
-                                        };
-                                        let sz_color = if *detail_size > 1024 * 1024 * 1024 {
-                                            egui::Color32::from_rgb(255, 159, 10)
-                                        } else if *detail_size > 100 * 1024 * 1024 {
-                                            egui::Color32::from_rgb(255, 200, 100)
-                                        } else {
-                                            egui::Color32::from_gray(140)
-                                        };
-                                        ui.colored_label(sz_color, egui::RichText::new(&sz_str).size(12.0));
-                                        ui.add_space(8.0);
-                                        // 路径
-                                        let dp = truncate_path(detail_path, 55);
-                                        ui.colored_label(
-                                            egui::Color32::from_gray(90),
-                                            egui::RichText::new(&dp).size(10.0),
-                                        );
-                                    });
-                                });
-                            }
+                            groups[idx].1.push(display_idx);
+                        } else {
+                            // 不符合子项后缀的单独成组
+                            groups.push((item.category.clone(), vec![display_idx]));
                         }
                     }
 
-                    ui.add_space(1.0);
+                    for (app_name, indices) in &groups {
+                        let total_size: u64 = indices.iter().map(|&i| items[i].size_bytes).sum();
+                        let deletable_indices: Vec<usize> = indices
+                            .iter()
+                            .copied()
+                            .filter(|&i| items[i].deletable)
+                            .collect();
+                        let all_selected = deletable_indices.iter().all(|&i| items[i].selected);
+                        let any_selected = deletable_indices.iter().any(|&i| items[i].selected);
+                        let has_deletable = !deletable_indices.is_empty();
+
+                        // 默认展开所有分组（首次渲染时自动展开）
+                        if !expanded_items.contains(app_name) && !expand_toggles.contains(app_name) {
+                            expand_toggles.insert(app_name.clone());
+                        }
+                        let is_group_expanded = expanded_items.contains(app_name);
+
+                        // 父行背景
+                        let parent_bg = if any_selected {
+                            egui::Color32::from_rgb(30, 50, 30)
+                        } else {
+                            egui::Color32::from_rgb(45, 45, 55)
+                        };
+                        let parent_frame = egui::Frame::none()
+                            .fill(parent_bg)
+                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                            .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(70, 70, 80)));
+
+                        let parent_resp = parent_frame.show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                // 父复选框：一键选中/取消所有可删除子项
+                                let parent_cb_text = if !has_deletable {
+                                    "🔒"
+                                } else if all_selected {
+                                    "✅"
+                                } else if any_selected {
+                                    "☑️"
+                                } else {
+                                    "⬜"
+                                };
+                                let parent_cb_color = if !has_deletable {
+                                    egui::Color32::GRAY
+                                } else if all_selected {
+                                    egui::Color32::from_rgb(52, 199, 89)
+                                } else if any_selected {
+                                    egui::Color32::from_rgb(255, 159, 10)
+                                } else {
+                                    egui::Color32::from_gray(160)
+                                };
+                                if ui.colored_label(parent_cb_color, parent_cb_text).clicked() && has_deletable {
+                                    let target = !all_selected;
+                                    for &idx in &deletable_indices {
+                                        if items[idx].selected != target {
+                                            toggled_indices.push(idx);
+                                        }
+                                    }
+                                }
+
+                                // 展开/收起图标
+                                let expand_icon = if is_group_expanded { "▼" } else { "▶" };
+                                if ui.small_button(expand_icon).clicked() && !expand_toggles.contains(app_name) {
+                                    expand_toggles.insert(app_name.clone());
+                                }
+
+                                ui.add_space(3.0);
+
+                                // 应用名 + 总大小
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(200, 200, 220),
+                                            egui::RichText::new(app_name).size(14.0).strong(),
+                                        );
+                                        let size_str = if total_size == 0 {
+                                            "—".to_string()
+                                        } else {
+                                            format_size(total_size)
+                                        };
+                                        let size_color = if total_size > 100 * 1024 * 1024 * 1024 {
+                                            egui::Color32::RED
+                                        } else if total_size > 1024 * 1024 * 1024 {
+                                            egui::Color32::from_rgb(255, 159, 10)
+                                        } else {
+                                            egui::Color32::from_rgb(100, 200, 100)
+                                        };
+                                        ui.colored_label(size_color, &size_str);
+                                    });
+                                    ui.colored_label(
+                                        egui::Color32::from_gray(130),
+                                        egui::RichText::new(format!(
+                                            "{} 个子项（点击展开查看卸载/数据/缓存）",
+                                            indices.len()
+                                        ))
+                                        .size(11.0),
+                                    );
+                                });
+                            });
+                        });
+
+                        // 点击父行空白处切换展开/收起
+                        if parent_resp.response.clicked() && !expand_toggles.contains(app_name) {
+                            expand_toggles.insert(app_name.clone());
+                        }
+
+                        ui.add_space(1.0);
+
+                        // 渲染子项（展开时）
+                        if is_group_expanded {
+                            for &display_idx in indices {
+                                let (toggled, expand) = render_scan_item_row(
+                                    ui,
+                                    &items[display_idx],
+                                    display_idx,
+                                    app,
+                                    is_uninstall_tab,
+                                    &associated_details,
+                                    &expanded_items,
+                                );
+                                if let Some(idx) = toggled {
+                                    toggled_indices.push(idx);
+                                }
+                                if let Some(path) = expand {
+                                    expand_toggles.insert(path);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // ====== 其它 Tab：平铺显示 ======
+                    for &display_idx in &filtered_indices {
+                        let (toggled, expand) = render_scan_item_row(
+                            ui,
+                            &items[display_idx],
+                            display_idx,
+                            app,
+                            is_uninstall_tab,
+                            &associated_details,
+                            &expanded_items,
+                        );
+                        if let Some(idx) = toggled {
+                            toggled_indices.push(idx);
+                        }
+                        if let Some(path) = expand {
+                            expand_toggles.insert(path);
+                        }
+                    }
                 }
 
                 // 应用选中变更
