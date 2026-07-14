@@ -56,6 +56,9 @@ const DANGER_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58);      /
 /// 选中项卡片背景色（浅绿）
 const SELECTED_CARD_BG: egui::Color32 = egui::Color32::from_rgb(240, 255, 244); // #F0FFF4
 
+/// 列表区背景色（极浅灰，内容少时避免刺眼空白）
+const LIST_BG: egui::Color32 = egui::Color32::from_rgb(250, 250, 250); // #FAFAFA
+
 /// 后台扫描消息
 enum ScanMessage {
     /// 扫描进度更新
@@ -588,6 +591,7 @@ fn render_scan_item_row(
     is_uninstall_tab: bool,
     associated_details: &std::collections::HashMap<String, Vec<(String, u64, String)>>,
     expanded_items: &std::collections::HashSet<String>,
+    compact_child: bool,
 ) -> (Option<usize>, Option<String>) {
     let mut toggled: Option<usize> = None;
     let mut expand_toggle: Option<String> = None;
@@ -612,7 +616,11 @@ fn render_scan_item_row(
 
     let row_frame = egui::Frame::none()
         .fill(row_bg)
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .inner_margin(if compact_child {
+            egui::Margin::symmetric(10.0, 6.0)
+        } else {
+            egui::Margin::symmetric(12.0, 8.0)
+        })
         .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
         .rounding(egui::Rounding::same(8.0));
 
@@ -624,6 +632,10 @@ fn render_scan_item_row(
 
     let row_resp = row_frame.show(ui, |ui| {
         ui.horizontal(|ui| {
+            if compact_child {
+                ui.add_space(28.0);
+            }
+
             // 复选框（紫色选中）
             let checkbox_text = if !item.deletable { "🔒" } else if item.selected { "✅" } else { "⬜" };
             let cb_color = if !item.deletable {
@@ -681,7 +693,7 @@ fn render_scan_item_row(
                 let desc_en = i18n::translate_description(&item.description, app.lang_en);
                 ui.colored_label(
                     TEXT_SECONDARY,
-                    egui::RichText::new(&desc_en).size(12.0),
+                    egui::RichText::new(&desc_en).size(11.0),
                 );
                 // 路径
                 let path_display = truncate_path(&item.path, 70);
@@ -719,17 +731,17 @@ fn render_scan_item_row(
                 let detail_bg = SURFACE;
                 let detail_frame = egui::Frame::none()
                     .fill(detail_bg)
-                    .inner_margin(egui::Margin::symmetric(14.0, 4.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 4.0))
                     .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
                     .rounding(egui::Rounding::same(6.0));
 
                 detail_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.add_space(40.0); // 缩进对齐
+                        ui.add_space(28.0); // 缩进对齐
                         // 标签
                         ui.colored_label(
                             BRAND,
-                            egui::RichText::new(detail_label).size(12.0),
+                            egui::RichText::new(detail_label).size(11.0),
                         );
                         // 大小
                         let sz_str = if *detail_size == 0 {
@@ -758,7 +770,7 @@ fn render_scan_item_row(
         }
     }
 
-    ui.add_space(8.0);
+    ui.add_space(4.0);
 
     (toggled, expand_toggle)
 }
@@ -822,11 +834,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                     .size(13.0)
                             )
                             .fill(DANGER_COLOR)
-                            .rounding(egui::Rounding::same(8.0)),
-                        );
-                        if delete_btn.clicked() {
-                            app.prepare_delete();
-                        }
+                            .rounding(egui::Rounding::same(8.0))
+                            .min_size([0.0, 28.0].into()),
+                    );
+                    if delete_btn.clicked() {
+                        app.prepare_delete();
+                    }
                     });
                 });
             });
@@ -837,15 +850,15 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         ui.set_min_width(200.0);
         ui.vertical(|ui| {
             // --- 品牌区 ---
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("🧹").size(22.0));
+                ui.label(egui::RichText::new("🧹").size(20.0));
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Maclean").size(16.0).strong().color(BRAND_TEXT));
+                    ui.label(egui::RichText::new("Maclean").size(15.0).strong().color(BRAND_TEXT));
                     ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(TEXT_TERTIARY));
                 });
             });
-            ui.add_space(14.0);
+            ui.add_space(10.0);
 
             // --- 磁盘用量卡片 ---
             let used = app.disk_total.saturating_sub(app.disk_free);
@@ -872,9 +885,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         .fill(BRAND)
                         .text(format!("{:.0}%", used_pct)));
                 });
-            ui.add_space(14.0);
+            ui.add_space(10.0);
 
             // --- 导航项列表 ---
+            ui.spacing_mut().item_spacing.y = 2.0;
             let nav_icons = ["📦", "📁", "🗑", "📦", "🧩", "⚙️", "💾"];
             for (i, tab) in Tab::all().iter().enumerate() {
                 let count = app.results[i].len();
@@ -886,11 +900,11 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     egui::Frame::none()
                         .fill(BRAND_SOFT)
                         .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                         .stroke(egui::Stroke::NONE)
                 } else {
                     egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                         .stroke(egui::Stroke::NONE)
                 };
 
@@ -920,10 +934,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.separator();
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button(if app.lang_en { "中文" } else { "EN" }).clicked() {
+                if ui.add(egui::Button::new(if app.lang_en { "中文" } else { "EN" }).min_size([0.0, 28.0].into())).clicked() {
                     app.toggle_lang();
                 }
-                if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
+                if ui.add(egui::Button::new(format!("📋 {}", app.t("logs"))).min_size([0.0, 28.0].into())).clicked() {
                     let log_dir = logger::log_dir();
                     // 跨平台打开日志目录
                     #[cfg(target_os = "macos")]
@@ -941,9 +955,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
     // ========== 右侧内容区 ==========
     egui::CentralPanel::default().show(ctx, |ui| {
         // --- 顶部 Header：当前 Tab 标题 + 副标题 + 扫描/刷新按钮 ---
-        ui.horizontal(|ui| {
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new(tab_title(&app.tab, app)).size(20.0).strong().color(TEXT_PRIMARY));
+                ui.label(egui::RichText::new(tab_title(&app.tab, app)).size(16.0).strong().color(TEXT_PRIMARY));
                 // 副标题：扫描状态/项目数
                 let tab_idx_h = app.tab_index();
                 let subtitle = match &app.scan_states[tab_idx_h] {
@@ -955,13 +972,13 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         app.tf("found_items_total", &[&count.to_string(), &format_size(total)])
                     }
                 };
-                ui.colored_label(TEXT_TERTIARY, egui::RichText::new(subtitle).size(12.0));
+                ui.colored_label(TEXT_TERTIARY, egui::RichText::new(subtitle).size(11.0));
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // 强制刷新按钮（清除缓存后重新扫描）
                 let is_scanning = matches!(app.current_scan_state(), ScanState::Scanning);
-                let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
+                let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄").min_size([0.0, 28.0].into()));
                 if refresh_btn.clicked() {
                     let tab_name = match app.tab {
                         Tab::DevCache => "dev_cache",
@@ -981,15 +998,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 // 扫描按钮
                 let scan_button = ui.add_enabled(!is_scanning, egui::Button::new(
                     egui::RichText::new(if is_scanning { "⏳..." } else { app.t("scan") }).color(egui::Color32::WHITE)
-                ).fill(BRAND).rounding(egui::Rounding::same(8.0)));
+                ).fill(BRAND).rounding(egui::Rounding::same(8.0)).min_size([0.0, 28.0].into()));
                 if scan_button.clicked() {
                     start_scan(app, scan_rx);
                 }
             });
         });
+        });
 
         ui.separator();
-        ui.add_space(4.0);
+        ui.add_space(2.0);
 
         // --- 系统优化 Tab：特殊渲染（操作面板而非列表选择）---
         if app.tab == Tab::SystemOptimize {
@@ -1087,18 +1105,24 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if items.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(80.0);
-                ui.label(egui::RichText::new(app.t("no_items_hint")).size(16.0).color(TEXT_TERTIARY));
-                ui.add_space(10.0);
-                let scan_hint = format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
-                if ui.button(egui::RichText::new(&scan_hint).size(16.0).color(egui::Color32::WHITE)).clicked() {
-                    start_scan(app, scan_rx);
-                }
-            });
+            // 列表区域：占满剩余高度并居中显示空状态
+            let list_area_size = ui.available_size();
+            egui::Frame::none()
+                .fill(LIST_BG)
+                .rounding(egui::Rounding::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_min_size(list_area_size);
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new(app.t("no_items_hint")).size(14.0).color(TEXT_TERTIARY));
+                        ui.add_space(8.0);
+                        let scan_hint = format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
+                        if ui.add(egui::Button::new(egui::RichText::new(&scan_hint).size(13.0).color(egui::Color32::WHITE)).min_size([0.0, 28.0].into())).clicked() {
+                            start_scan(app, scan_rx);
+                        }
+                    });
+                });
         } else {
             // ====== 扫描结果汇总卡片 ======
-            ui.add_space(5.0);
 
             let safe_cnt = app.safe_count();
             let safe_sz = app.safe_size();
@@ -1110,134 +1134,126 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             let selected_sz = app.selected_total_size();
 
             // Summary Pills：胶囊式汇总卡片
-            ui.horizontal(|ui| {
-                // Safe 胶囊
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(232, 255, 243))
-                    .stroke(egui::Stroke::new(1.0, SAFE_COLOR))
-                    .rounding(egui::Rounding::same(14.0))
-                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(SAFE_COLOR, egui::RichText::new("●").size(10.0));
-                            ui.colored_label(SAFE_COLOR, egui::RichText::new(
-                                format!("{} {} · {}", safe_cnt, app.t("safe_clean"), format_size(safe_sz))
-                            ).size(12.0));
-                        });
-                    });
-                ui.add_space(6.0);
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(16.0, 8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
 
-                // Caution 胶囊
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(255, 247, 230))
-                    .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
-                    .rounding(egui::Rounding::same(14.0))
-                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(CAUTION_COLOR, egui::RichText::new("●").size(10.0));
-                            ui.colored_label(CAUTION_COLOR, egui::RichText::new(
-                                format!("{} {} · {}", caution_cnt, app.t("caution_clean"), format_size(caution_sz))
-                            ).size(12.0));
-                        });
-                    });
-                ui.add_space(6.0);
-
-                // Advanced 胶囊（如果有）
-                if advanced_cnt > 0 {
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(255, 233, 230))
-                        .stroke(egui::Stroke::new(1.0, ADVANCED_COLOR))
-                        .rounding(egui::Rounding::same(14.0))
-                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(ADVANCED_COLOR, egui::RichText::new("●").size(10.0));
-                                ui.colored_label(ADVANCED_COLOR, egui::RichText::new(
-                                    format!("{} {} · {}", advanced_cnt, app.t("confirm_clean"), format_size(advanced_sz))
-                                ).size(12.0));
+                        // Safe 胶囊
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgb(232, 255, 243))
+                            .stroke(egui::Stroke::new(1.0, SAFE_COLOR))
+                            .rounding(egui::Rounding::same(14.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(SAFE_COLOR, egui::RichText::new("●").size(9.0));
+                                    ui.colored_label(SAFE_COLOR, egui::RichText::new(
+                                        format!("{} {} · {}", safe_cnt, app.t("safe_clean"), format_size(safe_sz))
+                                    ).size(11.0));
+                                });
                             });
-                        });
-                    ui.add_space(6.0);
-                }
 
-                // 已选胶囊
-                if selected_cnt > 0 {
-                    egui::Frame::none()
-                        .fill(BRAND_SOFT)
-                        .stroke(egui::Stroke::new(1.0, BRAND))
-                        .rounding(egui::Rounding::same(14.0))
-                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(BRAND, egui::RichText::new("✓").size(10.0));
-                                ui.colored_label(BRAND, egui::RichText::new(
-                                    format!("{} {} · {}", selected_cnt, app.t("items_selected"), format_size(selected_sz))
-                                ).size(12.0));
+                        // Caution 胶囊
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgb(255, 247, 230))
+                            .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
+                            .rounding(egui::Rounding::same(14.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(CAUTION_COLOR, egui::RichText::new("●").size(9.0));
+                                    ui.colored_label(CAUTION_COLOR, egui::RichText::new(
+                                        format!("{} {} · {}", caution_cnt, app.t("caution_clean"), format_size(caution_sz))
+                                    ).size(11.0));
+                                });
                             });
-                        });
-                }
-            });
 
-            ui.add_space(5.0);
+                        // Advanced 胶囊（如果有）
+                        if advanced_cnt > 0 {
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(255, 233, 230))
+                                .stroke(egui::Stroke::new(1.0, ADVANCED_COLOR))
+                                .rounding(egui::Rounding::same(14.0))
+                                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(ADVANCED_COLOR, egui::RichText::new("●").size(9.0));
+                                        ui.colored_label(ADVANCED_COLOR, egui::RichText::new(
+                                            format!("{} {} · {}", advanced_cnt, app.t("confirm_clean"), format_size(advanced_sz))
+                                        ).size(11.0));
+                                    });
+                                });
+                        }
 
-            // ====== 操作按钮栏 ======
-            ui.horizontal(|ui| {
-                // 智能选择：只选推荐清理
-                let smart_btn = ui.add(
-                    egui::Button::new(egui::RichText::new(format!("🟢 {}", app.t("select_safe"))).color(egui::Color32::WHITE))
-                        .fill(SAFE_COLOR)
-                        .rounding(egui::Rounding::same(8.0)),
-                );
-                if smart_btn.clicked() {
-                    app.select_safe_only();
-                }
+                        // 已选胶囊
+                        if selected_cnt > 0 {
+                            egui::Frame::none()
+                                .fill(BRAND_SOFT)
+                                .stroke(egui::Stroke::new(1.0, BRAND))
+                                .rounding(egui::Rounding::same(14.0))
+                                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(BRAND, egui::RichText::new("✓").size(9.0));
+                                        ui.colored_label(BRAND, egui::RichText::new(
+                                            format!("{} {} · {}", selected_cnt, app.t("items_selected"), format_size(selected_sz))
+                                        ).size(11.0));
+                                    });
+                                });
+                        }
+                    });
+                });
 
-                if ui.button(app.t("select_all")).clicked() {
-                    app.select_all();
-                }
-                if ui.button(app.t("deselect_all")).clicked() {
-                    app.deselect_all();
-                }
+            ui.add_space(2.0);
 
-                ui.separator();
+            // ====== 操作按钮栏（选择分组 + 搜索）======
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(16.0, 6.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
 
-                // 删除按钮
-                let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
-                let delete_btn = ui.add_enabled(
-                    delete_enabled,
-                    egui::Button::new(egui::RichText::new(format!("🗑 {} ({})", app.t("delete"), format_size(selected_sz))).color(egui::Color32::WHITE))
-                        .fill(DANGER_COLOR)
-                        .rounding(egui::Rounding::same(8.0)),
-                );
-                if delete_btn.clicked() {
-                    app.prepare_delete();
-                }
-            });
+                        // 智能选择：只选推荐清理
+                        let smart_btn = ui.add(
+                            egui::Button::new(egui::RichText::new(format!("🟢 {}", app.t("select_safe"))).color(egui::Color32::WHITE))
+                                .fill(SAFE_COLOR)
+                                .rounding(egui::Rounding::same(8.0))
+                                .min_size([0.0, 28.0].into()),
+                        );
+                        if smart_btn.clicked() {
+                            app.select_safe_only();
+                        }
 
-            ui.separator();
-            ui.add_space(3.0);
+                        if ui.add(egui::Button::new(app.t("select_all")).min_size([0.0, 28.0].into())).clicked() {
+                            app.select_all();
+                        }
+                        if ui.add(egui::Button::new(app.t("deselect_all")).min_size([0.0, 28.0].into())).clicked() {
+                            app.deselect_all();
+                        }
 
-            // ====== 过滤/搜索输入框 ======
-            // / 键聚焦输入框，Esc 清除过滤
-            let filter_placeholder = app.t("filter_placeholder").to_string();
-            let filter_response = ui.horizontal(|ui| {
-                ui.label("🔍");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut app.filter_query)
-                        .hint_text(&filter_placeholder)
-                        .desired_width(400.0),
-                );
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    app.clear_filter();
-                }
-                if !app.filter_query.is_empty() {
-                    if ui.button("✕").clicked() {
-                        app.clear_filter();
-                    }
-                }
-                app.filter_active = resp.has_focus();
-            });
+                        ui.separator();
+
+                        // 过滤/搜索输入框（/ 键聚焦，Esc 清除过滤）
+                        let filter_placeholder = app.t("filter_placeholder").to_string();
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut app.filter_query)
+                                .hint_text(&filter_placeholder)
+                                .desired_width(280.0)
+                                .min_size([120.0, 28.0].into()),
+                        );
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            app.clear_filter();
+                        }
+                        if !app.filter_query.is_empty() {
+                            if ui.add(egui::Button::new("✕").min_size([0.0, 28.0].into())).clicked() {
+                                app.clear_filter();
+                            }
+                        }
+                        app.filter_active = resp.has_focus();
+                    });
+                });
 
             // 全局 / 键快捷聚焦过滤输入框
             if ui.input(|i| i.key_pressed(egui::Key::Slash) && !app.filter_active) {
@@ -1256,27 +1272,32 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 );
             }
 
-            let _ = filter_response;
+            // 列表区域：占满剩余高度，内容少时保持背景色
+            let list_area_size = ui.available_size();
+            egui::Frame::none()
+                .fill(LIST_BG)
+                .rounding(egui::Rounding::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_min_size(list_area_size);
 
-            ui.add_space(3.0);
+                    // 过滤后无结果
+                    if filtered_count == 0 && !app.filter_query.trim().is_empty() {
+                        let no_match_text = app.t("no_match").to_string();
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new(&no_match_text).size(13.0).color(TEXT_TERTIARY));
+                        });
+                        return;
+                    }
 
-            // 过滤后无结果
-            if filtered_count == 0 && !app.filter_query.trim().is_empty() {
-                let no_match_text = app.t("no_match").to_string();
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.label(egui::RichText::new(&no_match_text).size(14.0).color(TEXT_TERTIARY));
-                });
-                return;
-            }
+                    // ====== 可滚动列表 ======
+                    // 提前克隆关联明细和展开状态，避免借用冲突
+                    let associated_details = app.associated_details.clone();
+                    let expanded_items = app.expanded_items.clone();
+                    let is_uninstall_tab = app.tab == crate::app::Tab::AppUninstall;
 
-            // ====== 可滚动列表 ======
-            // 提前克隆关联明细和展开状态，避免借用冲突
-            let associated_details = app.associated_details.clone();
-            let expanded_items = app.expanded_items.clone();
-            let is_uninstall_tab = app.tab == crate::app::Tab::AppUninstall;
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(list_area_size.y)
+                        .show(ui, |ui| {
                 let mut toggled_indices: Vec<usize> = Vec::new();
                 let mut expand_toggles: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1324,7 +1345,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         };
                         let parent_frame = egui::Frame::none()
                             .fill(parent_bg)
-                            .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                             .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
                             .rounding(egui::Rounding::same(8.0));
 
@@ -1417,6 +1438,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                     is_uninstall_tab,
                                     &associated_details,
                                     &expanded_items,
+                                    true,
                                 );
                                 if let Some(idx) = toggled {
                                     toggled_indices.push(idx);
@@ -1438,6 +1460,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                             is_uninstall_tab,
                             &associated_details,
                             &expanded_items,
+                            false,
                         );
                         if let Some(idx) = toggled {
                             toggled_indices.push(idx);
@@ -1462,6 +1485,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         app.expanded_items.remove(&path);
                     }
                 }
+            });
             });
         }
     });
