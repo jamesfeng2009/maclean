@@ -1533,7 +1533,12 @@ fn render_gui(
         });
 
     // ========== 右侧内容区 ==========
-    egui::CentralPanel::default().show(ctx, |ui| {
+    // 减小 CentralPanel 默认内边距，避免顶部和两侧留空过多
+    let central_frame = egui::Frame::central_panel(&ctx.style())
+        .inner_margin(egui::Margin::symmetric(12.0, 0.0));
+    egui::CentralPanel::default()
+        .frame(central_frame)
+        .show(ctx, |ui| {
         // --- 顶部 Header：当前 Tab 标题 + 副标题 + 扫描/刷新按钮 ---
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -1677,7 +1682,6 @@ fn render_gui(
                         }
                     }
                 });
-                ui.add_space(4.0);
             }
         }
 
@@ -1707,8 +1711,6 @@ fn render_gui(
             });
         } else {
             // ====== 扫描结果汇总卡片 ======
-            ui.add_space(5.0);
-
             let safe_cnt = app.safe_count();
             let safe_sz = app.safe_size();
             let caution_cnt = app.caution_count();
@@ -1818,8 +1820,6 @@ fn render_gui(
                         });
                 }
             });
-
-            ui.add_space(5.0);
 
             // ====== 操作按钮栏 ======
             ui.horizontal(|ui| {
