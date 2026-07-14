@@ -62,8 +62,10 @@ enum ScanMessage {
     Progress(f32),
     /// 增量结果（扫描中部分项）— (items, tab_index)
     PartialItems(Vec<ScanItem>, u64),
-    /// 扫描完成
+    /// 单个 Tab 扫描完成
     Done(Vec<ScanItem>, u64, u64), // (items, scan_time_ms, tab_index)
+    /// 全部扫描完成（用于批量扫描）
+    AllDone,
 }
 
 /// 后台删除消息
@@ -242,6 +244,15 @@ fn main() -> eframe::Result {
                                 app.results[tab_idx as usize] = items;
                                 app.scan_states[tab_idx as usize] = ScanState::Done;
                                 app.scan_time_ms[tab_idx as usize] = time_ms;
+                                app.scan_progress = 1.0;
+                                let (total, free) = get_disk_info();
+                                app.disk_total = total;
+                                app.disk_free = free;
+                            }
+                            // 单个 Tab 扫描完成后不 break，继续接收 AllDone 或更多 Done
+                        }
+                        Ok(ScanMessage::AllDone) => {
+                            if let Some(app) = &mut APP {
                                 app.scan_progress = 1.0;
                                 let (total, free) = get_disk_info();
                                 app.disk_total = total;
@@ -875,7 +886,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.add_space(14.0);
 
             // --- 导航项列表 ---
-            let nav_icons = ["📦", "📁", "🗑", "📦", "🧩", "⚙️", "💾"];
+            let nav_icons = ["🏠", "📦", "📁", "🗑", "📦", "🧩", "⚙️", "💾"];
             for (i, tab) in Tab::all().iter().enumerate() {
                 let count = app.results[i].len();
                 let is_selected = *tab == app.tab;
@@ -964,6 +975,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
                 if refresh_btn.clicked() {
                     let tab_name = match app.tab {
+                        Tab::Overview => "overview",
                         Tab::DevCache => "dev_cache",
                         Tab::LargeFiles => "large_files",
                         Tab::AppCache => "app_cache",
@@ -990,6 +1002,12 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
         ui.separator();
         ui.add_space(4.0);
+
+        // --- 概览 Tab：聚合推荐清理 ---
+        if app.tab == Tab::Overview {
+            render_overview_panel(ui, app, scan_rx);
+            return;
+        }
 
         // --- 系统优化 Tab：特殊渲染（操作面板而非列表选择）---
         if app.tab == Tab::SystemOptimize {
@@ -1585,6 +1603,7 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
         // 获取 Tab 名称用于缓存
         // 磁盘分析器在非主目录浏览时不使用缓存（路径不同，结果不同）
         let tab_name = match tab {
+            Tab::Overview => None,
             Tab::DevCache => Some("dev_cache"),
             Tab::LargeFiles => {
                 // 仅在主目录时缓存
@@ -1617,6 +1636,7 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 // 缓存命中也按批次发送，提供增量显示体验
                 send_items_in_batches(&tx, &items, tab_idx as u64);
                 let _ = tx.send(ScanMessage::Done(items, cached.scan_time_ms, tab_idx as u64));
+                let _ = tx.send(ScanMessage::AllDone);
                 return;
             }
         }
@@ -1625,6 +1645,7 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
         // 用 catch_unwind 兜底，防止扫描 panic 后 UI 卡死
         let result = std::panic::catch_unwind(|| {
             match tab {
+                Tab::Overview => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
                 Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
                 Tab::LargeFiles => {
                     // 磁盘分析器：扫描指定目录（默认为主目录）
@@ -1699,6 +1720,144 @@ fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) 
                 let _ = tx.send(ScanMessage::Done(Vec::new(), 0, tab_idx as u64));
             }
         }
+        let _ = tx.send(ScanMessage::AllDone);
+    });
+}
+
+/// 启动所有 Tab 的后台扫描（用于概览页"扫描全部"）
+fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+    // 标记所有 Tab 为扫描中
+    for tab_idx in 1..app.results.len() {
+        app.scan_states[tab_idx] = ScanState::Scanning;
+    }
+    app.scan_progress = 0.0;
+
+    let (tx, rx) = mpsc::channel();
+    *scan_rx = Some(rx);
+
+    // 进度估算线程
+    let tx_progress = tx.clone();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let elapsed = start.elapsed().as_secs_f32();
+            let progress = if elapsed < 10.0 {
+                0.9 * (1.0 - (-elapsed / 5.0).exp())
+            } else if elapsed < 30.0 {
+                0.9 + 0.09 * (1.0 - (-(elapsed - 10.0) / 20.0).exp())
+            } else {
+                0.99 + 0.005 * (1.0 - (-(elapsed - 30.0) / 20.0).exp())
+            };
+            if tx_progress.send(ScanMessage::Progress(progress.min(0.995))).is_err() {
+                break;
+            }
+        }
+    });
+
+    std::thread::spawn(move || {
+        let tabs_to_scan: Vec<(Tab, u64)> = Tab::all()
+            .iter()
+            .enumerate()
+            .skip(1) // 跳过 Overview
+            .map(|(idx, tab)| (*tab, idx as u64))
+            .collect();
+
+        for (tab, tab_idx) in tabs_to_scan {
+            // 检查缓存
+            let cache_name = match tab {
+                Tab::Overview => None,
+                Tab::DevCache => Some("dev_cache"),
+                Tab::LargeFiles => Some("large_files"),
+                Tab::AppCache => Some("app_cache"),
+                Tab::AppData => Some("app_data"),
+                Tab::AppUninstall => Some("app_uninstall"),
+                Tab::SystemOptimize => None,
+                Tab::Apfs => Some("apfs"),
+            };
+
+            if let Some(name) = cache_name {
+                if let Some(cached) = scanner::cache::load_cache(name) {
+                    let mut items = cached.items;
+                    for item in &mut items {
+                        let (deletable, reason) = scanner::check_deletable(&item.path);
+                        item.deletable = deletable && item.deletable;
+                        if !item.deletable && !reason.is_empty() {
+                            item.undeletable_reason = reason;
+                        }
+                    }
+                    send_items_in_batches(&tx, &items, tab_idx);
+                    let _ = tx.send(ScanMessage::Done(items, cached.scan_time_ms, tab_idx));
+                    continue;
+                }
+            }
+
+            let result = std::panic::catch_unwind(|| {
+                match tab {
+                    Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
+                    Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
+                    #[cfg(target_os = "macos")]
+                    Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
+                    #[cfg(target_os = "macos")]
+                    Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
+                    #[cfg(target_os = "macos")]
+                    Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
+                    #[cfg(target_os = "macos")]
+                    Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
+                    #[cfg(target_os = "macos")]
+                    Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+                    #[cfg(not(target_os = "macos"))]
+                    Tab::AppCache => {
+                        #[cfg(target_os = "windows")]
+                        { scanner::windows_apps::WindowsAppCacheScanner::new().scan() }
+                        #[cfg(not(target_os = "windows"))]
+                        { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    Tab::AppData => {
+                        #[cfg(target_os = "windows")]
+                        { scanner::windows_apps::WindowsAppDataScanner::new().scan() }
+                        #[cfg(not(target_os = "windows"))]
+                        { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    Tab::AppUninstall => {
+                        #[cfg(target_os = "windows")]
+                        { scanner::windows_apps::WindowsUninstallScanner::new().scan() }
+                        #[cfg(not(target_os = "windows"))]
+                        { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    Tab::SystemOptimize | Tab::Apfs => {
+                        scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
+                    }
+                    _ => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
+                }
+            });
+
+            match result {
+                Ok(scan_result) => {
+                    if let Some(name) = cache_name {
+                        scanner::cache::save_cache(name, &scan_result);
+                    }
+                    let mut items = scan_result.items;
+                    for item in &mut items {
+                        let (deletable, reason) = scanner::check_deletable(&item.path);
+                        item.deletable = deletable && item.deletable;
+                        if !item.deletable && !reason.is_empty() {
+                            item.undeletable_reason = reason;
+                        }
+                    }
+                    send_items_in_batches(&tx, &items, tab_idx);
+                    let _ = tx.send(ScanMessage::Done(items, scan_result.scan_time_ms, tab_idx));
+                }
+                Err(_) => {
+                    let _ = tx.send(ScanMessage::Done(Vec::new(), 0, tab_idx));
+                }
+            }
+        }
+
+        let _ = tx.send(ScanMessage::AllDone);
     });
 }
 
@@ -3822,6 +3981,7 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
 /// Tab 标题
 fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
     match tab {
+        Tab::Overview => app.t("tab_overview"),
         Tab::DevCache => app.t("tab_dev_cache"),
         Tab::LargeFiles => app.t("tab_large_files"),
         Tab::AppCache => app.t("tab_app_cache"),
@@ -4312,6 +4472,187 @@ fn display_path_short(path: &std::path::Path, lang_en: bool) -> String {
         name.to_string()
     } else {
         path.display().to_string()
+    }
+}
+
+/// 概览面板：聚合所有 Tab 的推荐清理项
+fn render_overview_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
+    // 聚合所有 Tab 的统计信息（跳过 Overview 自身，索引 0）
+    let mut safe_total: u64 = 0;
+    let mut caution_total: u64 = 0;
+    let mut advanced_total: u64 = 0;
+    let mut safe_count = 0usize;
+    let mut caution_count = 0usize;
+    let mut advanced_count = 0usize;
+    let mut recommendation_items: Vec<(usize, usize, ScanItem)> = Vec::new(); // (tab_index, item_index, item)
+
+    for tab_idx in 1..app.results.len() {
+        for (item_idx, item) in app.results[tab_idx].iter().enumerate() {
+            if !item.deletable {
+                continue;
+            }
+            match item.recommend {
+                crate::scanner::Recommend::Safe | crate::scanner::Recommend::CacheOnly => {
+                    safe_total += item.size_bytes;
+                    safe_count += 1;
+                    recommendation_items.push((tab_idx, item_idx, item.clone()));
+                }
+                crate::scanner::Recommend::Caution => {
+                    caution_total += item.size_bytes;
+                    caution_count += 1;
+                }
+                crate::scanner::Recommend::Advanced => {
+                    advanced_total += item.size_bytes;
+                    advanced_count += 1;
+                }
+            }
+        }
+    }
+
+    // 按大小降序排列推荐项
+    recommendation_items.sort_by(|a, b| b.2.size_bytes.cmp(&a.2.size_bytes));
+
+    // 判断是否有任一 Tab 正在扫描
+    let any_scanning = app.scan_states.iter().any(|s| matches!(s, ScanState::Scanning));
+
+    // --- Summary Pills ---
+    ui.add_space(5.0);
+    ui.horizontal(|ui| {
+        // Safe 可释放空间（主 pill）
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(232, 255, 243))
+            .stroke(egui::Stroke::new(1.0, SAFE_COLOR))
+            .rounding(egui::Rounding::same(14.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("overview_releasable")).size(12.0));
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(safe_total)).size(20.0).strong());
+                        ui.colored_label(SAFE_COLOR, egui::RichText::new("Safe").size(11.0).strong());
+                    });
+                });
+            });
+        ui.add_space(10.0);
+
+        // Caution pill
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(255, 247, 230))
+            .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
+            .rounding(egui::Rounding::same(14.0))
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("caution_clean")).size(12.0));
+                    ui.add_space(2.0);
+                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(caution_total)).size(18.0).strong());
+                });
+            });
+        ui.add_space(10.0);
+
+        // Advanced pill
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(255, 233, 230))
+            .stroke(egui::Stroke::new(1.0, ADVANCED_COLOR))
+            .rounding(egui::Rounding::same(14.0))
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("confirm_clean")).size(12.0));
+                    ui.add_space(2.0);
+                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(advanced_total)).size(18.0).strong());
+                });
+            });
+    });
+    ui.add_space(16.0);
+
+    // --- 推荐清理 ---
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(app.t("overview_recommendation")).size(16.0).strong().color(TEXT_PRIMARY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let scan_btn = ui.add_enabled(
+                !any_scanning,
+                egui::Button::new(egui::RichText::new(format!("🔄 {}", app.t("scan_all"))).color(egui::Color32::WHITE))
+                    .fill(BRAND)
+                    .rounding(egui::Rounding::same(8.0)),
+            );
+            if scan_btn.clicked() {
+                start_scan_all(app, scan_rx);
+            }
+        });
+    });
+    ui.add_space(4.0);
+    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(app.t("overview_recommendation_hint")).size(12.0));
+    ui.add_space(10.0);
+
+    if any_scanning {
+        ui_scanning(ui, app);
+    } else if recommendation_items.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(60.0);
+            ui.label(egui::RichText::new("🧹").size(48.0));
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new(app.t("overview_empty_title")).size(16.0).strong().color(TEXT_PRIMARY));
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(app.t("overview_empty_hint")).size(13.0).color(TEXT_TERTIARY));
+            ui.add_space(16.0);
+            if ui.button(egui::RichText::new(format!("🔍 {}", app.t("scan_all"))).size(16.0)).clicked() {
+                start_scan_all(app, scan_rx);
+            }
+        });
+    } else {
+        // 一键清理按钮
+        let total_safe_size: u64 = recommendation_items.iter().map(|(_, _, item)| item.size_bytes).sum();
+        let clean_btn = ui.add(
+            egui::Button::new(egui::RichText::new(format!("🗑 {} {} ({})", app.t("one_click_clean"), recommendation_items.len(), format_size(total_safe_size))).color(egui::Color32::WHITE))
+                .fill(BRAND)
+                .rounding(egui::Rounding::same(8.0))
+                .min_size(egui::vec2(ui.available_width(), 40.0)),
+        );
+        if clean_btn.clicked() {
+            // 选中所有推荐项并准备删除
+            for &(tab_idx, item_idx, _) in &recommendation_items {
+                if let Some(item) = app.results[tab_idx].get_mut(item_idx) {
+                    item.selected = true;
+                }
+            }
+            app.prepare_delete();
+        }
+        ui.add_space(12.0);
+
+        // 推荐项列表
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for &(tab_idx, item_idx, ref item) in &recommendation_items {
+                let tab = Tab::all()[tab_idx];
+                let tab_title_text = tab_title(&tab, app);
+
+                egui::Frame::none()
+                    .fill(SURFACE_ELEVATED)
+                    .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(SAFE_COLOR, egui::RichText::new("✓").size(14.0).strong());
+                            ui.add_space(10.0);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(&item.category).size(13.0).strong());
+                                    ui.add_space(6.0);
+                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(format!("· {}", tab_title_text)).size(11.0));
+                                });
+                                ui.colored_label(TEXT_SECONDARY, egui::RichText::new(truncate_path(&item.path, 70)).size(11.0));
+                                ui.colored_label(TEXT_SECONDARY, egui::RichText::new(&item.description).size(11.0));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format_size(item.size_bytes)).size(14.0).strong().monospace());
+                            });
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+        });
     }
 }
 

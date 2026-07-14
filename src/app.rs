@@ -34,6 +34,8 @@ fn touch_id_enabled_cross() -> bool {
 /// Tab 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    /// 概览（聚合推荐清理）
+    Overview,
     /// 开发者缓存
     DevCache,
     /// 大文件
@@ -54,6 +56,7 @@ impl Tab {
     /// 获取 Tab 的标题（直接返回中文 &'static str）
     pub fn title(self) -> &'static str {
         match self {
+            Tab::Overview => "概览",
             Tab::DevCache => "开发者缓存",
             Tab::LargeFiles => "大文件",
             Tab::AppCache => "App缓存",
@@ -65,27 +68,38 @@ impl Tab {
     }
 
     /// 所有 Tab
-    pub fn all() -> [Tab; 7] {
-        [Tab::DevCache, Tab::LargeFiles, Tab::AppCache, Tab::AppData, Tab::AppUninstall, Tab::SystemOptimize, Tab::Apfs]
+    pub fn all() -> [Tab; 8] {
+        [
+            Tab::Overview,
+            Tab::DevCache,
+            Tab::LargeFiles,
+            Tab::AppCache,
+            Tab::AppData,
+            Tab::AppUninstall,
+            Tab::SystemOptimize,
+            Tab::Apfs,
+        ]
     }
 
     /// 下一个 Tab
     pub fn next(self) -> Self {
         match self {
+            Tab::Overview => Tab::DevCache,
             Tab::DevCache => Tab::LargeFiles,
             Tab::LargeFiles => Tab::AppCache,
             Tab::AppCache => Tab::AppData,
             Tab::AppData => Tab::AppUninstall,
             Tab::AppUninstall => Tab::SystemOptimize,
             Tab::SystemOptimize => Tab::Apfs,
-            Tab::Apfs => Tab::DevCache,
+            Tab::Apfs => Tab::Overview,
         }
     }
 
     /// 上一个 Tab
     pub fn prev(self) -> Self {
         match self {
-            Tab::DevCache => Tab::Apfs,
+            Tab::Overview => Tab::Apfs,
+            Tab::DevCache => Tab::Overview,
             Tab::LargeFiles => Tab::DevCache,
             Tab::AppCache => Tab::LargeFiles,
             Tab::AppData => Tab::AppCache,
@@ -131,9 +145,9 @@ pub struct App {
     /// 当前 Tab
     pub tab: Tab,
     /// 每个 Tab 的扫描结果
-    pub results: [Vec<ScanItem>; 7],
+    pub results: [Vec<ScanItem>; 8],
     /// 每个 Tab 的扫描状态
-    pub scan_states: [ScanState; 7],
+    pub scan_states: [ScanState; 8],
     /// 列表选中索引
     pub list_index: usize,
     /// 磁盘总空间（字节）
@@ -149,7 +163,7 @@ pub struct App {
     /// 是否应该退出
     pub should_quit: bool,
     /// 扫描耗时（毫秒）
-    pub scan_time_ms: [u64; 7],
+    pub scan_time_ms: [u64; 8],
     /// 语言切换（true=英文, false=中文）
     pub lang_en: bool,
     /// 删除进度：已完成的项数
@@ -222,9 +236,10 @@ impl App {
         let (disk_total, disk_free) = get_disk_info();
 
         Self {
-            tab: Tab::DevCache,
-            results: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            tab: Tab::Overview,
+            results: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             scan_states: [
+                ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
@@ -240,7 +255,7 @@ impl App {
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
             should_quit: false,
-            scan_time_ms: [0; 7],
+            scan_time_ms: [0; 8],
             lang_en: false, // 默认中文
             delete_done: 0,
             delete_total: 0,
@@ -278,13 +293,14 @@ impl App {
     /// 获取当前 Tab 索引
     pub fn tab_index(&self) -> usize {
         match self.tab {
-            Tab::DevCache => 0,
-            Tab::LargeFiles => 1,
-            Tab::AppCache => 2,
-            Tab::AppData => 3,
-            Tab::AppUninstall => 4,
-            Tab::SystemOptimize => 5,
-            Tab::Apfs => 6,
+            Tab::Overview => 0,
+            Tab::DevCache => 1,
+            Tab::LargeFiles => 2,
+            Tab::AppCache => 3,
+            Tab::AppData => 4,
+            Tab::AppUninstall => 5,
+            Tab::SystemOptimize => 6,
+            Tab::Apfs => 7,
         }
     }
 
@@ -539,6 +555,7 @@ impl App {
         self.scan_states[idx] = ScanState::Scanning;
 
         let result = match self.tab {
+            Tab::Overview => scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 },
             Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
             Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
             #[cfg(target_os = "macos")]
@@ -788,6 +805,7 @@ impl App {
 
         // 失效当前 Tab 的扫描缓存，确保下次扫描看到最新数据
         let cache_name = match self.tab {
+            Tab::Overview => None,
             Tab::DevCache => Some("dev_cache"),
             Tab::LargeFiles => Some("large_files"),
             Tab::AppCache => Some("app_cache"),
@@ -889,6 +907,7 @@ impl App {
         if lang_en {
             match key {
                 // Tab 标题
+                "tab_overview" => "Overview",
                 "tab_dev_cache" => "Dev Cache",
                 "tab_large_files" => "Large Files",
                 "tab_app_cache" => "App Cache",
@@ -945,6 +964,14 @@ impl App {
                 "unknown" => "unknown",
                 "no_items_hint" => "No items yet - click Scan to find cleanable files",
                 "click_to_start" => "Click to start",
+                // 概览
+                "overview_releasable" => "Releasable Space",
+                "overview_recommendation" => "Recommended Cleanup",
+                "overview_recommendation_hint" => "Safe items from all categories, sorted by size",
+                "overview_empty_title" => "Everything looks clean",
+                "overview_empty_hint" => "Click Scan All to find cleanable files",
+                "scan_all" => "Scan All",
+                "one_click_clean" => "Clean",
                 "badge_undeletable" => "🔒 Undeletable",
                 // 过滤/搜索
                 "filter" => "Filter",
@@ -1130,6 +1157,7 @@ impl App {
         } else {
             match key {
                 // Tab 标题
+                "tab_overview" => "概览",
                 "tab_dev_cache" => "开发者缓存",
                 "tab_large_files" => "大文件",
                 "tab_app_cache" => "App缓存",
@@ -1182,6 +1210,14 @@ impl App {
                 "unknown" => "未知",
                 "no_items_hint" => "暂无数据 - 点击「扫描」查找可清理文件",
                 "click_to_start" => "点击开始",
+                // 概览
+                "overview_releasable" => "可释放空间",
+                "overview_recommendation" => "推荐清理",
+                "overview_recommendation_hint" => "聚合所有分类中的安全项，按大小排序",
+                "overview_empty_title" => "看起来一切整洁",
+                "overview_empty_hint" => "点击「扫描全部」查找可清理文件",
+                "scan_all" => "扫描全部",
+                "one_click_clean" => "一键清理",
                 "badge_undeletable" => "🔒 不可删除",
                 // 过滤/搜索
                 "filter" => "过滤",

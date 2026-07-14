@@ -1,0 +1,1830 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>maclean UI 设计稿 v1.0</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --surface: #F7F7F8;
+            --surface-elevated: #FFFFFF;
+            --surface-muted: #EFEFF2;
+            --surface-sidebar: #F2F2F5;
+            --surface-hover: #EAEAED;
+            --text: #171717;
+            --text-secondary: #52525B;
+            --text-tertiary: #71717A;
+            --border: rgba(23, 23, 23, 0.10);
+            --border-strong: rgba(23, 23, 23, 0.18);
+            --brand: #4B3FE3;
+            --brand-soft: #F2F7FF;
+            --brand-soft-strong: #E5EAFF;
+            --brand-text: #1A1759;
+            --brand-on: #FFFFFF;
+            --accent-teal: #14B8A6;
+            --accent-coral: #F87454;
+            --accent-amber: #F59E0B;
+            --success: #1DC981;
+            --warning: #EFAA17;
+            --danger: #E8463A;
+            --danger-soft: #FEF2F2;
+            --disabled: #A1A1AA;
+            --radius-sm: 6px;
+            --radius: 8px;
+            --radius-card: 12px;
+            --radius-full: 999px;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-card: 0 1px 3px rgba(0,0,0,0.06), 0 1px 1px rgba(0,0,0,0.04);
+            --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: var(--font-sans);
+            background: var(--surface);
+            color: var(--text);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 48px 32px;
+        }
+
+        h1 {
+            font-size: 32px;
+            font-weight: 600;
+            margin: 0 0 8px 0;
+            letter-spacing: -0.02em;
+        }
+
+        h2 {
+            font-size: 22px;
+            font-weight: 600;
+            margin: 48px 0 16px 0;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 32px 0 12px 0;
+            color: var(--text);
+        }
+
+        p {
+            color: var(--text-secondary);
+            margin: 0 0 12px 0;
+            font-size: 14px;
+        }
+
+        .subtitle {
+            font-size: 16px;
+            color: var(--text-secondary);
+            margin-bottom: 32px;
+        }
+
+        .meta {
+            display: flex;
+            gap: 16px;
+            font-size: 13px;
+            color: var(--text-tertiary);
+            margin-bottom: 40px;
+        }
+
+        .meta span {
+            background: var(--surface-muted);
+            padding: 4px 10px;
+            border-radius: var(--radius-full);
+        }
+
+        .section {
+            margin-bottom: 48px;
+        }
+
+        .color-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 12px;
+            margin: 16px 0;
+        }
+
+        .color-swatch {
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 12px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .swatch-block {
+            height: 48px;
+            border-radius: var(--radius-sm);
+            margin-bottom: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .swatch-name {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .swatch-hex {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            font-family: var(--font-mono);
+        }
+
+        .component-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            align-items: center;
+            padding: 16px;
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-card);
+            margin: 12px 0;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 14px;
+            border-radius: var(--radius);
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid transparent;
+            cursor: default;
+            transition: all 120ms ease;
+        }
+
+        .btn-primary {
+            background: var(--brand);
+            color: var(--brand-on);
+            border-color: var(--brand);
+        }
+
+        .btn-primary:hover { filter: brightness(1.05); }
+
+        .btn-secondary {
+            background: var(--surface-elevated);
+            color: var(--text);
+            border-color: var(--border-strong);
+        }
+
+        .btn-secondary:hover { background: var(--surface-hover); }
+
+        .btn-danger {
+            background: var(--danger);
+            color: #fff;
+            border-color: var(--danger);
+        }
+
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-secondary);
+            border-color: transparent;
+        }
+
+        .btn-ghost:hover { background: var(--surface-muted); color: var(--text); }
+
+        .btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 8px;
+            border-radius: var(--radius-full);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+
+        .badge-safe { background: #D1FAE5; color: #065F46; }
+        .badge-caution { background: #FEF3C7; color: #92400E; }
+        .badge-advanced { background: #FEE2E2; color: #991B1B; }
+        .badge-locked { background: var(--surface-muted); color: var(--text-tertiary); }
+        .badge-brand { background: var(--brand-soft); color: var(--brand-text); }
+
+        .mockup {
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-card);
+            box-shadow: var(--shadow-card);
+            overflow: hidden;
+            margin: 24px 0;
+        }
+
+        .mockup-header {
+            height: 38px;
+            background: var(--surface-muted);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 14px;
+            gap: 8px;
+        }
+
+        .window-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .window-title {
+            flex: 1;
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-tertiary);
+            font-weight: 500;
+        }
+
+        .mockup-body {
+            display: flex;
+            min-height: 520px;
+        }
+
+        .sidebar {
+            width: 220px;
+            background: var(--surface-sidebar);
+            border-right: 1px solid var(--border);
+            padding: 16px 12px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 0 8px 16px 8px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 12px;
+        }
+
+        .brand-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, var(--brand) 0%, #6F6FFF 100%);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        .brand-text {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .brand-version {
+            font-size: 11px;
+            color: var(--text-tertiary);
+        }
+
+        .disk-card {
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 12px;
+            margin: 12px 8px 16px 8px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .disk-label {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            margin-bottom: 4px;
+        }
+
+        .disk-size {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text);
+            letter-spacing: -0.02em;
+        }
+
+        .disk-bar {
+            height: 6px;
+            background: var(--surface-muted);
+            border-radius: var(--radius-full);
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .disk-bar-fill {
+            height: 100%;
+            width: 72%;
+            background: var(--brand);
+            border-radius: var(--radius-full);
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            border-radius: var(--radius);
+            font-size: 13px;
+            color: var(--text-secondary);
+            cursor: default;
+            transition: background 120ms;
+            margin-bottom: 2px;
+        }
+
+        .nav-item:hover { background: var(--surface-hover); }
+        .nav-item.active {
+            background: var(--brand-soft);
+            color: var(--brand-text);
+            font-weight: 500;
+        }
+
+        .nav-icon {
+            width: 18px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        .nav-count {
+            margin-left: auto;
+            font-size: 11px;
+            color: var(--text-tertiary);
+            background: var(--surface-muted);
+            padding: 1px 6px;
+            border-radius: var(--radius-full);
+        }
+
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .main-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .main-title {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .main-subtitle {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            margin-top: 2px;
+        }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--surface-muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 6px 10px;
+            font-size: 13px;
+            color: var(--text-secondary);
+            min-width: 180px;
+        }
+
+        .search-box input {
+            border: none;
+            background: transparent;
+            outline: none;
+            font-size: 13px;
+            color: var(--text);
+            width: 100%;
+        }
+
+        .summary-pills {
+            display: flex;
+            gap: 10px;
+            padding: 12px 20px;
+            background: var(--surface-elevated);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .pill {
+            flex: 1;
+            background: var(--surface-muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .pill-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--text-tertiary);
+        }
+
+        .pill-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .pill.selected {
+            border-color: var(--brand);
+            background: var(--brand-soft);
+        }
+
+        .pill.selected .pill-value { color: var(--brand-text); }
+
+        .content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 20px 20px 20px;
+        }
+
+        .list-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 14px;
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin-bottom: 8px;
+            transition: background 120ms;
+        }
+
+        .list-item:hover { background: var(--surface-hover); }
+
+        .list-item.locked {
+            opacity: 0.7;
+            background: var(--surface-muted);
+        }
+
+        .checkbox {
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--border-strong);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: var(--brand-on);
+            flex-shrink: 0;
+        }
+
+        .checkbox.checked {
+            background: var(--brand);
+            border-color: var(--brand);
+        }
+
+        .item-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .item-title {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text);
+            margin-bottom: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .item-path {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            font-family: var(--font-mono);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .item-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 4px;
+        }
+
+        .item-size {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text);
+            font-family: var(--font-mono);
+            flex-shrink: 0;
+        }
+
+        .footer {
+            padding: 12px 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--surface-elevated);
+        }
+
+        .footer-info {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .footer-size {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .progress-card {
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-card);
+            padding: 20px;
+            margin: 20px;
+            box-shadow: var(--shadow-card);
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .progress-title {
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .progress-count {
+            font-size: 13px;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: var(--surface-muted);
+            border-radius: var(--radius-full);
+            overflow: hidden;
+            margin-bottom: 12px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 45%;
+            background: var(--brand);
+            border-radius: var(--radius-full);
+            transition: width 300ms ease;
+        }
+
+        .progress-log {
+            background: var(--surface-muted);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-secondary);
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        .log-line {
+            margin-bottom: 3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .dialog-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(0,0,0,0.18);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+        }
+
+        .dialog {
+            background: var(--surface-elevated);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-card);
+            width: 420px;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.18);
+            overflow: hidden;
+        }
+
+        .dialog-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .dialog-title {
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .dialog-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .dialog-body {
+            padding: 16px 20px;
+        }
+
+        .dialog-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+        }
+
+        .dialog-row:last-child { border-bottom: none; }
+
+        .dialog-label { color: var(--text-secondary); }
+        .dialog-value { font-weight: 500; color: var(--text); }
+
+        .dialog-footer {
+            padding: 12px 20px 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 60px 20px;
+            text-align: center;
+        }
+
+        .empty-icon {
+            width: 64px;
+            height: 64px;
+            background: var(--brand-soft);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            margin-bottom: 16px;
+        }
+
+        .empty-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        .empty-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            max-width: 320px;
+        }
+
+        .scan-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--surface-muted);
+            border-top-color: var(--brand);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 16px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .tabs {
+            display: flex;
+            gap: 4px;
+            padding: 0 20px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface-elevated);
+        }
+
+        .tab {
+            padding: 10px 14px;
+            font-size: 13px;
+            color: var(--text-secondary);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            cursor: default;
+        }
+
+        .tab.active {
+            color: var(--brand);
+            border-bottom-color: var(--brand);
+            font-weight: 500;
+        }
+
+        .setting-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .setting-item:last-child { border-bottom: none; }
+
+        .setting-label {
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .setting-desc {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        .toggle {
+            width: 40px;
+            height: 22px;
+            background: var(--surface-muted);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-full);
+            position: relative;
+            transition: background 150ms;
+        }
+
+        .toggle.on {
+            background: var(--brand);
+            border-color: var(--brand);
+        }
+
+        .toggle-knob {
+            width: 18px;
+            height: 18px;
+            background: white;
+            border-radius: 50%;
+            position: absolute;
+            top: 1px;
+            left: 2px;
+            transition: transform 150ms;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+        }
+
+        .toggle.on .toggle-knob { transform: translateX(17px); }
+
+        .menubar-hud {
+            width: 280px;
+            background: rgba(255,255,255,0.95);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-card);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+            overflow: hidden;
+        }
+
+        .hud-header {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .hud-title {
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .hud-size {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--brand);
+        }
+
+        .hud-actions {
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .hud-action {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            border-radius: var(--radius);
+            font-size: 13px;
+            color: var(--text);
+        }
+
+        .hud-action:hover { background: var(--surface-muted); }
+
+        .note {
+            background: var(--brand-soft);
+            border-left: 3px solid var(--brand);
+            padding: 12px 16px;
+            border-radius: 0 var(--radius) var(--radius) 0;
+            font-size: 13px;
+            color: var(--brand-text);
+            margin: 16px 0;
+        }
+
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 860px) {
+            .two-col { grid-template-columns: 1fr; }
+            .mockup-body { flex-direction: column; }
+            .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>maclean UI 设计稿 v1.0</h1>
+        <p class="subtitle">基于 egui 可实现的跨平台 macOS 风格界面方案 — 清爽、专业、可信</p>
+        <div class="meta">
+            <span>目标框架: egui / eframe</span>
+            <span>主色调: 紫罗兰 #4B3FE3</span>
+            <span>设计语言: macOS 原生风格</span>
+            <span>交付: 图稿 + 组件规范</span>
+        </div>
+
+        <div class="section">
+            <h2>1. 设计原则</h2>
+            <p>当前 UI 的主要问题是信息堆叠、色彩过饱和、标签栏拥挤。新版设计遵循以下原则：</p>
+            <ul style="color: var(--text-secondary); font-size: 14px; padding-left: 20px;">
+                <li><strong>信噪比优先</strong>：用白色/浅灰卡片承载内容，减少视觉噪音</li>
+                <li><strong>左导航 + 右内容</strong>：借鉴 Finder / 系统设置，左侧固定功能入口，右侧展示详情</li>
+                <li><strong>状态即颜色</strong>：Safe/Caution/Advanced 用绿/黄/红微标表达，不污染整行背景</li>
+                <li><strong>空间即层级</strong>：通过间距和阴影区分卡片，避免粗边框</li>
+                <li><strong>操作可视化</strong>：扫描、删除过程使用进度条 + 实时日志，降低焦虑</li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h2>2. 设计系统</h2>
+            <h3>2.1 色彩</h3>
+            <p>采用浅色模式为主，深色模式通过反色实现。egui 中可直接映射为 Color32。</p>
+            <div class="color-grid">
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #4B3FE3;"></div>
+                    <div class="swatch-name">Brand</div>
+                    <div class="swatch-hex">#4B3FE3</div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #F2F7FF;"></div>
+                    <div class="swatch-name">Brand Soft</div>
+                    <div class="swatch-hex">#F2F7FF</div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #1DC981;"></div>
+                    <div class="swatch-name">Safe</div>
+                    <div class="swatch-hex">#1DC981</div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #EFAA17;"></div>
+                    <div class="swatch-name">Caution</div>
+                    <div class="swatch-hex">#EFAA17</div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #E8463A;"></div>
+                    <div class="swatch-name">Advanced</div>
+                    <div class="swatch-hex">#E8463A</div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #F7F7F8; border: 1px solid #ddd;"></div>
+                    <div class="swatch-name">Surface</div>
+                    <div class="swatch-hex">#F7F7F8</div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #FFFFFF; border: 1px solid #ddd;"></div>
+                    <div class="swatch-name">Elevated</div>
+                    <div class="swatch-hex">#FFFFFF</div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch-block" style="background: #52525B;"></div>
+                    <div class="swatch-name">Text Secondary</div>
+                    <div class="swatch-hex">#52525B</div>
+                </div>
+            </div>
+
+            <h3>2.2 字体</h3>
+            <p>egui 默认使用系统字体，可通过 egui::FontDefinitions 加载 SF Pro / PingFang SC。数值使用等宽字体对齐。</p>
+            <div class="component-row" style="font-family: var(--font-sans);">
+                <div style="font-size: 18px; font-weight: 600;">标题 18px / 600</div>
+                <div style="font-size: 14px; font-weight: 400; color: var(--text-secondary);">正文 14px / 400</div>
+                <div style="font-size: 13px; font-weight: 500;">按钮/列表 13px / 500</div>
+                <div style="font-size: 12px; color: var(--text-tertiary);">辅助 12px / 400</div>
+                <div style="font-family: var(--font-mono); font-size: 13px; font-weight: 500;">12.4 GB</div>
+            </div>
+
+            <h3>2.3 圆角与阴影</h3>
+            <p>egui 支持 stroke + rounding + shadow（简单阴影）。避免复杂模糊，用 1px 边框 + 浅灰背景营造卡片感。</p>
+            <div class="component-row">
+                <div style="padding: 12px 16px; background: white; border: 1px solid var(--border); border-radius: 8px;">默认卡片 8px</div>
+                <div style="padding: 16px 20px; background: white; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-card);">弹窗/大卡片 12px</div>
+                <div class="badge badge-brand">胶囊标签</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>3. 组件库</h2>
+            <h3>3.1 按钮</h3>
+            <div class="component-row">
+                <div class="btn btn-primary">🚀 立即扫描</div>
+                <div class="btn btn-secondary">刷新</div>
+                <div class="btn btn-danger">🗑 删除选中</div>
+                <div class="btn btn-ghost">取消</div>
+                <div class="btn btn-primary" disabled>处理中...</div>
+            </div>
+
+            <h3>3.2 状态微标</h3>
+            <div class="component-row">
+                <span class="badge badge-safe">● Safe</span>
+                <span class="badge badge-caution">● Caution</span>
+                <span class="badge badge-advanced">● Advanced</span>
+                <span class="badge badge-locked">🔒 不可删除</span>
+                <span class="badge badge-brand">Pro</span>
+            </div>
+
+            <h3>3.3 列表项</h3>
+            <div class="mockup" style="max-width: 720px;">
+                <div class="list-item">
+                    <div class="checkbox checked">✓</div>
+                    <div class="item-info">
+                        <div class="item-title">VS Code 缓存</div>
+                        <div class="item-path">~/Library/Application Support/Code/Cache</div>
+                        <div class="item-meta">
+                            <span class="badge badge-safe">Safe</span>
+                            <span style="font-size: 12px; color: var(--text-tertiary);">删除后自动重建</span>
+                        </div>
+                    </div>
+                    <div class="item-size">2.4 GB</div>
+                </div>
+                <div class="list-item locked">
+                    <div class="checkbox">✓</div>
+                    <div class="item-info">
+                        <div class="item-title">Xcode DerivedData</div>
+                        <div class="item-path">~/Library/Developer/Xcode/DerivedData/...</div>
+                        <div class="item-meta">
+                            <span class="badge badge-locked">🔒 SIP 保护</span>
+                            <span style="font-size: 12px; color: var(--text-tertiary);">需要管理员权限</span>
+                        </div>
+                    </div>
+                    <div class="item-size" style="color: var(--text-tertiary);">8.1 GB</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>4. 核心界面图稿</h2>
+
+            <h3>4.1 主窗口 — 概览（Overview）</h3>
+            <p>左侧展示磁盘用量与导航，右侧展示可释放空间总览和快捷操作。</p>
+            <div class="mockup">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">maclean</div>
+                </div>
+                <div class="mockup-body">
+                    <div class="sidebar">
+                        <div class="brand">
+                            <div class="brand-icon">M</div>
+                            <div>
+                                <div class="brand-text">maclean</div>
+                                <div class="brand-version">v0.2.0</div>
+                            </div>
+                        </div>
+                        <div class="disk-card">
+                            <div class="disk-label">Macintosh HD 可用空间</div>
+                            <div class="disk-size">142 GB / 512 GB</div>
+                            <div class="disk-bar"><div class="disk-bar-fill"></div></div>
+                        </div>
+                        <div class="nav-item active"><span class="nav-icon">🏠</span> 概览</div>
+                        <div class="nav-item"><span class="nav-icon">🗑</span> 系统清理 <span class="nav-count">24</span></div>
+                        <div class="nav-item"><span class="nav-icon">📦</span> 开发缓存 <span class="nav-count">18</span></div>
+                        <div class="nav-item"><span class="nav-icon">🧩</span> 应用卸载 <span class="nav-count">3</span></div>
+                        <div class="nav-item"><span class="nav-icon">📁</span> 大文件 <span class="nav-count">7</span></div>
+                        <div style="margin-top: auto;">
+                            <div class="nav-item"><span class="nav-icon">⚙️</span> 设置</div>
+                        </div>
+                    </div>
+                    <div class="main">
+                        <div class="main-header">
+                            <div>
+                                <div class="main-title">概览</div>
+                                <div class="main-subtitle">上次扫描：10 分钟前 · 共发现 52 项可清理内容</div>
+                            </div>
+                            <div class="toolbar">
+                                <div class="btn btn-primary">🚀 重新扫描</div>
+                            </div>
+                        </div>
+                        <div class="summary-pills">
+                            <div class="pill selected">
+                                <div class="pill-header">可释放空间 <span class="badge badge-safe">Safe</span></div>
+                                <div class="pill-value">36.8 GB</div>
+                            </div>
+                            <div class="pill">
+                                <div class="pill-header">Caution 项目</div>
+                                <div class="pill-value">8.2 GB</div>
+                            </div>
+                            <div class="pill">
+                                <div class="pill-header">Advanced 项目</div>
+                                <div class="pill-value">14.5 GB</div>
+                            </div>
+                        </div>
+                        <div class="content">
+                            <h3 style="margin-top: 0;">推荐清理</h3>
+                            <div class="list-item">
+                                <div class="checkbox checked">✓</div>
+                                <div class="item-info">
+                                    <div class="item-title">应用缓存</div>
+                                    <div class="item-path">~/Library/Caches 下的临时文件</div>
+                                </div>
+                                <div class="item-size">12.4 GB</div>
+                            </div>
+                            <div class="list-item">
+                                <div class="checkbox checked">✓</div>
+                                <div class="item-info">
+                                    <div class="item-title">Xcode 编译缓存</div>
+                                    <div class="item-path">~/Library/Developer/Xcode/DerivedData</div>
+                                </div>
+                                <div class="item-size">8.1 GB</div>
+                            </div>
+                            <div class="list-item">
+                                <div class="checkbox checked">✓</div>
+                                <div class="item-info">
+                                    <div class="item-title">Docker 镜像与层缓存</div>
+                                    <div class="item-path">Docker daemon 管理的镜像层</div>
+                                </div>
+                                <div class="item-size">6.3 GB</div>
+                            </div>
+                            <div style="margin-top: 16px; text-align: center;">
+                                <div class="btn btn-primary" style="padding: 10px 28px;">一键清理 36.8 GB</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>4.2 扫描结果 — 列表视图</h3>
+            <p>以开发缓存为例，展示扫描后的项目列表，支持搜索、筛选、全选。</p>
+            <div class="mockup">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">maclean</div>
+                </div>
+                <div class="mockup-body">
+                    <div class="sidebar">
+                        <div class="brand">
+                            <div class="brand-icon">M</div>
+                            <div>
+                                <div class="brand-text">maclean</div>
+                                <div class="brand-version">v0.2.0</div>
+                            </div>
+                        </div>
+                        <div class="disk-card">
+                            <div class="disk-label">可释放空间</div>
+                            <div class="disk-size">59.5 GB</div>
+                            <div class="disk-bar"><div class="disk-bar-fill" style="width: 35%;"></div></div>
+                        </div>
+                        <div class="nav-item"><span class="nav-icon">🏠</span> 概览</div>
+                        <div class="nav-item"><span class="nav-icon">🗑</span> 系统清理</div>
+                        <div class="nav-item active"><span class="nav-icon">📦</span> 开发缓存</div>
+                        <div class="nav-item"><span class="nav-icon">🧩</span> 应用卸载</div>
+                        <div class="nav-item"><span class="nav-icon">📁</span> 大文件</div>
+                        <div style="margin-top: auto;"><div class="nav-item"><span class="nav-icon">⚙️</span> 设置</div></div>
+                    </div>
+                    <div class="main">
+                        <div class="main-header">
+                            <div>
+                                <div class="main-title">开发缓存</div>
+                                <div class="main-subtitle">18 个项目 · 共 42.1 GB</div>
+                            </div>
+                            <div class="toolbar">
+                                <div class="search-box"><span>🔍</span><input type="text" placeholder="搜索项目或路径 /" readonly></div>
+                                <div class="btn btn-secondary">全选 Safe</div>
+                            </div>
+                        </div>
+                        <div class="tabs">
+                            <div class="tab active">全部 (18)</div>
+                            <div class="tab">Docker (4)</div>
+                            <div class="tab">Xcode (6)</div>
+                            <div class="tab">AI 模型 (2)</div>
+                            <div class="tab">K8s / Monorepo (3)</div>
+                        </div>
+                        <div class="content">
+                            <div class="list-item">
+                                <div class="checkbox checked">✓</div>
+                                <div class="item-info">
+                                    <div class="item-title">Docker  dangling 镜像</div>
+                                    <div class="item-path">docker images --filter dangling=true</div>
+                                    <div class="item-meta">
+                                        <span class="badge badge-safe">Safe</span>
+                                        <span style="font-size: 12px; color: var(--text-tertiary);">无用镜像，删除后不影响运行</span>
+                                    </div>
+                                </div>
+                                <div class="item-size">4.2 GB</div>
+                            </div>
+                            <div class="list-item">
+                                <div class="checkbox checked">✓</div>
+                                <div class="item-info">
+                                    <div class="item-title">Xcode DerivedData — ProjectA</div>
+                                    <div class="item-path">~/Library/Developer/Xcode/DerivedData/ProjectA-xxx</div>
+                                    <div class="item-meta">
+                                        <span class="badge badge-safe">Safe</span>
+                                        <span style="font-size: 12px; color: var(--text-tertiary);">编译产物，可重建</span>
+                                    </div>
+                                </div>
+                                <div class="item-size">3.8 GB</div>
+                            </div>
+                            <div class="list-item">
+                                <div class="checkbox"></div>
+                                <div class="item-info">
+                                    <div class="item-title">Hugging Face 模型缓存</div>
+                                    <div class="item-path">~/.cache/huggingface/hub</div>
+                                    <div class="item-meta">
+                                        <span class="badge badge-caution">Caution</span>
+                                        <span style="font-size: 12px; color: var(--text-tertiary);">删除后需重新下载模型</span>
+                                    </div>
+                                </div>
+                                <div class="item-size">6.5 GB</div>
+                            </div>
+                            <div class="list-item locked">
+                                <div class="checkbox"></div>
+                                <div class="item-info">
+                                    <div class="item-title">系统 pip 缓存</div>
+                                    <div class="item-path">/Library/Caches/pip</div>
+                                    <div class="item-meta">
+                                        <span class="badge badge-locked">🔒 SIP / root 保护</span>
+                                        <span style="font-size: 12px; color: var(--text-tertiary);">需要管理员权限</span>
+                                    </div>
+                                </div>
+                                <div class="item-size" style="color: var(--text-tertiary);">1.2 GB</div>
+                            </div>
+                            <div class="list-item">
+                                <div class="checkbox"></div>
+                                <div class="item-info">
+                                    <div class="item-title">node_modules 聚合（5 个项目）</div>
+                                    <div class="item-path">~/workspace/*</div>
+                                    <div class="item-meta">
+                                        <span class="badge badge-advanced">Advanced</span>
+                                        <span style="font-size: 12px; color: var(--text-tertiary);">删除后需重新执行 npm install</span>
+                                    </div>
+                                </div>
+                                <div class="item-size">14.1 GB</div>
+                            </div>
+                        </div>
+                        <div class="footer">
+                            <div class="footer-info">已选中 <strong>3</strong> 项 · 可释放 <span class="footer-size">12.4 GB</span></div>
+                            <div class="toolbar">
+                                <div class="btn btn-ghost">取消</div>
+                                <div class="btn btn-danger">🗑 删除 12.4 GB</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>4.3 扫描进行中</h3>
+            <p>实时显示扫描进度、当前路径、已发现项目数，降低用户等待焦虑。</p>
+            <div class="mockup" style="max-width: 560px; margin-left: 0;">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">扫描中...</div>
+                </div>
+                <div class="mockup-body" style="min-height: 340px; align-items: center; justify-content: center;">
+                    <div class="progress-card" style="width: 100%; margin: 0 24px;">
+                        <div style="text-align: center; margin-bottom: 20px;">
+                            <div class="scan-spinner" style="margin: 0 auto 16px;"></div>
+                            <div style="font-size: 16px; font-weight: 600;">正在扫描开发缓存...</div>
+                            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">已发现 24 个项目 · 6.8 GB</div>
+                        </div>
+                        <div class="progress-bar"><div class="progress-bar-fill" style="width: 62%;"></div></div>
+                        <div class="progress-count">62% · 正在扫描 ~/workspace/monorepo/node_modules</div>
+                        <div class="progress-log">
+                            <div class="log-line">[10:42:05] 扫描 Xcode DerivedData...</div>
+                            <div class="log-line">[10:42:08] 发现 Docker dangling 镜像 4.2 GB</div>
+                            <div class="log-line">[10:42:11] 扫描 node_modules 聚合...</div>
+                            <div class="log-line">[10:42:14] 当前路径: ~/workspace/monorepo/packages/ui</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>4.4 删除确认对话框</h3>
+            <p>删除前明确展示项目数、大小、风险等级，避免误操作。</p>
+            <div class="mockup" style="max-width: 640px; position: relative; min-height: 360px;">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">maclean</div>
+                </div>
+                <div class="mockup-body" style="min-height: 360px; background: var(--surface-muted); position: relative;">
+                    <div class="dialog-overlay">
+                        <div class="dialog">
+                            <div class="dialog-header">
+                                <div class="dialog-title">🗑 确认删除</div>
+                                <div class="dialog-subtitle">删除后文件将不可恢复，请确认。</div>
+                            </div>
+                            <div class="dialog-body">
+                                <div class="dialog-row"><span class="dialog-label">选中项目</span><span class="dialog-value">12 项</span></div>
+                                <div class="dialog-row"><span class="dialog-label">预计释放</span><span class="dialog-value" style="color: var(--brand); font-weight: 600;">24.6 GB</span></div>
+                                <div class="dialog-row"><span class="dialog-label">Safe</span><span class="dialog-value">8 项 · 18.2 GB</span></div>
+                                <div class="dialog-row"><span class="dialog-label">Caution</span><span class="dialog-value">3 项 · 4.1 GB</span></div>
+                                <div class="dialog-row"><span class="dialog-label">Advanced</span><span class="dialog-value">1 项 · 2.3 GB</span></div>
+                                <div class="dialog-row"><span class="dialog-label">管理员权限</span><span class="dialog-value">需要（含 root/SIP 项目）</span></div>
+                            </div>
+                            <div class="dialog-footer">
+                                <div class="btn btn-ghost">取消</div>
+                                <div class="btn btn-danger">确认删除</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>4.5 删除进度</h3>
+            <p>使用模态浮层展示实时进度、成功/失败计数、失败路径可复制。</p>
+            <div class="mockup" style="max-width: 640px; position: relative; min-height: 420px;">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">maclean</div>
+                </div>
+                <div class="mockup-body" style="min-height: 420px; background: var(--surface-muted); position: relative;">
+                    <div class="dialog-overlay">
+                        <div class="dialog" style="width: 480px;">
+                            <div class="dialog-header">
+                                <div class="dialog-title">正在清理...</div>
+                                <div class="dialog-subtitle">已释放 18.4 GB / 24.6 GB</div>
+                            </div>
+                            <div class="dialog-body">
+                                <div class="progress-bar"><div class="progress-bar-fill" style="width: 75%;"></div></div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary); margin-bottom: 14px;">
+                                    <span>9 / 12 项完成</span>
+                                    <span>2 项失败 · 1 项需权限</span>
+                                </div>
+                                <div class="progress-log" style="max-height: 160px;">
+                                    <div class="log-line">✓ 删除 VS Code 缓存 (2.4 GB)</div>
+                                    <div class="log-line">✓ 删除 Xcode DerivedData (3.8 GB)</div>
+                                    <div class="log-line">✓ 删除 Docker dangling 镜像 (4.2 GB)</div>
+                                    <div class="log-line" style="color: var(--warning);">⚠ pip 缓存删除失败，将尝试 sudo</div>
+                                    <div class="log-line" style="color: var(--danger);">✕ /usr/local/share/... 受 SIP 保护</div>
+                                </div>
+                            </div>
+                            <div class="dialog-footer">
+                                <div class="btn btn-ghost">后台运行</div>
+                                <div class="btn btn-primary">授权并继续</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>4.6 设置页面</h3>
+            <p>简洁的设置项，使用 Toggle 和二级菜单。</p>
+            <div class="mockup">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">maclean</div>
+                </div>
+                <div class="mockup-body">
+                    <div class="sidebar">
+                        <div class="brand">
+                            <div class="brand-icon">M</div>
+                            <div>
+                                <div class="brand-text">maclean</div>
+                                <div class="brand-version">v0.2.0</div>
+                            </div>
+                        </div>
+                        <div class="nav-item"><span class="nav-icon">🏠</span> 概览</div>
+                        <div class="nav-item"><span class="nav-icon">🗑</span> 系统清理</div>
+                        <div class="nav-item"><span class="nav-icon">📦</span> 开发缓存</div>
+                        <div class="nav-item"><span class="nav-icon">🧩</span> 应用卸载</div>
+                        <div class="nav-item"><span class="nav-icon">📁</span> 大文件</div>
+                        <div style="margin-top: auto;"><div class="nav-item active"><span class="nav-icon">⚙️</span> 设置</div></div>
+                    </div>
+                    <div class="main">
+                        <div class="main-header">
+                            <div class="main-title">设置</div>
+                        </div>
+                        <div class="content">
+                            <div class="progress-card" style="margin: 0;">
+                                <h3 style="margin-top: 0;">通用</h3>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">启动时显示菜单栏图标</div>
+                                        <div class="setting-desc">在 macOS 菜单栏常驻磁盘用量指示器</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">自动保持 sudo 会话</div>
+                                        <div class="setting-desc">避免重复输入管理员密码</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">扫描结果本地缓存</div>
+                                        <div class="setting-desc">7 天内避免重复扫描，加速启动</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                            </div>
+
+                            <div class="progress-card" style="margin: 16px 0 0 0;">
+                                <h3 style="margin-top: 0;">安全</h3>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">删除前二次确认</div>
+                                        <div class="setting-desc">Advanced 项目必须手动确认</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">合盖时禁止删除</div>
+                                        <div class="setting-desc">检测 MacBook 合盖状态，防止误触</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                            </div>
+
+                            <div class="progress-card" style="margin: 16px 0 0 0;">
+                                <h3 style="margin-top: 0;">语言</h3>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">界面语言</div>
+                                        <div class="setting-desc">当前：简体中文</div>
+                                    </div>
+                                    <div class="btn btn-secondary">切换 English</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>4.6 应用卸载 — 子 cell 分组</h3>
+            <p>App 卸载 tab 已将每个应用拆分为「应用数据 / 缓存 / 应用本身」三个子项，便于用户精确控制。新版设计把分组做成可折叠卡片，状态用胶囊标表达，避免原界面中过多的彩色圆点。</p>
+            <div class="mockup">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">maclean</div>
+                </div>
+                <div class="mockup-body">
+                    <div class="sidebar">
+                        <div class="brand">
+                            <div class="brand-icon">M</div>
+                            <div>
+                                <div class="brand-text">maclean</div>
+                                <div class="brand-version">v0.2.0</div>
+                            </div>
+                        </div>
+                        <div class="disk-card">
+                            <div class="disk-label">可释放空间</div>
+                            <div class="disk-size">193.8 GB</div>
+                            <div class="disk-bar"><div class="disk-bar-fill" style="width: 55%;"></div></div>
+                        </div>
+                        <div class="nav-item"><span class="nav-icon">🏠</span> 概览</div>
+                        <div class="nav-item"><span class="nav-icon">🗑</span> 系统清理</div>
+                        <div class="nav-item"><span class="nav-icon">📦</span> 开发缓存</div>
+                        <div class="nav-item active"><span class="nav-icon">🧩</span> 应用卸载 <span class="nav-count">125</span></div>
+                        <div class="nav-item"><span class="nav-icon">📁</span> 大文件</div>
+                        <div style="margin-top: auto;"><div class="nav-item"><span class="nav-icon">⚙️</span> 设置</div></div>
+                    </div>
+                    <div class="main">
+                        <div class="main-header">
+                            <div>
+                                <div class="main-title">应用卸载</div>
+                                <div class="main-subtitle">125 个应用 · 共 193.8 GB 可释放</div>
+                            </div>
+                            <div class="toolbar">
+                                <div class="search-box"><span>🔍</span><input type="text" placeholder="搜索应用名称..." readonly></div>
+                            </div>
+                        </div>
+                        <div class="summary-pills" style="padding: 10px 20px; gap: 8px;">
+                            <div class="pill active" style="flex: 0 1 auto; padding: 8px 12px;">
+                                <div class="pill-header" style="font-size: 11px;">全部</div>
+                                <div class="pill-value" style="font-size: 14px;">125 · 193.8G</div>
+                            </div>
+                            <div class="pill" style="flex: 0 1 auto; padding: 8px 12px;">
+                                <div class="pill-header" style="font-size: 11px;"><span class="badge badge-safe">Safe</span></div>
+                                <div class="pill-value" style="font-size: 14px;">20 · 6.0G</div>
+                            </div>
+                            <div class="pill" style="flex: 0 1 auto; padding: 8px 12px;">
+                                <div class="pill-header" style="font-size: 11px;"><span class="badge badge-caution">Caution</span></div>
+                                <div class="pill-value" style="font-size: 14px;">18 · 5.2G</div>
+                            </div>
+                            <div class="pill" style="flex: 0 1 auto; padding: 8px 12px;">
+                                <div class="pill-header" style="font-size: 11px;"><span class="badge badge-advanced">Advanced</span></div>
+                                <div class="pill-value" style="font-size: 14px;">104 · 182.6G</div>
+                            </div>
+                        </div>
+                        <div class="toolbar" style="padding: 10px 20px; border-bottom: 1px solid var(--border);">
+                            <div class="btn btn-secondary">一键选推荐清理</div>
+                            <div class="btn btn-ghost">全选</div>
+                            <div class="btn btn-ghost">取消全选</div>
+                            <div style="margin-left: auto; font-size: 12px; color: var(--text-tertiary);">展开 3 个应用分组</div>
+                        </div>
+                        <div class="content">
+                            <!-- App Group 1 -->
+                            <div style="background: var(--surface-elevated); border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; margin-bottom: 12px;">
+                                <div class="list-item" style="border: none; border-radius: 0; margin: 0; background: transparent;">
+                                    <div class="checkbox checked">✓</div>
+                                    <span style="font-size: 12px; color: var(--brand);">▼</span>
+                                    <div class="item-info">
+                                        <div class="item-title">TRAE SOLO CN</div>
+                                        <div class="item-path">/Applications/TRAE SOLO CN.app</div>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 10px;">
+                                        <span class="badge badge-advanced">数据 · 1</span>
+                                        <span class="badge badge-safe">缓存 · 1</span>
+                                        <span class="badge badge-caution">应用 · 1</span>
+                                        <div class="item-size">58.2 GB</div>
+                                    </div>
+                                </div>
+                                <div style="padding: 0 14px 12px 44px; display: flex; flex-direction: column; gap: 6px;">
+                                    <div class="list-item" style="margin: 0; background: var(--surface-muted); border-color: var(--border);">
+                                        <div class="checkbox checked">✓</div>
+                                        <div class="item-info">
+                                            <div class="item-title">应用数据</div>
+                                            <div class="item-path">~/Library/Application Support/TRAE SOLO CN 等 3 项</div>
+                                            <div class="item-meta">
+                                                <span class="badge badge-advanced">Advanced</span>
+                                                <span style="font-size: 12px; color: var(--text-tertiary);">删除后可能需要重新登录或配置</span>
+                                            </div>
+                                        </div>
+                                        <div class="item-size">55.6 GB</div>
+                                    </div>
+                                    <div class="list-item" style="margin: 0; background: var(--surface-muted); border-color: var(--border);">
+                                        <div class="checkbox checked">✓</div>
+                                        <div class="item-info">
+                                            <div class="item-title">缓存与日志</div>
+                                            <div class="item-path">~/Library/Caches/cn.trae.solo.app</div>
+                                            <div class="item-meta">
+                                                <span class="badge badge-safe">Safe</span>
+                                                <span style="font-size: 12px; color: var(--text-tertiary);">删除后不影响使用，应用自动重建</span>
+                                            </div>
+                                        </div>
+                                        <div class="item-size">1.7 GB</div>
+                                    </div>
+                                    <div class="list-item" style="margin: 0; background: var(--surface-muted); border-color: var(--border);">
+                                        <div class="checkbox"></div>
+                                        <div class="item-info">
+                                            <div class="item-title">应用本体</div>
+                                            <div class="item-path">/Applications/TRAE SOLO CN.app</div>
+                                            <div class="item-meta">
+                                                <span class="badge badge-caution">Caution</span>
+                                                <span style="font-size: 12px; color: var(--text-tertiary);">卸载应用本身，关联数据不会被删除</span>
+                                            </div>
+                                        </div>
+                                        <div class="item-size">908.7 MB</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- App Group 2 -->
+                            <div style="background: var(--surface-elevated); border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; margin-bottom: 12px;">
+                                <div class="list-item" style="border: none; border-radius: 0; margin: 0; background: transparent;">
+                                    <div class="checkbox checked">✓</div>
+                                    <span style="font-size: 12px; color: var(--brand);">▼</span>
+                                    <div class="item-info">
+                                        <div class="item-title">WeChat</div>
+                                        <div class="item-path">/Applications/WeChat.app</div>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 10px;">
+                                        <span class="badge badge-advanced">数据 · 1</span>
+                                        <span class="badge badge-caution">应用 · 1</span>
+                                        <div class="item-size">44.6 GB</div>
+                                    </div>
+                                </div>
+                                <div style="padding: 0 14px 12px 44px; display: flex; flex-direction: column; gap: 6px;">
+                                    <div class="list-item" style="margin: 0; background: var(--surface-muted); border-color: var(--border);">
+                                        <div class="checkbox checked">✓</div>
+                                        <div class="item-info">
+                                            <div class="item-title">应用数据</div>
+                                            <div class="item-path">~/Library/Containers/com.tencent.xinWeChat</div>
+                                            <div class="item-meta">
+                                                <span class="badge badge-advanced">Advanced</span>
+                                                <span style="font-size: 12px; color: var(--text-tertiary);">包含聊天记录，删除后无法恢复</span>
+                                            </div>
+                                        </div>
+                                        <div class="item-size">43.3 GB</div>
+                                    </div>
+                                    <div class="list-item" style="margin: 0; background: var(--surface-muted); border-color: var(--border);">
+                                        <div class="checkbox"></div>
+                                        <div class="item-info">
+                                            <div class="item-title">应用本体</div>
+                                            <div class="item-path">/Applications/WeChat.app</div>
+                                            <div class="item-meta">
+                                                <span class="badge badge-caution">Caution</span>
+                                                <span style="font-size: 12px; color: var(--text-tertiary);">卸载应用本身</span>
+                                            </div>
+                                        </div>
+                                        <div class="item-size">1.3 GB</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- App Group 3 (collapsed) -->
+                            <div style="background: var(--surface-elevated); border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; margin-bottom: 12px;">
+                                <div class="list-item" style="border: none; border-radius: 0; margin: 0; background: transparent;">
+                                    <div class="checkbox"></div>
+                                    <span style="font-size: 12px; color: var(--text-tertiary);">▶</span>
+                                    <div class="item-info">
+                                        <div class="item-title">Telegram</div>
+                                        <div class="item-path">/Applications/Telegram.app</div>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 10px;">
+                                        <span class="badge badge-advanced">数据 · 1</span>
+                                        <span class="badge badge-caution">应用 · 1</span>
+                                        <div class="item-size">18.7 GB</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="footer">
+                            <div class="footer-info">已选中 <strong>2</strong> 个应用的部分项目 · 可释放 <span class="footer-size">100.6 GB</span></div>
+                            <div class="toolbar">
+                                <div class="btn btn-ghost">取消</div>
+                                <div class="btn btn-danger">🗑 删除 100.6 GB</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="note">
+                <strong>设计说明</strong>：子 cell 分组的思路很好，既保留「一键卸载整个应用」的便捷性，又允许用户只清理缓存或只删除数据。新版将展开/折叠、子项类型、风险等级整合为一张卡片，视觉层级更清晰。
+            </div>
+
+            <h3>4.7 设置页面</h3>
+            <p>简洁的设置项，使用 Toggle 和二级菜单。</p>
+            <div class="mockup">
+                <div class="mockup-header">
+                    <div class="window-dot" style="background: #FF5F57;"></div>
+                    <div class="window-dot" style="background: #FEBC2E;"></div>
+                    <div class="window-dot" style="background: #28C840;"></div>
+                    <div class="window-title">maclean</div>
+                </div>
+                <div class="mockup-body">
+                    <div class="sidebar">
+                        <div class="brand">
+                            <div class="brand-icon">M</div>
+                            <div>
+                                <div class="brand-text">maclean</div>
+                                <div class="brand-version">v0.2.0</div>
+                            </div>
+                        </div>
+                        <div class="nav-item"><span class="nav-icon">🏠</span> 概览</div>
+                        <div class="nav-item"><span class="nav-icon">🗑</span> 系统清理</div>
+                        <div class="nav-item"><span class="nav-icon">📦</span> 开发缓存</div>
+                        <div class="nav-item"><span class="nav-icon">🧩</span> 应用卸载</div>
+                        <div class="nav-item"><span class="nav-icon">📁</span> 大文件</div>
+                        <div style="margin-top: auto;"><div class="nav-item active"><span class="nav-icon">⚙️</span> 设置</div></div>
+                    </div>
+                    <div class="main">
+                        <div class="main-header">
+                            <div class="main-title">设置</div>
+                        </div>
+                        <div class="content">
+                            <div class="progress-card" style="margin: 0;">
+                                <h3 style="margin-top: 0;">通用</h3>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">启动时显示菜单栏图标</div>
+                                        <div class="setting-desc">在 macOS 菜单栏常驻磁盘用量指示器</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">自动保持 sudo 会话</div>
+                                        <div class="setting-desc">避免重复输入管理员密码</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">扫描结果本地缓存</div>
+                                        <div class="setting-desc">7 天内避免重复扫描，加速启动</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                            </div>
+
+                            <div class="progress-card" style="margin: 16px 0 0 0;">
+                                <h3 style="margin-top: 0;">安全</h3>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">删除前二次确认</div>
+                                        <div class="setting-desc">Advanced 项目必须手动确认</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">合盖时禁止删除</div>
+                                        <div class="setting-desc">检测 MacBook 合盖状态，防止误触</div>
+                                    </div>
+                                    <div class="toggle on"><div class="toggle-knob"></div></div>
+                                </div>
+                            </div>
+
+                            <div class="progress-card" style="margin: 16px 0 0 0;">
+                                <h3 style="margin-top: 0;">语言</h3>
+                                <div class="setting-item">
+                                    <div>
+                                        <div class="setting-label">界面语言</div>
+                                        <div class="setting-desc">当前：简体中文</div>
+                                    </div>
+                                    <div class="btn btn-secondary">切换 English</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3>4.8 菜单栏 HUD</h3>
+            <p>常驻菜单栏，显示可释放空间与快捷操作，点击展开。</p>
+            <div class="two-col" style="max-width: 620px;">
+                <div class="menubar-hud">
+                    <div class="hud-header">
+                        <div class="hud-title">maclean</div>
+                        <div class="hud-size">可释放 36.8 GB</div>
+                    </div>
+                    <div class="hud-actions">
+                        <div class="hud-action"><span>🚀</span> 快速扫描</div>
+                        <div class="hud-action"><span>🗑</span> 清理 Safe 项目</div>
+                        <div class="hud-action"><span>📦</span> 打开主窗口</div>
+                        <div class="hud-action"><span>⚙️</span> 设置</div>
+                        <div class="hud-action" style="color: var(--text-tertiary);"><span>⏏</span> 退出</div>
+                    </div>
+                </div>
+                <div style="padding: 20px; background: var(--surface-elevated); border: 1px solid var(--border); border-radius: var(--radius-card);">
+                    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">菜单栏常态显示</div>
+                    <div style="display: inline-flex; align-items: center; gap: 6px; background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 10px; font-size: 13px;">
+                        <span>🧹</span>
+                        <span>36.8 GB</span>
+                    </div>
+                    <div style="margin-top: 16px; font-size: 12px; color: var(--text-tertiary);">
+                        使用等宽数字显示大小，数字变化时高亮一次品牌色，吸引用户点击。
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>5. egui 实现要点</h2>
+            <p>以下是图稿中各元素在 egui 中的可行实现方式，避免使用 egui 难以支持的效果。</p>
+
+            <h3>5.1 布局</h3>
+            <ul style="color: var(--text-secondary); font-size: 14px; padding-left: 20px;">
+                <li>左侧 Sidebar 使用 <code>SidePanel::left()</code>，固定宽度 220px</li>
+                <li>右侧内容区使用 <code>CentralPanel</code> + <code>ScrollArea</code></li>
+                <li>底部 Footer 使用 <code>TopBottomPanel::bottom()</code></li>
+                <li>列表项使用 <code>ui.horizontal()</code> + 固定高度 <code>Frame</code></li>
+            </ul>
+
+            <h3>5.2 样式</h3>
+            <ul style="color: var(--text-secondary); font-size: 14px; padding-left: 20px;">
+                <li>圆角：通过 <code>rounding</code> 设置 6px / 8px / 12px</li>
+                <li>边框：1px solid，颜色使用 <code>Color32::from_gray(220)</code></li>
+                <li>阴影：使用 egui 的 <code>Shadow</code>，但保持轻微（1-2px 偏移，低透明度）</li>
+                <li>图标：使用系统 emoji 或加载自定义字体图标（推荐 Phosphor / SF Symbols 字体）</li>
+                <li>背景：避免复杂渐变，使用纯色 + 浅灰边框</li>
+            </ul>
+
+            <h3>5.3 自定义绘制</h3>
+            <ul style="color: var(--text-secondary); font-size: 14px; padding-left: 20px;">
+                <li>进度条：使用 <code>ui.add(ProgressBar::new(...))</code> 并重写样式</li>
+                <li>复选框：用 <code>ui.selectable_label</code> 或自定义 <code>Response</code> 绘制方框</li>
+                <li>菜单栏 HUD：使用 <code>Window::new(...)</code> 无边框模式 + 自定义 <code>Frame</code></li>
+                <li>锁定状态：降低透明度、禁用 checkbox、添加 🔒 徽章</li>
+            </ul>
+
+            <h3>5.4 不建议在 egui 中实现的效果</h3>
+            <ul style="color: var(--text-secondary); font-size: 14px; padding-left: 20px;">
+                <li>真正的毛玻璃 / 背景模糊（性能差且跨平台不一致）</li>
+                <li>复杂的多层阴影和投影</li>
+                <li>圆角窗口（依赖系统窗口管理器，eframe 支持有限）</li>
+                <li>高保真动画（egui 是即时模式，复杂动画需要手动管理状态）</li>
+            </ul>
+
+            <div class="note">
+                <strong>核心建议</strong>：新版 UI 赢在信息层级和留白，不靠特效。egui 完全能够实现上述所有设计，重点是统一颜色变量、规范间距、避免过度装饰。
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>6. 界面标注摘要</h2>
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text-secondary);">
+                <thead>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <th style="text-align: left; padding: 10px 8px; color: var(--text);">元素</th>
+                        <th style="text-align: left; padding: 10px 8px; color: var(--text);">尺寸 / 样式</th>
+                        <th style="text-align: left; padding: 10px 8px; color: var(--text);">egui 实现</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 10px 8px;">Sidebar</td>
+                        <td style="padding: 10px 8px;">宽 220px，背景 #F2F2F5</td>
+                        <td style="padding: 10px 8px;">SidePanel::left</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 10px 8px;">卡片</td>
+                        <td style="padding: 10px 8px;">圆角 12px，白底，1px 边框</td>
+                        <td style="padding: 10px 8px;">Frame::none().rounding(12).fill(...).stroke(...)</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 10px 8px;">列表项</td>
+                        <td style="padding: 10px 8px;">高自适应，内边距 12px 14px，圆角 8px</td>
+                        <td style="padding: 10px 8px;">ui.horizontal + Frame</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 10px 8px;">按钮</td>
+                        <td style="padding: 10px 8px;">高 32px，内边距 8px 14px，圆角 8px</td>
+                        <td style="padding: 10px 8px;">Button::new + 自定义 Visuals</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 10px 8px;">微标</td>
+                        <td style="padding: 10px 8px;">胶囊形，字号 11px，粗体</td>
+                        <td style="padding: 10px 8px;">Label + Frame 圆角 999</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 10px 8px;">进度条</td>
+                        <td style="padding: 10px 8px;">高 8px，圆角 999px</td>
+                        <td style="padding: 10px 8px;">ProgressBar 或自定义 painter.rect_filled</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <td style="padding: 10px 8px;">弹窗</td>
+                        <td style="padding: 10px 8px;">宽 420-480px，白底，居中</td>
+                        <td style="padding: 10px 8px;">Window::new 或 Area + Frame 模态</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section" style="margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--border);">
+            <p style="font-size: 12px; color: var(--text-tertiary);">© maclean UI Design v1.0 · 专为 egui/eframe 跨平台实现设计 · 2026</p>
+        </div>
+    </div>
+</body>
+</html>
