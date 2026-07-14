@@ -5920,8 +5920,10 @@ fn render_overview_panel(
     // --- Summary Pills ---
     ui.add_space(5.0);
     ui.horizontal(|ui| {
+        let is_blocked = !matches!(app.confirm, ConfirmState::None);
+
         // Safe 可释放空间（主 pill）
-        egui::Frame::none()
+        let safe_resp = egui::Frame::none()
             .fill(egui::Color32::from_rgb(232, 255, 243))
             .stroke(egui::Stroke::new(1.0, SAFE_COLOR))
             .rounding(egui::Rounding::same(14.0))
@@ -5947,10 +5949,19 @@ fn render_overview_panel(
                     });
                 });
             });
+        let safe_click = ui.interact(
+            safe_resp.response.rect,
+            egui::Id::new("overview_pill_safe"),
+            egui::Sense::click(),
+        );
+        if safe_click.clicked() && !is_blocked {
+            app.tab = Tab::Overview;
+            app.list_index = 0;
+        }
         ui.add_space(10.0);
 
         // Caution pill
-        egui::Frame::none()
+        let caution_resp = egui::Frame::none()
             .fill(egui::Color32::from_rgb(255, 247, 230))
             .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
             .rounding(egui::Rounding::same(14.0))
@@ -5970,10 +5981,19 @@ fn render_overview_panel(
                     );
                 });
             });
+        let caution_click = ui.interact(
+            caution_resp.response.rect,
+            egui::Id::new("overview_pill_caution"),
+            egui::Sense::click(),
+        );
+        if caution_click.clicked() && !is_blocked {
+            app.tab = Tab::AppUninstall;
+            app.list_index = 0;
+        }
         ui.add_space(10.0);
 
         // Advanced pill
-        egui::Frame::none()
+        let advanced_resp = egui::Frame::none()
             .fill(egui::Color32::from_rgb(255, 233, 230))
             .stroke(egui::Stroke::new(1.0, ADVANCED_COLOR))
             .rounding(egui::Rounding::same(14.0))
@@ -5993,32 +6013,25 @@ fn render_overview_panel(
                     );
                 });
             });
+        let advanced_click = ui.interact(
+            advanced_resp.response.rect,
+            egui::Id::new("overview_pill_advanced"),
+            egui::Sense::click(),
+        );
+        if advanced_click.clicked() && !is_blocked {
+            app.tab = Tab::AppData;
+            app.list_index = 0;
+        }
     });
     ui.add_space(16.0);
 
     // --- 推荐清理 ---
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(app.t("overview_recommendation"))
-                .size(16.0)
-                .strong()
-                .color(TEXT_PRIMARY),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let scan_btn = ui.add_enabled(
-                !any_scanning,
-                egui::Button::new(
-                    egui::RichText::new(format!("🔄 {}", app.t("scan_all")))
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(BRAND)
-                .rounding(egui::Rounding::same(8.0)),
-            );
-            if scan_btn.clicked() {
-                start_scan_all(app, scan_rx);
-            }
-        });
-    });
+    ui.label(
+        egui::RichText::new(app.t("overview_recommendation"))
+            .size(16.0)
+            .strong()
+            .color(TEXT_PRIMARY),
+    );
     ui.add_space(4.0);
     ui.colored_label(
         TEXT_TERTIARY,
@@ -6045,13 +6058,6 @@ fn render_overview_panel(
                     .size(13.0)
                     .color(TEXT_TERTIARY),
             );
-            ui.add_space(16.0);
-            if ui
-                .button(egui::RichText::new(format!("🔍 {}", app.t("scan_all"))).size(16.0))
-                .clicked()
-            {
-                start_scan_all(app, scan_rx);
-            }
         });
     } else {
         // 一键清理按钮
