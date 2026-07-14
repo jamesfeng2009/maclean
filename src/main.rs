@@ -1495,7 +1495,13 @@ fn render_gui(
                         });
                     });
 
-                    if nav_resp.response.clicked() && matches!(app.confirm, ConfirmState::None) {
+                    // Frame 默认只响应 hover，需要单独分配 click sense 才能点击
+                    let nav_click = ui.interact(
+                        nav_resp.response.rect,
+                        egui::Id::new(("nav_click", i)),
+                        egui::Sense::click(),
+                    );
+                    if nav_click.clicked() && matches!(app.confirm, ConfirmState::None) {
                         app.tab = *tab;
                         app.list_index = 0;
                     }
