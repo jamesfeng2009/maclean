@@ -1565,20 +1565,27 @@ fn render_gui(
                 let is_scanning = matches!(app.current_scan_state(), ScanState::Scanning);
                 let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
                 if refresh_btn.clicked() {
-                    let tab_name = match app.tab {
-                        Tab::Overview | Tab::Settings => None,
-                        Tab::DevCache => Some("dev_cache"),
-                        Tab::LargeFiles => Some("large_files"),
-                        Tab::AppCache => Some("app_cache"),
-                        Tab::AppData => Some("app_data"),
-                        Tab::AppUninstall => Some("app_uninstall"),
-                        Tab::SystemOptimize => Some("system_optimize"),
-                        Tab::Apfs => Some("apfs"),
-                    };
-                    if let Some(name) = tab_name {
-                        scanner::cache::invalidate_cache(name);
+                    if app.tab == Tab::Overview {
+                        // 概览页：清空所有 Tab 缓存后扫描全部
+                        scanner::cache::invalidate_all_caches();
+                        start_scan_all(app, scan_rx);
+                    } else {
+                        let tab_name = match app.tab {
+                            Tab::Settings => None,
+                            Tab::DevCache => Some("dev_cache"),
+                            Tab::LargeFiles => Some("large_files"),
+                            Tab::AppCache => Some("app_cache"),
+                            Tab::AppData => Some("app_data"),
+                            Tab::AppUninstall => Some("app_uninstall"),
+                            Tab::SystemOptimize => Some("system_optimize"),
+                            Tab::Apfs => Some("apfs"),
+                            Tab::Overview => unreachable!(),
+                        };
+                        if let Some(name) = tab_name {
+                            scanner::cache::invalidate_cache(name);
+                        }
+                        start_scan(app, scan_rx);
                     }
-                    start_scan(app, scan_rx);
                 }
 
                 ui.add_space(4.0);
@@ -1594,7 +1601,11 @@ fn render_gui(
                     .rounding(egui::Rounding::same(8.0)),
                 );
                 if scan_button.clicked() {
-                    start_scan(app, scan_rx);
+                    if app.tab == Tab::Overview {
+                        start_scan_all(app, scan_rx);
+                    } else {
+                        start_scan(app, scan_rx);
+                    }
                 }
             });
         });
