@@ -685,23 +685,19 @@ fn scan_user_appdata_cache(base: &Path) -> Vec<ScanItem> {
                     let cache_path = sub.path();
                     let size = dir_size(&cache_path);
                     if size > 0 {
-                        let (deletable, reason, recommend, desc) = if is_safe_cache(&app_name) {
-                            (true, String::new(), Recommend::Safe,
-                             format!("{} 应用的缓存文件，可安全删除", app_name))
-                        } else {
-                            (true, String::new(), Recommend::Caution,
-                             format!("{} 应用的缓存，删除后可能需重新配置", app_name))
-                        };
                         items.push(ScanItem {
                             path: cache_path.to_string_lossy().to_string(),
                             size_bytes: size,
                             category: format!("{} 缓存", app_name),
                             selected: false,
-                            deletable,
-                            undeletable_reason: reason,
+                            deletable: true,
+                            undeletable_reason: String::new(),
                             batch_paths: Vec::new(),
-                            recommend,
-                            description: desc,
+                            recommend: Recommend::CacheOnly,
+                            description: format!(
+                                "{} 应用的缓存文件，删除后不影响使用，应用会自动重建",
+                                app_name
+                            ),
                         });
                     }
                 }
@@ -754,7 +750,7 @@ fn scan_program_files_cache_dir(base: &Path) -> Vec<ScanItem> {
                             deletable: false, // Program Files 需要管理员权限
                             undeletable_reason: "需要管理员权限删除".to_string(),
                             batch_paths: Vec::new(),
-                            recommend: Recommend::Caution,
+                            recommend: Recommend::CacheOnly,
                             description: format!(
                                 "{} 应用的日志/缓存目录（位于 Program Files，需管理员权限）",
                                 app_name
@@ -850,17 +846,6 @@ impl Scanner for WindowsAppCacheScanner {
             scan_time_ms: start.elapsed().as_millis() as u64,
         }
     }
-}
-
-/// 判断应用缓存是否安全删除
-fn is_safe_cache(app_name: &str) -> bool {
-    // 浏览器和编辑器缓存通常安全
-    let safe_apps = [
-        "Google\\Chrome", "Microsoft\\Edge", "Mozilla\\Firefox",
-        "Code", "Cursor", "JetBrains", "Postman",
-        "Discord", "Slack", "Teams",
-    ];
-    safe_apps.iter().any(|a| app_name.contains(a))
 }
 
 // =========================================================================
@@ -1012,29 +997,25 @@ impl Scanner for WindowsUninstallScanner {
                 WinProtectionLevel::None => {}
             }
 
-            let (deletable, reason, recommend, desc_suffix) = match protection {
+            let (deletable, reason, desc_suffix) = match protection {
                 WinProtectionLevel::Critical => (
                     false,
                     "系统关键应用，禁止卸载".to_string(),
-                    Recommend::Advanced,
                     " [系统保护]",
                 ),
                 WinProtectionLevel::RequiresOfficialUninstaller => (
                     false,
                     "安全软件，请使用官方卸载工具".to_string(),
-                    Recommend::Advanced,
                     " [需官方卸载工具]",
                 ),
                 WinProtectionLevel::DataProtected => (
                     true,
                     String::new(),
-                    Recommend::Caution,
                     " [⚠️ 数据保护]",
                 ),
                 WinProtectionLevel::None => (
                     true,
                     String::new(),
-                    Recommend::Caution,
                     "",
                 ),
             };
@@ -1052,7 +1033,7 @@ impl Scanner for WindowsUninstallScanner {
             };
 
             // 卸载路径标记（删除时识别）
-            let path = if app.is_uwp {
+            let uninstall_path = if app.is_uwp {
                 format!("uwp:{}", app.key_name)
             } else if app.uninstall_string.is_some() {
                 format!("uninstall:{}", app.key_name)
@@ -1066,23 +1047,38 @@ impl Scanner for WindowsUninstallScanner {
                 "未知".to_string()
             };
 
+            // 应用卸载项（Advanced）：卸载命令 + 应用本体
             items.push(ScanItem {
-                path,
+                path: uninstall_path,
                 size_bytes: size,
-                category: "应用名称".to_string(),
+                category: format!("{} (卸载)", app.name),
                 selected: false,
                 deletable,
                 undeletable_reason: reason,
                 batch_paths: Vec::new(),
-                recommend,
+                recommend: Recommend::Advanced,
                 description: format!(
-                    "{} ({}){} - 大小: {}",
+                    "{} ({}){} - 大小: {} | 卸载将删除应用及其安装目录",
                     app.name,
                     if app.is_uwp { "UWP" } else { "Win32" },
                     desc_suffix,
                     display_size
                 ),
             });
+
+            // 可卸载应用：额外拆出缓存清理项（CacheOnly）
+            if deletable {
+                let cache_items = scan_windows_app_cache(&app.name);
+                if !cache_items.is_empty() {
+                    crate::logger::info(&format!(
+                        "{} 拆出 {} 个缓存项, 共 {}",
+                        app.name,
+                        cache_items.len(),
+                        super::format_size(cache_items.iter().map(|i| i.size_bytes).sum())
+                    ));
+                }
+                items.extend(cache_items);
+            }
         }
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
@@ -1092,6 +1088,104 @@ impl Scanner for WindowsUninstallScanner {
             scan_time_ms: start.elapsed().as_millis() as u64,
         }
     }
+}
+
+/// 根据应用名扫描其缓存目录
+///
+/// 在 %LOCALAPPDATA% 和 %APPDATA% 下查找与应用名匹配的目录，
+/// 然后收集其中的 Cache / Local State 等缓存子目录。
+fn scan_windows_app_cache(app_name: &str) -> Vec<ScanItem> {
+    let home = home_dir();
+    let local_appdata = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Local"));
+    let appdata = std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Roaming"));
+
+    let mut items = Vec::new();
+    let name_variants = windows_app_name_variants(app_name);
+
+    for base in [&local_appdata, &appdata] {
+        if !base.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let app_dir = entry.path();
+            if !app_dir.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let dir_lower = dir_name.to_lowercase();
+
+            // 检查目录名是否匹配应用名变体
+            if !name_variants.iter().any(|v| dir_lower.contains(&v.to_lowercase())) {
+                continue;
+            }
+
+            // 查找缓存子目录
+            let Ok(subs) = std::fs::read_dir(&app_dir) else {
+                continue;
+            };
+            for sub in subs.flatten() {
+                let sub_name = sub.file_name().to_string_lossy().to_string();
+                if CACHE_DIR_NAMES.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
+                    let cache_path = sub.path();
+                    let size = dir_size(&cache_path);
+                    if size > 0 {
+                        items.push(ScanItem {
+                            path: cache_path.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: format!("{} 缓存", app_name),
+                            selected: false,
+                            deletable: true,
+                            undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
+                            recommend: Recommend::CacheOnly,
+                            description: format!(
+                                "{} 应用的缓存文件，删除后不影响使用，应用会自动重建",
+                                app_name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    items
+}
+
+/// 生成 Windows 应用名变体（用于匹配 AppData 目录）
+fn windows_app_name_variants(app_name: &str) -> Vec<String> {
+    let mut variants = vec![app_name.to_string()];
+
+    let lower = app_name.to_lowercase();
+    if lower != app_name {
+        variants.push(lower.clone());
+    }
+
+    // 去除空格、连字符、下划线后的紧凑名
+    let compact = app_name.replace([' ', '-', '_'], "").to_lowercase();
+    if compact != lower && !compact.is_empty() {
+        variants.push(compact);
+    }
+
+    // 去除常见后缀
+    for suffix in [" for windows", " desktop", " (64-bit)", " (32-bit)", " beta"] {
+        if lower.ends_with(suffix) {
+            let stripped = lower.strip_suffix(suffix).unwrap_or(&lower).to_string();
+            if !variants.contains(&stripped) {
+                variants.push(stripped);
+            }
+        }
+    }
+
+    variants
 }
 
 // =========================================================================
