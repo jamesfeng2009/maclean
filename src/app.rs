@@ -2,10 +2,8 @@
 //!
 //! 管理 egui GUI 应用的全部状态，包括当前 Tab、扫描结果、选中状态等。
 
-use std::path::Path;
-
-use crate::scanner::{self, ScanItem, Scanner};
 use crate::safety;
+use crate::scanner::{self, ScanItem, Scanner};
 
 /// 跨平台 Touch ID 可用性检查（macOS 专属，其他平台返回 false）
 fn touch_id_available_cross() -> bool {
@@ -34,6 +32,8 @@ fn touch_id_enabled_cross() -> bool {
 /// Tab 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    /// 概览（聚合推荐清理）
+    Overview,
     /// 开发者缓存
     DevCache,
     /// 大文件
@@ -48,12 +48,15 @@ pub enum Tab {
     SystemOptimize,
     /// APFS 快照
     Apfs,
+    /// 设置
+    Settings,
 }
 
 impl Tab {
     /// 获取 Tab 的标题（直接返回中文 &'static str）
     pub fn title(self) -> &'static str {
         match self {
+            Tab::Overview => "概览",
             Tab::DevCache => "开发者缓存",
             Tab::LargeFiles => "大文件",
             Tab::AppCache => "App缓存",
@@ -61,37 +64,52 @@ impl Tab {
             Tab::AppUninstall => "App卸载",
             Tab::SystemOptimize => "系统优化",
             Tab::Apfs => "APFS快照",
+            Tab::Settings => "设置",
         }
     }
 
     /// 所有 Tab
-    pub fn all() -> [Tab; 7] {
-        [Tab::DevCache, Tab::LargeFiles, Tab::AppCache, Tab::AppData, Tab::AppUninstall, Tab::SystemOptimize, Tab::Apfs]
+    pub fn all() -> [Tab; 9] {
+        [
+            Tab::Overview,
+            Tab::DevCache,
+            Tab::LargeFiles,
+            Tab::AppCache,
+            Tab::AppData,
+            Tab::AppUninstall,
+            Tab::SystemOptimize,
+            Tab::Apfs,
+            Tab::Settings,
+        ]
     }
 
     /// 下一个 Tab
     pub fn next(self) -> Self {
         match self {
+            Tab::Overview => Tab::DevCache,
             Tab::DevCache => Tab::LargeFiles,
             Tab::LargeFiles => Tab::AppCache,
             Tab::AppCache => Tab::AppData,
             Tab::AppData => Tab::AppUninstall,
             Tab::AppUninstall => Tab::SystemOptimize,
             Tab::SystemOptimize => Tab::Apfs,
-            Tab::Apfs => Tab::DevCache,
+            Tab::Apfs => Tab::Settings,
+            Tab::Settings => Tab::Overview,
         }
     }
 
     /// 上一个 Tab
     pub fn prev(self) -> Self {
         match self {
-            Tab::DevCache => Tab::Apfs,
+            Tab::Overview => Tab::Settings,
+            Tab::DevCache => Tab::Overview,
             Tab::LargeFiles => Tab::DevCache,
             Tab::AppCache => Tab::LargeFiles,
             Tab::AppData => Tab::AppCache,
             Tab::AppUninstall => Tab::AppData,
             Tab::SystemOptimize => Tab::AppUninstall,
             Tab::Apfs => Tab::SystemOptimize,
+            Tab::Settings => Tab::Apfs,
         }
     }
 }
@@ -131,9 +149,9 @@ pub struct App {
     /// 当前 Tab
     pub tab: Tab,
     /// 每个 Tab 的扫描结果
-    pub results: [Vec<ScanItem>; 7],
+    pub results: [Vec<ScanItem>; 9],
     /// 每个 Tab 的扫描状态
-    pub scan_states: [ScanState; 7],
+    pub scan_states: [ScanState; 9],
     /// 列表选中索引
     pub list_index: usize,
     /// 磁盘总空间（字节）
@@ -149,7 +167,7 @@ pub struct App {
     /// 是否应该退出
     pub should_quit: bool,
     /// 扫描耗时（毫秒）
-    pub scan_time_ms: [u64; 7],
+    pub scan_time_ms: [u64; 9],
     /// 语言切换（true=英文, false=中文）
     pub lang_en: bool,
     /// 删除进度：已完成的项数
@@ -205,8 +223,24 @@ pub struct App {
     pub filter_active: bool,
     /// 磁盘监控：上次检查时间（用于 5 秒间隔轮询）
     pub disk_last_check: std::time::Instant,
+    /// 当前扫描路径（显示在扫描进度 UI）
+    pub scan_current_path: String,
+    /// 当前分类过滤（按 category 前缀过滤）
+    pub filter_category: Option<String>,
     /// 是否显示残留清理弹窗（卸载后检测到残留时弹出）
     pub show_residual_dialog: bool,
+    /// 启动时显示菜单栏图标
+    pub settings_menubar_icon: bool,
+    /// 自动保持 sudo 会话
+    pub settings_keep_sudo: bool,
+    /// 扫描结果本地缓存
+    pub settings_scan_cache: bool,
+    /// 删除前二次确认（Advanced 项目）
+    pub settings_confirm_advanced: bool,
+    /// 合盖时禁止删除（macOS only）
+    pub settings_prevent_lid_close: bool,
+    /// 菜单栏 HUD 是否展开
+    pub hud_open: bool,
     /// 残留项选中状态（与残留列表一一对应，true=选中清理）
     pub residual_selected: Vec<bool>,
     /// 残留清理中（正在执行清理操作）
@@ -222,9 +256,21 @@ impl App {
         let (disk_total, disk_free) = get_disk_info();
 
         Self {
-            tab: Tab::DevCache,
-            results: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            tab: Tab::Overview,
+            results: [
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ],
             scan_states: [
+                ScanState::Idle,
+                ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
@@ -240,8 +286,16 @@ impl App {
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
             should_quit: false,
-            scan_time_ms: [0; 7],
+            scan_time_ms: [0; 9],
             lang_en: false, // 默认中文
+            settings_menubar_icon: true,
+            settings_keep_sudo: true,
+            settings_scan_cache: true,
+            settings_confirm_advanced: true,
+            settings_prevent_lid_close: true,
+            hud_open: false,
+            scan_current_path: String::new(),
+            filter_category: None,
             delete_done: 0,
             delete_total: 0,
             scan_progress: 0.0,
@@ -278,13 +332,15 @@ impl App {
     /// 获取当前 Tab 索引
     pub fn tab_index(&self) -> usize {
         match self.tab {
-            Tab::DevCache => 0,
-            Tab::LargeFiles => 1,
-            Tab::AppCache => 2,
-            Tab::AppData => 3,
-            Tab::AppUninstall => 4,
-            Tab::SystemOptimize => 5,
-            Tab::Apfs => 6,
+            Tab::Overview => 0,
+            Tab::DevCache => 1,
+            Tab::LargeFiles => 2,
+            Tab::AppCache => 3,
+            Tab::AppData => 4,
+            Tab::AppUninstall => 5,
+            Tab::SystemOptimize => 6,
+            Tab::Apfs => 7,
+            Tab::Settings => 8,
         }
     }
 
@@ -315,17 +371,28 @@ impl App {
     ///
     /// 当 `filter_query` 非空时，只返回路径、类别或描述中包含查询字符串
     /// （大小写不敏感）的项的索引。查询为空时返回所有项的索引。
+    /// 当 `filter_category` 存在时，只返回 category 前缀匹配的项。
     pub fn filtered_indices(&self) -> Vec<usize> {
         let idx = self.tab_index();
         let items = &self.results[idx];
         let query = self.filter_query.trim().to_lowercase();
-        if query.is_empty() {
-            return (0..items.len()).collect();
-        }
+        let cat_prefix = self
+            .filter_category
+            .as_deref()
+            .map(|s| s.trim().to_lowercase());
         items
             .iter()
             .enumerate()
             .filter(|(_, item)| {
+                let prefix_ok = cat_prefix.as_ref().map_or(true, |prefix| {
+                    item.category.to_lowercase().starts_with(prefix)
+                });
+                if !prefix_ok {
+                    return false;
+                }
+                if query.is_empty() {
+                    return true;
+                }
                 item.path.to_lowercase().contains(&query)
                     || item.category.to_lowercase().contains(&query)
                     || item.description.to_lowercase().contains(&query)
@@ -338,6 +405,7 @@ impl App {
     pub fn clear_filter(&mut self) {
         self.filter_query.clear();
         self.filter_active = false;
+        self.filter_category = None;
     }
 
     /// 磁盘监控：轮询检查磁盘空间（每 5 秒调用一次）
@@ -539,6 +607,11 @@ impl App {
         self.scan_states[idx] = ScanState::Scanning;
 
         let result = match self.tab {
+            Tab::Overview | Tab::Settings => scanner::ScanResult {
+                items: Vec::new(),
+                total_size: 0,
+                scan_time_ms: 0,
+            },
             Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
             Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
             #[cfg(target_os = "macos")]
@@ -555,28 +628,54 @@ impl App {
             #[cfg(not(target_os = "macos"))]
             Tab::AppCache => {
                 #[cfg(target_os = "windows")]
-                { scanner::windows_apps::WindowsAppCacheScanner::new().scan() }
+                {
+                    scanner::windows_apps::WindowsAppCacheScanner::new().scan()
+                }
                 #[cfg(not(target_os = "windows"))]
-                { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                {
+                    scanner::ScanResult {
+                        items: Vec::new(),
+                        total_size: 0,
+                        scan_time_ms: 0,
+                    }
+                }
             }
             #[cfg(not(target_os = "macos"))]
             Tab::AppData => {
                 #[cfg(target_os = "windows")]
-                { scanner::windows_apps::WindowsAppDataScanner::new().scan() }
+                {
+                    scanner::windows_apps::WindowsAppDataScanner::new().scan()
+                }
                 #[cfg(not(target_os = "windows"))]
-                { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                {
+                    scanner::ScanResult {
+                        items: Vec::new(),
+                        total_size: 0,
+                        scan_time_ms: 0,
+                    }
+                }
             }
             #[cfg(not(target_os = "macos"))]
             Tab::AppUninstall => {
                 #[cfg(target_os = "windows")]
-                { scanner::windows_apps::WindowsUninstallScanner::new().scan() }
+                {
+                    scanner::windows_apps::WindowsUninstallScanner::new().scan()
+                }
                 #[cfg(not(target_os = "windows"))]
-                { scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 } }
+                {
+                    scanner::ScanResult {
+                        items: Vec::new(),
+                        total_size: 0,
+                        scan_time_ms: 0,
+                    }
+                }
             }
             #[cfg(not(target_os = "macos"))]
-            Tab::SystemOptimize | Tab::Apfs => {
-                scanner::ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 }
-            }
+            Tab::SystemOptimize | Tab::Apfs => scanner::ScanResult {
+                items: Vec::new(),
+                total_size: 0,
+                scan_time_ms: 0,
+            },
         };
 
         let item_count = result.items.len();
@@ -586,7 +685,10 @@ impl App {
         self.results[idx] = result.items;
         crate::logger::info(&format!(
             "扫描完成 [{}]: {} 项, {}, 耗时 {}ms",
-            idx, item_count, crate::scanner::format_size(total_size), scan_time
+            idx,
+            item_count,
+            crate::scanner::format_size(total_size),
+            scan_time
         ));
         self.scan_states[idx] = ScanState::Done;
         self.list_index = 0;
@@ -672,7 +774,8 @@ impl App {
                                 continue;
                             }
                             let ss = scanner::dir_size(&sp);
-                            if ss > 10 * 1024 * 1024 { // > 10MB 的子目录才展示
+                            if ss > 10 * 1024 * 1024 {
+                                // > 10MB 的子目录才展示
                                 sub_dirs.push((sp.to_string_lossy().to_string(), ss));
                             }
                         }
@@ -711,6 +814,16 @@ impl App {
         self.current_items().iter().filter(|i| i.selected).count()
     }
 
+    /// 统计所有 Tab 中可安全释放的总大小（Safe / CacheOnly）
+    pub fn total_releasable_size(&self) -> u64 {
+        self.results
+            .iter()
+            .flat_map(|v| v.iter())
+            .filter(|i| i.deletable && i.recommend.default_selected())
+            .map(|i| i.size_bytes)
+            .sum()
+    }
+
     /// 准备删除选中的项（进入确认状态）
     pub fn prepare_delete(&mut self) {
         let selected: Vec<usize> = self
@@ -745,12 +858,17 @@ impl App {
             .map(|&i| {
                 let item = &self.results[idx][i];
                 let use_trash = match item.recommend {
-                    crate::scanner::Recommend::Safe => false,       // 缓存类：永久删除
-                    crate::scanner::Recommend::CacheOnly => false,  // 应用缓存/日志：永久删除
-                    crate::scanner::Recommend::Caution => false,    // 系统缓存：永久删除（root 属主无法移到用户废纸篓）
-                    crate::scanner::Recommend::Advanced => true,    // 大文件/高级项：移至废纸篓
+                    crate::scanner::Recommend::Safe => false, // 缓存类：永久删除
+                    crate::scanner::Recommend::CacheOnly => false, // 应用缓存/日志：永久删除
+                    crate::scanner::Recommend::Caution => false, // 系统缓存：永久删除（root 属主无法移到用户废纸篓）
+                    crate::scanner::Recommend::Advanced => true, // 大文件/高级项：移至废纸篓
                 };
-                (item.path.clone(), item.category.clone(), item.batch_paths.clone(), use_trash)
+                (
+                    item.path.clone(),
+                    item.category.clone(),
+                    item.batch_paths.clone(),
+                    use_trash,
+                )
             })
             .collect();
 
@@ -764,7 +882,13 @@ impl App {
     }
 
     /// 接收一条删除日志并更新进度
-    pub fn receive_delete_log(&mut self, log: String, path: String, category: String, success: bool) {
+    pub fn receive_delete_log(
+        &mut self,
+        log: String,
+        path: String,
+        category: String,
+        success: bool,
+    ) {
         if success {
             self.deleted_paths.push(path);
         } else {
@@ -788,6 +912,7 @@ impl App {
 
         // 失效当前 Tab 的扫描缓存，确保下次扫描看到最新数据
         let cache_name = match self.tab {
+            Tab::Overview | Tab::Settings => None,
             Tab::DevCache => Some("dev_cache"),
             Tab::LargeFiles => Some("large_files"),
             Tab::AppCache => Some("app_cache"),
@@ -805,7 +930,10 @@ impl App {
 
         self.logs.push(format!(
             "✅ {}",
-            self.tf("finish_summary", &[&success_count.to_string(), &failed_count.to_string()])
+            self.tf(
+                "finish_summary",
+                &[&success_count.to_string(), &failed_count.to_string()]
+            )
         ));
 
         // 刷新磁盘信息
@@ -889,6 +1017,7 @@ impl App {
         if lang_en {
             match key {
                 // Tab 标题
+                "tab_overview" => "Overview",
                 "tab_dev_cache" => "Dev Cache",
                 "tab_large_files" => "Large Files",
                 "tab_app_cache" => "App Cache",
@@ -896,6 +1025,24 @@ impl App {
                 "tab_app_uninstall" => "Uninstall",
                 "tab_system_optimize" => "Optimize",
                 "tab_apfs" => "APFS Snapshots",
+                "tab_settings" => "Settings",
+                "settings_general" => "General",
+                "settings_safety" => "Safety",
+                "settings_language" => "Language",
+                "setting_menubar_icon" => "Show menu bar icon on launch",
+                "setting_menubar_icon_desc" => "Display disk usage indicator in the macOS menu bar",
+                "setting_keep_sudo" => "Keep sudo session alive",
+                "setting_keep_sudo_desc" => "Avoid repeated administrator password prompts",
+                "setting_scan_cache" => "Cache scan results locally",
+                "setting_scan_cache_desc" => "Avoid re-scanning within 7 days for faster startup",
+                "setting_confirm_advanced" => "Double-check before deleting Advanced items",
+                "setting_confirm_advanced_desc" => "Advanced items require manual confirmation",
+                "setting_prevent_lid_close" => "Prevent deletion while lid is closed",
+                "setting_prevent_lid_close_desc" => "Detect MacBook clamshell state to avoid accidental deletion",
+                "setting_language" => "Interface language",
+                "setting_language_current" => "Current: Simplified Chinese",
+                "switch_to_english" => "Switch to English",
+                "switch_to_chinese" => "Switch to 中文",
                 // 按钮
                 "scan" => "Scan",
                 "delete" => "Delete",
@@ -936,8 +1083,8 @@ impl App {
                 "home_dir_label" => "Home",
                 "safe_clean" => "safe to clean",
                 "cache_only_clean" => "cache only",
-                "caution_clean" => "need caution",
-                "confirm_clean" => "need confirm",
+                "caution_clean" => "Needs Caution",
+                "confirm_clean" => "Needs Confirm",
                 // 列表
                 "category" => "Category",
                 "size" => "Size",
@@ -945,6 +1092,14 @@ impl App {
                 "unknown" => "unknown",
                 "no_items_hint" => "No items yet - click Scan to find cleanable files",
                 "click_to_start" => "Click to start",
+                // 概览
+                "overview_releasable" => "Releasable Space",
+                "overview_recommendation" => "Recommended Cleanup",
+                "overview_recommendation_hint" => "Safe items from all categories, sorted by size",
+                "overview_empty_title" => "Everything looks clean",
+                "overview_empty_hint" => "Click the Scan button at the top right to find cleanable files",
+                "scan_all" => "Scan All",
+                "one_click_clean" => "Clean",
                 "badge_undeletable" => "🔒 Undeletable",
                 // 过滤/搜索
                 "filter" => "Filter",
@@ -954,9 +1109,21 @@ impl App {
                 // 删除确认
                 "about_to_delete" => "About to delete",
                 "irreversible" => "This operation is irreversible!",
+                "confirm_subtitle" => "Deleted files cannot be recovered. Please confirm.",
+                "confirm_selected_items" => "Selected items",
+                "confirm_releasable" => "Releasable space",
+                "confirm_safe" => "Safe",
+                "confirm_caution" => "Caution",
+                "confirm_advanced" => "Advanced",
+                "confirm_admin_required" => "Administrator privileges",
+                "confirm_admin_yes" => "Required (contains root/SIP items)",
+                "confirm_admin_no" => "Not required",
                 "cleaning" => "Cleaning",
                 "cleaning_in_progress" => "Cleaning in progress",
                 "cleaning_log" => "Latest logs:",
+                "progress_background_run" => "Run in background",
+                "progress_authorize" => "Authorize and continue",
+                "deleting_subtitle" => "Completed {0} / {1} items",
                 // 系统优化
                 "optimize_click_to_scan" => "Click Scan to view available optimization tasks",
                 "optimize_safe_hint" => "Optimization tasks are safe and will not affect system stability",
@@ -1130,6 +1297,7 @@ impl App {
         } else {
             match key {
                 // Tab 标题
+                "tab_overview" => "概览",
                 "tab_dev_cache" => "开发者缓存",
                 "tab_large_files" => "大文件",
                 "tab_app_cache" => "App缓存",
@@ -1137,6 +1305,24 @@ impl App {
                 "tab_app_uninstall" => "App卸载",
                 "tab_system_optimize" => "系统优化",
                 "tab_apfs" => "APFS快照",
+                "tab_settings" => "设置",
+                "settings_general" => "通用",
+                "settings_safety" => "安全",
+                "settings_language" => "语言",
+                "setting_menubar_icon" => "启动时显示菜单栏图标",
+                "setting_menubar_icon_desc" => "在 macOS 菜单栏常驻磁盘用量指示器",
+                "setting_keep_sudo" => "自动保持 sudo 会话",
+                "setting_keep_sudo_desc" => "避免重复输入管理员密码",
+                "setting_scan_cache" => "扫描结果本地缓存",
+                "setting_scan_cache_desc" => "7 天内避免重复扫描，加速启动",
+                "setting_confirm_advanced" => "删除前二次确认",
+                "setting_confirm_advanced_desc" => "Advanced 项目必须手动确认",
+                "setting_prevent_lid_close" => "合盖时禁止删除",
+                "setting_prevent_lid_close_desc" => "检测 MacBook 合盖状态，防止误触",
+                "setting_language" => "界面语言",
+                "setting_language_current" => "当前：简体中文",
+                "switch_to_english" => "切换 English",
+                "switch_to_chinese" => "切换 中文",
                 // 按钮
                 "scan" => "扫描",
                 "delete" => "删除",
@@ -1173,8 +1359,8 @@ impl App {
                 "logs" => "日志",
                 "safe_clean" => "可安全清理",
                 "cache_only_clean" => "仅缓存可清",
-                "caution_clean" => "需谨慎确认",
-                "confirm_clean" => "需确认",
+                "caution_clean" => "需谨慎处理",
+                "confirm_clean" => "需确认删除",
                 // 列表
                 "category" => "类别",
                 "size" => "大小",
@@ -1182,6 +1368,14 @@ impl App {
                 "unknown" => "未知",
                 "no_items_hint" => "暂无数据 - 点击「扫描」查找可清理文件",
                 "click_to_start" => "点击开始",
+                // 概览
+                "overview_releasable" => "可释放空间",
+                "overview_recommendation" => "推荐清理",
+                "overview_recommendation_hint" => "聚合所有分类中的安全项，按大小排序",
+                "overview_empty_title" => "看起来一切整洁",
+                "overview_empty_hint" => "点击右上角「扫描」查找可清理文件",
+                "scan_all" => "扫描全部",
+                "one_click_clean" => "一键清理",
                 "badge_undeletable" => "🔒 不可删除",
                 // 过滤/搜索
                 "filter" => "过滤",
@@ -1191,9 +1385,21 @@ impl App {
                 // 删除确认
                 "about_to_delete" => "即将删除",
                 "irreversible" => "此操作不可逆！",
+                "confirm_subtitle" => "删除后文件将不可恢复，请确认。",
+                "confirm_selected_items" => "选中项目",
+                "confirm_releasable" => "预计释放",
+                "confirm_safe" => "Safe",
+                "confirm_caution" => "Caution",
+                "confirm_advanced" => "Advanced",
+                "confirm_admin_required" => "管理员权限",
+                "confirm_admin_yes" => "需要（含 root/SIP 项目）",
+                "confirm_admin_no" => "不需要",
                 "cleaning" => "清理中",
                 "cleaning_in_progress" => "正在执行清理",
                 "cleaning_log" => "最新日志：",
+                "progress_background_run" => "后台运行",
+                "progress_authorize" => "授权并继续",
+                "deleting_subtitle" => "已完成 {0} / {1} 项",
                 // 系统优化
                 "optimize_click_to_scan" => "点击扫描查看可用的优化任务",
                 "optimize_safe_hint" => "优化任务安全可执行，不会影响系统稳定性",
@@ -1389,10 +1595,7 @@ impl App {
 ///
 /// 执行 `df -k /` 命令，解析输出获取磁盘总量和可用空间（字节）。
 fn get_disk_info() -> (u64, u64) {
-    let output = std::process::Command::new("df")
-        .arg("-k")
-        .arg("/")
-        .output();
+    let output = std::process::Command::new("df").arg("-k").arg("/").output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);

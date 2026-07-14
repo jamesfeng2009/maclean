@@ -131,7 +131,9 @@ fn scan_application_support() -> Vec<ScanItem> {
             undeletable_reason: String::new(),
             batch_paths: Vec::new(),
             recommend: Recommend::Advanced,
-            description: "⚠️ 高风险：应用数据目录，删除后可能丢失配置、登录状态或本地数据，App 可能无法启动".to_string(),
+            description:
+                "⚠️ 高风险：应用数据目录，删除后可能丢失配置、登录状态或本地数据，App 可能无法启动"
+                    .to_string(),
         });
     }
 

@@ -77,14 +77,14 @@ const CRITICAL_BUNDLE_PREFIXES: &[&str] = &[
 ///
 /// 这些是 Apple 发布但用户可自行安装/卸载的应用。
 const APPLE_UNINSTALLABLE_PREFIXES: &[&str] = &[
-    "com.apple.dt.",         // Xcode, Instruments, FileMerge
-    "com.apple.FinalCut",    // Final Cut Pro
+    "com.apple.dt.",      // Xcode, Instruments, FileMerge
+    "com.apple.FinalCut", // Final Cut Pro
     "com.apple.Motion",
     "com.apple.Compressor",
-    "com.apple.logic",       // Logic Pro
-    "com.apple.garageband",  // GarageBand
+    "com.apple.logic",      // Logic Pro
+    "com.apple.garageband", // GarageBand
     "com.apple.iMovie",
-    "com.apple.iWork.",      // Pages, Numbers, Keynote
+    "com.apple.iWork.", // Pages, Numbers, Keynote
     "com.apple.MainStage",
     "com.apple.server.",     // macOS Server
     "com.apple.Playgrounds", // Swift Playgrounds
@@ -110,7 +110,7 @@ const SECURITY_APP_RULES: &[(&str, &[&str])] = &[
 const DATA_PROTECTED_PREFIXES: &[&str] = &[
     // 密码管理器
     "com.1password.",
-    "com.agilebits.",   // 1Password 旧 bundle ID
+    "com.agilebits.", // 1Password 旧 bundle ID
     "com.lastpass.",
     "com.dashlane.",
     "com.bitwarden.",
@@ -261,7 +261,10 @@ mod tests {
 
     #[test]
     fn test_security_vendor_name() {
-        assert_eq!(get_security_vendor("com.crowdstrike.falcon"), Some("CrowdStrike"));
+        assert_eq!(
+            get_security_vendor("com.crowdstrike.falcon"),
+            Some("CrowdStrike")
+        );
         assert_eq!(get_security_vendor("com.jamf.management"), Some("Jamf"));
         assert_eq!(get_security_vendor("com.apple.finder"), None);
     }

@@ -53,7 +53,10 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     //  第 1 层: 控制字符过滤 + 路径遍历防护
     // ================================================================
     // 拒绝包含控制字符的路径（防止注入攻击）
-    if path.chars().any(|c| c.is_control() || c == '\n' || c == '\r' || c == '\0') {
+    if path
+        .chars()
+        .any(|c| c.is_control() || c == '\n' || c == '\r' || c == '\0')
+    {
         return SafetyCheck::Danger("路径包含控制字符".to_string());
     }
 
@@ -116,10 +119,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     //  第 3 层: 系统关键目录黑名单（参考 Mole 的保护列表）
     // ================================================================
     if is_critical_system_path(&canonical_str) {
-        return SafetyCheck::Danger(format!(
-            "拒绝删除系统关键目录: {}",
-            canonical_str
-        ));
+        return SafetyCheck::Danger(format!("拒绝删除系统关键目录: {}", canonical_str));
     }
 
     // 根目录本身绝对禁止
@@ -141,51 +141,48 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // 4a. 精确匹配：只保护目录本身，允许删除其子项
     //     （这些目录的子项在白名单中按需放行，如 Containers/<bundle_id>、Preferences/<bundle_id>.plist）
     let forbidden_exact = [
-        "Library/Preferences",           // 偏好设置根目录（子项 plist 可删）
-        "Library/Containers",            // Containers 根目录（子项可删）
-        "Library/Group Containers",      // Group Containers 根目录（子项可删）
+        "Library/Preferences",             // 偏好设置根目录（子项 plist 可删）
+        "Library/Containers",              // Containers 根目录（子项可删）
+        "Library/Group Containers",        // Group Containers 根目录（子项可删）
         "Library/Saved Application State", // Saved State 根目录（子项可删）
-        "Library/HTTPStorages",          // HTTPStorages 根目录（子项可删）
-        "Library/Caches",                // Caches 根目录（子项可删）
-        "Library/Logs",                  // Logs 根目录（子项可删）
-        "Library/Application Support",   // Application Support 根目录（子项可删）
-        "Library/Cookies",               // Cookies 根目录（子项 .binarycookies 可删）
-        "Library/WebKit",                // WebKit 根目录（子项可删）
-        "Library/Application Scripts",   // Application Scripts 根目录（子项可删）
+        "Library/HTTPStorages",            // HTTPStorages 根目录（子项可删）
+        "Library/Caches",                  // Caches 根目录（子项可删）
+        "Library/Logs",                    // Logs 根目录（子项可删）
+        "Library/Application Support",     // Application Support 根目录（子项可删）
+        "Library/Cookies",                 // Cookies 根目录（子项 .binarycookies 可删）
+        "Library/WebKit",                  // WebKit 根目录（子项可删）
+        "Library/Application Scripts",     // Application Scripts 根目录（子项可删）
     ];
 
     for forbidden_suffix in &forbidden_exact {
         let forbidden_path = home.join(forbidden_suffix);
         if canonical == forbidden_path {
-            return SafetyCheck::Danger(format!(
-                "拒绝删除用户关键目录: {}",
-                canonical_str
-            ));
+            return SafetyCheck::Danger(format!("拒绝删除用户关键目录: {}", canonical_str));
         }
     }
 
     // 4b. 前缀匹配：保护目录本身及其所有子内容
     //     （这些目录的任何子路径都不允许删除）
     let forbidden_prefix = [
-        "Library/Keychains",             // 钥匙串（密码）
-        "Library/Accounts",              // 账户信息
-        "Library/Mail",                  // 邮件数据
-        "Library/Messages",              // 消息数据
-        "Library/Application Support/MobileSync",   // iOS 备份
-        "Library/Application Support/AddressBook",  // 通讯录
+        "Library/Keychains",                         // 钥匙串（密码）
+        "Library/Accounts",                          // 账户信息
+        "Library/Mail",                              // 邮件数据
+        "Library/Messages",                          // 消息数据
+        "Library/Application Support/MobileSync",    // iOS 备份
+        "Library/Application Support/AddressBook",   // 通讯录
         "Library/Application Support/CallHistoryDB", // 通话记录
         "Library/Application Support/CloudDocs",     // iCloud 文档
-        "Library/Calendars",             // 日历
-        "Library/Reminders",             // 提醒事项
-        "Library/Notes",                 // 备忘录
-        "Library/Safari",                // Safari 数据
-        "Library/Assistants",            // Siri 数据
-        "Library/Passwords",             // 密码
-        "Library/Security",              // 安全数据
-        "Library/Caches/Homebrew/Caskroom", // Homebrew 已安装应用
-        ".ssh",                          // SSH 密钥
-        ".gnupg",                        // GPG 密钥
-        ".config/git",                   // Git 配置
+        "Library/Calendars",                         // 日历
+        "Library/Reminders",                         // 提醒事项
+        "Library/Notes",                             // 备忘录
+        "Library/Safari",                            // Safari 数据
+        "Library/Assistants",                        // Siri 数据
+        "Library/Passwords",                         // 密码
+        "Library/Security",                          // 安全数据
+        "Library/Caches/Homebrew/Caskroom",          // Homebrew 已安装应用
+        ".ssh",                                      // SSH 密钥
+        ".gnupg",                                    // GPG 密钥
+        ".config/git",                               // Git 配置
     ];
 
     for forbidden_suffix in &forbidden_prefix {
@@ -194,10 +191,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         if canonical == forbidden_path
             || canonical.starts_with(&format!("{}/", forbidden_path.to_string_lossy()))
         {
-            return SafetyCheck::Danger(format!(
-                "拒绝删除用户关键目录: {}",
-                canonical_str
-            ));
+            return SafetyCheck::Danger(format!("拒绝删除用户关键目录: {}", canonical_str));
         }
     }
 
@@ -232,10 +226,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // ================================================================
     //  第 6 层: 敏感文件名检测
     // ================================================================
-    let file_name = canonical
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let file_name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     let sensitive_names = [
         ".env",
@@ -253,9 +244,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     ];
 
     for sensitive in &sensitive_names {
-        if file_name.eq_ignore_ascii_case(sensitive)
-            || canonical_str.contains(sensitive)
-        {
+        if file_name.eq_ignore_ascii_case(sensitive) || canonical_str.contains(sensitive) {
             return SafetyCheck::Warning(format!(
                 "路径包含敏感文件名 ({}): {}",
                 sensitive, canonical_str
@@ -298,7 +287,12 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
 pub fn is_simulator_running() -> bool {
     #[cfg(target_os = "macos")]
     {
-        let processes = ["Xcode", "Simulator", "CoreSimulatorService", "simdiskimaged"];
+        let processes = [
+            "Xcode",
+            "Simulator",
+            "CoreSimulatorService",
+            "simdiskimaged",
+        ];
         for proc in &processes {
             if let Ok(output) = std::process::Command::new("/usr/bin/pgrep")
                 .arg("-x")
@@ -427,8 +421,8 @@ const EDR_BUNDLE_PREFIXES: &[&str] = &[
 /// 注意：此检查不依赖 HOME 环境变量，防止 `env -u HOME` 绕过。
 pub fn is_endpoint_security_cache_path(path: &str) -> bool {
     // 只检查 /private/var/folders/ 和 /var/folders/ 下的路径
-    let is_var_folders = path.starts_with("/private/var/folders/")
-        || path.starts_with("/var/folders/");
+    let is_var_folders =
+        path.starts_with("/private/var/folders/") || path.starts_with("/var/folders/");
 
     if !is_var_folders {
         return false;
@@ -607,7 +601,10 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
         format!("{}/Library/Logs", home_str),
         // JetBrains
         format!("{}/Library/Caches/JetBrains", home_str),
-        format!("{}/Library/Application Support/JetBrains/Toolbox/apps", home_str),
+        format!(
+            "{}/Library/Application Support/JetBrains/Toolbox/apps",
+            home_str
+        ),
     ];
 
     for prefix in &global_tool_caches {

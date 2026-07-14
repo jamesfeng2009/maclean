@@ -450,7 +450,11 @@ mod tests {
     #[test]
     fn test_registry_has_50_plus_entries() {
         // 注册表本身 37 条 + 复杂扫描器 ~15 + 构建产物 8 = 60+
-        assert!(CACHE_REGISTRY.len() >= 30, "注册表至少 30 条，当前 {}", CACHE_REGISTRY.len());
+        assert!(
+            CACHE_REGISTRY.len() >= 30,
+            "注册表至少 30 条，当前 {}",
+            CACHE_REGISTRY.len()
+        );
     }
 
     #[test]
@@ -459,7 +463,11 @@ mod tests {
             assert!(!def.name.is_empty(), "名称不能为空");
             assert!(!def.macos_path.is_empty(), "{} macOS 路径为空", def.name);
             // windows_path 可以是 "N/A"（如 Nix），但不能为空
-            assert!(!def.windows_path.is_empty(), "{} Windows 路径为空", def.name);
+            assert!(
+                !def.windows_path.is_empty(),
+                "{} Windows 路径为空",
+                def.name
+            );
             assert!(!def.desc_zh.is_empty(), "{} 中文描述为空", def.name);
             assert!(!def.desc_en.is_empty(), "{} 英文描述为空", def.name);
         }

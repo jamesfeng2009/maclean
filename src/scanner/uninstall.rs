@@ -32,19 +32,61 @@ use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 /// 这些应用即使在 /Applications/ 下（非 /System/）也不应被卸载。
 /// 用于 bundle ID 检查之外的名称匹配后备保护。
 const SYSTEM_APP_NAMES: &[&str] = &[
-    "Safari", "Mail", "Notes", "Calendar", "Messages", "FaceTime",
-    "Maps", "News", "Stocks", "Weather", "Reminders", "Contacts",
-    "Preview", "TextEdit", "Calculator", "Chess", "Stickies",
-    "Time Machine", "System Preferences", "System Settings",
-    "Photo Booth", "Dictionary", "Font Book", "Grapher",
-    "Terminal", "Activity Monitor", "Disk Utility", "Keychain Access",
-    "Migration Assistant", "Console", "Automator", "Script Editor",
-    "Image Capture", "Screenshot", "QuickTime Player",
-    "VoiceOver Utility", "Audio MIDI Setup", "Digital Color Meter",
-    "ColorSync Utility", "AirPort Utility", "Bluetooth File Exchange",
-    "Tips", "Home", "App Store", "System Information", "Launchpad",
-    "Mission Control", "Find My", "Podcasts", "Music", "TV",
-    "Photos", "Books", "Freeform", "Shortcuts",
+    "Safari",
+    "Mail",
+    "Notes",
+    "Calendar",
+    "Messages",
+    "FaceTime",
+    "Maps",
+    "News",
+    "Stocks",
+    "Weather",
+    "Reminders",
+    "Contacts",
+    "Preview",
+    "TextEdit",
+    "Calculator",
+    "Chess",
+    "Stickies",
+    "Time Machine",
+    "System Preferences",
+    "System Settings",
+    "Photo Booth",
+    "Dictionary",
+    "Font Book",
+    "Grapher",
+    "Terminal",
+    "Activity Monitor",
+    "Disk Utility",
+    "Keychain Access",
+    "Migration Assistant",
+    "Console",
+    "Automator",
+    "Script Editor",
+    "Image Capture",
+    "Screenshot",
+    "QuickTime Player",
+    "VoiceOver Utility",
+    "Audio MIDI Setup",
+    "Digital Color Meter",
+    "ColorSync Utility",
+    "AirPort Utility",
+    "Bluetooth File Exchange",
+    "Tips",
+    "Home",
+    "App Store",
+    "System Information",
+    "Launchpad",
+    "Mission Control",
+    "Find My",
+    "Podcasts",
+    "Music",
+    "TV",
+    "Photos",
+    "Books",
+    "Freeform",
+    "Shortcuts",
 ];
 
 /// App 卸载扫描器
@@ -100,10 +142,7 @@ fn collect_app_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let home = home_dir();
 
-    let search_dirs = [
-        PathBuf::from("/Applications"),
-        home.join("Applications"),
-    ];
+    let search_dirs = [PathBuf::from("/Applications"), home.join("Applications")];
 
     for dir in &search_dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -155,10 +194,7 @@ fn scan_trash_apps() -> Vec<ScanItem> {
             if !is_app_bundle(&path) {
                 continue;
             }
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // 如果同名应用已在 /Applications 安装，则跳过（可能是在重装）
             if installed_names.contains(name) {
                 continue;
@@ -173,10 +209,7 @@ fn scan_trash_apps() -> Vec<ScanItem> {
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
-                description: format!(
-                    "废纸篓中的 {} 残留，可安全清理释放空间",
-                    name
-                ),
+                description: format!("废纸篓中的 {} 残留，可安全清理释放空间", name),
             });
         }
     }
@@ -203,10 +236,7 @@ fn scan_downloads_apps() -> Vec<ScanItem> {
             if !is_app_bundle(&path) {
                 continue;
             }
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // 如果同名应用已安装，说明已拷贝到 /Applications，Downloads 里的是残留
             let is_installed = installed_names.contains(name);
             let size = dir_size(&path);
@@ -218,7 +248,10 @@ fn scan_downloads_apps() -> Vec<ScanItem> {
             let desc = if is_installed {
                 format!("Downloads 中的 {}，同名应用已安装，可安全清理", name)
             } else {
-                format!("Downloads 中的 {}，未检测到同名已安装应用，请确认后再删除", name)
+                format!(
+                    "Downloads 中的 {}，未检测到同名已安装应用，请确认后再删除",
+                    name
+                )
             };
             items.push(ScanItem {
                 path: path.to_string_lossy().to_string(),
@@ -342,7 +375,11 @@ fn scan_app(app_path: &PathBuf) -> Vec<ScanItem> {
             undeletable_reason: format!("protection_official_uninstaller:{}", vendor),
             batch_paths: Vec::new(),
             recommend: Recommend::Advanced,
-            description: format!("{} 安全代理 | 应用大小 {}", vendor, format_size_local(app_size)),
+            description: format!(
+                "{} 安全代理 | 应用大小 {}",
+                vendor,
+                format_size_local(app_size)
+            ),
         });
         return items;
     }
@@ -407,10 +444,7 @@ fn scan_app(app_path: &PathBuf) -> Vec<ScanItem> {
             undeletable_reason: String::new(),
             batch_paths: cache_paths,
             recommend: Recommend::CacheOnly,
-            description: format!(
-                "{} 的缓存/日志，删除后不影响使用，应用会自动重建",
-                app_name
-            ),
+            description: format!("{} 的缓存/日志，删除后不影响使用，应用会自动重建", app_name),
         });
     }
 
@@ -565,10 +599,21 @@ fn decode_unicode_escapes(input: &str) -> String {
 /// 例如 "Visual Studio Code Insiders" → 基础名 "Visual Studio Code"
 /// "Firefox Developer Edition" → "Firefox"
 const VERSION_SUFFIXES: &[&str] = &[
-    "Nightly", "Beta", "Alpha", "Dev", "Canary",
-    "Preview", "Insider", "Insiders", "Edge",
-    "Stable", "Release", "RC", "LTS",
-    "Developer Edition", "Technology Preview",
+    "Nightly",
+    "Beta",
+    "Alpha",
+    "Dev",
+    "Canary",
+    "Preview",
+    "Insider",
+    "Insiders",
+    "Edge",
+    "Stable",
+    "Release",
+    "RC",
+    "LTS",
+    "Developer Edition",
+    "Technology Preview",
 ];
 
 /// 查找应用的关联文件
@@ -675,7 +720,10 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
 
     // 8. ~/Library/Saved Application State/<bundle_id>.savedState/
     for bid in &bundle_id_variants {
-        let p = home.join(format!("Library/Saved Application State/{}.savedState", bid));
+        let p = home.join(format!(
+            "Library/Saved Application State/{}.savedState",
+            bid
+        ));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
         }
@@ -997,8 +1045,11 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 // 不整体标记为残留，递归检测子目录
                 if is_vendor_shared_dir(&name) {
                     items.extend(scan_vendor_subdir_leftovers(
-                        &path, &installed_apps, "App残留",
-                        50 * 1024 * 1024, Recommend::Advanced,
+                        &path,
+                        &installed_apps,
+                        "App残留",
+                        50 * 1024 * 1024,
+                        Recommend::Advanced,
                     ));
                     continue;
                 }
@@ -1042,8 +1093,11 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 // 多应用共享厂商目录：递归检测子目录
                 if is_vendor_shared_dir(&name) {
                     items.extend(scan_vendor_subdir_leftovers(
-                        &path, &installed_apps, "App残留缓存",
-                        100 * 1024 * 1024, Recommend::CacheOnly,
+                        &path,
+                        &installed_apps,
+                        "App残留缓存",
+                        100 * 1024 * 1024,
+                        Recommend::CacheOnly,
                     ));
                     continue;
                 }
@@ -1130,7 +1184,10 @@ fn is_app_installed(name: &str, installed_apps: &std::collections::HashSet<Strin
 
     // 去掉常见前缀（如 com.example.）
     if let Some(stripped) = name.split('.').last() {
-        if !stripped.is_empty() && (installed_apps.contains(stripped) || installed_apps.contains(&stripped.to_lowercase())) {
+        if !stripped.is_empty()
+            && (installed_apps.contains(stripped)
+                || installed_apps.contains(&stripped.to_lowercase()))
+        {
             return true;
         }
     }
@@ -1159,8 +1216,15 @@ fn is_app_installed(name: &str, installed_apps: &std::collections::HashSet<Strin
 /// 这类目录下通常包含多个不同 App 的子目录，不应整体标记为残留
 fn is_vendor_shared_dir(name: &str) -> bool {
     let vendor_dirs = [
-        "Google", "Microsoft", "Adobe", "JetBrains", "Mozilla",
-        "Opera", "BraveSoftware", "Vivaldi", "Chromium",
+        "Google",
+        "Microsoft",
+        "Adobe",
+        "JetBrains",
+        "Mozilla",
+        "Opera",
+        "BraveSoftware",
+        "Vivaldi",
+        "Chromium",
     ];
     vendor_dirs.iter().any(|v| name.eq_ignore_ascii_case(v))
 }
@@ -1175,7 +1239,8 @@ fn scan_vendor_subdir_leftovers(
     recommend: Recommend,
 ) -> Vec<ScanItem> {
     let mut items = Vec::new();
-    let vendor_name = vendor_path.file_name()
+    let vendor_name = vendor_path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
@@ -1218,7 +1283,10 @@ fn scan_vendor_subdir_leftovers(
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
                 recommend,
-                description: format!("{} 中 {} 的残留数据（App 可能已卸载）", vendor_name, sub_name),
+                description: format!(
+                    "{} 中 {} 的残留数据（App 可能已卸载）",
+                    vendor_name, sub_name
+                ),
             });
         }
     }
@@ -1228,9 +1296,17 @@ fn scan_vendor_subdir_leftovers(
 
 /// 检测带版本号的 App 目录（如 AndroidStudio2025.1.3 → Android Studio）
 fn is_versioned_app_dir(name: &str, installed_apps: &std::collections::HashSet<String>) -> bool {
-    let name_alnum: String = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let name_alnum: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
     for app in installed_apps {
-        let app_alnum: String = app.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        let app_alnum: String = app
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase();
         // 至少 4 个字符前缀匹配，避免误判
         if app_alnum.len() >= 4 && name_alnum.starts_with(&app_alnum) {
             return true;
@@ -1242,12 +1318,33 @@ fn is_versioned_app_dir(name: &str, installed_apps: &std::collections::HashSet<S
 /// 判断是否为系统级 Application Support 目录（不应标记为残留）
 fn is_system_app_support_dir(name: &str) -> bool {
     let system_dirs = [
-        "Apple", "AppleSetup", "com.apple", "CrashReporter", "Dock",
-        "FaceTime", "iCloud", "KeyboardServices", "MobileSync",
-        "SyncServices", "AddressBook", "Calendar", "Mail", "Messages",
-        "Notes", "Reminders", "Safari", "Siri", "Spotlight",
-        "System Preferences", "TelephonyUtilities", "WebKit",
-        "Homebrew", "JetBrains", "CoreSimulator", "Caches", "CloudDocs",
+        "Apple",
+        "AppleSetup",
+        "com.apple",
+        "CrashReporter",
+        "Dock",
+        "FaceTime",
+        "iCloud",
+        "KeyboardServices",
+        "MobileSync",
+        "SyncServices",
+        "AddressBook",
+        "Calendar",
+        "Mail",
+        "Messages",
+        "Notes",
+        "Reminders",
+        "Safari",
+        "Siri",
+        "Spotlight",
+        "System Preferences",
+        "TelephonyUtilities",
+        "WebKit",
+        "Homebrew",
+        "JetBrains",
+        "CoreSimulator",
+        "Caches",
+        "CloudDocs",
     ];
 
     for sys in &system_dirs {

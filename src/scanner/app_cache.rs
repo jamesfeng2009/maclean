@@ -146,7 +146,10 @@ fn scan_containers() -> Vec<ScanItem> {
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
-                description: format!("{} 的应用数据（含文档、聊天记录等），删除可能导致数据丢失", app_name),
+                description: format!(
+                    "{} 的应用数据（含文档、聊天记录等），删除可能导致数据丢失",
+                    app_name
+                ),
             });
         }
     }
@@ -159,11 +162,7 @@ fn scan_containers() -> Vec<ScanItem> {
 /// 通用方案：取 bundle ID 最后一段作为名称（如 com.tencent.xinWeChat → xinWeChat）。
 /// 不硬编码任何特定 App 名称，适用于所有应用。
 fn bundle_id_to_display_name(bundle_id: &str) -> String {
-    bundle_id
-        .split('.')
-        .last()
-        .unwrap_or(bundle_id)
-        .to_string()
+    bundle_id.split('.').last().unwrap_or(bundle_id).to_string()
 }
 
 // =========================================================================
@@ -198,10 +197,7 @@ fn scan_group_containers() -> Vec<ScanItem> {
             };
 
             if size >= CONTAINER_MIN {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let display = group_container_display_name(name);
                 Some((caches, size, display))
             } else {
@@ -217,8 +213,8 @@ fn scan_group_containers() -> Vec<ScanItem> {
             category: display,
             selected: false,
             deletable: true,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
             recommend: Recommend::Caution,
             description: "应用组缓存，删除后可能需重新配置".to_string(),
         });
@@ -252,49 +248,87 @@ fn group_container_display_name(id: &str) -> String {
 /// - 开发工具（Claude, Antigravity, Qoder 等）
 const CACHE_DIR_NAMES: &[&str] = &[
     // === 通用缓存 ===
-    "Cache", "Caches", "cache", "caches",
-    "CachedData", "CachedExtensions", "CachedExtensionVSIXs",
-    "Cache_Data", "CacheData", "CacheStorage", "cacheStorage",
-    "Application Cache", "application_cache",
+    "Cache",
+    "Caches",
+    "cache",
+    "caches",
+    "CachedData",
+    "CachedExtensions",
+    "CachedExtensionVSIXs",
+    "Cache_Data",
+    "CacheData",
+    "CacheStorage",
+    "cacheStorage",
+    "Application Cache",
+    "application_cache",
     // === Electron / Chromium 缓存 ===
-    "Code Cache", "CodeCache", "code_cache",
-    "GPUCache", "gpu_cache",
-    "DawnGraphiteCache", "DawnWebGPUCache", "DawnCache",
-    "GrShaderCache", "GraphiteDawnCache",
-    "ShaderCache", "shader_cache", "shadercache",
+    "Code Cache",
+    "CodeCache",
+    "code_cache",
+    "GPUCache",
+    "gpu_cache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "DawnCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "ShaderCache",
+    "shader_cache",
+    "shadercache",
     // 注意：Service Worker / ServiceWorker / WebStorage 不在此列表
     // 这些目录包含用户数据（PWA 注册信息、Web Storage），不应被清理工具触碰
     // 浏览器缓存清理由 scan_browser_caches() 专门处理 Service Worker/CacheStorage 子目录
     "Crashpad", // Chromium 崩溃报告（Crashpad/completed）
     // === 浏览器特有缓存 ===
     "cache2", // Firefox profile cache
-    "component_crx_cache", "extensions_crx_cache", "crx_cache",
-    "OptGuideOnDeviceModel", "OptGuideOnDeviceClassifierModel",
+    "component_crx_cache",
+    "extensions_crx_cache",
+    "crx_cache",
+    "OptGuideOnDeviceModel",
+    "OptGuideOnDeviceClassifierModel",
     // === Web 缓存 ===
-    "webcache", "webcache2",
-    "browser_cache", "BrowserCache",
-    "NetworkCache", "network_cache",
+    "webcache",
+    "webcache2",
+    "browser_cache",
+    "BrowserCache",
+    "NetworkCache",
+    "network_cache",
     // === 日志 ===
-    "logs", "Logs", "log",
+    "logs",
+    "Logs",
+    "log",
     "holmeslogs", // DingTalk
     // === 临时文件 ===
-    "tmp", "Temp", "temp", "T",
+    "tmp",
+    "Temp",
+    "temp",
+    "T",
     // === 崩溃报告 ===
-    "crash-reports", "CrashReporter", "CrashReports",
-    "SentryCrash", "sentry-crash", "sentry",
+    "crash-reports",
+    "CrashReporter",
+    "CrashReports",
+    "SentryCrash",
+    "sentry-crash",
+    "sentry",
     // === 媒体缓存 ===
-    "thumbnails", "thumbnail-cache",
-    "Media Cache Files", "MediaCache",
-    "videoCache", "VideoCache",
+    "thumbnails",
+    "thumbnail-cache",
+    "Media Cache Files",
+    "MediaCache",
+    "videoCache",
+    "VideoCache",
     "CacheClip", // DaVinci Resolve
     // === 游戏 / 工具缓存 ===
-    "htmlcache", // Steam web cache
-    "appcache", // Steam app cache
-    "depotcache", // Steam depot cache
+    "htmlcache",     // Steam web cache
+    "appcache",      // Steam app cache
+    "depotcache",    // Steam depot cache
     "stremio-cache", // Stremio
-    "DictUpdate", // WeType 输入法
+    "DictUpdate",    // WeType 输入法
     // === 通信应用缓存（QQ Music 等）===
-    "iRRCache", "iCache", "iTemp", "iLog",
+    "iRRCache",
+    "iCache",
+    "iTemp",
+    "iLog",
     // === 其他 ===
     "Photos.cache", // Address Book
 ];
@@ -364,10 +398,7 @@ fn scan_app_support_caches() -> Vec<ScanItem> {
     for (path, size) in cache_dirs {
         // 从路径中提取 App 名称（Application Support/<AppName>/.../<CacheDir>）
         let app_name = extract_app_name_from_path(&path, &app_support);
-        let dir_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("缓存");
+        let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("缓存");
 
         items.push(ScanItem {
             path: path.to_string_lossy().to_string(),
@@ -378,10 +409,7 @@ fn scan_app_support_caches() -> Vec<ScanItem> {
             undeletable_reason: String::new(),
             batch_paths: Vec::new(),
             recommend: Recommend::Safe,
-            description: format!(
-                "{} 的 {} 目录，删除后自动重建",
-                app_name, dir_name
-            ),
+            description: format!("{} 的 {} 目录，删除后自动重建", app_name, dir_name),
         });
     }
 
@@ -454,8 +482,8 @@ fn scan_system_caches() -> Vec<ScanItem> {
             category: format!("系统缓存-{}", name),
             selected: false,
             deletable: true,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
             recommend: Recommend::Safe,
             description: "系统缓存目录，可安全删除".to_string(),
         });
@@ -483,8 +511,8 @@ fn scan_logs() -> Vec<ScanItem> {
                 category: "系统日志".to_string(),
                 selected: false,
                 deletable: true,
-                            undeletable_reason: String::new(),
-                            batch_paths: Vec::new(),
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
                 recommend: Recommend::Safe,
                 description: "系统日志文件，可安全删除".to_string(),
             });

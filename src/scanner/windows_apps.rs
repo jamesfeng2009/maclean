@@ -30,7 +30,10 @@ static SCAN_ALL_DISKS: AtomicBool = AtomicBool::new(false);
 /// 设置是否扫描全部磁盘
 pub fn set_scan_all_disks(enabled: bool) {
     SCAN_ALL_DISKS.store(enabled, Ordering::Relaxed);
-    crate::logger::info(&format!("磁盘扫描配置: {}", if enabled { "全部磁盘" } else { "仅 C 盘" }));
+    crate::logger::info(&format!(
+        "磁盘扫描配置: {}",
+        if enabled { "全部磁盘" } else { "仅 C 盘" }
+    ));
 }
 
 /// 获取当前磁盘扫描配置
@@ -123,17 +126,40 @@ const SYSTEM_NAME_KEYWORDS: &[&str] = &[
 /// 匹配应用名或发布者。厂商名稳定，比应用名少很多
 /// （一家厂商可能发布多款安全产品，如 ESET NOD32 / ESET Internet Security）。
 const SECURITY_VENDOR_KEYWORDS: &[&str] = &[
-    "CrowdStrike", "SentinelOne", "Sentinel Labs", "ESET", "Kaspersky",
-    "McAfee", "Norton", "Bitdefender", "Trend Micro", "Sophos",
-    "Carbon Black", "Cylance", "Trellix", "Jamf", "Palo Alto",
-    "Fortinet", "Symantec", "Webroot", "Malwarebytes", "Tanium",
+    "CrowdStrike",
+    "SentinelOne",
+    "Sentinel Labs",
+    "ESET",
+    "Kaspersky",
+    "McAfee",
+    "Norton",
+    "Bitdefender",
+    "Trend Micro",
+    "Sophos",
+    "Carbon Black",
+    "Cylance",
+    "Trellix",
+    "Jamf",
+    "Palo Alto",
+    "Fortinet",
+    "Symantec",
+    "Webroot",
+    "Malwarebytes",
+    "Tanium",
 ];
 
 /// 安全软件类别关键词（匹配应用名，覆盖未列出的厂商）
 const SECURITY_CATEGORY_KEYWORDS: &[&str] = &[
-    "antivirus", "anti-virus", "anti malware", "anti-malware",
-    "endpoint protection", "endpoint security", "internet security",
-    "total security", "firewall", "mdm agent",
+    "antivirus",
+    "anti-virus",
+    "anti malware",
+    "anti-malware",
+    "endpoint protection",
+    "endpoint security",
+    "internet security",
+    "total security",
+    "firewall",
+    "mdm agent",
 ];
 
 /// 数据保护功能类别关键词（按功能类别，不枚举具体应用名）
@@ -142,9 +168,16 @@ const SECURITY_CATEGORY_KEYWORDS: &[&str] = &[
 /// IM/云盘等应用通过数据目录大小启发式检测，无需枚举。
 const DATA_PROTECTED_KEYWORDS: &[&str] = &[
     // 密码/认证
-    "password", "authenticator", "wallet", "vault", "keepass",
+    "password",
+    "authenticator",
+    "wallet",
+    "vault",
+    "keepass",
     // 输入法
-    "输入法", "input method", "小狼毫", "rime",
+    "输入法",
+    "input method",
+    "小狼毫",
+    "rime",
 ];
 
 /// 数据保护的数据目录大小阈值（字节）
@@ -200,7 +233,10 @@ fn is_critical_system_app(app: &WindowsAppInfo) -> bool {
     // 规则 2: 安装在系统目录
     if let Some(ref loc) = app.install_location {
         let loc_lower = loc.to_lowercase();
-        if SYSTEM_INSTALL_PATH_PREFIXES.iter().any(|p| loc_lower.starts_with(p)) {
+        if SYSTEM_INSTALL_PATH_PREFIXES
+            .iter()
+            .any(|p| loc_lower.starts_with(p))
+        {
             return true;
         }
     }
@@ -213,7 +249,10 @@ fn is_critical_system_app(app: &WindowsAppInfo) -> bool {
         .unwrap_or(false);
     if is_microsoft {
         let name_lower = app.name.to_lowercase();
-        if SYSTEM_NAME_KEYWORDS.iter().any(|kw| name_lower.contains(kw)) {
+        if SYSTEM_NAME_KEYWORDS
+            .iter()
+            .any(|kw| name_lower.contains(kw))
+        {
             return true;
         }
     }
@@ -242,7 +281,10 @@ fn is_security_app(app: &WindowsAppInfo) -> bool {
 
     // 规则 2: 安全类别关键词（仅匹配 name）
     let name_lower = app.name.to_lowercase();
-    if SECURITY_CATEGORY_KEYWORDS.iter().any(|kw| name_lower.contains(kw)) {
+    if SECURITY_CATEGORY_KEYWORDS
+        .iter()
+        .any(|kw| name_lower.contains(kw))
+    {
         return true;
     }
 
@@ -258,7 +300,10 @@ fn is_security_app(app: &WindowsAppInfo) -> bool {
 fn is_data_protected_app(app: &WindowsAppInfo) -> bool {
     // 规则 1: 功能类别关键词
     let name_lower = app.name.to_lowercase();
-    if DATA_PROTECTED_KEYWORDS.iter().any(|kw| name_lower.contains(kw)) {
+    if DATA_PROTECTED_KEYWORDS
+        .iter()
+        .any(|kw| name_lower.contains(kw))
+    {
         return true;
     }
 
@@ -336,9 +381,7 @@ fn scan_registry_uninstall() -> Vec<WindowsAppInfo> {
 
     for reg_path in &reg_paths {
         // 列出所有子键
-        let output = Command::new("reg")
-            .args(["query", reg_path])
-            .output();
+        let output = Command::new("reg").args(["query", reg_path]).output();
         if let Ok(out) = output {
             let stdout = String::from_utf8_lossy(&out.stdout);
             for line in stdout.lines() {
@@ -365,9 +408,7 @@ fn scan_registry_uninstall() -> Vec<WindowsAppInfo> {
 /// 查询单个注册表键的应用信息
 fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
     let full_path = format!("{}\\{}", parent_path, key_name);
-    let output = Command::new("reg")
-        .args(["query", &full_path])
-        .output();
+    let output = Command::new("reg").args(["query", &full_path]).output();
     let out = output.ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
 
@@ -461,7 +502,8 @@ fn parse_reg_line(line: &str, field: &str) -> Option<String> {
 
 /// 扫描 UWP/Store 应用（通过 PowerShell）
 fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
-    let ps_cmd = "Get-AppxPackage | Select-Object Name, PackageFullName, InstallLocation | ConvertTo-Json";
+    let ps_cmd =
+        "Get-AppxPackage | Select-Object Name, PackageFullName, InstallLocation | ConvertTo-Json";
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
         .output();
@@ -476,9 +518,20 @@ fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
                 vec![json]
             };
             for item in arr {
-                let name = item.get("Name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let full_name = item.get("PackageFullName").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let install = item.get("InstallLocation").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let name = item
+                    .get("Name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let full_name = item
+                    .get("PackageFullName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let install = item
+                    .get("InstallLocation")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 if name.is_empty() {
                     continue;
                 }
@@ -486,7 +539,10 @@ fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
                     name,
                     install_location: install,
                     uninstall_string: Some(format!("Remove-AppxPackage -Package {}", full_name)),
-                    quiet_uninstall_string: Some(format!("Remove-AppxPackage -Package {}", full_name)),
+                    quiet_uninstall_string: Some(format!(
+                        "Remove-AppxPackage -Package {}",
+                        full_name
+                    )),
                     estimated_size: None,
                     publisher: None,
                     key_name: full_name,
@@ -632,7 +688,8 @@ pub fn get_installed_apps() -> Vec<WindowsAppInfo> {
 /// 用于卸载时获取应用名称和安装路径，以支持干净卸载（注册表 + 环境变量清理）。
 pub fn find_app_by_key(key_name: &str) -> Option<WindowsAppInfo> {
     let apps = get_installed_apps();
-    apps.into_iter().find(|a| a.key_name.eq_ignore_ascii_case(key_name))
+    apps.into_iter()
+        .find(|a| a.key_name.eq_ignore_ascii_case(key_name))
 }
 
 // =========================================================================
@@ -652,7 +709,13 @@ impl WindowsAppCacheScanner {
 
 /// 缓存目录名模式（%LOCALAPPDATA% / %APPDATA% 下）
 const CACHE_DIR_NAMES: &[&str] = &[
-    "Cache", "cache", "Caches", "caches", "GPUCache", "Code Cache", "Service Worker",
+    "Cache",
+    "cache",
+    "Caches",
+    "caches",
+    "GPUCache",
+    "Code Cache",
+    "Service Worker",
 ];
 
 /// Program Files 下的日志/缓存目录名模式
@@ -681,7 +744,10 @@ fn scan_user_appdata_cache(base: &Path) -> Vec<ScanItem> {
         if let Ok(sub_entries) = std::fs::read_dir(&app_dir) {
             for sub in sub_entries.flatten() {
                 let sub_name = sub.file_name().to_string_lossy().to_string();
-                if CACHE_DIR_NAMES.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
+                if CACHE_DIR_NAMES
+                    .iter()
+                    .any(|&cn| sub_name.eq_ignore_ascii_case(cn))
+                {
                     let cache_path = sub.path();
                     let size = dir_size(&cache_path);
                     if size > 0 {
@@ -737,7 +803,10 @@ fn scan_program_files_cache_dir(base: &Path) -> Vec<ScanItem> {
         if let Ok(sub_entries) = std::fs::read_dir(&app_dir) {
             for sub in sub_entries.flatten() {
                 let sub_name = sub.file_name().to_string_lossy().to_string();
-                if PF_CACHE_NAMES.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn)) {
+                if PF_CACHE_NAMES
+                    .iter()
+                    .any(|&cn| sub_name.eq_ignore_ascii_case(cn))
+                {
                     let cache_path = sub.path();
                     let size = dir_size(&cache_path);
                     if size > 1024 * 1024 {
@@ -802,7 +871,11 @@ impl Scanner for WindowsAppCacheScanner {
         crate::logger::info(&format!(
             "App缓存并行扫描开始: AppData 目录 2 个, Program Files 目录 {} 个 (磁盘配置: {})",
             pf_dirs.len(),
-            if should_scan_all_disks() { "全部磁盘" } else { "仅 C 盘" }
+            if should_scan_all_disks() {
+                "全部磁盘"
+            } else {
+                "仅 C 盘"
+            }
         ));
 
         // 并行扫描：%LOCALAPPDATA%、%APPDATA%、Program Files 各一个线程
@@ -865,9 +938,18 @@ impl WindowsAppDataScanner {
 
 /// App 数据扫描时跳过的系统目录
 const APPDATA_SKIP_DIRS: &[&str] = &[
-    "Microsoft", "Packages", "ConnectedDevicesPlatform", "Temp",
-    "CrashDumps", "D3DSCache", "DXCache", "NVIDIA", "AMD",
-    "IconCache.db", "cache", "Cache",
+    "Microsoft",
+    "Packages",
+    "ConnectedDevicesPlatform",
+    "Temp",
+    "CrashDumps",
+    "D3DSCache",
+    "DXCache",
+    "NVIDIA",
+    "AMD",
+    "IconCache.db",
+    "cache",
+    "Cache",
 ];
 
 /// 扫描 AppData 目录下的应用数据（%LOCALAPPDATA% 或 %APPDATA%）
@@ -889,7 +971,10 @@ fn scan_user_appdata_data(base: &Path) -> Vec<ScanItem> {
         let app_name = entry.file_name().to_string_lossy().to_string();
 
         // 跳过系统目录
-        if APPDATA_SKIP_DIRS.iter().any(|&s| app_name.eq_ignore_ascii_case(s)) {
+        if APPDATA_SKIP_DIRS
+            .iter()
+            .any(|&s| app_name.eq_ignore_ascii_case(s))
+        {
             continue;
         }
 
@@ -902,7 +987,8 @@ fn scan_user_appdata_data(base: &Path) -> Vec<ScanItem> {
                 category: format!("{} 数据", app_name),
                 selected: false,
                 deletable: false, // App 数据默认不可删除（高风险）
-                undeletable_reason: "应用数据删除可能导致应用配置丢失，请确认后手动删除".to_string(),
+                undeletable_reason: "应用数据删除可能导致应用配置丢失，请确认后手动删除"
+                    .to_string(),
                 batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
                 description: format!(
@@ -977,7 +1063,10 @@ impl Scanner for WindowsUninstallScanner {
         let start = std::time::Instant::now();
         crate::logger::info("Windows 卸载扫描开始");
         let apps = get_installed_apps();
-        crate::logger::info(&format!("发现 {} 个已安装应用（注册表 + UWP + Program Files 直接扫描）", apps.len()));
+        crate::logger::info(&format!(
+            "发现 {} 个已安装应用（注册表 + UWP + Program Files 直接扫描）",
+            apps.len()
+        ));
         let mut items = Vec::new();
 
         for app in apps {
@@ -989,35 +1078,31 @@ impl Scanner for WindowsUninstallScanner {
                     crate::logger::info(&format!("保护检测: {} -> Critical (系统关键)", app.name));
                 }
                 WinProtectionLevel::RequiresOfficialUninstaller => {
-                    crate::logger::info(&format!("保护检测: {} -> RequiresOfficialUninstaller", app.name));
+                    crate::logger::info(&format!(
+                        "保护检测: {} -> RequiresOfficialUninstaller",
+                        app.name
+                    ));
                 }
                 WinProtectionLevel::DataProtected => {
-                    crate::logger::info(&format!("保护检测: {} -> DataProtected (数据保护)", app.name));
+                    crate::logger::info(&format!(
+                        "保护检测: {} -> DataProtected (数据保护)",
+                        app.name
+                    ));
                 }
                 WinProtectionLevel::None => {}
             }
 
             let (deletable, reason, desc_suffix) = match protection {
-                WinProtectionLevel::Critical => (
-                    false,
-                    "系统关键应用，禁止卸载".to_string(),
-                    " [系统保护]",
-                ),
+                WinProtectionLevel::Critical => {
+                    (false, "系统关键应用，禁止卸载".to_string(), " [系统保护]")
+                }
                 WinProtectionLevel::RequiresOfficialUninstaller => (
                     false,
                     "安全软件，请使用官方卸载工具".to_string(),
                     " [需官方卸载工具]",
                 ),
-                WinProtectionLevel::DataProtected => (
-                    true,
-                    String::new(),
-                    " [⚠️ 数据保护]",
-                ),
-                WinProtectionLevel::None => (
-                    true,
-                    String::new(),
-                    "",
-                ),
+                WinProtectionLevel::DataProtected => (true, String::new(), " [⚠️ 数据保护]"),
+                WinProtectionLevel::None => (true, String::new(), ""),
             };
 
             // 计算大小
@@ -1180,7 +1265,10 @@ fn scan_windows_app_data_and_cache(app_name: &str) -> (Vec<String>, u64, Vec<Str
             let dir_lower = dir_name.to_lowercase();
 
             // 检查目录名是否匹配应用名变体
-            if !name_variants.iter().any(|v| dir_lower.contains(&v.to_lowercase())) {
+            if !name_variants
+                .iter()
+                .any(|v| dir_lower.contains(&v.to_lowercase()))
+            {
                 continue;
             }
 
@@ -1193,7 +1281,9 @@ fn scan_windows_app_data_and_cache(app_name: &str) -> (Vec<String>, u64, Vec<Str
                 let sub_name = sub.file_name().to_string_lossy().to_string();
 
                 if sub_path.is_dir()
-                    && CACHE_DIR_NAMES.iter().any(|&cn| sub_name.eq_ignore_ascii_case(cn))
+                    && CACHE_DIR_NAMES
+                        .iter()
+                        .any(|&cn| sub_name.eq_ignore_ascii_case(cn))
                 {
                     // 缓存子目录
                     let size = dir_size(&sub_path);
@@ -1236,7 +1326,13 @@ fn windows_app_name_variants(app_name: &str) -> Vec<String> {
     }
 
     // 去除常见后缀
-    for suffix in [" for windows", " desktop", " (64-bit)", " (32-bit)", " beta"] {
+    for suffix in [
+        " for windows",
+        " desktop",
+        " (64-bit)",
+        " (32-bit)",
+        " beta",
+    ] {
         if lower.ends_with(suffix) {
             let stripped = lower.strip_suffix(suffix).unwrap_or(&lower).to_string();
             if !variants.contains(&stripped) {
@@ -1301,9 +1397,7 @@ fn uninstall_win32(key_name: &str) -> (bool, String) {
 
     for reg_path in &reg_paths {
         let full_path = format!("{}\\{}", reg_path, key_name);
-        let output = Command::new("reg")
-            .args(["query", &full_path])
-            .output();
+        let output = Command::new("reg").args(["query", &full_path]).output();
         if let Ok(out) = output {
             let stdout = String::from_utf8_lossy(&out.stdout);
 
@@ -1359,8 +1453,11 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
     // 如果已有静默参数，直接使用原始参数
     let has_silent = args.iter().any(|a| {
         let lower = a.to_lowercase();
-        lower == "/s" || lower == "/silent" || lower == "/quiet"
-            || lower == "/verysilent" || lower == "--silent"
+        lower == "/s"
+            || lower == "/silent"
+            || lower == "/quiet"
+            || lower == "/verysilent"
+            || lower == "--silent"
     });
 
     let full_args: Vec<String> = if has_silent {
@@ -1372,7 +1469,11 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
     };
 
     // 尝试 1: 直接执行（可能因权限不足失败）
-    crate::logger::info(&format!("执行卸载命令: {} {}", exe_path, full_args.join(" ")));
+    crate::logger::info(&format!(
+        "执行卸载命令: {} {}",
+        exe_path,
+        full_args.join(" ")
+    ));
     let output = Command::new(&exe_path).args(&full_args).output();
     match output {
         Ok(out) if out.status.success() => {
@@ -1380,7 +1481,10 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
             return (true, format!("应用 {} 已卸载", exe_path));
         }
         Ok(out) => {
-            crate::logger::warn(&format!("直接执行失败 (exit={}), 尝试 PowerShell 提权", out.status.code().unwrap_or(-1)));
+            crate::logger::warn(&format!(
+                "直接执行失败 (exit={}), 尝试 PowerShell 提权",
+                out.status.code().unwrap_or(-1)
+            ));
             // 尝试 2: 用 PowerShell Start-Process 提权执行
             let ps_result = try_powershell_elevated(&exe_path, &full_args);
             if ps_result.0 {
@@ -1409,7 +1513,10 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
             if ps_result.0 {
                 return ps_result;
             }
-            (false, format!("执行卸载程序失败（直接执行和提权均失败）: {}", e))
+            (
+                false,
+                format!("执行卸载程序失败（直接执行和提权均失败）: {}", e),
+            )
         }
     }
 }
@@ -1433,8 +1540,13 @@ fn execute_msi_uninstall(cmd_str: &str) -> (bool, String) {
                         let parts: Vec<&str> = passive_cmd.split_whitespace().collect();
                         let output = Command::new(parts[0]).args(&parts[1..]).output();
                         match output {
-                            Ok(o) if o.status.success() => (true, format!("MSI 应用 {} 已卸载", product_code)),
-                            Ok(o) => (false, format!("MSI 卸载失败: {}", String::from_utf8_lossy(&o.stderr))),
+                            Ok(o) if o.status.success() => {
+                                (true, format!("MSI 应用 {} 已卸载", product_code))
+                            }
+                            Ok(o) => (
+                                false,
+                                format!("MSI 卸载失败: {}", String::from_utf8_lossy(&o.stderr)),
+                            ),
                             Err(e) => (false, format!("执行 msiexec 失败: {}", e)),
                         }
                     }
@@ -1467,7 +1579,9 @@ fn detect_silent_flags(exe_path: &str, existing_args: &[String]) -> Vec<&'static
 
     // InstallShield: setup.exe 且带 -runfromtemp 或类似参数
     if (path_lower.ends_with("setup.exe") || path_lower.ends_with("_is1.exe"))
-        && existing_args.iter().any(|a| a.contains("-runfromtemp") || a.contains("-removeonly"))
+        && existing_args
+            .iter()
+            .any(|a| a.contains("-runfromtemp") || a.contains("-removeonly"))
     {
         return vec!["/s"];
     }
@@ -1500,11 +1614,21 @@ fn try_powershell_elevated(exe_path: &str, args: &[String]) -> (bool, String) {
             let exit_code: i32 = stdout.parse().unwrap_or(-1);
             if out.status.success() && exit_code == 0 {
                 crate::logger::info(&format!("PowerShell 提权卸载成功: {}", exe_path));
-                (true, format!("应用 {} 已通过 PowerShell 提权卸载", exe_path))
+                (
+                    true,
+                    format!("应用 {} 已通过 PowerShell 提权卸载", exe_path),
+                )
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                crate::logger::warn(&format!("PowerShell 提权卸载失败 (exit={}): {}", exit_code, stderr.trim()));
-                (false, format!("PowerShell 提权卸载失败 (exit={}): {}", exit_code, stderr))
+                crate::logger::warn(&format!(
+                    "PowerShell 提权卸载失败 (exit={}): {}",
+                    exit_code,
+                    stderr.trim()
+                ));
+                (
+                    false,
+                    format!("PowerShell 提权卸载失败 (exit={}): {}", exit_code, stderr),
+                )
             }
         }
         Err(e) => (false, format!("执行 PowerShell 失败: {}", e)),
@@ -1724,9 +1848,9 @@ pub fn scan_registry_residual(app_name: &str) -> Vec<RegistryResidual> {
                 let key_lower = key_name.to_lowercase();
 
                 // 检查是否匹配应用名
-                let matched = search_names.iter().any(|sn| {
-                    key_lower.contains(sn) || sn.contains(&key_lower)
-                });
+                let matched = search_names
+                    .iter()
+                    .any(|sn| key_lower.contains(sn) || sn.contains(&key_lower));
 
                 if matched && !key_lower.is_empty() {
                     let (deletable, reason) = if *is_system {
@@ -1796,7 +1920,10 @@ pub fn scan_env_var_residual(app_name: &str, install_path: Option<&str>) -> Vec<
 
     let env_roots = [
         (r"HKCU\Environment", false),
-        (r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment", true),
+        (
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            true,
+        ),
     ];
 
     for (reg_key, is_system) in &env_roots {
@@ -1914,9 +2041,7 @@ pub fn delete_registry_residual(key_path: &str) -> (bool, String) {
         .output();
 
     match output {
-        Ok(out) if out.status.success() => {
-            (true, format!("已删除注册表键: {}", key_path))
-        }
+        Ok(out) if out.status.success() => (true, format!("已删除注册表键: {}", key_path)),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let detail = if stderr.is_empty() {
@@ -1965,7 +2090,17 @@ pub fn clean_env_var_residual(residual: &EnvVarResidual) -> (bool, String) {
         let new_path = cleaned.join(";");
 
         let output = Command::new("reg")
-            .args(["add", reg_key, "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", &new_path, "/f"])
+            .args([
+                "add",
+                reg_key,
+                "/v",
+                "Path",
+                "/t",
+                "REG_EXPAND_SZ",
+                "/d",
+                &new_path,
+                "/f",
+            ])
             .output();
 
         match output {
@@ -1993,7 +2128,10 @@ pub fn clean_env_var_residual(residual: &EnvVarResidual) -> (bool, String) {
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                (false, format!("删除环境变量 {} 失败: {}", residual.var_name, stderr.trim()))
+                (
+                    false,
+                    format!("删除环境变量 {} 失败: {}", residual.var_name, stderr.trim()),
+                )
             }
             Err(e) => (false, format!("执行 reg delete 失败: {}", e)),
         }
@@ -2171,7 +2309,11 @@ pub fn clean_all_residuals(residual: &UninstallResidual) -> (usize, usize, usize
     let mut fs_cleaned = 0;
     for fs in &residual.filesystem {
         if fs.deletable {
-            crate::logger::info(&format!("删除文件系统残留: {} ({})", fs.path, super::format_size(fs.size)));
+            crate::logger::info(&format!(
+                "删除文件系统残留: {} ({})",
+                fs.path,
+                super::format_size(fs.size)
+            ));
             let (ok, msg) = delete_filesystem_residual(&fs.path);
             if ok {
                 fs_cleaned += 1;
@@ -2186,9 +2328,12 @@ pub fn clean_all_residuals(residual: &UninstallResidual) -> (usize, usize, usize
 
     crate::logger::info(&format!(
         "残留清理完成: 注册表 {}/{} 项, 环境变量 {}/{} 项, 文件 {}/{} 项",
-        reg_cleaned, residual.registry.len(),
-        env_cleaned, residual.env_vars.len(),
-        fs_cleaned, residual.filesystem.len()
+        reg_cleaned,
+        residual.registry.len(),
+        env_cleaned,
+        residual.env_vars.len(),
+        fs_cleaned,
+        residual.filesystem.len()
     ));
 
     (reg_cleaned, env_cleaned, fs_cleaned)
@@ -2213,7 +2358,12 @@ mod tests {
     }
 
     /// 构建测试用 WindowsAppInfo
-    fn make_app(name: &str, publisher: Option<&str>, install_loc: Option<&str>, system_component: bool) -> WindowsAppInfo {
+    fn make_app(
+        name: &str,
+        publisher: Option<&str>,
+        install_loc: Option<&str>,
+        system_component: bool,
+    ) -> WindowsAppInfo {
         WindowsAppInfo {
             name: name.to_string(),
             install_location: install_loc.map(|s| s.to_string()),
@@ -2231,29 +2381,59 @@ mod tests {
     fn test_protection_critical() {
         // 规则 1: SystemComponent 标志
         assert_eq!(
-            check_protection(&make_app("Hidden System Update", Some("Microsoft"), None, true)),
+            check_protection(&make_app(
+                "Hidden System Update",
+                Some("Microsoft"),
+                None,
+                true
+            )),
             WinProtectionLevel::Critical
         );
         // 规则 2: 系统安装路径
         assert_eq!(
-            check_protection(&make_app("Some App", None, Some(r"C:\Windows\System32\app"), false)),
+            check_protection(&make_app(
+                "Some App",
+                None,
+                Some(r"C:\Windows\System32\app"),
+                false
+            )),
             WinProtectionLevel::Critical
         );
         assert_eq!(
-            check_protection(&make_app("Some App", None, Some(r"C:\Program Files\WindowsApps\test"), false)),
+            check_protection(&make_app(
+                "Some App",
+                None,
+                Some(r"C:\Program Files\WindowsApps\test"),
+                false
+            )),
             WinProtectionLevel::Critical
         );
         // 规则 3: Microsoft 发布 + 系统关键词
         assert_eq!(
-            check_protection(&make_app("Windows Defender", Some("Microsoft Corporation"), None, false)),
+            check_protection(&make_app(
+                "Windows Defender",
+                Some("Microsoft Corporation"),
+                None,
+                false
+            )),
             WinProtectionLevel::Critical
         );
         assert_eq!(
-            check_protection(&make_app("Microsoft Edge", Some("Microsoft Corporation"), None, false)),
+            check_protection(&make_app(
+                "Microsoft Edge",
+                Some("Microsoft Corporation"),
+                None,
+                false
+            )),
             WinProtectionLevel::Critical
         );
         assert_eq!(
-            check_protection(&make_app("Microsoft .NET Framework 4.8", Some("Microsoft Corporation"), None, false)),
+            check_protection(&make_app(
+                "Microsoft .NET Framework 4.8",
+                Some("Microsoft Corporation"),
+                None,
+                false
+            )),
             WinProtectionLevel::Critical
         );
     }
@@ -2262,21 +2442,41 @@ mod tests {
     fn test_protection_official_uninstaller() {
         // 厂商关键词匹配应用名
         assert_eq!(
-            check_protection(&make_app("CrowdStrike Falcon", Some("CrowdStrike Inc."), None, false)),
+            check_protection(&make_app(
+                "CrowdStrike Falcon",
+                Some("CrowdStrike Inc."),
+                None,
+                false
+            )),
             WinProtectionLevel::RequiresOfficialUninstaller
         );
         // 厂商关键词匹配发布者
         assert_eq!(
-            check_protection(&make_app("Falcon Sensor", Some("CrowdStrike Inc."), None, false)),
+            check_protection(&make_app(
+                "Falcon Sensor",
+                Some("CrowdStrike Inc."),
+                None,
+                false
+            )),
             WinProtectionLevel::RequiresOfficialUninstaller
         );
         // 安全类别关键词
         assert_eq!(
-            check_protection(&make_app("Acme Antivirus Pro", Some("Acme Corp"), None, false)),
+            check_protection(&make_app(
+                "Acme Antivirus Pro",
+                Some("Acme Corp"),
+                None,
+                false
+            )),
             WinProtectionLevel::RequiresOfficialUninstaller
         );
         assert_eq!(
-            check_protection(&make_app("Endpoint Protection Agent", Some("Unknown"), None, false)),
+            check_protection(&make_app(
+                "Endpoint Protection Agent",
+                Some("Unknown"),
+                None,
+                false
+            )),
             WinProtectionLevel::RequiresOfficialUninstaller
         );
     }
@@ -2289,7 +2489,12 @@ mod tests {
             WinProtectionLevel::DataProtected
         );
         assert_eq!(
-            check_protection(&make_app("KeePass Password Safe", Some("Dominik Reichl"), None, false)),
+            check_protection(&make_app(
+                "KeePass Password Safe",
+                Some("Dominik Reichl"),
+                None,
+                false
+            )),
             WinProtectionLevel::DataProtected
         );
         // 输入法（类别关键词）
@@ -2306,12 +2511,22 @@ mod tests {
     #[test]
     fn test_protection_none() {
         assert_eq!(
-            check_protection(&make_app("Visual Studio Code", Some("Microsoft Corporation"), None, false)),
+            check_protection(&make_app(
+                "Visual Studio Code",
+                Some("Microsoft Corporation"),
+                None,
+                false
+            )),
             WinProtectionLevel::None
         );
         // 注意：VS Code 虽然是 Microsoft 发布，但名称不含系统关键词，所以不是 Critical
         assert_eq!(
-            check_protection(&make_app("Spotify", Some("Spotify AB"), Some(r"C:\Users\test\AppData\Local\Spotify"), false)),
+            check_protection(&make_app(
+                "Spotify",
+                Some("Spotify AB"),
+                Some(r"C:\Users\test\AppData\Local\Spotify"),
+                false
+            )),
             WinProtectionLevel::None
         );
     }
@@ -2319,14 +2534,24 @@ mod tests {
     #[test]
     fn test_is_security_app_vendor_in_publisher() {
         // 厂商名在 publisher 中但不在应用名中
-        let app = make_app("Falcon Platform", Some("CrowdStrike Holdings, Inc."), None, false);
+        let app = make_app(
+            "Falcon Platform",
+            Some("CrowdStrike Holdings, Inc."),
+            None,
+            false,
+        );
         assert!(is_security_app(&app));
     }
 
     #[test]
     fn test_is_critical_non_microsoft_app() {
         // 非 Microsoft 发布的应用即使名称含 "windows" 也不是 Critical
-        let app = make_app("Windows Media Player Classic", Some("Some Random Corp"), None, false);
+        let app = make_app(
+            "Windows Media Player Classic",
+            Some("Some Random Corp"),
+            None,
+            false,
+        );
         assert!(!is_critical_system_app(&app));
     }
 
@@ -2334,17 +2559,32 @@ mod tests {
     fn test_critical_windows_subdir_in_program_files() {
         // C:\Program Files\Windows Defender\ 应被识别为系统路径
         assert_eq!(
-            check_protection(&make_app("Windows Defender", None, Some(r"C:\Program Files\Windows Defender"), false)),
+            check_protection(&make_app(
+                "Windows Defender",
+                None,
+                Some(r"C:\Program Files\Windows Defender"),
+                false
+            )),
             WinProtectionLevel::Critical
         );
         // C:\Program Files\Windows NT\Accessories\ 应被识别为系统路径
         assert_eq!(
-            check_protection(&make_app("WordPad", None, Some(r"C:\Program Files\Windows NT\Accessories"), false)),
+            check_protection(&make_app(
+                "WordPad",
+                None,
+                Some(r"C:\Program Files\Windows NT\Accessories"),
+                false
+            )),
             WinProtectionLevel::Critical
         );
         // 32 位路径
         assert_eq!(
-            check_protection(&make_app("Some Tool", None, Some(r"C:\Program Files (x86)\Windows Kits\10"), false)),
+            check_protection(&make_app(
+                "Some Tool",
+                None,
+                Some(r"C:\Program Files (x86)\Windows Kits\10"),
+                false
+            )),
             WinProtectionLevel::Critical
         );
     }
@@ -2368,7 +2608,12 @@ mod tests {
     #[test]
     fn test_program_files_not_all_critical() {
         // C:\Program Files\ 下的普通第三方应用不应是 Critical
-        let app = make_app("Spotify", Some("Spotify AB"), Some(r"C:\Program Files\Spotify"), false);
+        let app = make_app(
+            "Spotify",
+            Some("Spotify AB"),
+            Some(r"C:\Program Files\Spotify"),
+            false,
+        );
         assert!(!is_critical_system_app(&app));
         assert_eq!(check_protection(&app), WinProtectionLevel::None);
     }
@@ -2419,16 +2664,16 @@ mod tests {
     #[test]
     fn test_parse_env_var_line() {
         // 标准格式
-        let (name, value) = parse_env_var_line(
-            "    JAVA_HOME    REG_SZ    C:\\Program Files\\Java\\jdk1.8.0_291"
-        ).unwrap();
+        let (name, value) =
+            parse_env_var_line("    JAVA_HOME    REG_SZ    C:\\Program Files\\Java\\jdk1.8.0_291")
+                .unwrap();
         assert_eq!(name, "JAVA_HOME");
         assert_eq!(value, r"C:\Program Files\Java\jdk1.8.0_291");
 
         // REG_EXPAND_SZ 格式
-        let (name, value) = parse_env_var_line(
-            "    Path    REG_EXPAND_SZ    %SystemRoot%\\system32;C:\\Python39"
-        ).unwrap();
+        let (name, value) =
+            parse_env_var_line("    Path    REG_EXPAND_SZ    %SystemRoot%\\system32;C:\\Python39")
+                .unwrap();
         assert_eq!(name, "Path");
         assert_eq!(value, r"%SystemRoot%\system32;C:\Python39");
     }
@@ -2509,7 +2754,8 @@ mod tests {
         assert_eq!(residual.entries_to_remove.len(), 1);
         // 验证清理后保留的条目
         let entries: Vec<&str> = residual.current_value.split(';').collect();
-        let to_remove_lower: Vec<String> = residual.entries_to_remove
+        let to_remove_lower: Vec<String> = residual
+            .entries_to_remove
             .iter()
             .map(|e| e.to_lowercase())
             .collect();

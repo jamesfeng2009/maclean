@@ -44,9 +44,7 @@ static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// 获取日志目录
 pub fn log_dir() -> PathBuf {
     LOG_DIR
-        .get_or_init(|| {
-            crate::platform::app_data_dir().join("logs")
-        })
+        .get_or_init(|| crate::platform::app_data_dir().join("logs"))
         .clone()
 }
 
@@ -70,10 +68,7 @@ pub fn init() {
     let today = format_date(SystemTime::now());
     let log_file = log_dir.join(format!("maclean_{}.log", today));
 
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file);
+    let file = OpenOptions::new().create(true).append(true).open(&log_file);
 
     match file {
         Ok(f) => {
@@ -103,10 +98,7 @@ fn set_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // 写入日志
-        let panic_msg = format!(
-            "PANIC: {}",
-            info
-        );
+        let panic_msg = format!("PANIC: {}", info);
         let location = info
             .location()
             .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))

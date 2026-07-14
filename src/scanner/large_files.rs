@@ -51,9 +51,16 @@ fn is_problematic_path(name: &str) -> bool {
 fn should_skip_home_dir(name: &str) -> bool {
     matches!(
         name,
-        "Library" | "Pictures" | "Music" | "Movies"
-            | "Public" | "Applications" | "Sites"
-            | "Documents" | "Desktop" | "Downloads"
+        "Library"
+            | "Pictures"
+            | "Music"
+            | "Movies"
+            | "Public"
+            | "Applications"
+            | "Sites"
+            | "Documents"
+            | "Desktop"
+            | "Downloads"
     )
 }
 
@@ -82,12 +89,11 @@ impl Scanner for LargeFileScanner {
 ///
 /// 结果按大小降序排列，便于用户快速定位占用空间的目录/文件。
 pub fn scan_directory(path: &Path) -> ScanResult {
-    catch_unwind(AssertUnwindSafe(|| scan_directory_impl(path)))
-        .unwrap_or_else(|_| ScanResult {
-            items: Vec::new(),
-            total_size: 0,
-            scan_time_ms: 0,
-        })
+    catch_unwind(AssertUnwindSafe(|| scan_directory_impl(path))).unwrap_or_else(|_| ScanResult {
+        items: Vec::new(),
+        total_size: 0,
+        scan_time_ms: 0,
+    })
 }
 
 fn scan_directory_impl(path: &Path) -> ScanResult {
@@ -172,7 +178,11 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
             batch_paths: Vec::new(),
             recommend: Recommend::Advanced,
             description: if is_dir {
-                format!("📁 {} — {}（可进入查看详情）", name, super::format_size(size))
+                format!(
+                    "📁 {} — {}（可进入查看详情）",
+                    name,
+                    super::format_size(size)
+                )
             } else {
                 format!("📄 {} — {}", name, super::format_size(size))
             },

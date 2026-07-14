@@ -5,19 +5,19 @@
 
 use clap::{Parser, Subcommand};
 
-use crate::scanner::{format_size, Scanner};
-use crate::scanner::dev_cache::DevCacheScanner;
-use crate::scanner::large_files::LargeFileScanner;
+#[cfg(target_os = "macos")]
+use crate::scanner::apfs::ApfsScanner;
 #[cfg(target_os = "macos")]
 use crate::scanner::app_cache::AppCacheScanner;
 #[cfg(target_os = "macos")]
 use crate::scanner::app_data::AppDataScanner;
-#[cfg(target_os = "macos")]
-use crate::scanner::uninstall::UninstallScanner;
+use crate::scanner::dev_cache::DevCacheScanner;
+use crate::scanner::large_files::LargeFileScanner;
 #[cfg(target_os = "macos")]
 use crate::scanner::optimize::OptimizeScanner;
 #[cfg(target_os = "macos")]
-use crate::scanner::apfs::ApfsScanner;
+use crate::scanner::uninstall::UninstallScanner;
+use crate::scanner::{format_size, Scanner};
 use crate::scanner::{Recommend, ScanItem};
 
 /// maclean — macOS 磁盘清理工具
@@ -91,7 +91,11 @@ pub fn run_cli() -> bool {
 fn run_command(cmd: Commands) {
     match cmd {
         Commands::Scan { tab, deep } => cmd_scan(tab, deep),
-        Commands::Clean { tab, safe_only, dry_run } => cmd_clean(tab, safe_only, dry_run),
+        Commands::Clean {
+            tab,
+            safe_only,
+            dry_run,
+        } => cmd_clean(tab, safe_only, dry_run),
         Commands::CheckDisk => cmd_check_disk(),
         Commands::List => cmd_list(),
         Commands::Log { tail, open } => cmd_log(tail, open),
@@ -128,11 +132,23 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
         "apfs" => ApfsScanner::new().scan().items,
         // Windows 扫描器
         #[cfg(target_os = "windows")]
-        "app-cache" => crate::scanner::windows_apps::WindowsAppCacheScanner::new().scan().items,
+        "app-cache" => {
+            crate::scanner::windows_apps::WindowsAppCacheScanner::new()
+                .scan()
+                .items
+        }
         #[cfg(target_os = "windows")]
-        "app-data" => crate::scanner::windows_apps::WindowsAppDataScanner::new().scan().items,
+        "app-data" => {
+            crate::scanner::windows_apps::WindowsAppDataScanner::new()
+                .scan()
+                .items
+        }
         #[cfg(target_os = "windows")]
-        "app-uninstall" => crate::scanner::windows_apps::WindowsUninstallScanner::new().scan().items,
+        "app-uninstall" => {
+            crate::scanner::windows_apps::WindowsUninstallScanner::new()
+                .scan()
+                .items
+        }
         _ => Vec::new(),
     }
 }
@@ -143,9 +159,19 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
 
 fn cmd_scan(tab: Option<String>, deep: bool) {
     let tabs: Vec<(String, String)> = if deep {
-        ALL_TABS.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        ALL_TABS
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     } else if let Some(t) = &tab {
-        vec![(t.clone(), ALL_TABS.iter().find(|(k, _)| *k == t.as_str()).map(|(_, v)| v.to_string()).unwrap_or_else(|| t.clone()))]
+        vec![(
+            t.clone(),
+            ALL_TABS
+                .iter()
+                .find(|(k, _)| *k == t.as_str())
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_else(|| t.clone()),
+        )]
     } else {
         vec![("dev-cache".to_string(), "开发者缓存".to_string())]
     };
@@ -168,14 +194,22 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
         }
 
         let tab_total: u64 = items.iter().map(|i| i.size_bytes).sum();
-        let safe_count = items.iter().filter(|i| i.recommend.default_selected() && i.deletable).count();
-        let safe_size: u64 = items.iter()
+        let safe_count = items
+            .iter()
+            .filter(|i| i.recommend.default_selected() && i.deletable)
+            .count();
+        let safe_size: u64 = items
+            .iter()
             .filter(|i| i.recommend.default_selected() && i.deletable)
             .map(|i| i.size_bytes)
             .sum();
 
         println!("  发现 {} 项，总计 {}", items.len(), format_size(tab_total));
-        println!("  其中安全可清理：{} 项，{}", safe_count, format_size(safe_size));
+        println!(
+            "  其中安全可清理：{} 项，{}",
+            safe_count,
+            format_size(safe_size)
+        );
         println!("  耗时 {:.2}s\n", elapsed.as_secs_f64());
 
         // 列出前 20 项
@@ -211,7 +245,11 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
 
     if tabs.len() > 1 {
         println!("\n═══════════════════════════════════════════");
-        println!("  合计：{} 项，总计 {}", total_count, format_size(total_size));
+        println!(
+            "  合计：{} 项，总计 {}",
+            total_count,
+            format_size(total_size)
+        );
         println!("═══════════════════════════════════════════");
     }
 }
@@ -224,13 +262,20 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
     };
 
     for tab_key in &tabs {
-        let tab_label = ALL_TABS.iter().find(|(k, _)| *k == tab_key.as_str()).map(|(_, v)| *v).unwrap_or(tab_key);
+        let tab_label = ALL_TABS
+            .iter()
+            .find(|(k, _)| *k == tab_key.as_str())
+            .map(|(_, v)| *v)
+            .unwrap_or(tab_key);
         println!("\n🧹 清理 {} ({})", tab_label, tab_key);
 
         let items = scan_tab(tab_key);
 
         let to_clean: Vec<&ScanItem> = if safe_only {
-            items.iter().filter(|i| i.recommend.default_selected() && i.deletable).collect()
+            items
+                .iter()
+                .filter(|i| i.recommend.default_selected() && i.deletable)
+                .collect()
         } else {
             items.iter().filter(|i| i.deletable).collect()
         };
@@ -241,7 +286,11 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
         }
 
         let clean_size: u64 = to_clean.iter().map(|i| i.size_bytes).sum();
-        println!("  将清理 {} 项，释放 {}", to_clean.len(), format_size(clean_size));
+        println!(
+            "  将清理 {} 项，释放 {}",
+            to_clean.len(),
+            format_size(clean_size)
+        );
 
         if dry_run {
             println!("  [dry-run] 未实际删除，以下为将被清理的项目：");
@@ -390,9 +439,7 @@ fn cmd_log(tail: Option<usize>, open: bool) {
         // 显示日志路径和大小
         println!("日志目录: {}", log_dir.display());
         if let Some(log_file) = crate::logger::latest_log_file() {
-            let size = std::fs::metadata(&log_file)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0);
             println!("最新日志: {}", log_file.display());
             println!("日志大小: {}", crate::scanner::format_size(size));
         } else {

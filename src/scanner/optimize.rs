@@ -27,10 +27,7 @@ impl Scanner for OptimizeScanner {
         // 8 项安全的系统优化任务
         // path 使用英文 key，UI 层通过 app.t("optimize_xxx") 翻译显示
         let items = vec![
-            make_task(
-                "dns_cache_flush",
-                "刷新 DNS 缓存，修复网络解析问题",
-            ),
+            make_task("dns_cache_flush", "刷新 DNS 缓存，修复网络解析问题"),
             make_task(
                 "quicklook_rebuild",
                 "清理 QuickLook 缩略图缓存，修复预览问题",
@@ -39,14 +36,8 @@ impl Scanner for OptimizeScanner {
                 "launchservices_rebuild",
                 "重建 LaunchServices 数据库，修复\"打开方式\"菜单问题",
             ),
-            make_task(
-                "saved_state_cleanup",
-                "清理超过 30 天的应用保存状态",
-            ),
-            make_task(
-                "gatekeeper_cleanup",
-                "清理 Gatekeeper 下载追踪记录",
-            ),
+            make_task("saved_state_cleanup", "清理超过 30 天的应用保存状态"),
+            make_task("gatekeeper_cleanup", "清理 Gatekeeper 下载追踪记录"),
             make_task(
                 "memory_pressure_release",
                 "释放非活跃内存，提升系统响应速度",
@@ -55,10 +46,7 @@ impl Scanner for OptimizeScanner {
                 "spotlight_reindex",
                 "重建 Spotlight 搜索索引，修复搜索不到文件的问题",
             ),
-            make_task(
-                "login_items_audit",
-                &scan_login_items_description(),
-            ),
+            make_task("login_items_audit", &scan_login_items_description()),
         ];
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
@@ -158,4 +146,3 @@ fn count_plist_files(dir: &str) -> usize {
         })
         .unwrap_or(0)
 }
-

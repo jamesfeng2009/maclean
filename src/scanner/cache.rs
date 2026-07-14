@@ -124,8 +124,8 @@ pub fn invalidate_all_caches() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{Recommend, ScanItem, ScanResult};
+    use super::*;
 
     #[test]
     fn test_cache_save_and_load() {

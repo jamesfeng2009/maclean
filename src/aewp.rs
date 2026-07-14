@@ -63,10 +63,7 @@ extern "C" {
         authorization: *mut AuthorizationRef,
     ) -> OSStatus;
 
-    fn AuthorizationFree(
-        authorization: AuthorizationRef,
-        flags: AuthorizationFlags,
-    ) -> OSStatus;
+    fn AuthorizationFree(authorization: AuthorizationRef, flags: AuthorizationFlags) -> OSStatus;
 
     fn AuthorizationCopyRights(
         authorization: AuthorizationRef,
@@ -180,10 +177,7 @@ pub fn execute_with_privileges(
         .map(|s| CString::new(*s).unwrap())
         .collect();
     // AEWP 要求 argv 风格：以 NULL 结尾的指针数组
-    let mut argv: Vec<*mut c_char> = c_args
-        .iter()
-        .map(|s| s.as_ptr() as *mut c_char)
-        .collect();
+    let mut argv: Vec<*mut c_char> = c_args.iter().map(|s| s.as_ptr() as *mut c_char).collect();
     argv.push(std::ptr::null_mut());
 
     // 3. 创建 AuthorizationRef
