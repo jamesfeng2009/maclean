@@ -239,6 +239,8 @@ pub struct App {
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS only）
     pub settings_prevent_lid_close: bool,
+    /// 菜单栏 HUD 是否展开
+    pub hud_open: bool,
     /// 残留项选中状态（与残留列表一一对应，true=选中清理）
     pub residual_selected: Vec<bool>,
     /// 残留清理中（正在执行清理操作）
@@ -291,6 +293,7 @@ impl App {
             settings_scan_cache: true,
             settings_confirm_advanced: true,
             settings_prevent_lid_close: true,
+            hud_open: false,
             scan_current_path: String::new(),
             filter_category: None,
             delete_done: 0,
@@ -809,6 +812,16 @@ impl App {
     /// 获取当前 Tab 选中项的数量
     pub fn selected_count(&self) -> usize {
         self.current_items().iter().filter(|i| i.selected).count()
+    }
+
+    /// 统计所有 Tab 中可安全释放的总大小（Safe / CacheOnly）
+    pub fn total_releasable_size(&self) -> u64 {
+        self.results
+            .iter()
+            .flat_map(|v| v.iter())
+            .filter(|i| i.deletable && i.recommend.default_selected())
+            .map(|i| i.size_bytes)
+            .sum()
     }
 
     /// 准备删除选中的项（进入确认状态）
