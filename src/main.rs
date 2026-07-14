@@ -27,6 +27,35 @@ use eframe::egui;
 use app::{App, ConfirmState, ScanState, Tab};
 use scanner::{format_size, Recommend, ScanItem, Scanner};
 
+// =========================================================================
+//  颜色常量（浅色 macOS 风格）
+// =========================================================================
+
+// 品牌色系
+const BRAND: egui::Color32 = egui::Color32::from_rgb(75, 63, 227);      // #4B3FE3
+const BRAND_SOFT: egui::Color32 = egui::Color32::from_rgb(242, 247, 255); // #F2F7FF
+const BRAND_TEXT: egui::Color32 = egui::Color32::from_rgb(26, 23, 89);   // #1A1759
+// 表面色
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(247, 247, 248);   // #F7F7F8
+const SURFACE_ELEVATED: egui::Color32 = egui::Color32::from_rgb(255, 255, 255); // #FFFFFF
+const SURFACE_MUTED: egui::Color32 = egui::Color32::from_rgb(239, 239, 242);    // #EFEFF2
+const SURFACE_SIDEBAR: egui::Color32 = egui::Color32::from_rgb(242, 242, 245);   // #F2F2F5
+// 文本色
+const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(23, 23, 23);      // #171717
+const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(82, 82, 91);     // #52525B
+const TEXT_TERTIARY: egui::Color32 = egui::Color32::from_rgb(113, 113, 122);   // #71717A
+// 边框
+const BORDER_LIGHT: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 23, 23, 26);  // ~0.1 alpha
+const BORDER_STRONG: egui::Color32 = egui::Color32::from_rgba_premultiplied(23, 23, 23, 46);  // ~0.18 alpha
+// 状态色
+const SAFE_COLOR: egui::Color32 = egui::Color32::from_rgb(29, 201, 129);       // #1DC981
+const CAUTION_COLOR: egui::Color32 = egui::Color32::from_rgb(239, 170, 23);    // #EFAA17
+const ADVANCED_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58);    // #E8463A
+const DANGER_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58);      // #E8463A
+
+/// 选中项卡片背景色（浅绿）
+const SELECTED_CARD_BG: egui::Color32 = egui::Color32::from_rgb(240, 255, 244); // #F0FFF4
+
 /// 后台扫描消息
 enum ScanMessage {
     /// 扫描进度更新
@@ -104,6 +133,14 @@ fn main() -> eframe::Result {
                 APP = Some(App::new());
                 NEEDS_INIT = false;
                 setup_fonts(ctx);
+
+                // 设置浅色主题
+                let mut visuals = egui::Visuals::light();
+                visuals.window_rounding = egui::Rounding::same(10.0);
+                visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+                visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+                visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+                ctx.set_visuals(visuals);
 
                 // 初始化菜单栏 HUD (macOS 专属)
                 #[cfg(target_os = "macos")]
@@ -502,10 +539,10 @@ fn get_disk_info() -> (u64, u64) {
 /// 推荐等级颜色
 fn recommend_color(rec: &Recommend) -> egui::Color32 {
     match rec {
-        Recommend::Safe => egui::Color32::from_rgb(52, 199, 89),      // 绿色
-        Recommend::CacheOnly => egui::Color32::from_rgb(48, 209, 88), // 青绿色（缓存）
-        Recommend::Caution => egui::Color32::from_rgb(255, 159, 10),  // 橙色
-        Recommend::Advanced => egui::Color32::from_rgb(255, 69, 58),  // 红色
+        Recommend::Safe => SAFE_COLOR,      // 绿色
+        Recommend::CacheOnly => SAFE_COLOR, // 青绿色（缓存）
+        Recommend::Caution => CAUTION_COLOR,  // 橙色
+        Recommend::Advanced => ADVANCED_COLOR,  // 红色
     }
 }
 
@@ -556,7 +593,7 @@ fn render_scan_item_row(
     let mut expand_toggle: Option<String> = None;
 
     let rec_color = if !item.deletable {
-        egui::Color32::from_gray(80)
+        TEXT_TERTIARY
     } else {
         recommend_color(&item.recommend)
     };
@@ -566,19 +603,18 @@ fn render_scan_item_row(
         recommend_badge(&item.recommend)
     };
 
-    // 行背景色
+    // 卡片背景色：白色（选中时浅绿）
     let row_bg = if item.selected {
-        egui::Color32::from_rgb(30, 50, 30)
-    } else if index % 2 == 0 {
-        egui::Color32::from_rgb(35, 35, 42)
+        SELECTED_CARD_BG
     } else {
-        egui::Color32::from_rgb(28, 28, 34)
+        SURFACE_ELEVATED
     };
 
     let row_frame = egui::Frame::none()
         .fill(row_bg)
-        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-        .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)));
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+        .rounding(egui::Rounding::same(8.0));
 
     // 检查是否有可展开的关联明细
     let has_details = is_uninstall_tab
@@ -588,20 +624,20 @@ fn render_scan_item_row(
 
     let row_resp = row_frame.show(ui, |ui| {
         ui.horizontal(|ui| {
-            // 复选框
+            // 复选框（紫色选中）
             let checkbox_text = if !item.deletable { "🔒" } else if item.selected { "✅" } else { "⬜" };
             let cb_color = if !item.deletable {
-                egui::Color32::GRAY
+                TEXT_TERTIARY
             } else if item.selected {
-                egui::Color32::from_rgb(52, 199, 89)
+                BRAND
             } else {
-                egui::Color32::from_gray(160)
+                TEXT_TERTIARY
             };
             if ui.colored_label(cb_color, checkbox_text).clicked() && item.deletable {
                 toggled = Some(index);
             }
 
-            // 推荐等级标签
+            // 推荐等级标签（状态徽章）
             ui.colored_label(rec_color, badge);
 
             // 展开/收起按钮（仅 App卸载 tab 且有明细时显示）
@@ -620,7 +656,7 @@ fn render_scan_item_row(
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     let cat_color = if !item.deletable {
-                        egui::Color32::from_gray(80)
+                        TEXT_TERTIARY
                     } else {
                         category_color(&item.category)
                     };
@@ -633,26 +669,26 @@ fn render_scan_item_row(
                         format_size(item.size_bytes)
                     };
                     let size_color = if item.size_bytes > 100 * 1024 * 1024 * 1024 {
-                        egui::Color32::RED
+                        ADVANCED_COLOR
                     } else if item.size_bytes > 1024 * 1024 * 1024 {
-                        egui::Color32::from_rgb(255, 159, 10)
+                        CAUTION_COLOR
                     } else {
-                        egui::Color32::from_rgb(100, 200, 100)
+                        SAFE_COLOR
                     };
-                    ui.colored_label(size_color, &size_str);
+                    ui.colored_label(size_color, egui::RichText::new(&size_str).strong().monospace().size(13.0));
                 });
                 // 描述说明（告诉用户这是什么，删除后有什么影响）
                 let desc_en = i18n::translate_description(&item.description, app.lang_en);
                 ui.colored_label(
-                    egui::Color32::from_gray(140),
+                    TEXT_SECONDARY,
                     egui::RichText::new(&desc_en).size(12.0),
                 );
                 // 路径
                 let path_display = truncate_path(&item.path, 70);
                 let path_color = if item.deletable {
-                    egui::Color32::from_gray(100)
+                    TEXT_TERTIARY
                 } else {
-                    egui::Color32::from_gray(70)
+                    TEXT_TERTIARY
                 };
                 ui.colored_label(
                     path_color,
@@ -663,7 +699,7 @@ fn render_scan_item_row(
                 if !item.deletable && !item.undeletable_reason.is_empty() {
                     let reason_en = i18n::translate_undeletable_reason(&item.undeletable_reason, app.lang_en);
                     ui.colored_label(
-                        egui::Color32::from_rgb(200, 80, 80),
+                        ADVANCED_COLOR,
                         egui::RichText::new(format!("⚠️ {}", reason_en)).size(11.0),
                     );
                 }
@@ -680,18 +716,19 @@ fn render_scan_item_row(
     if has_details && is_expanded {
         if let Some(details) = associated_details.get(&item.path) {
             for (detail_path, detail_size, detail_label) in details {
-                let detail_bg = egui::Color32::from_rgb(22, 22, 28);
+                let detail_bg = SURFACE;
                 let detail_frame = egui::Frame::none()
                     .fill(detail_bg)
-                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                    .stroke(egui::Stroke::new(0.3, egui::Color32::from_rgb(40, 40, 45)));
+                    .inner_margin(egui::Margin::symmetric(14.0, 4.0))
+                    .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                    .rounding(egui::Rounding::same(6.0));
 
                 detail_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_space(40.0); // 缩进对齐
                         // 标签
                         ui.colored_label(
-                            egui::Color32::from_rgb(130, 160, 255),
+                            BRAND,
                             egui::RichText::new(detail_label).size(12.0),
                         );
                         // 大小
@@ -701,18 +738,18 @@ fn render_scan_item_row(
                             format_size(*detail_size)
                         };
                         let sz_color = if *detail_size > 1024 * 1024 * 1024 {
-                            egui::Color32::from_rgb(255, 159, 10)
+                            CAUTION_COLOR
                         } else if *detail_size > 100 * 1024 * 1024 {
-                            egui::Color32::from_rgb(255, 200, 100)
+                            CAUTION_COLOR
                         } else {
-                            egui::Color32::from_gray(140)
+                            TEXT_SECONDARY
                         };
                         ui.colored_label(sz_color, egui::RichText::new(&sz_str).size(12.0));
                         ui.add_space(8.0);
                         // 路径
                         let dp = truncate_path(detail_path, 55);
                         ui.colored_label(
-                            egui::Color32::from_gray(90),
+                            TEXT_TERTIARY,
                             egui::RichText::new(&dp).size(10.0),
                         );
                     });
@@ -721,7 +758,7 @@ fn render_scan_item_row(
         }
     }
 
-    ui.add_space(1.0);
+    ui.add_space(8.0);
 
     (toggled, expand_toggle)
 }
@@ -731,51 +768,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
     // 动态更新窗口标题（跟随语言切换）
     ctx.send_viewport_cmd(egui::ViewportCommand::Title(app.t("window_title").to_string()));
 
-    // ========== 顶部：标题栏 + 磁盘概览 ==========
-    egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading("🧹 Maclean");
-            ui.separator();
-
-            if ui.button(if app.lang_en { "中文" } else { "EN" }).clicked() {
-                app.toggle_lang();
-            }
-            ui.separator();
-
-            // 磁盘概览
-            let used = app.disk_total.saturating_sub(app.disk_free);
-            let used_pct = if app.disk_total > 0 {
-                used as f32 / app.disk_total as f32 * 100.0
-            } else {
-                0.0
-            };
-
-            ui.label(format!(
-                "{}: {} ({:.0}%)  {}: {}  {}: {}",
-                app.t("disk_used"),
-                format_size(used),
-                used_pct,
-                app.t("disk_free"),
-                format_size(app.disk_free),
-                app.t("disk_total"),
-                format_size(app.disk_total),
-            ));
-
-            let bar_color = if used_pct > 85.0 {
-                egui::Color32::RED
-            } else if used_pct > 70.0 {
-                egui::Color32::YELLOW
-            } else {
-                egui::Color32::GREEN
-            };
-
-            ui.add(egui::ProgressBar::new(used_pct / 100.0)
-                .fill(bar_color)
-                .text(format!("{:.0}%", used_pct)));
-        });
-    });
-
-    // ========== 磁盘告警横幅 ==========
+    // ========== 磁盘告警横幅（顶部）==========
     let (alert_level, alert_color, free_pct) = app.disk_alert_level();
     if alert_level >= 1 {
         egui::TopBottomPanel::top("disk_alert_banner").show(ctx, |ui| {
@@ -803,89 +796,200 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         });
     }
 
-    // ========== 底部状态栏 ==========
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            let tab_idx = app.tab_index();
-            match &app.scan_states[tab_idx] {
-                ScanState::Idle => {
-                    ui.colored_label(egui::Color32::GRAY, app.t("press_r_to_scan"));
-                }
-                ScanState::Scanning => {
-                    ui.colored_label(egui::Color32::from_rgb(0, 200, 255), "⏳ ".to_string() + app.t("scanning"));
-                }
-                ScanState::Done => {
-                    let count = app.current_items().len();
-                    let total: u64 = app.current_items().iter().map(|i| i.size_bytes).sum();
-                    ui.colored_label(
-                        egui::Color32::GREEN,
-                        app.tf("found_items_total", &[&count.to_string(), &format_size(total)]),
-                    );
-                }
-            }
+    // ========== 底部 Footer ==========
+    egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
+        egui::Frame::none()
+            .fill(SURFACE_ELEVATED)
+            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+            .inner_margin(egui::Margin::symmetric(16.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let selected_cnt = app.selected_count();
+                    let selected_sz = app.selected_total_size();
 
-            ui.separator();
+                    // 左侧：已选中 N 项 · 可释放 XX GB
+                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(
+                        format!("{} {} · {} {}", selected_cnt, app.t("items_selected"), app.t("total"), format_size(selected_sz))
+                    ).size(13.0));
 
-            // 日志按钮
-            if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
-                let log_dir = logger::log_dir();
-                // 跨平台打开日志目录
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(&log_dir).spawn();
-                #[cfg(target_os = "windows")]
-                let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
-                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                let _ = std::process::Command::new("xdg-open").arg(&log_dir).spawn();
-            }
-        });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
+                        let delete_btn = ui.add_enabled(
+                            delete_enabled,
+                            egui::Button::new(
+                                egui::RichText::new(format!("🗑 {} ({})", app.t("delete"), format_size(selected_sz)))
+                                    .color(egui::Color32::WHITE)
+                                    .size(13.0)
+                            )
+                            .fill(DANGER_COLOR)
+                            .rounding(egui::Rounding::same(8.0)),
+                        );
+                        if delete_btn.clicked() {
+                            app.prepare_delete();
+                        }
+                    });
+                });
+            });
     });
 
-    // ========== 中央内容区 ==========
-    egui::CentralPanel::default().show(ctx, |ui| {
-        // --- Tab 栏 ---
-        ui.horizontal(|ui| {
+    // ========== 左侧导航栏 ==========
+    egui::SidePanel::left("sidebar").exact_width(220.0).show(ctx, |ui| {
+        ui.set_min_width(200.0);
+        ui.vertical(|ui| {
+            // --- 品牌区 ---
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("🧹").size(22.0));
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Maclean").size(16.0).strong().color(BRAND_TEXT));
+                    ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(TEXT_TERTIARY));
+                });
+            });
+            ui.add_space(14.0);
+
+            // --- 磁盘用量卡片 ---
+            let used = app.disk_total.saturating_sub(app.disk_free);
+            let used_pct = if app.disk_total > 0 {
+                used as f32 / app.disk_total as f32 * 100.0
+            } else {
+                0.0
+            };
+            egui::Frame::none()
+                .fill(SURFACE_ELEVATED)
+                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::same(10.0))
+                .show(ui, |ui| {
+                    ui.set_min_width(180.0);
+                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(app.t("disk_used")).size(11.0));
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format_size(used)).size(16.0).strong().color(TEXT_PRIMARY));
+                        ui.label(egui::RichText::new(format!("/ {}", format_size(app.disk_total))).size(11.0).color(TEXT_TERTIARY));
+                    });
+                    ui.add_space(4.0);
+                    ui.add(egui::ProgressBar::new(used_pct / 100.0)
+                        .fill(BRAND)
+                        .text(format!("{:.0}%", used_pct)));
+                });
+            ui.add_space(14.0);
+
+            // --- 导航项列表 ---
+            let nav_icons = ["📦", "📁", "🗑", "📦", "🧩", "⚙️", "💾"];
             for (i, tab) in Tab::all().iter().enumerate() {
                 let count = app.results[i].len();
-                let tab_title = if count > 0 {
-                    format!("{} ({})", tab_title(tab, app), count)
+                let is_selected = *tab == app.tab;
+                let icon = nav_icons[i];
+                let title = tab_title(tab, app);
+
+                let nav_frame = if is_selected {
+                    egui::Frame::none()
+                        .fill(BRAND_SOFT)
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .stroke(egui::Stroke::NONE)
                 } else {
-                    tab_title(tab, app).to_string()
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .stroke(egui::Stroke::NONE)
                 };
 
-                let is_selected = *tab == app.tab;
-                let button = ui.selectable_label(is_selected, &tab_title);
+                let nav_resp = nav_frame.show(ui, |ui| {
+                    ui.set_min_width(180.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon).size(16.0));
+                        ui.label(egui::RichText::new(title).size(13.0).color(if is_selected { BRAND } else { TEXT_PRIMARY }));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if count > 0 {
+                                ui.label(egui::RichText::new(count.to_string()).size(11.0).color(if is_selected { BRAND } else { TEXT_TERTIARY }));
+                            }
+                        });
+                    });
+                });
 
-                if button.clicked() && matches!(app.confirm, ConfirmState::None) {
+                if nav_resp.response.clicked() && matches!(app.confirm, ConfirmState::None) {
                     app.tab = *tab;
                     app.list_index = 0;
                 }
             }
-
-            ui.separator();
-
-            // 扫描按钮
-            let is_scanning = matches!(app.current_scan_state(), ScanState::Scanning);
-            let scan_button = ui.add_enabled(!is_scanning, egui::Button::new(if is_scanning { "⏳..." } else { app.t("scan") }));
-            if scan_button.clicked() {
-                start_scan(app, scan_rx);
-            }
-
-            // 强制刷新按钮（清除缓存后重新扫描）
-            let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
-            if refresh_btn.clicked() {
-                let tab_name = match app.tab {
-                    Tab::DevCache => "dev_cache",
-                    Tab::LargeFiles => "large_files",
-                    Tab::AppCache => "app_cache",
-                    Tab::AppData => "app_data",
-                    Tab::AppUninstall => "app_uninstall",
-                    Tab::SystemOptimize => "system_optimize",
-                    Tab::Apfs => "apfs",
-                };
-                scanner::cache::invalidate_cache(tab_name);
-                start_scan(app, scan_rx);
-            }
         });
+
+        // --- 底部：语言切换 + 日志按钮 ---
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button(if app.lang_en { "中文" } else { "EN" }).clicked() {
+                    app.toggle_lang();
+                }
+                if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
+                    let log_dir = logger::log_dir();
+                    // 跨平台打开日志目录
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&log_dir).spawn();
+                    #[cfg(target_os = "windows")]
+                    let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
+                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                    let _ = std::process::Command::new("xdg-open").arg(&log_dir).spawn();
+                }
+            });
+            ui.add_space(4.0);
+        });
+    });
+
+    // ========== 右侧内容区 ==========
+    egui::CentralPanel::default().show(ctx, |ui| {
+        // --- 顶部 Header：当前 Tab 标题 + 副标题 + 扫描/刷新按钮 ---
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(tab_title(&app.tab, app)).size(20.0).strong().color(TEXT_PRIMARY));
+                // 副标题：扫描状态/项目数
+                let tab_idx_h = app.tab_index();
+                let subtitle = match &app.scan_states[tab_idx_h] {
+                    ScanState::Idle => app.t("press_r_to_scan").to_string(),
+                    ScanState::Scanning => format!("⏳ {}", app.t("scanning")),
+                    ScanState::Done => {
+                        let count = app.current_items().len();
+                        let total: u64 = app.current_items().iter().map(|i| i.size_bytes).sum();
+                        app.tf("found_items_total", &[&count.to_string(), &format_size(total)])
+                    }
+                };
+                ui.colored_label(TEXT_TERTIARY, egui::RichText::new(subtitle).size(12.0));
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // 强制刷新按钮（清除缓存后重新扫描）
+                let is_scanning = matches!(app.current_scan_state(), ScanState::Scanning);
+                let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
+                if refresh_btn.clicked() {
+                    let tab_name = match app.tab {
+                        Tab::DevCache => "dev_cache",
+                        Tab::LargeFiles => "large_files",
+                        Tab::AppCache => "app_cache",
+                        Tab::AppData => "app_data",
+                        Tab::AppUninstall => "app_uninstall",
+                        Tab::SystemOptimize => "system_optimize",
+                        Tab::Apfs => "apfs",
+                    };
+                    scanner::cache::invalidate_cache(tab_name);
+                    start_scan(app, scan_rx);
+                }
+
+                ui.add_space(4.0);
+
+                // 扫描按钮
+                let scan_button = ui.add_enabled(!is_scanning, egui::Button::new(
+                    egui::RichText::new(if is_scanning { "⏳..." } else { app.t("scan") }).color(egui::Color32::WHITE)
+                ).fill(BRAND).rounding(egui::Rounding::same(8.0)));
+                if scan_button.clicked() {
+                    start_scan(app, scan_rx);
+                }
+            });
+        });
+
+        ui.separator();
+        ui.add_space(4.0);
 
         // --- 系统优化 Tab：特殊渲染（操作面板而非列表选择）---
         if app.tab == Tab::SystemOptimize {
@@ -910,15 +1014,15 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.vertical_centered(|ui| {
                 ui.add(egui::Spinner::new().size(40.0));
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(egui::Color32::from_rgb(0, 200, 255)));
+                ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(BRAND));
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new(app.t("scanning_hint")).size(12.0).color(egui::Color32::GRAY));
+                ui.label(egui::RichText::new(app.t("scanning_hint")).size(12.0).color(TEXT_TERTIARY));
                 ui.add_space(15.0);
                 // 真实进度百分比长条
                 let pct = (app.scan_progress * 100.0) as u32;
                 ui.add(egui::ProgressBar::new(app.scan_progress)
                     .desired_width(500.0)
-                    .fill(egui::Color32::from_rgb(0, 200, 255))
+                    .fill(BRAND)
                     .text(format!("{}%", pct)));
             });
 
@@ -928,7 +1032,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let partial_count = items.len();
                 let partial_size: u64 = items.iter().map(|i| i.size_bytes).sum();
                 ui.colored_label(
-                    egui::Color32::from_rgb(0, 200, 255),
+                    BRAND,
                     egui::RichText::new(format!(
                         "🔍 {} {} ({})",
                         partial_count,
@@ -944,7 +1048,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                     .show(ui, |ui| {
                         for item in &items {
                             let rec_color = if !item.deletable {
-                                egui::Color32::from_gray(80)
+                                TEXT_TERTIARY
                             } else {
                                 recommend_color(&item.recommend)
                             };
@@ -954,12 +1058,13 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                 recommend_badge_text(&item.recommend, app.lang_en)
                             };
 
-                            let row_bg = egui::Color32::from_rgb(35, 35, 42);
+                            let row_bg = SURFACE_ELEVATED;
 
                             egui::Frame::none()
                                 .fill(row_bg)
                                 .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                                .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)))
+                                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                                .rounding(egui::Rounding::same(6.0))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.colored_label(rec_color, &badge);
@@ -967,10 +1072,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                         let cat_en = i18n::translate_category(&item.category, app.lang_en);
                                         ui.colored_label(category_color(&item.category), &cat_en);
                                         let size_str = if item.size_bytes == 0 { "—".to_string() } else { format_size(item.size_bytes) };
-                                        ui.colored_label(egui::Color32::from_rgb(100, 200, 100), &size_str);
+                                        ui.colored_label(SAFE_COLOR, &size_str);
                                         ui.add_space(5.0);
                                         ui.colored_label(
-                                            egui::Color32::from_gray(130),
+                                            TEXT_TERTIARY,
                                             egui::RichText::new(truncate_path(&item.path, 60)).size(11.0),
                                         );
                                     });
@@ -984,10 +1089,10 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
         } else if items.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
-                ui.label(egui::RichText::new(app.t("no_items_hint")).size(16.0).color(egui::Color32::GRAY));
+                ui.label(egui::RichText::new(app.t("no_items_hint")).size(16.0).color(TEXT_TERTIARY));
                 ui.add_space(10.0);
                 let scan_hint = format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
-                if ui.button(egui::RichText::new(&scan_hint).size(16.0)).clicked() {
+                if ui.button(egui::RichText::new(&scan_hint).size(16.0).color(egui::Color32::WHITE)).clicked() {
                     start_scan(app, scan_rx);
                 }
             });
@@ -997,8 +1102,6 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
 
             let safe_cnt = app.safe_count();
             let safe_sz = app.safe_size();
-            let cache_only_cnt = app.cache_only_count();
-            let cache_only_sz = app.cache_only_size();
             let caution_cnt = app.caution_count();
             let caution_sz = app.caution_size();
             let advanced_cnt = app.advanced_count();
@@ -1006,54 +1109,75 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             let selected_cnt = app.selected_count();
             let selected_sz = app.selected_total_size();
 
-            egui::Frame::group(ui.style())
-                .fill(egui::Color32::from_rgb(30, 30, 40))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 70)))
-                .inner_margin(egui::Margin::same(10.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // 推荐清理
-                        ui.colored_label(
-                            egui::Color32::from_rgb(52, 199, 89),
-                            format!("🟢 {} {} ({}), {} {}", safe_cnt, app.t("items"), app.t("safe_clean"), app.t("total"), format_size(safe_sz)),
-                        );
-                        ui.separator();
-
-                        // 仅缓存可清（如果有）
-                        if cache_only_cnt > 0 {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(48, 209, 88),
-                                format!("🧹 {} {} ({}), {} {}", cache_only_cnt, app.t("items"), app.t("cache_only_clean"), app.t("total"), format_size(cache_only_sz)),
-                            );
-                            ui.separator();
-                        }
-
-                        // 谨慎清理
-                        ui.colored_label(
-                            egui::Color32::from_rgb(255, 159, 10),
-                            format!("🟡 {} {} ({}), {} {}", caution_cnt, app.t("items"), app.t("caution_clean"), app.t("total"), format_size(caution_sz)),
-                        );
-
-                        // 需确认（如果有）
-                        if advanced_cnt > 0 {
-                            ui.separator();
-                            ui.colored_label(
-                                egui::Color32::from_rgb(255, 69, 58),
-                                format!("🔴 {} {} ({}), {} {}", advanced_cnt, app.t("items"), app.t("confirm_clean"), app.t("total"), format_size(advanced_sz)),
-                            );
-                        }
-
-                        ui.separator();
-
-                        // 已选
-                        if selected_cnt > 0 {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(100, 200, 255),
-                                format!("✓ {} {}, {} {}", selected_cnt, app.t("items_selected"), app.t("total"), format_size(selected_sz)),
-                            );
-                        }
+            // Summary Pills：胶囊式汇总卡片
+            ui.horizontal(|ui| {
+                // Safe 胶囊
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(232, 255, 243))
+                    .stroke(egui::Stroke::new(1.0, SAFE_COLOR))
+                    .rounding(egui::Rounding::same(14.0))
+                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(SAFE_COLOR, egui::RichText::new("●").size(10.0));
+                            ui.colored_label(SAFE_COLOR, egui::RichText::new(
+                                format!("{} {} · {}", safe_cnt, app.t("safe_clean"), format_size(safe_sz))
+                            ).size(12.0));
+                        });
                     });
-                });
+                ui.add_space(6.0);
+
+                // Caution 胶囊
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(255, 247, 230))
+                    .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
+                    .rounding(egui::Rounding::same(14.0))
+                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(CAUTION_COLOR, egui::RichText::new("●").size(10.0));
+                            ui.colored_label(CAUTION_COLOR, egui::RichText::new(
+                                format!("{} {} · {}", caution_cnt, app.t("caution_clean"), format_size(caution_sz))
+                            ).size(12.0));
+                        });
+                    });
+                ui.add_space(6.0);
+
+                // Advanced 胶囊（如果有）
+                if advanced_cnt > 0 {
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(255, 233, 230))
+                        .stroke(egui::Stroke::new(1.0, ADVANCED_COLOR))
+                        .rounding(egui::Rounding::same(14.0))
+                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(ADVANCED_COLOR, egui::RichText::new("●").size(10.0));
+                                ui.colored_label(ADVANCED_COLOR, egui::RichText::new(
+                                    format!("{} {} · {}", advanced_cnt, app.t("confirm_clean"), format_size(advanced_sz))
+                                ).size(12.0));
+                            });
+                        });
+                    ui.add_space(6.0);
+                }
+
+                // 已选胶囊
+                if selected_cnt > 0 {
+                    egui::Frame::none()
+                        .fill(BRAND_SOFT)
+                        .stroke(egui::Stroke::new(1.0, BRAND))
+                        .rounding(egui::Rounding::same(14.0))
+                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(BRAND, egui::RichText::new("✓").size(10.0));
+                                ui.colored_label(BRAND, egui::RichText::new(
+                                    format!("{} {} · {}", selected_cnt, app.t("items_selected"), format_size(selected_sz))
+                                ).size(12.0));
+                            });
+                        });
+                }
+            });
 
             ui.add_space(5.0);
 
@@ -1061,7 +1185,9 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             ui.horizontal(|ui| {
                 // 智能选择：只选推荐清理
                 let smart_btn = ui.add(
-                    egui::Button::new(egui::RichText::new(format!("🟢 {}", app.t("select_safe"))).color(egui::Color32::from_rgb(52, 199, 89)))
+                    egui::Button::new(egui::RichText::new(format!("🟢 {}", app.t("select_safe"))).color(egui::Color32::WHITE))
+                        .fill(SAFE_COLOR)
+                        .rounding(egui::Rounding::same(8.0)),
                 );
                 if smart_btn.clicked() {
                     app.select_safe_only();
@@ -1080,7 +1206,9 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
                 let delete_btn = ui.add_enabled(
                     delete_enabled,
-                    egui::Button::new(egui::RichText::new(format!("🗑 {} ({})", app.t("delete"), format_size(selected_sz))).color(egui::Color32::WHITE)),
+                    egui::Button::new(egui::RichText::new(format!("🗑 {} ({})", app.t("delete"), format_size(selected_sz))).color(egui::Color32::WHITE))
+                        .fill(DANGER_COLOR)
+                        .rounding(egui::Rounding::same(8.0)),
                 );
                 if delete_btn.clicked() {
                     app.prepare_delete();
@@ -1123,7 +1251,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
             let filtered_count = filtered_indices.len();
             if !app.filter_query.trim().is_empty() {
                 ui.colored_label(
-                    egui::Color32::from_rgb(100, 200, 255),
+                    BRAND,
                     egui::RichText::new(app.tf("filter_results", &[&filtered_count.to_string(), &total_count.to_string()])).size(12.0),
                 );
             }
@@ -1137,7 +1265,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                 let no_match_text = app.t("no_match").to_string();
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
-                    ui.label(egui::RichText::new(&no_match_text).size(14.0).color(egui::Color32::GRAY));
+                    ui.label(egui::RichText::new(&no_match_text).size(14.0).color(TEXT_TERTIARY));
                 });
                 return;
             }
@@ -1188,16 +1316,17 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                         }
                         let is_group_expanded = expanded_items.contains(app_name);
 
-                        // 父行背景
+                        // 父行背景（白色卡片，选中时浅绿）
                         let parent_bg = if any_selected {
-                            egui::Color32::from_rgb(30, 50, 30)
+                            SELECTED_CARD_BG
                         } else {
-                            egui::Color32::from_rgb(45, 45, 55)
+                            SURFACE_ELEVATED
                         };
                         let parent_frame = egui::Frame::none()
                             .fill(parent_bg)
-                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-                            .stroke(egui::Stroke::new(0.5, egui::Color32::from_rgb(70, 70, 80)));
+                            .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                            .rounding(egui::Rounding::same(8.0));
 
                         let parent_resp = parent_frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -1212,13 +1341,13 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                     "⬜"
                                 };
                                 let parent_cb_color = if !has_deletable {
-                                    egui::Color32::GRAY
+                                    TEXT_TERTIARY
                                 } else if all_selected {
-                                    egui::Color32::from_rgb(52, 199, 89)
+                                    BRAND
                                 } else if any_selected {
-                                    egui::Color32::from_rgb(255, 159, 10)
+                                    CAUTION_COLOR
                                 } else {
-                                    egui::Color32::from_gray(160)
+                                    TEXT_TERTIARY
                                 };
                                 if ui.colored_label(parent_cb_color, parent_cb_text).clicked() && has_deletable {
                                     let target = !all_selected;
@@ -1241,7 +1370,7 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.colored_label(
-                                            egui::Color32::from_rgb(200, 200, 220),
+                                            TEXT_PRIMARY,
                                             egui::RichText::new(app_name).size(14.0).strong(),
                                         );
                                         let size_str = if total_size == 0 {
@@ -1250,16 +1379,16 @@ fn render_gui(ctx: &egui::Context, app: &mut App, scan_rx: &mut Option<mpsc::Rec
                                             format_size(total_size)
                                         };
                                         let size_color = if total_size > 100 * 1024 * 1024 * 1024 {
-                                            egui::Color32::RED
+                                            ADVANCED_COLOR
                                         } else if total_size > 1024 * 1024 * 1024 {
-                                            egui::Color32::from_rgb(255, 159, 10)
+                                            CAUTION_COLOR
                                         } else {
-                                            egui::Color32::from_rgb(100, 200, 100)
+                                            SAFE_COLOR
                                         };
-                                        ui.colored_label(size_color, &size_str);
+                                        ui.colored_label(size_color, egui::RichText::new(&size_str).strong().size(13.0));
                                     });
                                     ui.colored_label(
-                                        egui::Color32::from_gray(130),
+                                        TEXT_TERTIARY,
                                         egui::RichText::new(format!(
                                             "{} 个子项（点击展开查看卸载/数据/缓存）",
                                             indices.len()
@@ -2484,7 +2613,7 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
                 // 标题
                 ui.horizontal(|ui| {
                     ui.colored_label(
-                        egui::Color32::from_rgb(100, 150, 255),
+                        BRAND,
                         egui::RichText::new("🔐").size(28.0),
                     );
                     ui.label(egui::RichText::new(app.t("permission_headline")).size(18.0).strong());
@@ -2496,12 +2625,12 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
 
                 // 说明
                 ui.colored_label(
-                    egui::Color32::from_gray(200),
+                    TEXT_PRIMARY,
                     egui::RichText::new(app.t("permission_desc")).size(13.0),
                 );
                 ui.add_space(3.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(170),
+                    TEXT_SECONDARY,
                     egui::RichText::new(app.t("permission_sub_desc")).size(12.0),
                 );
 
@@ -2509,7 +2638,7 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
 
                 // 步骤
                 ui.colored_label(
-                    egui::Color32::from_rgb(100, 200, 100),
+                    SAFE_COLOR,
                     egui::RichText::new(app.t("permission_steps_title")).size(13.0).strong(),
                 );
                 ui.add_space(5.0);
@@ -2524,11 +2653,11 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
                 for (i, step) in steps.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(100, 200, 100),
+                            SAFE_COLOR,
                             egui::RichText::new(format!("{}. ", i + 1)).size(13.0),
                         );
                         ui.colored_label(
-                            egui::Color32::from_gray(200),
+                            TEXT_PRIMARY,
                             egui::RichText::new(*step).size(13.0),
                         );
                     });
@@ -2561,7 +2690,7 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
                                 .color(egui::Color32::WHITE)
                                 .size(14.0)
                         )
-                        .fill(egui::Color32::from_rgb(52, 199, 89))
+                        .fill(SAFE_COLOR)
                     );
                     if install_btn.clicked() {
                         // 获取当前应用路径
@@ -2592,7 +2721,7 @@ fn show_permission_guide_window(ctx: &egui::Context, app: &mut App) {
 
                 ui.add_space(5.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(120),
+                    TEXT_TERTIARY,
                     egui::RichText::new(app.t("permission_hint")).size(11.0),
                 );
             });
@@ -2615,25 +2744,25 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(format!("{} {} {}", app.t("about_to_delete"), count, app.t("items"))).size(16.0));
-                ui.label(egui::RichText::new(format!("{}: {}", app.t("total"), format_size(size))).size(20.0).color(egui::Color32::from_rgb(255, 159, 10)));
+                ui.label(egui::RichText::new(format!("{}: {}", app.t("total"), format_size(size))).size(20.0).color(CAUTION_COLOR));
                 ui.add_space(8.0);
-                ui.colored_label(egui::Color32::RED, format!("⚠️ {}", app.t("irreversible")));
+                ui.colored_label(ADVANCED_COLOR, format!("⚠️ {}", app.t("irreversible")));
 
                 // 如果没有完全磁盘访问权限，显示警告
                 if !has_full_disk_access {
                     ui.add_space(8.0);
                     egui::Frame::group(ui.style())
-                        .fill(egui::Color32::from_rgb(50, 40, 20))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 120, 40)))
+                        .fill(egui::Color32::from_rgb(255, 247, 230))
+                        .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
                         .inner_margin(egui::Margin::same(8.0))
                         .show(ui, |ui| {
                             ui.colored_label(
-                                egui::Color32::from_rgb(255, 200, 100),
+                                CAUTION_COLOR,
                                 egui::RichText::new(format!("⚠️ {}", app.t("confirm_fda_warning"))).size(13.0).strong(),
                             );
                             ui.add_space(2.0);
                             ui.colored_label(
-                                egui::Color32::from_gray(180),
+                                TEXT_PRIMARY,
                                 egui::RichText::new(app.t("confirm_fda_sub_warning")).size(12.0),
                             );
                             ui.add_space(3.0);
@@ -2669,13 +2798,13 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
                                         ui.label(format_size(item.size_bytes));
                                         let cat_en = i18n::translate_category(&item.category, app.lang_en);
                                         ui.label(&cat_en);
-                                        ui.label(egui::RichText::new(&item.path).size(11.0).color(egui::Color32::from_gray(160)));
+                                        ui.label(egui::RichText::new(&item.path).size(11.0).color(TEXT_TERTIARY));
                                     });
                                 }
                                 ui.add_space(3.0);
                                 let summary_text = App::tf_lang(app.lang_en, "confirm_preview_summary", &[&items.len().to_string()]);
                                 ui.colored_label(
-                                    egui::Color32::from_gray(140),
+                                    TEXT_TERTIARY,
                                     egui::RichText::new(summary_text).size(11.0),
                                 );
                             });
@@ -2685,12 +2814,12 @@ fn show_confirm_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Optio
                 ui.add_space(15.0);
 
                 ui.horizontal(|ui| {
-                    if ui.button(egui::RichText::new(format!("✓ {}", app.t("confirm_delete"))).color(egui::Color32::from_rgb(52, 199, 89))).clicked() {
+                    if ui.button(egui::RichText::new(format!("✓ {}", app.t("confirm_delete"))).color(SAFE_COLOR)).clicked() {
                         app.show_preview = false;
                         let to_delete = app.confirm_delete();
                         start_delete(to_delete, app.lang_en, delete_rx);
                     }
-                    if ui.button(egui::RichText::new(format!("✗ {}", app.t("cancel"))).color(egui::Color32::RED)).clicked() {
+                    if ui.button(egui::RichText::new(format!("✗ {}", app.t("cancel"))).color(ADVANCED_COLOR)).clicked() {
                         app.show_preview = false;
                         app.cancel_delete();
                     }
@@ -2750,7 +2879,7 @@ fn show_sudo_password_window(
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(
-                        egui::Color32::from_rgb(255, 159, 10),
+                        CAUTION_COLOR,
                         egui::RichText::new(emoji).size(28.0),
                     );
                     ui.label(
@@ -2762,13 +2891,13 @@ fn show_sudo_password_window(
 
                 ui.add_space(8.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(200),
+                    TEXT_PRIMARY,
                     egui::RichText::new(description).size(13.0),
                 );
                 if !is_setup_mode {
                     ui.add_space(2.0);
                     ui.colored_label(
-                        egui::Color32::from_gray(150),
+                        TEXT_SECONDARY,
                         egui::RichText::new(app.t("sudo_password_note"))
                             .size(12.0),
                     );
@@ -2777,7 +2906,7 @@ fn show_sudo_password_window(
                 if let Some(ref err) = app.sudo_error {
                     ui.add_space(8.0);
                     ui.colored_label(
-                        egui::Color32::RED,
+                        ADVANCED_COLOR,
                         egui::RichText::new(err).size(13.0).strong(),
                     );
                 }
@@ -2928,7 +3057,7 @@ fn show_touch_id_setup_window(
 
                 ui.add_space(8.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(200),
+                    TEXT_PRIMARY,
                     egui::RichText::new(
                         App::tf_lang(
                             app.lang_en,
@@ -2940,7 +3069,7 @@ fn show_touch_id_setup_window(
                 );
                 ui.add_space(4.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(170),
+                    TEXT_SECONDARY,
                     egui::RichText::new(app.t("touchid_setup_detail"))
                     .size(12.0),
                 );
@@ -2948,7 +3077,7 @@ fn show_touch_id_setup_window(
                 if let Some(ref err) = app.touch_id_error {
                     ui.add_space(8.0);
                     ui.colored_label(
-                        egui::Color32::RED,
+                        ADVANCED_COLOR,
                         egui::RichText::new(err).size(13.0).strong(),
                     );
                 }
@@ -3035,7 +3164,7 @@ fn show_touch_id_waiting_window(ctx: &egui::Context, app: &mut App) {
 
                 ui.add_space(8.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(170),
+                    TEXT_SECONDARY,
                     egui::RichText::new(app.t("touchid_wait_desc"))
                     .size(13.0),
                 );
@@ -3045,7 +3174,7 @@ fn show_touch_id_waiting_window(ctx: &egui::Context, app: &mut App) {
                     let elapsed = start.elapsed().as_secs();
                     ui.add_space(6.0);
                     ui.colored_label(
-                        egui::Color32::from_gray(120),
+                        TEXT_TERTIARY,
                         egui::RichText::new(
                             App::tf_lang(app.lang_en, "touchid_wait_time", &[&elapsed.to_string()])
                         )
@@ -3104,7 +3233,7 @@ fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
 
                 ui.add_space(8.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(170),
+                    TEXT_SECONDARY,
                     egui::RichText::new(
                         App::tf_lang(app.lang_en, "touchid_verify_desc", &[&app.delete_total.to_string()])
                     )
@@ -3126,7 +3255,7 @@ fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
 
                 ui.add_space(4.0);
                 ui.colored_label(
-                    egui::Color32::from_gray(120),
+                    TEXT_TERTIARY,
                     egui::RichText::new(app.t("touchid_verify_hint")).size(11.0),
                 );
 
@@ -3143,14 +3272,14 @@ fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
                 if !recent_logs.is_empty() {
                     ui.add_space(10.0);
                     egui::Frame::group(ui.style())
-                        .fill(egui::Color32::from_gray(25))
+                        .fill(SURFACE)
                         .show(ui, |ui| {
                             ui.set_min_width(360.0);
                             ui.label(egui::RichText::new(app.t("touchid_verify_log")).size(11.0).strong());
                             ui.add_space(4.0);
                             for log in recent_logs {
                                 ui.colored_label(
-                                    egui::Color32::from_gray(170),
+                                    TEXT_SECONDARY,
                                     egui::RichText::new(log).size(10.0),
                                 );
                             }
@@ -3506,7 +3635,7 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
             } else {
                 app.t("cleaning_in_progress")
             };
-            ui.label(egui::RichText::new(format!("⏳ {}...", title)).size(15.0).color(egui::Color32::from_rgb(0, 200, 255)));
+            ui.label(egui::RichText::new(format!("⏳ {}...", title)).size(15.0).color(BRAND));
             ui.add_space(10.0);
 
             // 进度条
@@ -3519,25 +3648,25 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
             ui.add(
                 egui::ProgressBar::new(progress)
                     .desired_width(480.0)
-                    .fill(if in_sudo_phase { egui::Color32::from_rgb(255, 159, 10) } else { egui::Color32::from_rgb(52, 199, 89) })
+                    .fill(if in_sudo_phase { CAUTION_COLOR } else { SAFE_COLOR })
                     .text(progress_text)
             );
             ui.add_space(8.0);
 
             // 最新日志
-            ui.label(egui::RichText::new(app.t("cleaning_log")).size(12.0).color(egui::Color32::GRAY));
+            ui.label(egui::RichText::new(app.t("cleaning_log")).size(12.0).color(TEXT_TERTIARY));
             egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                 for log in app.logs.iter().rev().take(15) {
                     let color = if log.starts_with('✓') || log.starts_with('✅') {
-                        egui::Color32::from_rgb(52, 199, 89)
+                        SAFE_COLOR
                     } else if log.starts_with('✗') {
-                        egui::Color32::RED
+                        ADVANCED_COLOR
                     } else if log.starts_with('⛔') {
-                        egui::Color32::from_rgb(200, 100, 100)
+                        ADVANCED_COLOR
                     } else if log.starts_with('⚠') {
-                        egui::Color32::from_rgb(255, 159, 10)
+                        CAUTION_COLOR
                     } else {
-                        egui::Color32::from_rgb(0, 200, 255)
+                        BRAND
                     };
                     ui.colored_label(color, egui::RichText::new(log).size(12.0));
                 }
@@ -3563,54 +3692,54 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
             ui.vertical(|ui| {
                 // 成功
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(52, 199, 89), "✅");
-                    ui.label(egui::RichText::new(App::tf_lang(app.lang_en, "summary_success", &[&ok.to_string()])).size(15.0).color(egui::Color32::from_rgb(52, 199, 89)));
+                    ui.colored_label(SAFE_COLOR, "✅");
+                    ui.label(egui::RichText::new(App::tf_lang(app.lang_en, "summary_success", &[&ok.to_string()])).size(15.0).color(SAFE_COLOR));
                 });
 
                 if fail > 0 {
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::RED, "❌");
-                        ui.label(egui::RichText::new(App::tf_lang(app.lang_en, "summary_fail", &[&fail.to_string()])).size(15.0).color(egui::Color32::RED));
+                        ui.colored_label(ADVANCED_COLOR, "❌");
+                        ui.label(egui::RichText::new(App::tf_lang(app.lang_en, "summary_fail", &[&fail.to_string()])).size(15.0).color(ADVANCED_COLOR));
                     });
                     ui.add_space(3.0);
                     ui.colored_label(
-                        egui::Color32::from_gray(150),
+                        TEXT_SECONDARY,
                         egui::RichText::new(app.t("summary_fail_hint")).size(12.0),
                     );
 
                     // 引导用户处理失败项
                     ui.add_space(8.0);
                     egui::Frame::group(ui.style())
-                        .fill(egui::Color32::from_rgb(30, 35, 50))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 80, 120)))
+                        .fill(SURFACE)
+                        .stroke(egui::Stroke::new(1.0, BRAND))
                         .inner_margin(egui::Margin::same(8.0))
                         .show(ui, |ui| {
                             ui.colored_label(
-                                egui::Color32::from_rgb(100, 150, 255),
+                                BRAND,
                                 egui::RichText::new(format!("💡 {}", app.t("summary_solution_title"))).size(13.0).strong(),
                             );
                             ui.add_space(3.0);
                             ui.colored_label(
-                                egui::Color32::from_gray(180),
+                                TEXT_PRIMARY,
                                 egui::RichText::new(app.t("summary_sip_tip")).size(11.0),
                             );
                             ui.add_space(3.0);
                             ui.colored_label(
-                                egui::Color32::from_gray(180),
+                                TEXT_PRIMARY,
                                 egui::RichText::new(app.t("summary_perm_tip")).size(11.0),
                             );
                             ui.add_space(5.0);
                             ui.colored_label(
-                                egui::Color32::from_rgb(200, 200, 200),
+                                TEXT_SECONDARY,
                                 egui::RichText::new(app.t("summary_solution_1")).size(11.0),
                             );
                             ui.colored_label(
-                                egui::Color32::from_rgb(200, 200, 200),
+                                TEXT_SECONDARY,
                                 egui::RichText::new(app.t("summary_solution_2")).size(11.0),
                             );
                             ui.colored_label(
-                                egui::Color32::from_rgb(200, 200, 200),
+                                TEXT_SECONDARY,
                                 egui::RichText::new(app.t("summary_solution_3")).size(11.0),
                             );
                             ui.add_space(5.0);
@@ -3626,7 +3755,7 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                     // 列出所有失败的路径（可滚动+复制）
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(app.t("summary_fail_list")).size(12.0).color(egui::Color32::from_gray(170)));
+                        ui.label(egui::RichText::new(app.t("summary_fail_list")).size(12.0).color(TEXT_SECONDARY));
                         let all_paths: String = app.failed_paths.iter()
                             .map(|(p, c)| format!("[{}] {}", c, p))
                             .collect::<Vec<_>>()
@@ -3651,7 +3780,7 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                             for (path, category) in &app.failed_paths {
                                 ui.horizontal(|ui| {
                                     ui.colored_label(
-                                        egui::Color32::from_rgb(200, 100, 100),
+                                        ADVANCED_COLOR,
                                         egui::RichText::new("•").size(11.0),
                                     );
                                     ui.vertical(|ui| {
@@ -3663,7 +3792,7 @@ fn show_summary_window(ctx: &egui::Context, app: &mut App, ok: usize, fail: usiz
                                             egui::TextEdit::multiline(&mut path.as_str())
                                                 .desired_width(400.0)
                                                 .font(egui::TextStyle::Monospace)
-                                                .text_color(egui::Color32::from_gray(160))
+                                                .text_color(TEXT_TERTIARY)
                                                 .interactive(true),
                                         );
                                     });
@@ -3747,18 +3876,18 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
             ui.vertical(|ui| {
                 // 标题
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(255, 159, 10), "⚠️");
+                    ui.colored_label(CAUTION_COLOR, "⚠️");
                     ui.label(egui::RichText::new("检测到卸载残留").size(16.0).strong());
                 });
                 ui.colored_label(
-                    egui::Color32::from_gray(160),
+                    TEXT_TERTIARY,
                     egui::RichText::new(format!(
                         "共 {} 项残留 (可清理 {} 项), 文件总计 {}",
                         total, deletable_count, format_size(fs_total_size)
                     )).size(12.0),
                 );
                 ui.colored_label(
-                    egui::Color32::from_gray(120),
+                    TEXT_TERTIARY,
                     egui::RichText::new("请选择要清理的项目，或一键清理全部可删除项").size(11.0),
                 );
 
@@ -3771,17 +3900,17 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                     // 注册表残留
                     if reg_len > 0 {
                         ui.add_space(4.0);
-                        ui.colored_label(egui::Color32::from_rgb(100, 150, 255), egui::RichText::new(format!("📋 注册表残留 ({} 项)", reg_len)).size(13.0).strong());
+                        ui.colored_label(BRAND, egui::RichText::new(format!("📋 注册表残留 ({} 项)", reg_len)).size(13.0).strong());
                         for (i, reg) in residual.registry.iter().enumerate() {
                             let idx = i;
                             let checked = &mut app.residual_selected[idx];
                             ui.horizontal(|ui| {
                                 ui.add_enabled(reg.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
                                 if reg.deletable {
-                                    ui.colored_label(egui::Color32::from_gray(200), egui::RichText::new(&reg.key_path).size(11.0));
+                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(&reg.key_path).size(11.0));
                                 } else {
-                                    ui.colored_label(egui::Color32::from_gray(100), egui::RichText::new(&reg.key_path).size(11.0));
-                                    ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("({})", reg.reason)).size(10.0));
+                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(&reg.key_path).size(11.0));
+                                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(format!("({})", reg.reason)).size(10.0));
                                 }
                             });
                         }
@@ -3790,17 +3919,17 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
 
                     // 环境变量残留
                     if env_len > 0 {
-                        ui.colored_label(egui::Color32::from_rgb(100, 200, 100), egui::RichText::new(format!("环境变量残留 ({} 项)", env_len)).size(13.0).strong());
+                        ui.colored_label(SAFE_COLOR, egui::RichText::new(format!("环境变量残留 ({} 项)", env_len)).size(13.0).strong());
                         for (i, env) in residual.env_vars.iter().enumerate() {
                             let idx = reg_len + i;
                             let checked = &mut app.residual_selected[idx];
                             ui.horizontal(|ui| {
                                 ui.add_enabled(env.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
                                 if env.deletable {
-                                    ui.colored_label(egui::Color32::from_gray(200), egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
+                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
                                 } else {
-                                    ui.colored_label(egui::Color32::from_gray(100), egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
-                                    ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("({})", env.reason)).size(10.0));
+                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(format!("{} = {}", env.var_name, env.current_value)).size(11.0));
+                                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(format!("({})", env.reason)).size(10.0));
                                 }
                             });
                         }
@@ -3816,10 +3945,10 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                             ui.horizontal(|ui| {
                                 ui.add_enabled(fs.deletable && !is_cleaning, egui::Checkbox::without_text(checked));
                                 if fs.deletable {
-                                    ui.colored_label(egui::Color32::from_gray(200), egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
+                                    ui.colored_label(TEXT_PRIMARY, egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
                                 } else {
-                                    ui.colored_label(egui::Color32::from_gray(100), egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
-                                    ui.colored_label(egui::Color32::from_rgb(200, 100, 100), egui::RichText::new(format!("({})", fs.reason)).size(10.0));
+                                    ui.colored_label(TEXT_TERTIARY, egui::RichText::new(format!("{} ({})", fs.path, format_size(fs.size))).size(11.0));
+                                    ui.colored_label(ADVANCED_COLOR, egui::RichText::new(format!("({})", fs.reason)).size(10.0));
                                 }
                             });
                         }
@@ -3909,7 +4038,7 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
                 if is_cleaning {
                     ui.add_space(5.0);
                     ui.colored_label(
-                        egui::Color32::from_rgb(0, 200, 255),
+                        BRAND,
                         egui::RichText::new("⏳ 正在清理残留...").size(12.0),
                     );
                     ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -3922,17 +4051,17 @@ fn show_residual_window(ctx: &egui::Context, app: &mut App, delete_rx: &mut Opti
 fn category_color(category: &str) -> egui::Color32 {
     match category {
         c if c.contains("Rust") => egui::Color32::from_rgb(222, 120, 50),
-        c if c.contains("Xcode") => egui::Color32::from_rgb(100, 150, 255),
+        c if c.contains("Xcode") => BRAND,
         c if c.contains("模拟器") => egui::Color32::from_rgb(150, 100, 255),
-        c if c.contains("Node") => egui::Color32::from_rgb(100, 200, 100),
+        c if c.contains("Node") => SAFE_COLOR,
         c if c.contains("pnpm") | c.contains("npm") => egui::Color32::from_rgb(180, 120, 80),
         c if c.contains("Go") => egui::Color32::from_rgb(100, 200, 200),
         c if c.contains("Homebrew") => egui::Color32::from_rgb(255, 150, 50),
-        c if c.contains("pip") => egui::Color32::from_rgb(100, 200, 255),
+        c if c.contains("pip") => BRAND,
         c if c.contains("IDE") => egui::Color32::from_rgb(200, 150, 255),
         c if c.contains("APFS") => egui::Color32::from_rgb(255, 100, 150),
-        c if c.contains("大目录") | c.contains("大文件") => egui::Color32::from_rgb(255, 200, 100),
-        _ => egui::Color32::from_gray(180),
+        c if c.contains("大目录") | c.contains("大文件") => CAUTION_COLOR,
+        _ => TEXT_PRIMARY,
     }
 }
 
@@ -3990,7 +4119,7 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
 
         ui.label(egui::RichText::new(format!("📁 {}", display_path))
             .size(14.0)
-            .color(egui::Color32::from_rgb(100, 200, 255)));
+            .color(BRAND));
 
         ui.separator();
 
@@ -4016,13 +4145,13 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
             ui.label(
                 egui::RichText::new(app.tf("analyzing", &[&display_path_short(&current_path, app.lang_en)]))
                     .size(16.0)
-                    .color(egui::Color32::from_rgb(0, 200, 255)),
+                    .color(BRAND),
             );
             ui.add_space(15.0);
             let pct = (app.scan_progress * 100.0) as u32;
             ui.add(egui::ProgressBar::new(app.scan_progress)
                 .desired_width(500.0)
-                .fill(egui::Color32::from_rgb(0, 200, 255))
+                .fill(BRAND)
                 .text(format!("{}%", pct)));
         });
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -4032,7 +4161,7 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
     if items.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.label(egui::RichText::new(app.t("no_large_files")).size(16.0).color(egui::Color32::GRAY));
+            ui.label(egui::RichText::new(app.t("no_large_files")).size(16.0).color(TEXT_TERTIARY));
             ui.add_space(10.0);
             if ui.button(egui::RichText::new(format!("🔍 {}", app.t("rescan"))).size(16.0)).clicked() {
                 start_scan(app, scan_rx);
@@ -4048,13 +4177,13 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
 
     ui.horizontal(|ui| {
         ui.colored_label(
-            egui::Color32::from_rgb(100, 200, 255),
+            BRAND,
             app.tf("items_total_size", &[&items.len().to_string(), &format_size(total_size)]),
         );
         if selected_cnt > 0 {
             ui.separator();
             ui.colored_label(
-                egui::Color32::from_rgb(255, 159, 10),
+                CAUTION_COLOR,
                 app.tf("selected_count_size", &[&selected_cnt.to_string(), &format_size(selected_sz)]),
             );
         }
@@ -4077,7 +4206,7 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
         let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
         if ui.add_enabled(delete_enabled, egui::Button::new(
             egui::RichText::new(app.tf("delete_selected_count", &[&selected_cnt.to_string()]))
-                .color(egui::Color32::from_rgb(255, 69, 58))
+                .color(ADVANCED_COLOR)
         )).clicked() {
             app.prepare_delete();
         }
@@ -4141,11 +4270,11 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
                     ui.add(egui::ProgressBar::new(pct)
                         .desired_width(200.0)
                         .fill(if pct > 0.5 {
-                            egui::Color32::from_rgb(255, 69, 58)
+                            ADVANCED_COLOR
                         } else if pct > 0.2 {
-                            egui::Color32::from_rgb(255, 159, 10)
+                            CAUTION_COLOR
                         } else {
-                            egui::Color32::from_rgb(52, 199, 89)
+                            SAFE_COLOR
                         }));
 
                     // 大小
@@ -4159,13 +4288,13 @@ fn render_disk_analyzer(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<m
                     };
                     ui.label(egui::RichText::new(format!("{:.1}%", total_pct))
                         .size(11.0)
-                        .color(egui::Color32::GRAY));
+                        .color(TEXT_TERTIARY));
 
                     // 目录：显示"进入"提示
                     if is_dir {
                         ui.label(egui::RichText::new("→")
                             .size(16.0)
-                            .color(egui::Color32::from_rgb(100, 200, 255)));
+                            .color(BRAND));
                     }
                 });
 
@@ -4199,7 +4328,7 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
     if items.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
-            ui.label(egui::RichText::new(app.t("optimize_click_to_scan")).size(16.0).color(egui::Color32::GRAY));
+            ui.label(egui::RichText::new(app.t("optimize_click_to_scan")).size(16.0).color(TEXT_TERTIARY));
             ui.add_space(10.0);
             let scan_button = format!("🔍 {}", app.t("scan"));
             if ui.button(egui::RichText::new(scan_button).size(16.0)).clicked() {
@@ -4211,7 +4340,7 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
 
     ui.add_space(10.0);
     ui.heading(egui::RichText::new(app.t("tab_system_optimize")).size(18.0));
-    ui.label(egui::RichText::new(app.t("optimize_safe_hint")).size(12.0).color(egui::Color32::GRAY));
+    ui.label(egui::RichText::new(app.t("optimize_safe_hint")).size(12.0).color(TEXT_TERTIARY));
     ui.add_space(10.0);
 
     // 优化任务列表
@@ -4220,8 +4349,8 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (i, item) in items.iter().enumerate() {
             egui::Frame::group(ui.style())
-                .fill(egui::Color32::from_rgb(30, 30, 40))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 70)))
+                .fill(SURFACE)
+                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
                 .inner_margin(12.0)
                 .outer_margin(4.0)
                 .show(ui, |ui| {
@@ -4238,7 +4367,7 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
                                 ui.label(egui::RichText::new(recommend_badge_text(&item.recommend, app.lang_en)).size(11.0));
                             });
                             let desc_en = i18n::translate_description(&item.description, app.lang_en);
-                            ui.label(egui::RichText::new(&desc_en).size(12.0).color(egui::Color32::from_rgb(160, 160, 170)));
+                            ui.label(egui::RichText::new(&desc_en).size(12.0).color(TEXT_SECONDARY));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let run_text = if app.lang_en { "▶ Run" } else { "▶ 执行" };
@@ -4267,7 +4396,7 @@ fn render_optimize_panel(ui: &mut egui::Ui, app: &mut App, scan_rx: &mut Option<
                 .max_height(150.0)
                 .show(ui, |ui| {
                     for log in &app.logs {
-                        ui.label(egui::RichText::new(log).size(11.0).color(egui::Color32::from_rgb(160, 160, 170)));
+                        ui.label(egui::RichText::new(log).size(11.0).color(TEXT_SECONDARY));
                     }
                 });
         });
@@ -4415,12 +4544,12 @@ fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
     ui.vertical_centered(|ui| {
         ui.add(egui::Spinner::new().size(40.0));
         ui.add_space(10.0);
-        ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(egui::Color32::from_rgb(0, 200, 255)));
+        ui.label(egui::RichText::new(format!("⏳ {}...", app.t("scanning"))).size(16.0).color(BRAND));
         ui.add_space(15.0);
         let pct = (app.scan_progress * 100.0) as u32;
         ui.add(egui::ProgressBar::new(app.scan_progress)
             .desired_width(500.0)
-            .fill(egui::Color32::from_rgb(0, 200, 255))
+            .fill(BRAND)
             .text(format!("{}%", pct)));
     });
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
