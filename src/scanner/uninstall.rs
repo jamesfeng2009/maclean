@@ -347,34 +347,56 @@ fn scan_app(app_path: &PathBuf) -> Vec<ScanItem> {
         return items;
     }
 
-    // 可卸载应用：拆出卸载项和缓存项
-    let description_prefix = if matches!(protection, ProtectionLevel::DataProtected) {
-        "含敏感数据，卸载前请备份"
-    } else {
-        "卸载将删除应用及其数据"
-    };
+    // 可卸载应用：拆为三项，让用户自主选择
+    //   1. 应用卸载（Caution）：只删 .app 包
+    //   2. 应用数据（Advanced）：删 Containers/Application Support/Preferences 等
+    //   3. 应用缓存（CacheOnly）：删 Caches/Logs/HTTPStorages
 
-    // 应用卸载项（Advanced）：.app + 数据类文件
-    let mut uninstall_paths = data_paths.clone();
-    uninstall_paths.push(app_path.to_string_lossy().to_string());
+    // 1) 应用卸载项：只删 .app 包
     items.push(ScanItem {
         path: app_path.to_string_lossy().to_string(),
-        size_bytes: app_size + data_size,
+        size_bytes: app_size,
         category: format!("{} (卸载)", app_name),
         selected: false,
         deletable: true,
         undeletable_reason: String::new(),
-        batch_paths: uninstall_paths,
-        recommend: Recommend::Advanced,
+        batch_paths: vec![app_path.to_string_lossy().to_string()],
+        recommend: Recommend::Caution,
         description: format!(
-            "{} | 应用大小 {}，关联数据 {} 项",
-            description_prefix,
-            format_size_local(app_size),
-            data_paths.len()
+            "卸载 {} 应用本体（{}），关联数据不会被删除",
+            app_name,
+            format_size_local(app_size)
         ),
     });
 
-    // 缓存清理项（CacheOnly）：Caches / Logs / HTTPStorages
+    // 2) 应用数据项（Advanced）：删数据类文件
+    if data_size > 0 && !data_paths.is_empty() {
+        let data_desc = if matches!(protection, ProtectionLevel::DataProtected) {
+            format!(
+                "{} 的应用数据（含聊天记录/配置等），删除前请务必备份",
+                app_name
+            )
+        } else {
+            format!(
+                "{} 的应用数据与配置（{} 项），删除后可能需要重新登录或配置",
+                app_name,
+                data_paths.len()
+            )
+        };
+        items.push(ScanItem {
+            path: data_paths[0].clone(),
+            size_bytes: data_size,
+            category: format!("{} 数据", app_name),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: data_paths,
+            recommend: Recommend::Advanced,
+            description: data_desc,
+        });
+    }
+
+    // 3) 缓存清理项（CacheOnly）：Caches / Logs / HTTPStorages
     if cache_size > 0 && !cache_paths.is_empty() {
         items.push(ScanItem {
             path: cache_paths[0].clone(),
