@@ -1916,9 +1916,13 @@ fn start_delete(to_delete: Vec<(String, String, Vec<String>, bool)>, lang_en: bo
                         let p = std::path::Path::new(path.as_str());
 
                         if !p.exists() && !p.symlink_metadata().is_ok() {
+                            // 路径已不存在：视为删除成功（幂等性）。
+                            // 用户想要的结果就是该路径消失，现在目标已经达成，
+                            // 无需因缓存过期或外部已删除而报错。
                             let _ = tx.send(DeleteMessage::Log(
-                                format!("✗ {}", App::tf_lang(lang_en, "log_path_not_exist", &[&path])), path.clone(), category.clone(), false));
-                            safety::log_deletion(&path, &category, false, Some(&App::t_lang(lang_en, "log_path_not_exist").replace("{}", "").trim().to_string()));
+                                format!("✓ {} ({})", App::tf_lang(lang_en, "log_path_not_exist", &[&path]),
+                                    App::t_lang(lang_en, "already_cleaned")), path.clone(), category.clone(), true));
+                            safety::log_deletion(&path, &category, true, None);
                             continue;
                         }
 
