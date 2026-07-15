@@ -10,6 +10,7 @@
 //! - HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall (系统级 32位)
 //! - HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall (用户级)
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,6 +187,107 @@ const DATA_PROTECTED_KEYWORDS: &[&str] = &[
 /// 视为含有用户重要数据（聊天记录、配置等），标记为 DataProtected。
 /// 这使得 IM 应用（微信、QQ、Telegram 等）无需枚举即可被保护。
 const DATA_PROTECTED_SIZE_THRESHOLD: u64 = 50 * 1024 * 1024; // 50MB
+
+/// Windows 系统级目录名称列表
+///
+/// 用于 App 残留扫描时跳过系统/共享目录，避免误删。
+/// 名称统一使用小写，通过 `is_windows_system_name` 做不区分大小写匹配。
+const WINDOWS_SYSTEM_NAMES: &[&str] = &[
+    // 系统目录
+    "microsoft",
+    "windows",
+    "packages",
+    "programdata",
+    "winsxs",
+    "system32",
+    "syswow64",
+    // 系统组件
+    "microsoftedge",
+    "microsoftedgeupdate",
+    "edge",
+    "edgeupdate",
+    "office",
+    "teams",
+    "onedrive",
+    // 错误报告
+    "crashdumps",
+    "crashreports",
+    "errorreports",
+    "wer",
+    "wermgr",
+    // 系统服务
+    "d3dscache",
+    "vault",
+    "identitycrl",
+    "credentials",
+    "wbem",
+    "catroot",
+    "catroot2",
+    "driverstore",
+    "drivers",
+    "config",
+    "logs",
+    "fonts",
+    "help",
+    "ime",
+    "inf",
+    "migration",
+    "debug",
+    "diagnostics",
+    "serviceprofiles",
+    "servicing",
+    "speech",
+    "speech_onecore",
+    "systemapps",
+    "systemresources",
+    "twain_32",
+    "web",
+    // 用户配置
+    "roaming",
+    "local",
+    "locallow",
+    "usertemplates",
+    "network",
+    "start menu",
+    // 厂商共享目录（删除可能影响同厂商其他产品）
+    "adobe",
+    "macromedia",
+    "common files",
+    "common",
+    "nvidia",
+    "amd",
+    "intel",
+    "realtek",
+    "synaptics",
+    "logitech",
+    "corsair",
+    "razer",
+    "steelseries",
+    "msi",
+    "gigabyte",
+    "asrock",
+    "creative",
+    "dolby",
+    "nahimic",
+    "bangolufsen",
+    "hp",
+    "dell",
+    "lenovo",
+    "asus",
+    "acer",
+    "huawei",
+    "xiaomi",
+    "samsung",
+    "lg",
+    "sony",
+];
+
+/// 判断目录名是否为 Windows 系统级目录
+fn is_windows_system_name(name: &str) -> bool {
+    WINDOWS_SYSTEM_NAMES
+        .iter()
+        .any(|&sys| name.eq_ignore_ascii_case(sys))
+}
 
 /// 应用保护级别
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -693,6 +795,221 @@ pub fn find_app_by_key(key_name: &str) -> Option<WindowsAppInfo> {
 }
 
 // =========================================================================
+//  已安装应用名称收集
+// =========================================================================
+
+/// 收集所有已安装应用的名称变体集合
+///
+/// 基于 `get_installed_apps()` 返回的应用列表，生成小写、去空格/连字符/下划线
+/// 以及去除常见后缀的变体，用于和 AppData 目录名做模糊匹配。
+fn get_installed_app_names() -> HashSet<String> {
+    let mut names = HashSet::new();
+
+    for app in get_installed_apps() {
+        let lower = app.name.to_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+
+        // 原始小写名
+        names.insert(lower.clone());
+
+        // 去除空格/连字符/下划线后的紧凑名
+        let compact = lower.replace([' ', '-', '_'], "");
+        if !compact.is_empty() && compact != lower {
+            names.insert(compact);
+        }
+
+        // 去除常见后缀后的名称
+        for suffix in [
+            " for windows",
+            " desktop",
+            " (64-bit)",
+            " (32-bit)",
+            " beta",
+        ] {
+            if let Some(stripped) = lower.strip_suffix(suffix) {
+                names.insert(stripped.to_string());
+                let compact_stripped = stripped.replace([' ', '-', '_'], "");
+                if !compact_stripped.is_empty() && compact_stripped != stripped {
+                    names.insert(compact_stripped);
+                }
+            }
+        }
+    }
+
+    names
+}
+
+/// 判断 AppData 下的目录是否对应某个已安装应用
+///
+/// 支持模糊匹配：
+/// - 目录名与已安装应用名（小写）完全一致
+/// - 目录名包含已安装应用名，或应用名包含目录名
+/// - 去除空格/连字符/下划线后的紧凑名互相包含
+fn is_windows_app_installed(dir_name: &str, installed_names: &HashSet<String>) -> bool {
+    let dir_lower = dir_name.to_lowercase();
+    if installed_names.contains(&dir_lower) {
+        return true;
+    }
+
+    let dir_compact = dir_lower.replace([' ', '-', '_'], "");
+    if installed_names.contains(&dir_compact) {
+        return true;
+    }
+
+    for name in installed_names {
+        if name.len() < 3 {
+            continue;
+        }
+
+        // 原始小写名的互相包含
+        if dir_lower.contains(name) || name.contains(&dir_lower) {
+            return true;
+        }
+
+        // 紧凑名的互相包含
+        let name_compact = name.replace([' ', '-', '_'], "");
+        if name_compact.len() >= 3
+            && (dir_compact.contains(&name_compact) || name_compact.contains(&dir_compact))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+// =========================================================================
+//  Windows App 残留扫描
+// =========================================================================
+
+/// 扫描 %LOCALAPPDATA% 和 %APPDATA% 下已卸载应用的残留目录
+///
+/// 对每个一级目录：
+/// - 跳过 `is_windows_system_name` 匹配的系统目录
+/// - 跳过与已安装应用名匹配的目录
+/// - 剩余目录作为独立的 `App残留` 项加入扫描结果
+///
+/// 对 `Programs` 目录特殊处理：遍历其子目录，逐个判断是否对应已安装应用。
+fn scan_windows_app_leftovers(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+    let local_appdata = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Local"));
+    let appdata = std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join("AppData/Roaming"));
+
+    let installed_names = get_installed_app_names();
+
+    for base in [&local_appdata, &appdata] {
+        if !base.is_dir() {
+            continue;
+        }
+
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+
+            // 跳过系统级目录
+            if is_windows_system_name(&dir_name) {
+                continue;
+            }
+
+            // 对 Programs 目录做特殊处理：扫描子目录
+            if dir_name.eq_ignore_ascii_case("Programs") {
+                scan_programs_subdirs(&path, &installed_names, items);
+                continue;
+            }
+
+            // 跳过已安装应用对应的目录
+            if is_windows_app_installed(&dir_name, &installed_names) {
+                continue;
+            }
+
+            let size = dir_size(&path);
+            if size == 0 {
+                continue;
+            }
+
+            items.push(ScanItem {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "App残留".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: format!(
+                    "{} 可能为已卸载应用的残留目录，删除前请确认",
+                    dir_name
+                ),
+            });
+        }
+    }
+}
+
+/// 扫描 Programs 目录下的子目录
+///
+/// 每个子目录单独判断是否对应已安装应用；未匹配到的作为 App残留 项。
+fn scan_programs_subdirs(
+    programs_dir: &Path,
+    installed_names: &HashSet<String>,
+    items: &mut Vec<ScanItem>,
+) {
+    let Ok(entries) = std::fs::read_dir(programs_dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+
+        if is_windows_system_name(&dir_name) {
+            continue;
+        }
+
+        if is_windows_app_installed(&dir_name, installed_names) {
+            continue;
+        }
+
+        let size = dir_size(&path);
+        if size == 0 {
+            continue;
+        }
+
+        items.push(ScanItem {
+            path: path.to_string_lossy().to_string(),
+            size_bytes: size,
+            category: "App残留".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
+            recommend: Recommend::Caution,
+            description: format!(
+                "{} 可能为已卸载应用的残留目录（位于 Programs），删除前请确认",
+                dir_name
+            ),
+        });
+    }
+}
+
+// =========================================================================
 //  App 缓存扫描器
 // =========================================================================
 
@@ -814,16 +1131,16 @@ fn scan_program_files_cache_dir(base: &Path) -> Vec<ScanItem> {
                         items.push(ScanItem {
                             path: cache_path.to_string_lossy().to_string(),
                             size_bytes: size,
-                            category: format!("{} 日志/缓存", app_name),
-                            selected: false,
-                            deletable: false, // Program Files 需要管理员权限
-                            undeletable_reason: "需要管理员权限删除".to_string(),
-                            batch_paths: Vec::new(),
-                            recommend: Recommend::CacheOnly,
-                            description: format!(
-                                "{} 应用的日志/缓存目录（位于 Program Files，需管理员权限）",
-                                app_name
-                            ),
+                            category: format!("{} 缓存", app_name),
+                        selected: false,
+                        deletable: false, // Program Files 需要管理员权限
+                        undeletable_reason: "需要管理员权限删除".to_string(),
+                        batch_paths: Vec::new(),
+                        recommend: Recommend::CacheOnly,
+                        description: format!(
+                            "{} 应用的日志/缓存目录（位于 Program Files，需管理员权限）",
+                            app_name
+                        ),
                         });
                     }
                 }
@@ -1217,6 +1534,13 @@ impl Scanner for WindowsUninstallScanner {
                 ));
             }
         }
+
+        // 扫描已卸载应用留下的 AppData 目录残留
+        scan_windows_app_leftovers(&mut items);
+        crate::logger::info(&format!(
+            "Windows App残留扫描完成，当前共 {} 项",
+            items.len()
+        ));
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         ScanResult {
@@ -2765,5 +3089,39 @@ mod tests {
             .filter(|e| !to_remove_lower.contains(&e.to_lowercase()))
             .collect();
         assert_eq!(cleaned.join(";"), r"C:\Windows\system32;C:\Other");
+    }
+
+    #[test]
+    fn test_is_windows_system_name() {
+        assert!(is_windows_system_name("Microsoft"));
+        assert!(is_windows_system_name("microsoft"));
+        assert!(is_windows_system_name("Windows"));
+        assert!(is_windows_system_name("Packages"));
+        assert!(is_windows_system_name("CrashDumps"));
+        assert!(is_windows_system_name("Adobe"));
+        assert!(is_windows_system_name("Macromedia"));
+        assert!(!is_windows_system_name("MyUninstalledApp"));
+        assert!(!is_windows_system_name("Spotify"));
+    }
+
+    #[test]
+    fn test_is_windows_app_installed() {
+        let mut installed = HashSet::new();
+        installed.insert("spotify".to_string());
+        installed.insert("mozilla firefox".to_string());
+        installed.insert("visual studio code".to_string());
+        installed.insert("epic games launcher".to_string());
+
+        // 精确匹配
+        assert!(is_windows_app_installed("Spotify", &installed));
+        // 目录名是已安装应用名的子串
+        assert!(is_windows_app_installed("Mozilla", &installed));
+        assert!(is_windows_app_installed("Firefox", &installed));
+        // 紧凑名匹配
+        assert!(is_windows_app_installed("VisualStudioCode", &installed));
+        assert!(is_windows_app_installed("EpicGamesLauncher", &installed));
+        // 未安装应用不匹配
+        assert!(!is_windows_app_installed("UnknownApp", &installed));
+        assert!(!is_windows_app_installed("FooBar", &installed));
     }
 }

@@ -162,8 +162,9 @@ pub struct App {
     pub logs: Vec<String>,
     /// 确认状态
     pub confirm: ConfirmState,
-    /// 待删除的项索引列表
-    pub pending_delete: Vec<usize>,
+    /// 待删除的项索引列表，每项为 (tab_index, item_index)
+    /// 支持跨 Tab 删除（如概览一键清理）
+    pub pending_delete: Vec<(usize, usize)>,
     /// 是否应该退出
     pub should_quit: bool,
     /// 扫描耗时（毫秒）
@@ -227,6 +228,8 @@ pub struct App {
     pub scan_current_path: String,
     /// 当前分类过滤（按 category 前缀过滤）
     pub filter_category: Option<String>,
+    /// App卸载 Tab 当前选中的应用分组名（用于右侧详情面板）
+    pub selected_app_group: Option<String>,
     /// 是否显示残留清理弹窗（卸载后检测到残留时弹出）
     pub show_residual_dialog: bool,
     /// 启动时显示菜单栏图标
@@ -296,6 +299,7 @@ impl App {
             hud_open: false,
             scan_current_path: String::new(),
             filter_category: None,
+            selected_app_group: None,
             delete_done: 0,
             delete_total: 0,
             scan_progress: 0.0,
@@ -825,13 +829,36 @@ impl App {
     }
 
     /// 准备删除选中的项（进入确认状态）
+    /// 只收集当前 Tab 的选中项。
     pub fn prepare_delete(&mut self) {
-        let selected: Vec<usize> = self
-            .current_items()
+        let idx = self.tab_index();
+        let selected: Vec<(usize, usize)> = self
+            .results[idx]
             .iter()
             .enumerate()
             .filter(|(_, item)| item.selected)
-            .map(|(i, _)| i)
+            .map(|(i, _)| (idx, i))
+            .collect();
+
+        if selected.is_empty() {
+            return;
+        }
+
+        self.pending_delete = selected;
+        self.confirm = ConfirmState::Pending;
+    }
+
+    /// 准备跨 Tab 删除（概览一键清理使用）
+    pub fn prepare_delete_cross_tab(&mut self, items: Vec<(usize, usize)>) {
+        let selected: Vec<(usize, usize)> = items
+            .into_iter()
+            .filter(|(tab_idx, item_idx)| {
+                self.results
+                    .get(*tab_idx)
+                    .and_then(|v| v.get(*item_idx))
+                    .map(|item| item.deletable)
+                    .unwrap_or(false)
+            })
             .collect();
 
         if selected.is_empty() {
@@ -846,7 +873,6 @@ impl App {
     /// use_trash: true 表示移至废纸篓（可恢复），false 表示永久删除
     pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>, bool)> {
         self.confirm = ConfirmState::Deleting;
-        let idx = self.tab_index();
 
         // 收集要删除的路径和类别（跳过不可删除的项）
         // 策略：Safe 级别永久删除（缓存自动重建），Caution/Advanced 移至废纸篓（可恢复）
@@ -854,9 +880,15 @@ impl App {
             .pending_delete
             .iter()
             .rev()
-            .filter(|&&i| self.results[idx][i].deletable)
-            .map(|&i| {
-                let item = &self.results[idx][i];
+            .filter(|(tab_idx, item_idx)| {
+                self.results
+                    .get(*tab_idx)
+                    .and_then(|v| v.get(*item_idx))
+                    .map(|item| item.deletable)
+                    .unwrap_or(false)
+            })
+            .map(|(tab_idx, item_idx)| {
+                let item = &self.results[*tab_idx][*item_idx];
                 let use_trash = match item.recommend {
                     crate::scanner::Recommend::Safe => false, // 缓存类：永久删除
                     crate::scanner::Recommend::CacheOnly => false, // 应用缓存/日志：永久删除
@@ -899,30 +931,48 @@ impl App {
     }
 
     /// 删除完成后的收尾工作
+    /// 支持跨 Tab：根据 pending_delete 中记录的 (tab_idx, item_idx) 处理。
     pub fn finish_delete(&mut self) {
-        let idx = self.tab_index();
-
         // 统计成功/失败
         let success_count = self.deleted_paths.len();
         let failed_count = self.failed_paths.len();
 
-        // 只移除成功删除的项（通过路径匹配），保留失败的项让用户看到
+        // 按 Tab 分组处理：移除成功删除的项，取消该 Tab 的选中状态
+        let mut affected_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let deleted = self.deleted_paths.clone();
-        self.results[idx].retain(|item| !deleted.contains(&item.path));
 
-        // 失效当前 Tab 的扫描缓存，确保下次扫描看到最新数据
-        let cache_name = match self.tab {
-            Tab::Overview | Tab::Settings => None,
-            Tab::DevCache => Some("dev_cache"),
-            Tab::LargeFiles => Some("large_files"),
-            Tab::AppCache => Some("app_cache"),
-            Tab::AppData => Some("app_data"),
-            Tab::AppUninstall => Some("app_uninstall"),
-            Tab::SystemOptimize => None,
-            Tab::Apfs => Some("apfs"),
-        };
-        if let Some(name) = cache_name {
-            scanner::cache::invalidate_cache(name);
+        for (tab_idx, item_idx) in &self.pending_delete {
+            affected_tabs.insert(*tab_idx);
+            if let Some(item) = self.results.get_mut(*tab_idx).and_then(|v| v.get_mut(*item_idx)) {
+                item.selected = false;
+                if deleted.contains(&item.path) {
+                    // 标记为已删除（稍后统一移除）
+                    item.path = String::new();
+                }
+            }
+        }
+
+        let affected_tabs_clone = affected_tabs.clone();
+
+        // 从各 Tab 中移除路径为空的项
+        for tab_idx in affected_tabs {
+            self.results[tab_idx].retain(|item| !item.path.is_empty());
+        }
+
+        // 失效受影响 Tab 的扫描缓存
+        for tab_idx in affected_tabs_clone {
+            let cache_name = match Tab::all().get(tab_idx) {
+                Some(Tab::DevCache) => Some("dev_cache"),
+                Some(Tab::LargeFiles) => Some("large_files"),
+                Some(Tab::AppCache) => Some("app_cache"),
+                Some(Tab::AppData) => Some("app_data"),
+                Some(Tab::AppUninstall) => Some("app_uninstall"),
+                Some(Tab::Apfs) => Some("apfs"),
+                _ => None,
+            };
+            if let Some(name) = cache_name {
+                scanner::cache::invalidate_cache(name);
+            }
         }
 
         // 生成汇总
@@ -940,11 +990,6 @@ impl App {
         let (total, free) = get_disk_info();
         self.disk_total = total;
         self.disk_free = free;
-
-        // 取消所有选中状态（失败的项保留在列表但取消选中）
-        for item in &mut self.results[idx] {
-            item.selected = false;
-        }
 
         self.pending_delete.clear();
         self.confirm = ConfirmState::None;
@@ -1048,7 +1093,8 @@ impl App {
                 "delete" => "Delete",
                 "select_all" => "Select All",
                 "deselect_all" => "Deselect All",
-                "select_safe" => "Select Safe Only",
+                "select_safe" => "Clean",
+                "expand_all" => "Expand All",
                 "confirm_delete" => "Confirm Delete",
                 "cancel" => "Cancel",
                 // 磁盘信息
@@ -1068,6 +1114,7 @@ impl App {
                 "items_selected" => "selected",
                 "items" => "items",
                 "total" => "total",
+                "all_items" => "All",
                 "window_title" => "Maclean - macOS Disk Cleaner",
                 "back" => "Back",
                 "home" => "Home",
@@ -1095,6 +1142,12 @@ impl App {
                 // 概览
                 "overview_releasable" => "Releasable Space",
                 "overview_recommendation" => "Recommended Cleanup",
+                // App 卸载
+                "app_uninstall_subtitle" => "{0} apps, {1} releasable",
+                "app_uninstall_search_placeholder" => "Search app name...",
+                "app_list_title" => "App List",
+                "subitem_detail_title" => "Sub-item Details",
+                "current_selected" => "Current selected",
                 "overview_recommendation_hint" => "Safe items from all categories, sorted by size",
                 "overview_empty_title" => "Everything looks clean",
                 "overview_empty_hint" => "Click the Scan button at the top right to find cleanable files",
@@ -1328,7 +1381,8 @@ impl App {
                 "delete" => "删除",
                 "select_all" => "全选",
                 "deselect_all" => "取消全选",
-                "select_safe" => "一键选推荐清理",
+                "select_safe" => "一键选择清理",
+                "expand_all" => "展开全部",
                 "confirm_delete" => "确认删除",
                 "cancel" => "取消",
                 // 磁盘信息
@@ -1346,8 +1400,9 @@ impl App {
                 "press_r_to_scan" => "点击「扫描」开始",
                 "items_found" => "找到",
                 "items_selected" => "已选",
-                "items" => "项",
+                "items" => "个子项",
                 "total" => "共计",
+                "all_items" => "全部",
                 "window_title" => "Maclean - macOS 磁盘清理",
                 "back" => "返回",
                 "home" => "主目录",
@@ -1371,6 +1426,12 @@ impl App {
                 // 概览
                 "overview_releasable" => "可释放空间",
                 "overview_recommendation" => "推荐清理",
+                // App 卸载
+                "app_uninstall_subtitle" => "{0} 个应用 共 {1} 可释放",
+                "app_uninstall_search_placeholder" => "搜索应用名称...",
+                "app_list_title" => "应用列表",
+                "subitem_detail_title" => "子项详情",
+                "current_selected" => "当前选中",
                 "overview_recommendation_hint" => "聚合所有分类中的安全项，按大小排序",
                 "overview_empty_title" => "看起来一切整洁",
                 "overview_empty_hint" => "点击右上角「扫描」查找可清理文件",

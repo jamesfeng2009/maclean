@@ -17,6 +17,11 @@ use super::ScanResult;
 /// 配合删除后自动 invalidate_cache，保证清理后立即看到最新数据。
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 
+/// 缓存版本号
+///
+/// 变更扫描结果结构或过滤逻辑时递增此版本号，使旧缓存自动失效。
+const CACHE_VERSION: u32 = 8;
+
 /// 缓存文件的 JSON 包装结构
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CacheEntry {
@@ -28,6 +33,8 @@ struct CacheEntry {
     items: Vec<super::ScanItem>,
     /// 总大小
     total_size: u64,
+    /// 缓存版本号，用于强制旧缓存失效
+    version: u32,
 }
 
 /// 获取缓存目录路径
@@ -76,6 +83,11 @@ pub fn load_cache(tab_name: &str) -> Option<ScanResult> {
         return None;
     }
 
+    // 检查缓存版本，旧版本缓存强制失效
+    if entry.version != CACHE_VERSION {
+        return None;
+    }
+
     Some(ScanResult {
         items: entry.items,
         total_size: entry.total_size,
@@ -99,6 +111,7 @@ pub fn save_cache(tab_name: &str, result: &ScanResult) {
         scan_time_ms: result.scan_time_ms,
         items: result.items.clone(),
         total_size: result.total_size,
+        version: CACHE_VERSION,
     };
 
     let path = cache_file_path(tab_name);
@@ -183,5 +196,30 @@ mod tests {
         assert!(load_cache(tab_name).is_some());
         invalidate_cache(tab_name);
         assert!(load_cache(tab_name).is_none());
+    }
+
+    #[test]
+    fn test_cache_version_invalidates_old_cache() {
+        let tab_name = "test_tab_version";
+        invalidate_cache(tab_name);
+
+        // 手动写入一个旧版本缓存（version 为 1）
+        let path = cache_file_path(tab_name);
+        let old_entry = CacheEntry {
+            timestamp: now_secs(),
+            scan_time_ms: 0,
+            items: Vec::new(),
+            total_size: 0,
+            version: 1,
+        };
+        let json = serde_json::to_string(&old_entry).expect("序列化应成功");
+        let _ = std::fs::create_dir_all(cache_dir());
+        let _ = std::fs::write(&path, json);
+
+        // 当前版本号为 CACHE_VERSION，旧缓存应被判定为失效
+        assert!(load_cache(tab_name).is_none());
+
+        // 清理
+        invalidate_cache(tab_name);
     }
 }

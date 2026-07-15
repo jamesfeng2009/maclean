@@ -89,6 +89,206 @@ const SYSTEM_APP_NAMES: &[&str] = &[
     "Shortcuts",
 ];
 
+/// 统一的系统级目录/文件名称过滤函数
+///
+/// 用于 Application Support、Caches、Preferences 等 Library 子目录扫描时，
+/// 从根源过滤掉系统级条目，避免系统文件被展示给用户。
+///
+/// 覆盖范围包括：
+/// - Apple 系统应用（Safari/Mail/Maps/Photos/Calendar/Messages 等）
+/// - 系统框架/服务（CloudKit/CoreSimulator/QuickLook/ColorSync/Spotlight/launchservicesd 等）
+/// - 系统目录（ByHost/Caches/TemporaryItems/LaunchAgents/LaunchDaemons/Preferences 等）
+/// - 系统守护进程（bluetoothd/powerd/sharingd/wifiagent 等）
+/// - com.apple.* / org.apple.* 前缀
+/// - 点号开头文件
+pub fn is_system_library_name(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+
+    // 点号开头（隐藏系统文件/目录）
+    if name.starts_with('.') {
+        return true;
+    }
+
+    // Apple 官方 bundle ID / 组织前缀
+    if name.starts_with("com.apple.")
+        || name.starts_with("org.apple.")
+        || name.starts_with("com.icloud.")
+        || name.starts_with("com.mobilenetworking.")
+    {
+        return true;
+    }
+
+    // 常见系统目录名（Library 子目录级别）
+    let system_directories = [
+        "ByHost",
+        "Caches",
+        "TemporaryItems",
+        "LaunchAgents",
+        "LaunchDaemons",
+        "Preferences",
+        "Saved Application State",
+        "SavedApplicationState",
+        "Containers",
+        "Group Containers",
+        "GroupContainers",
+        "HTTPStorages",
+        "HTTPStorage",
+        "Cookies",
+        "WebKit",
+        "Application Scripts",
+        "ApplicationScripts",
+        "Metadata",
+        "Logs",
+        "Application Support",
+        "ApplicationSupport",
+        "MobileSync",
+        "SyncServices",
+        "KeyboardServices",
+        "AddressBook",
+        "CallHistoryDB",
+        "CallHistory",
+        "CloudDocs",
+        "iCloud",
+        "Apple",
+        "AppleSetup",
+        "CrashReporter",
+        "Dock",
+        "Siri",
+        "TelephonyUtilities",
+        "CoreSimulator",
+        "Xcode",
+    ];
+    for dir in &system_directories {
+        if name.eq_ignore_ascii_case(dir) {
+            return true;
+        }
+    }
+
+    // Apple 系统应用名称
+    for app in SYSTEM_APP_NAMES {
+        if name.eq_ignore_ascii_case(app) {
+            return true;
+        }
+    }
+
+    // 系统守护进程 / 服务 / 框架
+    let system_daemons_and_frameworks = [
+        // 守护进程
+        "bluetoothd",
+        "powerd",
+        "sharingd",
+        "wifiagent",
+        "wifid",
+        "airportd",
+        "awdd",
+        "thermalmonitord",
+        "systemstats",
+        "sysmond",
+        "powerlogd",
+        "deleted",
+        "photolibraryd",
+        "medialibraryd",
+        "coreduetd",
+        "contextstored",
+        "coredatad",
+        "applecamerad",
+        "appleaccountd",
+        "akd",
+        "aned",
+        "trustd",
+        "oahd",
+        "runningboardd",
+        "iconservicesagent",
+        "iconservicesd",
+        "fileproviderd",
+        "filecoordinationd",
+        "launchservicesd",
+        "coreservicesd",
+        "coreaudiod",
+        "corelocationd",
+        "parsed",
+        "distnoted",
+        "opendirectoryd",
+        "syslogd",
+        "kernelmanagerd",
+        "kextd",
+        "notifyd",
+        "securityd",
+        "mds",
+        "mds_stores",
+        "mds_worker",
+        "WindowServer",
+        "loginwindow",
+        "SystemUIServer",
+        "talagent",
+        "cfprefsd",
+        "cshregistrar",
+        "cloudd",
+        "bird",
+        "nsurlsessiond",
+        "nsurlstoraged",
+        "favord",
+        "suggestd",
+        "knowledge-agent",
+        "aksd",
+        "biometrickitd",
+        // 框架 / 服务
+        "CloudKit",
+        "QuickLook",
+        "ColorSync",
+        "Spotlight",
+        "CoreServices",
+        "ApplicationServices",
+        "SystemConfiguration",
+        "IOKit",
+        "Security",
+        "CoreFoundation",
+        "Foundation",
+        "CoreData",
+        "CoreText",
+        "CoreGraphics",
+        "CoreImage",
+        "CoreVideo",
+        "Accelerate",
+        "QuartzCore",
+        "AppKit",
+        "UIKit",
+        "WebKitLegacy",
+        "AVFoundation",
+        "CFNetwork",
+        "ImageIO",
+        "Metal",
+        "OpenGL",
+        "SystemIntegrityProtection",
+        // 其他系统级通用名
+        "MobileAsset",
+        "SoftwareUpdate",
+        "CommerceKit",
+        "StoreKit",
+        "GameCenter",
+        "GameKit",
+        "PassKit",
+        "HealthKit",
+        "HomeKit",
+        "ClassKit",
+        "ReplayKit",
+        "SpriteKit",
+        "SceneKit",
+        "MapKit",
+        "EventKit",
+        "AddressBookSourceSync",
+    ];
+    for daemon in &system_daemons_and_frameworks {
+        if name.eq_ignore_ascii_case(daemon) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// App 卸载扫描器
 #[derive(Debug, Default)]
 pub struct UninstallScanner;
@@ -1032,7 +1232,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 let path = entry.path();
 
                 // 跳过系统级和开发工具目录
-                if is_system_app_support_dir(&name) {
+                if is_system_library_name(&name) {
                     continue;
                 }
 
@@ -1048,27 +1248,25 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                         &path,
                         &installed_apps,
                         "App残留",
-                        50 * 1024 * 1024,
+                        0,
                         Recommend::Advanced,
                     ));
                     continue;
                 }
 
-                // 普通残留目录
+                // 普通残留目录：只要有文件就展示
                 let size = dir_size(&path);
-                if size > 50 * 1024 * 1024 {
-                    items.push(ScanItem {
-                        path: path.to_string_lossy().to_string(),
-                        size_bytes: size,
-                        category: "App残留".to_string(),
-                        selected: false,
-                        deletable: true,
-                        undeletable_reason: String::new(),
-                        batch_paths: Vec::new(),
-                        recommend: Recommend::Advanced,
-                        description: format!("{} 的残留数据（App 可能已卸载）", name),
-                    });
-                }
+                items.push(ScanItem {
+                    path: path.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: "App残留".to_string(),
+                    selected: false,
+                    deletable: true,
+                    undeletable_reason: String::new(),
+                    batch_paths: Vec::new(),
+                    recommend: Recommend::Advanced,
+                    description: format!("{} 的残留数据（App 可能已卸载）", name),
+                });
             }
         }
     }
@@ -1082,7 +1280,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 let path = entry.path();
 
                 // 跳过系统缓存
-                if name.starts_with("com.apple.") || name.starts_with("CloudKit") {
+                if is_system_library_name(&name) {
                     continue;
                 }
 
@@ -1096,62 +1294,76 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                         &path,
                         &installed_apps,
                         "App残留缓存",
-                        100 * 1024 * 1024,
+                        0,
                         Recommend::CacheOnly,
                     ));
                     continue;
                 }
 
+                // 普通残留缓存：只要有文件就展示
                 let size = dir_size(&path);
-                if size > 100 * 1024 * 1024 {
-                    items.push(ScanItem {
-                        path: path.to_string_lossy().to_string(),
-                        size_bytes: size,
-                        category: "App残留缓存".to_string(),
-                        selected: false,
-                        deletable: true,
-                        undeletable_reason: String::new(),
-                        batch_paths: Vec::new(),
-                        recommend: Recommend::CacheOnly,
-                        description: format!("{} 的残留缓存，删除后无影响（App 可能已卸载）", name),
-                    });
-                }
+                items.push(ScanItem {
+                    path: path.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: "App残留缓存".to_string(),
+                    selected: false,
+                    deletable: true,
+                    undeletable_reason: String::new(),
+                    batch_paths: Vec::new(),
+                    recommend: Recommend::CacheOnly,
+                    description: format!("{} 的残留缓存，删除后无影响（App 可能已卸载）", name),
+                });
             }
         }
     }
 
-    // 扫描 ~/Library/Preferences/ 下的残留 plist（按数量聚合）
+    // 扫描 ~/Library/Preferences/ 下的残留 plist（每个文件独立展示）
     let prefs = home.join("Library/Preferences");
     if prefs.is_dir() {
-        let mut leftover_prefs: Vec<String> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&prefs) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("com.apple.") || name.starts_with(".") {
+                let path = entry.path();
+
+                // 只处理 .plist 文件
+                if !name.ends_with(".plist") {
                     continue;
                 }
-                if !is_app_installed(&name, &installed_apps) {
-                    leftover_prefs.push(entry.path().to_string_lossy().to_string());
+
+                // 跳过系统级和 Apple 官方 plist
+                if is_system_library_name(&name) {
+                    continue;
                 }
+
+                // 只展示已卸载 App 的 plist
+                if is_app_installed(&name, &installed_apps) {
+                    continue;
+                }
+
+                let (recommend, description) = classify_leftover_plist(&name);
+                let size = path_size(path.to_string_lossy().as_ref());
+
+                items.push(ScanItem {
+                    path: path.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: "App残留配置".to_string(),
+                    selected: false,
+                    deletable: true,
+                    undeletable_reason: String::new(),
+                    batch_paths: Vec::new(),
+                    recommend,
+                    description,
+                });
             }
-        }
-        if leftover_prefs.len() > 10 {
-            items.push(ScanItem {
-                path: format!("{}个残留配置文件", leftover_prefs.len()),
-                size_bytes: 0,
-                category: "App残留配置".to_string(),
-                selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
-                batch_paths: leftover_prefs,
-                recommend: Recommend::Advanced,
-                description: "已卸载 App 的偏好设置文件，可安全删除".to_string(),
-            });
         }
     }
 }
 
 /// 获取已安装 App 的名称集合
+///
+/// 除扫描 /Applications 和 ~/Applications 外，还检测：
+/// - Homebrew（/opt/homebrew/bin/brew 或 /usr/local/bin/brew 存在）
+/// - JetBrains 系列 IDE（/Applications 下是否存在 JetBrains 应用）
 fn get_installed_app_names() -> std::collections::HashSet<String> {
     let mut apps = std::collections::HashSet::new();
 
@@ -1170,7 +1382,81 @@ fn get_installed_app_names() -> std::collections::HashSet<String> {
         }
     }
 
+    // Homebrew 检测
+    if Path::new("/opt/homebrew/bin/brew").exists()
+        || Path::new("/usr/local/bin/brew").exists()
+    {
+        apps.insert("Homebrew".to_string());
+        apps.insert("homebrew".to_string());
+    }
+
+    // JetBrains 检测
+    const JETBRAINS_APP_NAMES: &[&str] = &[
+        "IntelliJ IDEA",
+        "WebStorm",
+        "PyCharm",
+        "CLion",
+        "Rider",
+        "GoLand",
+        "RubyMine",
+        "DataGrip",
+        "AppCode",
+        "Android Studio",
+        "Fleet",
+        "JetBrains Toolbox",
+    ];
+    let applications = PathBuf::from("/Applications");
+    if applications.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&applications) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".app") {
+                    continue;
+                }
+                let app_name = name.trim_end_matches(".app");
+                for jb_name in JETBRAINS_APP_NAMES {
+                    if app_name.eq_ignore_ascii_case(jb_name) {
+                        apps.insert("JetBrains".to_string());
+                        apps.insert("jetbrains".to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     apps
+}
+
+/// 对已卸载 App 的残留 plist 进行安全分级
+///
+/// - git-credential-manager.plist 标记为 Safe
+/// - 文件名含 password/keychain/credential 关键字的标记为 Caution
+/// - 其他普通 plist 标记为 Safe
+fn classify_leftover_plist(name: &str) -> (Recommend, String) {
+    let lower = name.to_lowercase();
+
+    if lower.contains("git-credential-manager") {
+        return (
+            Recommend::Safe,
+            "GCM 偏好设置文件，不包含密码，删除后 GCM 配置恢复默认，不影响 Git 凭证".to_string(),
+        );
+    }
+
+    if lower.contains("password") || lower.contains("keychain") || lower.contains("credential") {
+        return (
+            Recommend::Caution,
+            format!(
+                "{} 可能包含凭证相关偏好设置，删除后对应应用的登录/授权信息可能需要重新配置",
+                name
+            ),
+        );
+    }
+
+    (
+        Recommend::Safe,
+        format!("{} 的偏好设置文件，可安全删除", name),
+    )
 }
 
 /// 检查名称是否对应已安装的 App
@@ -1262,7 +1548,7 @@ fn scan_vendor_subdir_leftovers(
         }
 
         // 跳过系统级目录
-        if is_system_app_support_dir(&sub_name) {
+        if is_system_library_name(&sub_name) {
             continue;
         }
 
@@ -1312,47 +1598,6 @@ fn is_versioned_app_dir(name: &str, installed_apps: &std::collections::HashSet<S
             return true;
         }
     }
-    false
-}
-
-/// 判断是否为系统级 Application Support 目录（不应标记为残留）
-fn is_system_app_support_dir(name: &str) -> bool {
-    let system_dirs = [
-        "Apple",
-        "AppleSetup",
-        "com.apple",
-        "CrashReporter",
-        "Dock",
-        "FaceTime",
-        "iCloud",
-        "KeyboardServices",
-        "MobileSync",
-        "SyncServices",
-        "AddressBook",
-        "Calendar",
-        "Mail",
-        "Messages",
-        "Notes",
-        "Reminders",
-        "Safari",
-        "Siri",
-        "Spotlight",
-        "System Preferences",
-        "TelephonyUtilities",
-        "WebKit",
-        "Homebrew",
-        "JetBrains",
-        "CoreSimulator",
-        "Caches",
-        "CloudDocs",
-    ];
-
-    for sys in &system_dirs {
-        if name.eq_ignore_ascii_case(sys) || name.starts_with(&format!("{}.", sys)) {
-            return true;
-        }
-    }
-
     false
 }
 
@@ -1410,5 +1655,36 @@ mod tests {
         // 对于不存在的应用，应返回空或很少的路径
         // （不应该 panic）
         assert!(paths.iter().all(|p| !p.is_empty()));
+    }
+
+    #[test]
+    fn test_is_system_library_name() {
+        // Apple 系统应用
+        assert!(is_system_library_name("Safari"));
+        assert!(is_system_library_name("com.apple.Safari"));
+        // 系统框架/服务
+        assert!(is_system_library_name("CloudKit"));
+        assert!(is_system_library_name("launchservicesd"));
+        // 系统目录
+        assert!(is_system_library_name("Containers"));
+        assert!(is_system_library_name("HTTPStorages"));
+        // 隐藏文件
+        assert!(is_system_library_name(".DS_Store"));
+        // 普通第三方应用不应被过滤
+        assert!(!is_system_library_name("Google Chrome"));
+        assert!(!is_system_library_name("com.jetbrains.intellij"));
+    }
+
+    #[test]
+    fn test_classify_leftover_plist() {
+        let (recommend, desc) = classify_leftover_plist("git-credential-manager.plist");
+        assert_eq!(recommend, Recommend::Safe);
+        assert!(desc.contains("GCM"));
+
+        let (recommend, _) = classify_leftover_plist("com.example.mypassword.plist");
+        assert_eq!(recommend, Recommend::Caution);
+
+        let (recommend, _) = classify_leftover_plist("com.example.preferences.plist");
+        assert_eq!(recommend, Recommend::Safe);
     }
 }

@@ -228,27 +228,34 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // ================================================================
     let file_name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-    let sensitive_names = [
-        ".env",
-        ".gitconfig",
-        ".npmrc",
-        ".cargo/credentials",
-        "id_rsa",
-        "id_ed25519",
-        "known_hosts",
-        "config.toml",
-        "settings.json",
-        "keychain",
-        "password",
-        "credential",
-    ];
+    // 已卸载 App 的偏好设置 plist（~/Library/Preferences/<name>.plist）可安全删除，
+    // 即使文件名包含 credential/password 等关键字（如 git-credential-manager.plist）。
+    let is_leftover_pref = file_name.ends_with(".plist")
+        && canonical_str.starts_with(&format!("{}/Library/Preferences/", home_str));
 
-    for sensitive in &sensitive_names {
-        if file_name.eq_ignore_ascii_case(sensitive) || canonical_str.contains(sensitive) {
-            return SafetyCheck::Warning(format!(
-                "路径包含敏感文件名 ({}): {}",
-                sensitive, canonical_str
-            ));
+    if !is_leftover_pref {
+        let sensitive_names = [
+            ".env",
+            ".gitconfig",
+            ".npmrc",
+            ".cargo/credentials",
+            "id_rsa",
+            "id_ed25519",
+            "known_hosts",
+            "config.toml",
+            "settings.json",
+            "keychain",
+            "password",
+            "credential",
+        ];
+
+        for sensitive in &sensitive_names {
+            if file_name.eq_ignore_ascii_case(sensitive) || canonical_str.contains(sensitive) {
+                return SafetyCheck::Warning(format!(
+                    "路径包含敏感文件名 ({}): {}",
+                    sensitive, canonical_str
+                ));
+            }
         }
     }
 
@@ -845,5 +852,14 @@ mod tests {
             "",
         );
         assert!(matches!(result, SafetyCheck::Danger(_)));
+    }
+
+    #[test]
+    fn test_leftover_plist_with_credential_allowed() {
+        // ~/Library/Preferences/ 下含 credential 关键字的 plist 应允许删除
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/NONEXISTENT"));
+        let path = home.join("Library/Preferences/git-credential-manager.plist");
+        let result = check_path_safety_with_category(path.to_string_lossy().as_ref(), "");
+        assert!(matches!(result, SafetyCheck::Safe));
     }
 }
