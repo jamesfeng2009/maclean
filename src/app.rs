@@ -61,7 +61,7 @@ impl Tab {
             Tab::LargeFiles => "大文件",
             Tab::AppCache => "App缓存",
             Tab::AppData => "App数据",
-            Tab::AppUninstall => "App卸载",
+            Tab::AppUninstall => "应用卸载",
             Tab::SystemOptimize => "系统优化",
             Tab::Apfs => "APFS快照",
             Tab::Settings => "设置",
@@ -230,8 +230,10 @@ pub struct App {
     pub scan_current_path: String,
     /// 当前分类过滤（按 category 前缀过滤）
     pub filter_category: Option<String>,
-    /// App卸载 Tab 当前选中的应用分组名（用于右侧详情面板）
-    pub selected_app_group: Option<String>,
+    /// App卸载 Tab 已展开的应用分组名集合
+    pub expanded_app_groups: std::collections::HashSet<String>,
+    /// App卸载 Tab 当前按推荐等级过滤（Safe / Caution / Advanced）
+    pub app_uninstall_recommend_filter: Option<crate::scanner::Recommend>,
     /// 是否显示残留清理弹窗（卸载后检测到残留时弹出）
     pub show_residual_dialog: bool,
     /// 启动时显示菜单栏图标
@@ -256,6 +258,56 @@ pub struct App {
 }
 
 impl App {
+    /// 启动时尝试从本地缓存加载当前 Tab 的扫描结果
+    ///
+    /// 仅在 settings_scan_cache 开启且缓存有效时执行，避免每次启动都重新扫描。
+    pub fn load_current_tab_cache(&mut self) {
+        if !self.settings_scan_cache {
+            crate::logger::info("缓存设置已关闭，跳过缓存加载");
+            return;
+        }
+        let cache_name = match self.tab {
+            Tab::Overview | Tab::Settings => None,
+            Tab::DevCache => Some("dev_cache"),
+            Tab::LargeFiles => Some("large_files"),
+            Tab::AppCache => Some("app_cache"),
+            Tab::AppData => Some("app_data"),
+            Tab::AppUninstall => Some("app_uninstall"),
+            Tab::SystemOptimize => None,
+            Tab::Apfs => Some("apfs"),
+        };
+        crate::logger::info(&format!(
+            "尝试加载当前 Tab({:?}) 缓存: {:?}",
+            self.tab, cache_name
+        ));
+        if let Some(name) = cache_name {
+            match scanner::cache::load_cache(name) {
+                Some(cached) => {
+                    crate::logger::info(&format!(
+                        "缓存加载成功: {} 项, 总大小 {}",
+                        cached.items.len(),
+                        crate::scanner::format_size(cached.total_size)
+                    ));
+                    let mut items = cached.items;
+                    for item in &mut items {
+                        let (deletable, reason) = scanner::check_deletable(&item.path);
+                        item.deletable = deletable && item.deletable;
+                        if !item.deletable && !reason.is_empty() {
+                            item.undeletable_reason = reason;
+                        }
+                    }
+                    let idx = self.tab_index();
+                    self.results[idx] = items;
+                    self.scan_states[idx] = ScanState::Done;
+                    self.scan_time_ms[idx] = cached.scan_time_ms;
+                }
+                None => {
+                    crate::logger::info("缓存加载失败或不存在");
+                }
+            }
+        }
+    }
+
     /// 创建新 App 状态
     pub fn new() -> Self {
         let (disk_total, disk_free) = get_disk_info();
@@ -302,7 +354,8 @@ impl App {
             hud_open: false,
             scan_current_path: String::new(),
             filter_category: None,
-            selected_app_group: None,
+            expanded_app_groups: std::collections::HashSet::new(),
+            app_uninstall_recommend_filter: None,
             delete_done: 0,
             delete_total: 0,
             scan_progress: 0.0,
@@ -1152,12 +1205,20 @@ impl App {
                 "app_uninstall_search_placeholder" => "Search app name...",
                 "app_list_title" => "App List",
                 "subitem_detail_title" => "Sub-item Details",
-                "current_selected" => "Current selected",
+                "current_selected" => "Current selected: {0}",
                 "overview_recommendation_hint" => "Safe items from all categories, sorted by size",
                 "overview_empty_title" => "Everything looks clean",
                 "overview_empty_hint" => "Click the Scan button at the top right to find cleanable files",
                 "scan_all" => "Scan All",
                 "one_click_clean" => "Clean",
+                "one_click_recommended_clean" => "Select Recommended",
+                "app_list_title_with_count" => "App List ({0})",
+                "selected_apps_partial" => "Selected items from {0} apps · {1}",
+                "delete_with_size" => "🗑 Delete {0}",
+                "all" => "All",
+                "collapse_all" => "Collapse All",
+                "expand_n_groups" => "Expand {0} groups",
+                "collapse_n_groups" => "Collapse {0} groups",
                 "badge_undeletable" => "🔒 Undeletable",
                 // 过滤/搜索
                 "filter" => "Filter",
@@ -1360,7 +1421,7 @@ impl App {
                 "tab_large_files" => "大文件",
                 "tab_app_cache" => "App缓存",
                 "tab_app_data" => "App数据",
-                "tab_app_uninstall" => "App卸载",
+                "tab_app_uninstall" => "应用卸载",
                 "tab_system_optimize" => "系统优化",
                 "tab_apfs" => "APFS快照",
                 "tab_settings" => "设置",
@@ -1434,16 +1495,24 @@ impl App {
                 "overview_releasable" => "可释放空间",
                 "overview_recommendation" => "推荐清理",
                 // App 卸载
-                "app_uninstall_subtitle" => "{0} 个应用 共 {1} 可释放",
+                "app_uninstall_subtitle" => "{0} 个应用 · 共 {1} 可释放",
                 "app_uninstall_search_placeholder" => "搜索应用名称...",
                 "app_list_title" => "应用列表",
                 "subitem_detail_title" => "子项详情",
-                "current_selected" => "当前选中",
+                "current_selected" => "当前选中：{0}",
                 "overview_recommendation_hint" => "聚合所有分类中的安全项，按大小排序",
                 "overview_empty_title" => "看起来一切整洁",
                 "overview_empty_hint" => "点击右上角「扫描」查找可清理文件",
                 "scan_all" => "扫描全部",
                 "one_click_clean" => "一键清理",
+                "one_click_recommended_clean" => "一键选推荐清理",
+                "app_list_title_with_count" => "应用列表（{0}）",
+                "selected_apps_partial" => "已选中 {0} 个应用的部分项目 · 可释放 {1}",
+                "delete_with_size" => "🗑 删除 {0}",
+                "all" => "全部",
+                "collapse_all" => "收起全部",
+                "expand_n_groups" => "展开 {0} 个应用分组",
+                "collapse_n_groups" => "收起 {0} 个应用分组",
                 "badge_undeletable" => "🔒 不可删除",
                 // 过滤/搜索
                 "filter" => "过滤",

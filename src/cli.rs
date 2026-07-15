@@ -188,6 +188,16 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
         let items = scan_tab(tab_key);
         let elapsed = start.elapsed();
 
+        // 保存扫描结果到本地缓存，便于 GUI 启动时直接加载
+        if !items.is_empty() {
+            let result = crate::scanner::ScanResult {
+                items: items.clone(),
+                total_size: items.iter().map(|i| i.size_bytes).sum(),
+                scan_time_ms: elapsed.as_millis() as u64,
+            };
+            crate::scanner::cache::save_cache(tab_key, &result);
+        }
+
         if items.is_empty() {
             println!("  （无可清理项目）\n");
             continue;
