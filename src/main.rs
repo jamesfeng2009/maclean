@@ -877,44 +877,56 @@ fn render_app_uninstall_list_panel(ui: &mut egui::Ui, app: &mut App) {
                         .rounding(egui::Rounding::same(8.0));
 
                     let row_resp = row_frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let cb_resp = render_custom_checkbox(
-                                ui,
-                                all_selected || any_selected,
-                                has_deletable,
+                        let cb_resp = render_custom_checkbox(
+                            ui,
+                            all_selected || any_selected,
+                            has_deletable,
+                        );
+
+                        ui.add_space(8.0);
+
+                        ui.vertical(|ui| {
+                            ui.set_min_width(100.0);
+                            ui.colored_label(
+                                TEXT_PRIMARY,
+                                egui::RichText::new(app_name.as_str()).size(13.0).strong(),
                             );
-                            if cb_resp.clicked() && has_deletable {
-                                let target = !all_selected;
-                                for &idx in &deletable_indices {
-                                    if app.results[tab_idx][idx].selected != target {
-                                        app.results[tab_idx][idx].selected = target;
-                                    }
-                                }
-                            }
-
-                            ui.add_space(8.0);
-
-                            ui.vertical(|ui| {
-                                ui.set_min_width(100.0);
-                                ui.colored_label(
-                                    TEXT_PRIMARY,
-                                    egui::RichText::new(app_name.as_str()).size(13.0).strong(),
-                                );
-                                let size_str = if total_size == 0 {
-                                    "—".to_string()
-                                } else {
-                                    format_size(total_size)
-                                };
-                                ui.colored_label(
-                                    TEXT_TERTIARY,
-                                    egui::RichText::new(size_str).size(11.0).monospace(),
-                                );
-                            });
+                            let size_str = if total_size == 0 {
+                                "—".to_string()
+                            } else {
+                                format_size(total_size)
+                            };
+                            ui.colored_label(
+                                TEXT_TERTIARY,
+                                egui::RichText::new(size_str).size(11.0).monospace(),
+                            );
                         });
+
+                        cb_resp.rect
                     });
 
-                    if row_resp.response.clicked() {
-                        app.selected_uninstall_app_index = Some(group_idx);
+                    // Frame 默认不响应点击，需手动分配整行可点击区域
+                    let row_click = ui.interact(
+                        row_resp.response.rect,
+                        egui::Id::new(("app_uninstall_row_click", group_idx)),
+                        egui::Sense::click(),
+                    );
+                    if row_click.clicked() {
+                        let clicked_checkbox = ui.input(|i| {
+                            i.pointer
+                                .interact_pos()
+                                .map_or(false, |pos| row_resp.inner.contains(pos))
+                        });
+                        if clicked_checkbox && has_deletable {
+                            let target = !all_selected;
+                            for &idx in &deletable_indices {
+                                if app.results[tab_idx][idx].selected != target {
+                                    app.results[tab_idx][idx].selected = target;
+                                }
+                            }
+                        } else {
+                            app.selected_uninstall_app_index = Some(group_idx);
+                        }
                     }
 
                     ui.add_space(4.0);
@@ -1106,8 +1118,13 @@ fn render_app_uninstall_child_row(
         });
     });
 
-    // 整行点击切换选中（锁定项除外），但避免与按钮冲突
-    if row_resp.response.clicked() && !locked && !row_resp.response.drag_started() {
+    // Frame 默认不响应点击，需手动分配整行可点击区域
+    let row_click = ui.interact(
+        row_resp.response.rect,
+        egui::Id::new(("app_uninstall_child_row_click", index)),
+        egui::Sense::click(),
+    );
+    if row_click.clicked() && !locked {
         toggled = Some(index);
     }
 
@@ -6357,8 +6374,13 @@ fn render_overview_panel(
                                     });
                                 });
 
-                            // 点击整行空白处也可切换选中（与复选框去重）
-                            if frame_resp.response.clicked() {
+                            // Frame 默认不响应点击，需手动分配整格可点击区域
+                            let cell_click = ui.interact(
+                                frame_resp.response.rect,
+                                egui::Id::new(("overview_item_click", tab_idx, item_idx)),
+                                egui::Sense::click(),
+                            );
+                            if cell_click.clicked() {
                                 toggled.insert((tab_idx, item_idx));
                             }
 
