@@ -154,6 +154,8 @@ pub struct App {
     pub scan_states: [ScanState; 9],
     /// 列表选中索引
     pub list_index: usize,
+    /// App 卸载 Tab 当前选中的应用分组索引
+    pub selected_uninstall_app_index: Option<usize>,
     /// 磁盘总空间（字节）
     pub disk_total: u64,
     /// 磁盘可用空间（字节）
@@ -280,6 +282,7 @@ impl App {
                 ScanState::Idle,
             ],
             list_index: 0,
+            selected_uninstall_app_index: None,
             disk_total,
             disk_free,
             logs: Vec::new(),
@@ -1092,6 +1095,8 @@ impl App {
                 "unknown" => "unknown",
                 "no_items_hint" => "No items yet - click Scan to find cleanable files",
                 "click_to_start" => "Click to start",
+                "app_subitems_detail" => "Sub-items: {0}",
+                "select_app_from_list" => "Please select an app from the left",
                 // 概览
                 "overview_releasable" => "Releasable Space",
                 "overview_recommendation" => "Recommended Cleanup",
@@ -1368,6 +1373,8 @@ impl App {
                 "unknown" => "未知",
                 "no_items_hint" => "暂无数据 - 点击「扫描」查找可清理文件",
                 "click_to_start" => "点击开始",
+                "app_subitems_detail" => "子项详情：{0}",
+                "select_app_from_list" => "请从左侧选择一个应用",
                 // 概览
                 "overview_releasable" => "可释放空间",
                 "overview_recommendation" => "推荐清理",
