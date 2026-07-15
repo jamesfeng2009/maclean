@@ -864,15 +864,10 @@ fn render_app_uninstall_list_panel(ui: &mut egui::Ui, app: &mut App) {
                     } else {
                         SURFACE_ELEVATED
                     };
-                    let left_stroke = if is_selected {
-                        egui::Stroke::new(3.0, BRAND)
-                    } else {
-                        egui::Stroke::NONE
-                    };
 
                     let row_frame = egui::Frame::none()
                         .fill(row_bg)
-                        .stroke(left_stroke)
+                        .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
                         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                         .rounding(egui::Rounding::same(8.0));
 
@@ -895,7 +890,6 @@ fn render_app_uninstall_list_panel(ui: &mut egui::Ui, app: &mut App) {
                             ui.add_space(8.0);
 
                             ui.vertical(|ui| {
-                                ui.set_min_width(100.0);
                                 ui.colored_label(
                                     TEXT_PRIMARY,
                                     egui::RichText::new(app_name.as_str()).size(13.0).strong(),
