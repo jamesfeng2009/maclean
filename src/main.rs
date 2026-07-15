@@ -38,7 +38,6 @@ const SURFACE: egui::Color32 = egui::Color32::from_rgb(247, 247, 248); // #F7F7F
 const SURFACE_ELEVATED: egui::Color32 = egui::Color32::from_rgb(255, 255, 255); // #FFFFFF
 const SURFACE_MUTED: egui::Color32 = egui::Color32::from_rgb(239, 239, 242); // #EFEFF2
 const SURFACE_SIDEBAR: egui::Color32 = egui::Color32::from_rgb(242, 242, 245); // #F2F2F5
-const SURFACE_HOVER: egui::Color32 = egui::Color32::from_rgb(234, 234, 237); // #EAEAED
                                                                                // 文本色
 const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(23, 23, 23); // #171717
 const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(82, 82, 91); // #52525B
@@ -54,6 +53,9 @@ const DANGER_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 70, 58); // #E8
 
 /// 选中项卡片背景色（浅绿）
 const SELECTED_CARD_BG: egui::Color32 = egui::Color32::from_rgb(240, 255, 244); // #F0FFF4
+
+/// 列表区背景色（极浅灰，内容少时避免刺眼空白）
+const LIST_BG: egui::Color32 = egui::Color32::from_rgb(250, 250, 250); // #FAFAFA
 
 /// 后台扫描消息
 enum ScanMessage {
@@ -226,7 +228,11 @@ fn main() -> eframe::Result {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     unsafe {
                         AUTO_CLEAN_AFTER_SCAN = false;
-                        if !app.scan_states.iter().any(|s| matches!(s, ScanState::Scanning)) {
+                        if !app
+                            .scan_states
+                            .iter()
+                            .any(|s| matches!(s, ScanState::Scanning))
+                        {
                             start_scan_all(app, &mut SCAN_RX);
                         }
                     }
@@ -772,6 +778,243 @@ fn uninstall_child_title(category: &str, lang_en: bool) -> String {
     }
 }
 
+/// 将 App 卸载 Tab 的 ScanItem 按应用名分组
+///
+/// 输入为过滤后的原始索引列表，输出为 (应用名, 原始索引列表) 的分组列表。
+fn build_uninstall_groups(
+    items: &[ScanItem],
+    filtered_indices: &[usize],
+) -> Vec<(String, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for &idx in filtered_indices {
+        let item = &items[idx];
+        if let Some(app_name) = extract_app_name(&item.category) {
+            let gidx = *group_map.entry(app_name.to_string()).or_insert_with(|| {
+                groups.push((app_name.to_string(), Vec::new()));
+                groups.len() - 1
+            });
+            groups[gidx].1.push(idx);
+        } else {
+            groups.push((item.category.clone(), vec![idx]));
+        }
+    }
+    groups
+}
+
+/// 渲染 App 卸载 Tab 的左侧应用列表面板
+fn render_app_uninstall_list_panel(ui: &mut egui::Ui, app: &mut App) {
+    let tab_idx = app.tab_index();
+    let items = app.results[tab_idx].clone();
+    let filtered_indices = app.filtered_indices();
+    let groups = build_uninstall_groups(&items, &filtered_indices);
+
+    // 如果当前选中索引越界，重置为未选中
+    if let Some(sel) = app.selected_uninstall_app_index {
+        if sel >= groups.len() {
+            app.selected_uninstall_app_index = None;
+        }
+    }
+
+    // 顶部过滤输入框
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let filter_placeholder = app.t("filter_placeholder").to_string();
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut app.filter_query)
+                .hint_text(&filter_placeholder)
+                .desired_width(ui.available_width() - 8.0)
+                .min_size([80.0, 28.0].into()),
+        );
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            app.clear_filter();
+        }
+        app.filter_active = resp.has_focus();
+        ui.add_space(4.0);
+    });
+    ui.add_space(4.0);
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            ui.add_space(6.0);
+            if groups.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    ui.colored_label(
+                        TEXT_TERTIARY,
+                        egui::RichText::new(app.t("no_match")).size(12.0),
+                    );
+                });
+            } else {
+                for (group_idx, (app_name, indices)) in groups.iter().enumerate() {
+                    let total_size: u64 = indices.iter().map(|&i| items[i].size_bytes).sum();
+                    let deletable_indices: Vec<usize> = indices
+                        .iter()
+                        .copied()
+                        .filter(|&i| items[i].deletable)
+                        .collect();
+                    let all_selected = deletable_indices.iter().all(|&i| items[i].selected);
+                    let any_selected = deletable_indices.iter().any(|&i| items[i].selected);
+                    let has_deletable = !deletable_indices.is_empty();
+
+                    let is_selected = app.selected_uninstall_app_index == Some(group_idx);
+                    let row_bg = if is_selected {
+                        BRAND_SOFT
+                    } else {
+                        SURFACE_ELEVATED
+                    };
+                    let left_stroke = if is_selected {
+                        egui::Stroke::new(3.0, BRAND)
+                    } else {
+                        egui::Stroke::NONE
+                    };
+
+                    let row_frame = egui::Frame::none()
+                        .fill(row_bg)
+                        .stroke(left_stroke)
+                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .rounding(egui::Rounding::same(8.0));
+
+                    let row_resp = row_frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let cb_resp = render_custom_checkbox(
+                                ui,
+                                all_selected || any_selected,
+                                has_deletable,
+                            );
+                            if cb_resp.clicked() && has_deletable {
+                                let target = !all_selected;
+                                for &idx in &deletable_indices {
+                                    if app.results[tab_idx][idx].selected != target {
+                                        app.results[tab_idx][idx].selected = target;
+                                    }
+                                }
+                            }
+
+                            ui.add_space(8.0);
+
+                            ui.vertical(|ui| {
+                                ui.set_min_width(100.0);
+                                ui.colored_label(
+                                    TEXT_PRIMARY,
+                                    egui::RichText::new(app_name.as_str()).size(13.0).strong(),
+                                );
+                                let size_str = if total_size == 0 {
+                                    "—".to_string()
+                                } else {
+                                    format_size(total_size)
+                                };
+                                ui.colored_label(
+                                    TEXT_TERTIARY,
+                                    egui::RichText::new(size_str).size(11.0).monospace(),
+                                );
+                            });
+                        });
+                    });
+
+                    if row_resp.response.clicked() {
+                        app.selected_uninstall_app_index = Some(group_idx);
+                    }
+
+                    ui.add_space(4.0);
+                }
+            }
+            ui.add_space(6.0);
+        });
+}
+
+/// 渲染 App 卸载 Tab 的右侧子项详情面板
+fn render_app_uninstall_details_panel(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+) {
+    let tab_idx = app.tab_index();
+    let items = app.results[tab_idx].clone();
+    let filtered_indices = app.filtered_indices();
+    let groups = build_uninstall_groups(&items, &filtered_indices);
+
+    if let Some(sel) = app.selected_uninstall_app_index {
+        if sel >= groups.len() {
+            app.selected_uninstall_app_index = None;
+        }
+    }
+
+    let available = ui.available_size();
+    egui::Frame::none()
+        .fill(LIST_BG)
+        .rounding(egui::Rounding::same(8.0))
+        .show(ui, |ui| {
+            ui.set_min_size(available);
+
+            if groups.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(app.t("no_items_hint"))
+                            .size(14.0)
+                            .color(TEXT_TERTIARY),
+                    );
+                    ui.add_space(8.0);
+                    let scan_hint = format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(&scan_hint)
+                                    .size(13.0)
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .min_size([0.0, 28.0].into()),
+                        )
+                        .clicked()
+                    {
+                        start_scan(app, scan_rx);
+                    }
+                });
+                return;
+            }
+
+            if let Some(sel) = app.selected_uninstall_app_index {
+                let (app_name, indices) = &groups[sel];
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        TEXT_PRIMARY,
+                        egui::RichText::new(app.tf("app_subitems_detail", &[app_name]))
+                            .size(14.0)
+                            .strong(),
+                    );
+                });
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        for &display_idx in indices {
+                            if let Some(toggled) = render_app_uninstall_child_row(
+                                ui,
+                                &items[display_idx],
+                                display_idx,
+                                app,
+                            ) {
+                                if app.results[tab_idx][toggled].deletable {
+                                    app.results[tab_idx][toggled].selected =
+                                        !app.results[tab_idx][toggled].selected;
+                                }
+                            }
+                        }
+                    });
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(app.t("select_app_from_list"))
+                            .size(14.0)
+                            .color(TEXT_TERTIARY),
+                    );
+                });
+            }
+        });
+}
+
 /// 渲染 App 卸载 Tab 中的子项行
 ///
 /// 用于父卡片内部的「应用数据 / 缓存与日志 / 应用本体」行。
@@ -788,7 +1031,7 @@ fn render_app_uninstall_child_row(
 
     let child_frame = egui::Frame::none()
         .fill(SURFACE_MUTED)
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
         .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
         .rounding(egui::Rounding::same(8.0));
 
@@ -857,7 +1100,7 @@ fn render_app_uninstall_child_row(
                     }
                     ui.add_space(6.0);
                     let desc = i18n::translate_description(&item.description, app.lang_en);
-                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(&desc).size(12.0));
+                    ui.colored_label(TEXT_SECONDARY, egui::RichText::new(&desc).size(11.0));
                 });
             });
         });
@@ -868,7 +1111,7 @@ fn render_app_uninstall_child_row(
         toggled = Some(index);
     }
 
-    ui.add_space(6.0);
+    ui.add_space(4.0);
 
     toggled
 }
@@ -1101,7 +1344,7 @@ fn render_scan_item_row(
 
     let row_frame = egui::Frame::none()
         .fill(row_bg)
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
         .stroke(egui::Stroke::new(1.0, border_color))
         .rounding(egui::Rounding::same(8.0));
 
@@ -1159,7 +1402,7 @@ fn render_scan_item_row(
                         ui.colored_label(
                             if locked { TEXT_TERTIARY } else { TEXT_PRIMARY },
                             egui::RichText::new(&size_str)
-                                .size(14.0)
+                                .size(13.0)
                                 .strong()
                                 .monospace(),
                         );
@@ -1170,7 +1413,7 @@ fn render_scan_item_row(
                 let path_display = truncate_path(&item.path, 90);
                 ui.colored_label(
                     TEXT_TERTIARY,
-                    egui::RichText::new(&path_display).size(12.0).monospace(),
+                    egui::RichText::new(&path_display).size(11.0).monospace(),
                 );
 
                 // 状态徽章 + 描述
@@ -1216,14 +1459,14 @@ fn render_scan_item_row(
                 let detail_bg = SURFACE;
                 let detail_frame = egui::Frame::none()
                     .fill(detail_bg)
-                    .inner_margin(egui::Margin::symmetric(14.0, 4.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 4.0))
                     .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
                     .rounding(egui::Rounding::same(6.0));
 
                 detail_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.add_space(40.0); // 缩进对齐
-                        ui.colored_label(BRAND, egui::RichText::new(detail_label).size(12.0));
+                        ui.add_space(28.0); // 缩进对齐
+                        ui.colored_label(BRAND, egui::RichText::new(detail_label).size(11.0));
                         let sz_str = if *detail_size == 0 {
                             "—".to_string()
                         } else {
@@ -1245,7 +1488,7 @@ fn render_scan_item_row(
         }
     }
 
-    ui.add_space(8.0);
+    ui.add_space(4.0);
 
     (toggled, expand_toggle)
 }
@@ -1337,7 +1580,8 @@ fn render_gui(
                                     .size(13.0),
                                 )
                                 .fill(DANGER_COLOR)
-                                .rounding(egui::Rounding::same(8.0)),
+                                .rounding(egui::Rounding::same(8.0))
+                                .min_size([0.0, 28.0].into()),
                             );
                             if delete_btn.clicked() {
                                 app.prepare_delete();
@@ -1356,10 +1600,10 @@ fn render_gui(
             ui.set_min_width(200.0);
             ui.vertical(|ui| {
                 // --- 品牌区 ---
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     // 品牌图标：紫色圆角方块 + 白色 M
-                    let icon_size = egui::vec2(32.0, 32.0);
+                    let icon_size = egui::vec2(28.0, 28.0);
                     let (icon_rect, _icon_resp) =
                         ui.allocate_exact_size(icon_size, egui::Sense::hover());
                     if ui.is_rect_visible(icon_rect) {
@@ -1369,14 +1613,14 @@ fn render_gui(
                             icon_rect.center(),
                             egui::Align2::CENTER_CENTER,
                             "M",
-                            egui::FontId::proportional(14.0),
+                            egui::FontId::proportional(13.0),
                             egui::Color32::WHITE,
                         );
                     }
                     ui.vertical(|ui| {
                         ui.label(
                             egui::RichText::new("Maclean")
-                                .size(16.0)
+                                .size(15.0)
                                 .strong()
                                 .color(BRAND_TEXT),
                         );
@@ -1387,7 +1631,7 @@ fn render_gui(
                         );
                     });
                 });
-                ui.add_space(14.0);
+                ui.add_space(10.0);
 
                 // --- 磁盘用量卡片 ---
                 let free_pct = if app.disk_total > 0 {
@@ -1444,9 +1688,10 @@ fn render_gui(
                         }
                         ui.allocate_rect(bar_rect, egui::Sense::hover());
                     });
-                ui.add_space(14.0);
+                ui.add_space(10.0);
 
                 // --- 导航项列表 ---
+                ui.spacing_mut().item_spacing.y = 2.0;
                 let nav_icons = ["🏠", "📦", "📁", "🧹", "📂", "🧩", "⚙️", "💾", "🛠"];
                 for (i, tab) in Tab::all().iter().enumerate() {
                     let count = app.results[i].len();
@@ -1458,11 +1703,11 @@ fn render_gui(
                         egui::Frame::none()
                             .fill(BRAND_SOFT)
                             .rounding(egui::Rounding::same(8.0))
-                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .stroke(egui::Stroke::NONE)
                     } else {
                         egui::Frame::none()
-                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .stroke(egui::Stroke::NONE)
                     };
 
@@ -1518,10 +1763,22 @@ fn render_gui(
                 ui.separator();
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if ui.button(if app.lang_en { "中文" } else { "EN" }).clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new(if app.lang_en { "中文" } else { "EN" })
+                                .min_size([0.0, 28.0].into()),
+                        )
+                        .clicked()
+                    {
                         app.toggle_lang();
                     }
-                    if ui.small_button(format!("📋 {}", app.t("logs"))).clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new(format!("📋 {}", app.t("logs")))
+                                .min_size([0.0, 28.0].into()),
+                        )
+                        .clicked()
+                    {
                         let log_dir = logger::log_dir();
                         // 跨平台打开日志目录
                         #[cfg(target_os = "macos")]
@@ -1536,819 +1793,548 @@ fn render_gui(
             });
         });
 
+    // ========== App 卸载：左侧应用列表面板 ==========
+    // 仅在 App 卸载 Tab 有数据且非扫描中时显示左右分栏
+    let show_app_list_panel = app.tab == Tab::AppUninstall
+        && !matches!(app.scan_states[app.tab_index()], ScanState::Scanning)
+        && !app.results[app.tab_index()].is_empty();
+    if show_app_list_panel {
+        egui::SidePanel::left("app_list_panel")
+            .exact_width(240.0)
+            .frame(egui::Frame::side_top_panel(&ctx.style()).fill(LIST_BG))
+            .show(ctx, |ui| {
+                render_app_uninstall_list_panel(ui, app);
+            });
+    }
+
     // ========== 右侧内容区 ==========
     // 减小 CentralPanel 默认内边距，避免顶部和两侧留空过多
-    let central_frame = egui::Frame::central_panel(&ctx.style())
-        .inner_margin(egui::Margin::symmetric(12.0, 0.0));
+    let central_frame =
+        egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(12.0, 0.0));
     egui::CentralPanel::default()
         .frame(central_frame)
         .show(ctx, |ui| {
-        // --- 顶部 Header：当前 Tab 标题 + 副标题 + 扫描/刷新按钮 ---
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(tab_title(&app.tab, app))
-                        .size(18.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                // 副标题：扫描状态/项目数
-                let tab_idx_h = app.tab_index();
-                let subtitle = match &app.scan_states[tab_idx_h] {
-                    ScanState::Idle => app.t("press_r_to_scan").to_string(),
-                    ScanState::Scanning => format!("⏳ {}", app.t("scanning")),
-                    ScanState::Done => {
-                        if app.tab == Tab::AppUninstall {
-                            let groups = compute_app_uninstall_groups(&app.results[tab_idx_h], &app.filtered_indices());
-                            let total: u64 = app.results[tab_idx_h].iter().map(|i| i.size_bytes).sum();
-                            app.tf(
-                                "app_uninstall_subtitle",
-                                &[&groups.len().to_string(), &format_size(total)],
-                            )
-                        } else {
-                            let count = app.current_items().len();
-                            let total: u64 = app.current_items().iter().map(|i| i.size_bytes).sum();
-                            app.tf(
-                                "found_items_total",
-                                &[&count.to_string(), &format_size(total)],
-                            )
-                        }
-                    }
-                };
-                ui.colored_label(TEXT_TERTIARY, egui::RichText::new(subtitle).size(12.0));
-            });
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // 强制刷新按钮（清除缓存后重新扫描）
-                let is_scanning = matches!(app.current_scan_state(), ScanState::Scanning);
-                let refresh_btn = ui.add_enabled(!is_scanning, egui::Button::new("🔄"));
-                if refresh_btn.clicked() {
-                    if app.tab == Tab::Overview {
-                        // 概览页：清空所有 Tab 缓存后扫描全部
-                        scanner::cache::invalidate_all_caches();
-                        start_scan_all(app, scan_rx);
-                    } else {
-                        let tab_name = match app.tab {
-                            Tab::Settings => None,
-                            Tab::DevCache => Some("dev_cache"),
-                            Tab::LargeFiles => Some("large_files"),
-                            Tab::AppCache => Some("app_cache"),
-                            Tab::AppData => Some("app_data"),
-                            Tab::AppUninstall => Some("app_uninstall"),
-                            Tab::SystemOptimize => Some("system_optimize"),
-                            Tab::Apfs => Some("apfs"),
-                            Tab::Overview => unreachable!(),
-                        };
-                        if let Some(name) = tab_name {
-                            scanner::cache::invalidate_cache(name);
-                        }
-                        start_scan(app, scan_rx);
-                    }
-                }
-
-                ui.add_space(4.0);
-
-                // 扫描按钮
-                let scan_button = ui.add_enabled(
-                    !is_scanning,
-                    egui::Button::new(
-                        egui::RichText::new(if is_scanning { "⏳..." } else { app.t("scan") })
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(BRAND)
-                    .rounding(egui::Rounding::same(8.0)),
-                );
-                if scan_button.clicked() {
-                    if app.tab == Tab::Overview {
-                        start_scan_all(app, scan_rx);
-                    } else {
-                        start_scan(app, scan_rx);
-                    }
-                }
-
-                ui.add_space(8.0);
-
-                // 搜索框（App卸载Tab 使用应用名称搜索占位符）
-                let filter_placeholder = if app.tab == Tab::AppUninstall {
-                    app.t("app_uninstall_search_placeholder")
-                } else {
-                    app.t("filter_placeholder")
-                };
-                ui.horizontal(|ui| {
-                    ui.label("🔍");
-                    let desired_width = if app.tab == Tab::AppUninstall { 220.0 } else { 280.0 };
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut app.filter_query)
-                            .hint_text(filter_placeholder)
-                            .desired_width(desired_width),
-                    );
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        app.clear_filter();
-                    }
-                    if !app.filter_query.is_empty() {
-                        if ui.button("✕").clicked() {
-                            app.clear_filter();
-                        }
-                    }
-                    app.filter_active = resp.has_focus();
-                });
-            });
-        });
-
-        ui.separator();
-
-        // --- 概览 Tab：聚合推荐清理 ---
-        if app.tab == Tab::Overview {
-            render_overview_panel(ui, app, scan_rx);
-            return;
-        }
-
-        // --- 系统优化 Tab：特殊渲染（操作面板而非列表选择）---
-        if app.tab == Tab::SystemOptimize {
-            render_optimize_panel(ui, app, scan_rx);
-            return;
-        }
-
-        // --- 设置 Tab：配置面板 ---
-        if app.tab == Tab::Settings {
-            render_settings_panel(ui, app);
-            return;
-        }
-
-        // --- 磁盘分析器 Tab：目录钻取式浏览 ---
-        if app.tab == Tab::LargeFiles {
-            render_disk_analyzer(ui, app, scan_rx);
-            return;
-        }
-
-        // --- 扫描结果区 ---
-        let tab_idx = app.tab_index();
-        let items = app.results[tab_idx].clone();
-        let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
-
-        // --- 分类过滤标签页（Overview / LargeFiles / SystemOptimize / Settings 除外）---
-        let show_category_tabs = !matches!(
-            app.tab,
-            Tab::Overview | Tab::LargeFiles | Tab::SystemOptimize | Tab::Settings
-        );
-        if show_category_tabs && !is_scanning && !items.is_empty() {
-            let mut prefixes: Vec<String> = items
-                .iter()
-                .map(|item| category_prefix(&item.category))
-                .filter(|p| !p.is_empty())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            prefixes.sort();
-
-            if !prefixes.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    let all_count = items.len();
-                    let all_active = app.filter_category.is_none();
-                    if render_category_tab(ui, app.t("select_all"), Some(all_count), all_active)
-                        .clicked()
-                    {
-                        app.filter_category = None;
-                    }
-                    for prefix in &prefixes {
-                        let count = items
-                            .iter()
-                            .filter(|i| category_prefix(&i.category) == *prefix)
-                            .count();
-                        let active = app.filter_category.as_deref() == Some(prefix);
-                        if render_category_tab(ui, prefix, Some(count), active).clicked() {
-                            app.filter_category = Some(prefix.clone());
-                        }
-                    }
-                });
-            }
-        }
-
-        if is_scanning {
-            ui_scanning(ui, app);
-            return;
-        } else if items.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(80.0);
-                ui.label(
-                    egui::RichText::new(app.t("no_items_hint"))
-                        .size(16.0)
-                        .color(TEXT_TERTIARY),
-                );
-                ui.add_space(10.0);
-                let scan_hint = format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
-                if ui
-                    .button(
-                        egui::RichText::new(&scan_hint)
-                            .size(16.0)
-                            .color(egui::Color32::WHITE),
-                    )
-                    .clicked()
-                {
-                    start_scan(app, scan_rx);
-                }
-            });
-        } else {
-            // ====== 扫描结果汇总卡片 ======
-            let safe_cnt = app.safe_count();
-            let safe_sz = app.safe_size();
-            let caution_cnt = app.caution_count();
-            let caution_sz = app.caution_size();
-            let advanced_cnt = app.advanced_count();
-            let advanced_sz = app.advanced_size();
-            let selected_cnt = app.selected_count();
-            let selected_sz = app.selected_total_size();
-            let is_uninstall_tab_summary = app.tab == Tab::AppUninstall;
-            let (total_cnt_for_pill, total_sz_for_pill) = if is_uninstall_tab_summary {
-                let groups = compute_app_uninstall_groups(&items, &app.filtered_indices());
-                let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
-                (groups.len(), total_size)
-            } else {
-                (items.len(), items.iter().map(|i| i.size_bytes).sum())
-            };
-
-            // Summary Pills：胶囊式汇总卡片
-            ui.horizontal(|ui| {
-                // 全部 胶囊
-                egui::Frame::none()
-                    .fill(SURFACE_MUTED)
-                    .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-                    .rounding(egui::Rounding::same(14.0))
-                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(TEXT_PRIMARY, egui::RichText::new("●").size(10.0));
+            // --- 顶部 Header：当前 Tab 标题 + 副标题 + 扫描/刷新按钮 ---
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(tab_title(&app.tab, app))
+                                    .size(16.0)
+                                    .strong()
+                                    .color(TEXT_PRIMARY),
+                            );
+                            // 副标题：扫描状态/项目数
+                            let tab_idx_h = app.tab_index();
+                            let subtitle = match &app.scan_states[tab_idx_h] {
+                                ScanState::Idle => app.t("press_r_to_scan").to_string(),
+                                ScanState::Scanning => format!("⏳ {}", app.t("scanning")),
+                                ScanState::Done => {
+                                    let count = app.current_items().len();
+                                    let total: u64 =
+                                        app.current_items().iter().map(|i| i.size_bytes).sum();
+                                    app.tf(
+                                        "found_items_total",
+                                        &[&count.to_string(), &format_size(total)],
+                                    )
+                                }
+                            };
                             ui.colored_label(
-                                TEXT_PRIMARY,
-                                egui::RichText::new(format!(
-                                    "{} {} · {}",
-                                    total_cnt_for_pill,
-                                    app.t("all_items"),
-                                    format_size(total_sz_for_pill)
-                                ))
-                                .size(12.0)
-                                .strong(),
+                                TEXT_TERTIARY,
+                                egui::RichText::new(subtitle).size(11.0),
                             );
                         });
-                    });
-                ui.add_space(6.0);
 
-                // Safe 胶囊
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(232, 255, 243))
-                    .stroke(egui::Stroke::new(1.0, SAFE_COLOR))
-                    .rounding(egui::Rounding::same(14.0))
-                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(SAFE_COLOR, egui::RichText::new("●").size(10.0));
-                            ui.colored_label(
-                                SAFE_COLOR,
-                                egui::RichText::new(format!(
-                                    "{} {} · {}",
-                                    safe_cnt,
-                                    app.t("safe_clean"),
-                                    format_size(safe_sz)
-                                ))
-                                .size(12.0),
-                            );
-                        });
-                    });
-                ui.add_space(6.0);
-
-                // Caution 胶囊
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(255, 247, 230))
-                    .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
-                    .rounding(egui::Rounding::same(14.0))
-                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(CAUTION_COLOR, egui::RichText::new("●").size(10.0));
-                            ui.colored_label(
-                                CAUTION_COLOR,
-                                egui::RichText::new(format!(
-                                    "{} {} · {}",
-                                    caution_cnt,
-                                    app.t("caution_clean"),
-                                    format_size(caution_sz)
-                                ))
-                                .size(12.0),
-                            );
-                        });
-                    });
-                ui.add_space(6.0);
-
-                // Advanced 胶囊（如果有）
-                if advanced_cnt > 0 {
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(255, 233, 230))
-                        .stroke(egui::Stroke::new(1.0, ADVANCED_COLOR))
-                        .rounding(egui::Rounding::same(14.0))
-                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    ADVANCED_COLOR,
-                                    egui::RichText::new("●").size(10.0),
-                                );
-                                ui.colored_label(
-                                    ADVANCED_COLOR,
-                                    egui::RichText::new(format!(
-                                        "{} {} · {}",
-                                        advanced_cnt,
-                                        app.t("confirm_clean"),
-                                        format_size(advanced_sz)
-                                    ))
-                                    .size(12.0),
-                                );
-                            });
-                        });
-                }
-            });
-
-            // ====== 操作按钮栏 ======
-            ui.horizontal(|ui| {
-                // 一键选择清理：自动选中所有 Safe/CacheOnly 推荐项
-                let smart_btn = ui.add(
-                    egui::Button::new(
-                        egui::RichText::new(app.t("select_safe"))
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(SAFE_COLOR)
-                    .rounding(egui::Rounding::same(8.0)),
-                );
-                if smart_btn.clicked() {
-                    app.select_safe_only();
-                }
-
-                if ui.button(app.t("select_all")).clicked() {
-                    app.select_all();
-                }
-                if ui.button(app.t("deselect_all")).clicked() {
-                    app.deselect_all();
-                }
-
-                // App卸载 Tab：展开全部子项关联详情
-                let is_uninstall_tab_now = app.tab == crate::app::Tab::AppUninstall;
-                if is_uninstall_tab_now {
-                    if ui.button(app.t("expand_all")).clicked() {
-                        for item in items.iter() {
-                            if !item.batch_paths.is_empty() {
-                                app.expanded_items.insert(item.path.clone());
-                            }
-                        }
-                    }
-                }
-
-                ui.separator();
-
-                // App卸载 Tab：在操作栏右侧显示当前选中的应用名
-                if is_uninstall_tab_now {
-                    if let Some(selected_app) = app.selected_app_group.as_deref() {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.colored_label(
-                                TEXT_SECONDARY,
-                                egui::RichText::new(format!(
-                                    "{}: {}",
-                                    app.t("current_selected"),
-                                    selected_app
-                                ))
-                                .size(12.0),
+                            // 强制刷新按钮（清除缓存后重新扫描）
+                            let is_scanning =
+                                matches!(app.current_scan_state(), ScanState::Scanning);
+                            let refresh_btn = ui.add_enabled(
+                                !is_scanning,
+                                egui::Button::new("🔄").min_size([0.0, 28.0].into()),
                             );
+                            if refresh_btn.clicked() {
+                                if app.tab == Tab::Overview {
+                                    // 概览页：清空所有 Tab 缓存后扫描全部
+                                    scanner::cache::invalidate_all_caches();
+                                    start_scan_all(app, scan_rx);
+                                } else {
+                                    let tab_name = match app.tab {
+                                        Tab::Settings => None,
+                                        Tab::DevCache => Some("dev_cache"),
+                                        Tab::LargeFiles => Some("large_files"),
+                                        Tab::AppCache => Some("app_cache"),
+                                        Tab::AppData => Some("app_data"),
+                                        Tab::AppUninstall => Some("app_uninstall"),
+                                        Tab::SystemOptimize => Some("system_optimize"),
+                                        Tab::Apfs => Some("apfs"),
+                                        Tab::Overview => unreachable!(),
+                                    };
+                                    if let Some(name) = tab_name {
+                                        scanner::cache::invalidate_cache(name);
+                                    }
+                                    start_scan(app, scan_rx);
+                                }
+                            }
+
+                            ui.add_space(4.0);
+
+                            // 扫描按钮
+                            let scan_button = ui.add_enabled(
+                                !is_scanning,
+                                egui::Button::new(
+                                    egui::RichText::new(if is_scanning {
+                                        "⏳..."
+                                    } else {
+                                        app.t("scan")
+                                    })
+                                    .color(egui::Color32::WHITE),
+                                )
+                                .fill(BRAND)
+                                .rounding(egui::Rounding::same(8.0))
+                                .min_size([0.0, 28.0].into()),
+                            );
+                            if scan_button.clicked() {
+                                if app.tab == Tab::Overview {
+                                    start_scan_all(app, scan_rx);
+                                } else {
+                                    start_scan(app, scan_rx);
+                                }
+                            }
                         });
-                    }
-                }
-
-                // 非 App卸载 Tab：删除按钮保留在操作栏
-                // App卸载 Tab 的删除按钮固定在底部栏
-                if !is_uninstall_tab_now {
-                    let delete_enabled =
-                        selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
-                    let delete_btn = ui.add_enabled(
-                        delete_enabled,
-                        egui::Button::new(
-                            egui::RichText::new(format!(
-                                "🗑 {} ({})",
-                                app.t("delete"),
-                                format_size(selected_sz)
-                            ))
-                            .color(egui::Color32::WHITE),
-                        )
-                        .fill(DANGER_COLOR)
-                        .rounding(egui::Rounding::same(8.0)),
-                    );
-                    if delete_btn.clicked() {
-                        app.prepare_delete();
-                    }
-                }
-            });
-
-
-
-            // ====== 可滚动列表 ======
-            // 提前克隆关联明细和展开状态，避免借用冲突
-            let associated_details = app.associated_details.clone();
-            let expanded_items = app.expanded_items.clone();
-            let is_uninstall_tab = app.tab == crate::app::Tab::AppUninstall;
-            let filtered_indices = app.filtered_indices();
-
-            // App卸载 Tab 采用三栏布局：左侧导航栏（已有）+ 应用列表 + 子项列表
-            if is_uninstall_tab {
-                let bottom_bar_height = 64.0;
-                let total_rect = ui.available_rect_before_wrap();
-                let total_width = total_rect.width();
-                let total_height = total_rect.height();
-                let available_height = (total_height - bottom_bar_height).max(0.0);
-                let spacing = 8.0;
-                let left_width = ((total_width - spacing) * 0.42).max(120.0);
-                let right_width = (total_width - left_width - spacing).max(120.0);
-
-                // 预先计算子项列标题，避免在闭包中重复借用 app
-                let groups = compute_app_uninstall_groups(&items, &filtered_indices);
-                let selected_app_name = app.selected_app_group.clone();
-                let selected_group = selected_app_name.as_ref().and_then(|name| {
-                    groups
-                        .iter()
-                        .find(|(n, _)| n == name)
-                        .map(|(n, idxs)| (n.clone(), idxs.clone()))
-                });
-                let (subitem_title_left, subitem_title_right) =
-                    if let Some((name, ref idxs)) = selected_group {
-                        let total_size: u64 = idxs.iter().map(|&i| items[i].size_bytes).sum();
-                        (
-                            format!("{}：{}", app.t("subitem_detail_title"), name),
-                            format!("{} {} · {}", idxs.len(), app.t("items"), format_size(total_size)),
-                        )
-                    } else {
-                        (app.t("subitem_detail_title").to_string(), String::new())
-                    };
-                let app_list_title = format!("{} ({})", app.t("app_list_title"), groups.len());
-
-                // 使用精确 Rect 分配左右两栏与底部栏，避免 egui 自动布局导致塌陷
-                let left_rect = egui::Rect::from_min_max(
-                    total_rect.min,
-                    egui::pos2(total_rect.min.x + left_width, total_rect.min.y + available_height),
-                );
-                let right_rect = egui::Rect::from_min_max(
-                    egui::pos2(left_rect.max.x + spacing, total_rect.min.y),
-                    egui::pos2(total_rect.min.x + total_width, total_rect.min.y + available_height),
-                );
-                let bottom_rect = egui::Rect::from_min_max(
-                    egui::pos2(total_rect.min.x, total_rect.min.y + available_height),
-                    total_rect.max,
-                );
-
-                // 左侧：应用列表（带独立垂直滚动条，占满高度）
-                let mut left_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(left_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                left_ui.horizontal(|ui| {
-                    ui.set_width(ui.available_width());
-                    ui.colored_label(
-                        TEXT_SECONDARY,
-                        egui::RichText::new(&app_list_title)
-                            .size(12.0)
-                            .strong(),
-                    );
-                });
-                left_ui.add_space(4.0);
-                let left_scroll_rect = left_ui.available_rect_before_wrap();
-                let mut left_scroll_ui = left_ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(left_scroll_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                egui::ScrollArea::vertical()
-                    .id_salt("app_uninstall_left")
-                    .auto_shrink([false, false])
-                    .show(&mut left_scroll_ui, |ui| {
-                        render_app_uninstall_list(
-                            ui,
-                            app,
-                            &items,
-                            &filtered_indices,
-                            tab_idx,
-                        );
                     });
-
-                // 右侧：子项列表（带独立垂直滚动条，占满高度，不允许留白）
-                let mut right_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(right_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                right_ui.horizontal(|ui| {
-                    ui.set_width(ui.available_width());
-                    ui.colored_label(
-                        TEXT_PRIMARY,
-                        egui::RichText::new(&subitem_title_left)
-                            .size(12.0)
-                            .strong(),
-                    );
-                    if !subitem_title_right.is_empty() {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.colored_label(
-                                    TEXT_SECONDARY,
-                                    egui::RichText::new(&subitem_title_right).size(12.0),
-                                );
-                            },
-                        );
-                    }
                 });
-                right_ui.add_space(4.0);
-                let right_scroll_rect = right_ui.available_rect_before_wrap();
-                let mut right_scroll_ui = right_ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(right_scroll_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                egui::ScrollArea::vertical()
-                    .id_salt("app_uninstall_right")
-                    .auto_shrink([false, false])
-                    .show(&mut right_scroll_ui, |ui| {
-                        render_app_uninstall_detail(
-                            ui,
-                            app,
-                            &items,
-                            &filtered_indices,
-                            &associated_details,
-                            &expanded_items,
-                        );
-                    });
 
-                // 底部：固定删除栏
-                let mut bottom_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(bottom_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                render_app_uninstall_bottom_bar(&mut bottom_ui, app, selected_cnt, selected_sz);
+            ui.separator();
+
+            // --- 概览 Tab：聚合推荐清理 ---
+            if app.tab == Tab::Overview {
+                render_overview_panel(ui, app, scan_rx);
                 return;
             }
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let mut toggled_indices: Vec<usize> = Vec::new();
-                let mut expand_toggles: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+            // --- 系统优化 Tab：特殊渲染（操作面板而非列表选择）---
+            if app.tab == Tab::SystemOptimize {
+                render_optimize_panel(ui, app, scan_rx);
+                return;
+            }
 
-                if is_uninstall_tab {
-                    // ====== App卸载 Tab：按应用名分组显示 ======
-                    // 过滤后按 category 中的应用名分组
-                    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-                    let mut group_map: std::collections::HashMap<String, usize> =
-                        std::collections::HashMap::new();
-                    for &display_idx in &filtered_indices {
-                        let item = &items[display_idx];
-                        if let Some(app_name) = extract_app_name(&item.category) {
-                            let idx = *group_map.entry(app_name.to_string()).or_insert_with(|| {
-                                groups.push((app_name.to_string(), Vec::new()));
-                                groups.len() - 1
-                            });
-                            groups[idx].1.push(display_idx);
-                        } else {
-                            // 不符合子项后缀的单独成组
-                            groups.push((item.category.clone(), vec![display_idx]));
-                        }
-                    }
+            // --- 设置 Tab：配置面板 ---
+            if app.tab == Tab::Settings {
+                render_settings_panel(ui, app);
+                return;
+            }
 
-                    for (app_name, indices) in &groups {
-                        let total_size: u64 = indices.iter().map(|&i| items[i].size_bytes).sum();
-                        let deletable_indices: Vec<usize> = indices
-                            .iter()
-                            .copied()
-                            .filter(|&i| items[i].deletable)
-                            .collect();
-                        let all_selected = deletable_indices.iter().all(|&i| items[i].selected);
-                        let any_selected = deletable_indices.iter().any(|&i| items[i].selected);
-                        let has_deletable = !deletable_indices.is_empty();
+            // --- 磁盘分析器 Tab：目录钻取式浏览 ---
+            if app.tab == Tab::LargeFiles {
+                render_disk_analyzer(ui, app, scan_rx);
+                return;
+            }
 
-                        // 统计子项类型数量
-                        let uninstall_count = indices
-                            .iter()
-                            .filter(|&&i| items[i].category.ends_with(" (卸载)"))
-                            .count();
-                        let data_count = indices
-                            .iter()
-                            .filter(|&&i| items[i].category.ends_with(" 数据"))
-                            .count();
-                        let cache_count = indices
-                            .iter()
-                            .filter(|&&i| items[i].category.ends_with(" 缓存"))
-                            .count();
-                        // 应用路径：取卸载项的路径
-                        let app_path: String = indices
-                            .iter()
-                            .find(|&&i| items[i].category.ends_with(" (卸载)"))
-                            .map(|&i| items[i].path.clone())
-                            .unwrap_or_else(|| items[indices[0]].path.clone());
-
-                        // 默认展开所有分组（首次渲染时自动展开）
-                        if !expanded_items.contains(app_name) && !expand_toggles.contains(app_name)
-                        {
-                            expand_toggles.insert(app_name.clone());
-                        }
-                        let is_group_expanded = expanded_items.contains(app_name);
-
-                        // 父卡片：包裹父行 + 子行
-                        let outer_stroke = if any_selected { BRAND } else { BORDER_LIGHT };
-                        let outer_frame = egui::Frame::none()
-                            .fill(SURFACE_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0, outer_stroke))
-                            .rounding(egui::Rounding::same(12.0))
-                            .inner_margin(egui::Margin::same(0.0));
-
-                        let (data_fg, data_bg, _) =
-                            recommend_badge_colors(&crate::scanner::Recommend::Advanced);
-                        let (cache_fg, cache_bg, _) =
-                            recommend_badge_colors(&crate::scanner::Recommend::Safe);
-                        let (app_fg, app_bg, _) =
-                            recommend_badge_colors(&crate::scanner::Recommend::Caution);
-
-                        let parent_resp = outer_frame.show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                // 父行
-                                let row_resp = ui.horizontal(|ui| {
-                                    // 父复选框：一键选中/取消所有可删除子项
-                                    let checkbox_resp = render_custom_checkbox(
-                                        ui,
-                                        all_selected || any_selected,
-                                        has_deletable,
-                                    );
-                                    if checkbox_resp.clicked() && has_deletable {
-                                        let target = !all_selected;
-                                        for &idx in &deletable_indices {
-                                            if items[idx].selected != target {
-                                                toggled_indices.push(idx);
-                                            }
-                                        }
-                                    }
-
-                                    ui.add_space(8.0);
-
-                                    // 展开/收起箭头
-                                    let arrow_color = if is_group_expanded {
-                                        BRAND
-                                    } else {
-                                        TEXT_TERTIARY
-                                    };
-                                    let expand_icon = if is_group_expanded { "▼" } else { "▶" };
-                                    let arrow_resp = ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(expand_icon).color(arrow_color),
+            // --- App 卸载 Tab：左右分栏（左侧应用列表已在外部 SidePanel 渲染）---
+            if app.tab == Tab::AppUninstall {
+                let is_scanning = matches!(app.scan_states[app.tab_index()], ScanState::Scanning);
+                let is_empty = app.results[app.tab_index()].is_empty();
+                if is_scanning {
+                    ui_scanning(ui, app);
+                } else if is_empty {
+                    let empty_size = ui.available_size();
+                    egui::Frame::none()
+                        .fill(LIST_BG)
+                        .rounding(egui::Rounding::same(8.0))
+                        .show(ui, |ui| {
+                            ui.set_min_size(empty_size);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new(app.t("no_items_hint"))
+                                        .size(14.0)
+                                        .color(TEXT_TERTIARY),
+                                );
+                                ui.add_space(8.0);
+                                let scan_hint =
+                                    format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(&scan_hint)
+                                                .size(13.0)
+                                                .color(egui::Color32::WHITE),
                                         )
-                                        .sense(egui::Sense::click()),
-                                    );
-                                    if arrow_resp.clicked()
-                                        && !expand_toggles.contains(app_name)
-                                    {
-                                        expand_toggles.insert(app_name.clone());
-                                    }
-
-                                    ui.add_space(6.0);
-
-                                    // 应用名 + 路径
-                                    ui.vertical(|ui| {
-                                        ui.colored_label(
-                                            TEXT_PRIMARY,
-                                            egui::RichText::new(app_name).size(14.0).strong(),
-                                        );
-                                        ui.colored_label(
-                                            TEXT_TERTIARY,
-                                            egui::RichText::new(truncate_path(&app_path, 80))
-                                                .size(11.0)
-                                                .monospace(),
-                                        );
-                                    });
-
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let size_str = if total_size == 0 {
-                                                "—".to_string()
-                                            } else {
-                                                format_size(total_size)
-                                            };
-                                            ui.colored_label(
-                                                TEXT_PRIMARY,
-                                                egui::RichText::new(&size_str)
-                                                    .size(14.0)
-                                                    .strong()
-                                                    .monospace(),
-                                            );
-                                            ui.add_space(10.0);
-                                            // 子项类型徽章：数据 / 缓存 / 应用
-                                            // right_to_left 中按「应用 → 缓存 → 数据」顺序添加，
-                                            // 最终从左到右显示为「数据 · 缓存 · 应用 · 大小」。
-                                            if uninstall_count > 0 {
-                                                render_status_badge(
-                                                    ui,
-                                                    &format!("应用 · {}", uninstall_count),
-                                                    app_fg,
-                                                    app_bg,
-                                                );
-                                                ui.add_space(6.0);
-                                            }
-                                            if cache_count > 0 {
-                                                render_status_badge(
-                                                    ui,
-                                                    &format!("缓存 · {}", cache_count),
-                                                    cache_fg,
-                                                    cache_bg,
-                                                );
-                                                ui.add_space(6.0);
-                                            }
-                                            if data_count > 0 {
-                                                render_status_badge(
-                                                    ui,
-                                                    &format!("数据 · {}", data_count),
-                                                    data_fg,
-                                                    data_bg,
-                                                );
-                                                ui.add_space(6.0);
-                                            }
-                                        },
-                                    );
-                                });
-
-                                // 点击父行空白处切换展开/收起
-                                if row_resp.response.clicked()
-                                    && !expand_toggles.contains(app_name)
+                                        .min_size([0.0, 28.0].into()),
+                                    )
+                                    .clicked()
                                 {
-                                    expand_toggles.insert(app_name.clone());
-                                }
-
-                                // 渲染子项（展开时）
-                                if is_group_expanded {
-                                    ui.add_space(2.0);
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(34.0);
-                                        ui.vertical(|ui| {
-                                            for &display_idx in indices {
-                                                if let Some(idx) =
-                                                    render_app_uninstall_child_row(
-                                                        ui,
-                                                        &items[display_idx],
-                                                        display_idx,
-                                                        app,
-                                                    )
-                                                {
-                                                    toggled_indices.push(idx);
-                                                }
-                                            }
-                                        });
-                                    });
-                                    ui.add_space(10.0);
+                                    start_scan(app, scan_rx);
                                 }
                             });
                         });
-
-                        let _ = parent_resp;
-                        ui.add_space(12.0);
-                    }
                 } else {
-                    // ====== 其它 Tab：平铺显示 ======
-                    for &display_idx in &filtered_indices {
-                        let (toggled, expand) = render_scan_item_row(
-                            ui,
-                            &items[display_idx],
-                            display_idx,
-                            app,
-                            is_uninstall_tab,
-                            &associated_details,
-                            &expanded_items,
-                        );
-                        if let Some(idx) = toggled {
-                            toggled_indices.push(idx);
+                    render_app_uninstall_details_panel(ui, app, scan_rx);
+                }
+                return;
+            }
+
+            // --- 扫描结果区 ---
+            let tab_idx = app.tab_index();
+            let items = app.results[tab_idx].clone();
+            let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
+
+            // --- 分类过滤标签页（Overview / LargeFiles / SystemOptimize / Settings 除外）---
+            let show_category_tabs = !matches!(
+                app.tab,
+                Tab::Overview | Tab::LargeFiles | Tab::SystemOptimize | Tab::Settings
+            );
+            if show_category_tabs && !is_scanning && !items.is_empty() {
+                let mut prefixes: Vec<String> = items
+                    .iter()
+                    .map(|item| category_prefix(&item.category))
+                    .filter(|p| !p.is_empty())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                prefixes.sort();
+
+                if !prefixes.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        let all_count = items.len();
+                        let all_active = app.filter_category.is_none();
+                        if render_category_tab(ui, app.t("select_all"), Some(all_count), all_active)
+                            .clicked()
+                        {
+                            app.filter_category = None;
                         }
-                        if let Some(path) = expand {
-                            expand_toggles.insert(path);
+                        for prefix in &prefixes {
+                            let count = items
+                                .iter()
+                                .filter(|i| category_prefix(&i.category) == *prefix)
+                                .count();
+                            let active = app.filter_category.as_deref() == Some(prefix);
+                            if render_category_tab(ui, prefix, Some(count), active).clicked() {
+                                app.filter_category = Some(prefix.clone());
+                            }
                         }
-                    }
+                    });
+                }
+            }
+
+            if is_scanning {
+                ui_scanning(ui, app);
+                return;
+            } else if items.is_empty() {
+                // 列表区域：占满剩余高度并居中显示空状态
+                let list_area_size = ui.available_size();
+                egui::Frame::none()
+                    .fill(LIST_BG)
+                    .rounding(egui::Rounding::same(8.0))
+                    .show(ui, |ui| {
+                        ui.set_min_size(list_area_size);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new(app.t("no_items_hint"))
+                                    .size(14.0)
+                                    .color(TEXT_TERTIARY),
+                            );
+                            ui.add_space(8.0);
+                            let scan_hint =
+                                format!("🔍 {} → {}", app.t("scan"), app.t("click_to_start"));
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(&scan_hint)
+                                            .size(13.0)
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .min_size([0.0, 28.0].into()),
+                                )
+                                .clicked()
+                            {
+                                start_scan(app, scan_rx);
+                            }
+                        });
+                    });
+            } else {
+                // ====== 扫描结果汇总卡片 ======
+                let safe_cnt = app.safe_count();
+                let safe_sz = app.safe_size();
+                let caution_cnt = app.caution_count();
+                let caution_sz = app.caution_size();
+                let advanced_cnt = app.advanced_count();
+                let advanced_sz = app.advanced_size();
+                let selected_cnt = app.selected_count();
+                let selected_sz = app.selected_total_size();
+
+                // Summary Pills：胶囊式汇总卡片
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(16.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+
+                            // Safe 胶囊
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(232, 255, 243))
+                                .stroke(egui::Stroke::new(1.0, SAFE_COLOR))
+                                .rounding(egui::Rounding::same(14.0))
+                                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(
+                                            SAFE_COLOR,
+                                            egui::RichText::new("●").size(9.0),
+                                        );
+                                        ui.colored_label(
+                                            SAFE_COLOR,
+                                            egui::RichText::new(format!(
+                                                "{} {} · {}",
+                                                safe_cnt,
+                                                app.t("safe_clean"),
+                                                format_size(safe_sz)
+                                            ))
+                                            .size(11.0),
+                                        );
+                                    });
+                                });
+
+                            // Caution 胶囊
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(255, 247, 230))
+                                .stroke(egui::Stroke::new(1.0, CAUTION_COLOR))
+                                .rounding(egui::Rounding::same(14.0))
+                                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(
+                                            CAUTION_COLOR,
+                                            egui::RichText::new("●").size(9.0),
+                                        );
+                                        ui.colored_label(
+                                            CAUTION_COLOR,
+                                            egui::RichText::new(format!(
+                                                "{} {} · {}",
+                                                caution_cnt,
+                                                app.t("caution_clean"),
+                                                format_size(caution_sz)
+                                            ))
+                                            .size(11.0),
+                                        );
+                                    });
+                                });
+
+                            // Advanced 胶囊（如果有）
+                            if advanced_cnt > 0 {
+                                egui::Frame::none()
+                                    .fill(egui::Color32::from_rgb(255, 233, 230))
+                                    .stroke(egui::Stroke::new(1.0, ADVANCED_COLOR))
+                                    .rounding(egui::Rounding::same(14.0))
+                                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(
+                                                ADVANCED_COLOR,
+                                                egui::RichText::new("●").size(9.0),
+                                            );
+                                            ui.colored_label(
+                                                ADVANCED_COLOR,
+                                                egui::RichText::new(format!(
+                                                    "{} {} · {}",
+                                                    advanced_cnt,
+                                                    app.t("confirm_clean"),
+                                                    format_size(advanced_sz)
+                                                ))
+                                                .size(11.0),
+                                            );
+                                        });
+                                    });
+                            }
+
+                            // 已选胶囊
+                            if selected_cnt > 0 {
+                                egui::Frame::none()
+                                    .fill(BRAND_SOFT)
+                                    .stroke(egui::Stroke::new(1.0, BRAND))
+                                    .rounding(egui::Rounding::same(14.0))
+                                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(
+                                                BRAND,
+                                                egui::RichText::new("✓").size(9.0),
+                                            );
+                                            ui.colored_label(
+                                                BRAND,
+                                                egui::RichText::new(format!(
+                                                    "{} {} · {}",
+                                                    selected_cnt,
+                                                    app.t("items_selected"),
+                                                    format_size(selected_sz)
+                                                ))
+                                                .size(11.0),
+                                            );
+                                        });
+                                    });
+                            }
+                        });
+                    });
+
+                // ====== 操作按钮栏（选择分组 + 搜索）======
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(16.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+
+                            // 智能选择：只选推荐清理
+                            let smart_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!("🟢 {}", app.t("select_safe")))
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(SAFE_COLOR)
+                                .rounding(egui::Rounding::same(8.0))
+                                .min_size([0.0, 28.0].into()),
+                            );
+                            if smart_btn.clicked() {
+                                app.select_safe_only();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(app.t("select_all"))
+                                        .min_size([0.0, 28.0].into()),
+                                )
+                                .clicked()
+                            {
+                                app.select_all();
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(app.t("deselect_all"))
+                                        .min_size([0.0, 28.0].into()),
+                                )
+                                .clicked()
+                            {
+                                app.deselect_all();
+                            }
+
+                            ui.separator();
+
+                            // 过滤/搜索输入框（/ 键聚焦，Esc 清除过滤）
+                            let filter_placeholder = app.t("filter_placeholder").to_string();
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut app.filter_query)
+                                    .hint_text(&filter_placeholder)
+                                    .desired_width(280.0)
+                                    .min_size([120.0, 28.0].into()),
+                            );
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                app.clear_filter();
+                            }
+                            if !app.filter_query.is_empty() {
+                                if ui
+                                    .add(egui::Button::new("✕").min_size([0.0, 28.0].into()))
+                                    .clicked()
+                                {
+                                    app.clear_filter();
+                                }
+                            }
+                            app.filter_active = resp.has_focus();
+                        });
+                    });
+
+                // 全局 / 键快捷聚焦过滤输入框
+                if ui.input(|i| i.key_pressed(egui::Key::Slash) && !app.filter_active) {
+                    // 标记需要聚焦（下一帧通过 request_focus 实现）
+                    app.filter_active = true;
                 }
 
-                // 应用选中变更
-                for idx in toggled_indices {
-                    let items_mut = &mut app.results[tab_idx];
-                    if idx < items_mut.len() && items_mut[idx].deletable {
-                        items_mut[idx].selected = !items_mut[idx].selected;
-                    }
+                // 显示过滤结果计数
+                let total_count = items.len();
+                let filtered_indices = app.filtered_indices();
+                let filtered_count = filtered_indices.len();
+                if !app.filter_query.trim().is_empty() {
+                    ui.colored_label(
+                        BRAND,
+                        egui::RichText::new(app.tf(
+                            "filter_results",
+                            &[&filtered_count.to_string(), &total_count.to_string()],
+                        ))
+                        .size(12.0),
+                    );
                 }
 
-                // 应用展开/收起变更
-                for path in expand_toggles {
-                    if !app.expanded_items.insert(path.clone()) {
-                        app.expanded_items.remove(&path);
-                    }
-                }
-            });
-        }
-    });
+                // 列表区域：占满剩余高度，内容少时保持背景色
+                let list_area_size = ui.available_size();
+                egui::Frame::none()
+                    .fill(LIST_BG)
+                    .rounding(egui::Rounding::same(8.0))
+                    .show(ui, |ui| {
+                        ui.set_min_size(list_area_size);
+
+                        // 过滤后无结果
+                        if filtered_count == 0 && !app.filter_query.trim().is_empty() {
+                            let no_match_text = app.t("no_match").to_string();
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&no_match_text)
+                                        .size(13.0)
+                                        .color(TEXT_TERTIARY),
+                                );
+                            });
+                            return;
+                        }
+
+                        // ====== 可滚动列表 ======
+                        // 提前克隆关联明细和展开状态，避免借用冲突
+                        let associated_details = app.associated_details.clone();
+                        let expanded_items = app.expanded_items.clone();
+
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                let mut toggled_indices: Vec<usize> = Vec::new();
+                                let mut expand_toggles: std::collections::HashSet<String> =
+                                    std::collections::HashSet::new();
+
+                                // ====== 其它 Tab：平铺显示 ======
+                                for &display_idx in &filtered_indices {
+                                    let (toggled, expand) = render_scan_item_row(
+                                        ui,
+                                        &items[display_idx],
+                                        display_idx,
+                                        app,
+                                        false,
+                                        &associated_details,
+                                        &expanded_items,
+                                    );
+                                    if let Some(idx) = toggled {
+                                        toggled_indices.push(idx);
+                                    }
+                                    if let Some(path) = expand {
+                                        expand_toggles.insert(path);
+                                    }
+                                }
+
+                                // 应用选中变更
+                                for idx in toggled_indices {
+                                    let items_mut = &mut app.results[tab_idx];
+                                    if idx < items_mut.len() && items_mut[idx].deletable {
+                                        items_mut[idx].selected = !items_mut[idx].selected;
+                                    }
+                                }
+
+                                // 应用展开/收起变更
+                                for path in expand_toggles {
+                                    if !app.expanded_items.insert(path.clone()) {
+                                        app.expanded_items.remove(&path);
+                                    }
+                                }
+                            });
+                    });
+            }
+        });
 
     // ========== 弹窗层（必须在 CentralPanel 闭包外部，确保不被 return 跳过） ==========
 
@@ -3951,9 +3937,10 @@ fn show_confirm_window(
     app: &mut App,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
 ) {
-    // 基于 pending_delete 跨 Tab 统计
-    let mut count = 0usize;
-    let mut size = 0u64;
+    let count = app.selected_count();
+    let size = app.selected_total_size();
+    let idx = app.tab_index();
+
     let mut safe_cnt = 0usize;
     let mut safe_sz = 0u64;
     let mut caution_cnt = 0usize;
@@ -3962,15 +3949,10 @@ fn show_confirm_window(
     let mut advanced_sz = 0u64;
     let mut needs_admin = false;
 
-    for (tab_idx, item_idx) in &app.pending_delete {
-        let Some(item) = app.results.get(*tab_idx).and_then(|v| v.get(*item_idx)) else {
-            continue;
-        };
-        if !item.deletable {
+    for item in &app.results[idx] {
+        if !item.selected || !item.deletable {
             continue;
         }
-        count += 1;
-        size += item.size_bytes;
         match item.recommend {
             crate::scanner::Recommend::Safe | crate::scanner::Recommend::CacheOnly => {
                 safe_cnt += 1;
@@ -4099,15 +4081,9 @@ fn show_confirm_window(
                     .show(ui, |ui| {
                         ui.set_max_height(150.0);
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            let items: Vec<_> = app
-                                .pending_delete
+                            let items: Vec<_> = app.results[idx]
                                 .iter()
-                                .filter_map(|(tab_idx, item_idx)| {
-                                    app.results
-                                        .get(*tab_idx)
-                                        .and_then(|v| v.get(*item_idx))
-                                        .filter(|item| item.deletable)
-                                })
+                                .filter(|item| item.selected && item.deletable)
                                 .collect();
                             for item in &items {
                                 ui.horizontal(|ui| {
@@ -5839,48 +5815,62 @@ fn render_disk_analyzer(
 
     if is_scanning {
         // 扫描中
-        ui.add_space(40.0);
-        ui.vertical_centered(|ui| {
-            ui.add(egui::Spinner::new().size(40.0));
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new(app.tf(
-                    "analyzing",
-                    &[&display_path_short(&current_path, app.lang_en)],
-                ))
-                .size(16.0)
-                .color(BRAND),
-            );
-            ui.add_space(15.0);
-            let pct = (app.scan_progress * 100.0) as u32;
-            ui.add(
-                egui::ProgressBar::new(app.scan_progress)
-                    .desired_width(500.0)
-                    .fill(BRAND)
-                    .text(format!("{}%", pct)),
-            );
-        });
+        let scan_size = ui.available_size();
+        egui::Frame::none()
+            .fill(LIST_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .show(ui, |ui| {
+                ui.set_min_size(scan_size);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.add(egui::Spinner::new().size(40.0));
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(app.tf(
+                            "analyzing",
+                            &[&display_path_short(&current_path, app.lang_en)],
+                        ))
+                        .size(16.0)
+                        .color(BRAND),
+                    );
+                    ui.add_space(15.0);
+                    let pct = (app.scan_progress * 100.0) as u32;
+                    ui.add(
+                        egui::ProgressBar::new(app.scan_progress)
+                            .desired_width(500.0)
+                            .fill(BRAND)
+                            .text(format!("{}%", pct)),
+                    );
+                });
+            });
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
         return;
     }
 
     if items.is_empty() {
-        ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            ui.label(
-                egui::RichText::new(app.t("no_large_files"))
-                    .size(16.0)
-                    .color(TEXT_TERTIARY),
-            );
-            ui.add_space(10.0);
-            if ui
-                .button(egui::RichText::new(format!("🔍 {}", app.t("rescan"))).size(16.0))
-                .clicked()
-            {
-                start_scan(app, scan_rx);
-            }
-        });
+        let empty_size = ui.available_size();
+        egui::Frame::none()
+            .fill(LIST_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .show(ui, |ui| {
+                ui.set_min_size(empty_size);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(80.0);
+                    ui.label(
+                        egui::RichText::new(app.t("no_large_files"))
+                            .size(16.0)
+                            .color(TEXT_TERTIARY),
+                    );
+                    ui.add_space(10.0);
+                    if ui
+                        .button(egui::RichText::new(format!("🔍 {}", app.t("rescan"))).size(16.0))
+                        .clicked()
+                    {
+                        start_scan(app, scan_rx);
+                    }
+                });
+            });
         return;
     }
 
@@ -5948,92 +5938,97 @@ fn render_disk_analyzer(
 
     // ====== 目录项列表 ======
     let max_size = items.first().map(|i| i.size_bytes).unwrap_or(1).max(1);
+    let list_size = ui.available_size();
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, true])
+    egui::Frame::none()
+        .fill(LIST_BG)
+        .rounding(egui::Rounding::same(8.0))
         .show(ui, |ui| {
-            for (i, item) in items.iter().enumerate() {
-                let is_dir = item.category == "目录";
-                let pct = if max_size > 0 {
-                    item.size_bytes as f32 / max_size as f32
-                } else {
-                    0.0
-                };
+            ui.set_min_size(list_size);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    for (i, item) in items.iter().enumerate() {
+                        let is_dir = item.category == "目录";
+                        let pct = if max_size > 0 {
+                            item.size_bytes as f32 / max_size as f32
+                        } else {
+                            0.0
+                        };
 
-                let name = std::path::Path::new(&item.path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
+                        let name = std::path::Path::new(&item.path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
 
-                let icon = if is_dir { "📁" } else { "📄" };
-                let size_str = format_size(item.size_bytes);
+                        let icon = if is_dir { "📁" } else { "📄" };
+                        let size_str = format_size(item.size_bytes);
 
-                // 每行：[图标+名称] [进度条] [大小] [操作]
-                ui.horizontal(|ui| {
-                    // 选中 checkbox（仅文件或非当前目录可删除）
-                    if item.deletable {
-                        let mut selected = item.selected;
-                        if ui.checkbox(&mut selected, "").changed() {
-                            app.results[tab_idx][i].selected = selected;
-                        }
-                    }
+                        // 每行：[图标+名称] [进度条] [大小] [操作]
+                        ui.horizontal(|ui| {
+                            // 选中 checkbox（仅文件或非当前目录可删除）
+                            if item.deletable {
+                                let mut selected = item.selected;
+                                if ui.checkbox(&mut selected, "").changed() {
+                                    app.results[tab_idx][i].selected = selected;
+                                }
+                            }
 
-                    // 图标 + 名称（目录可点击进入）
-                    let name_label = if is_dir {
-                        format!("{} {}", icon, name)
-                    } else {
-                        format!("{} {}", icon, name)
-                    };
-
-                    let name_btn = ui.add(
-                        egui::Label::new(egui::RichText::new(&name_label).size(13.0))
-                            .sense(egui::Sense::click()),
-                    );
-
-                    if is_dir && name_btn.clicked() && !is_scanning {
-                        // 进入子目录
-                        let new_path = std::path::PathBuf::from(&item.path);
-                        app.disk_analyzer_enter(new_path);
-                        start_scan(app, scan_rx);
-                        return;
-                    }
-
-                    // 进度条（相对大小可视化）
-                    ui.add(
-                        egui::ProgressBar::new(pct)
-                            .desired_width(200.0)
-                            .fill(if pct > 0.5 {
-                                ADVANCED_COLOR
-                            } else if pct > 0.2 {
-                                CAUTION_COLOR
+                            // 图标 + 名称（目录可点击进入）
+                            let name_label = if is_dir {
+                                format!("{} {}", icon, name)
                             } else {
-                                SAFE_COLOR
-                            }),
-                    );
+                                format!("{} {}", icon, name)
+                            };
 
-                    // 大小
-                    ui.label(egui::RichText::new(&size_str).size(13.0).strong());
+                            let name_btn = ui.add(
+                                egui::Label::new(egui::RichText::new(&name_label).size(13.0))
+                                    .sense(egui::Sense::click()),
+                            );
 
-                    // 百分比
-                    let total_pct = if total_size > 0 {
-                        item.size_bytes as f32 / total_size as f32 * 100.0
-                    } else {
-                        0.0
-                    };
-                    ui.label(
-                        egui::RichText::new(format!("{:.1}%", total_pct))
-                            .size(11.0)
-                            .color(TEXT_TERTIARY),
-                    );
+                            if is_dir && name_btn.clicked() && !is_scanning {
+                                // 进入子目录
+                                let new_path = std::path::PathBuf::from(&item.path);
+                                app.disk_analyzer_enter(new_path);
+                                start_scan(app, scan_rx);
+                                return;
+                            }
 
-                    // 目录：显示"进入"提示
-                    if is_dir {
-                        ui.label(egui::RichText::new("→").size(16.0).color(BRAND));
+                            // 进度条（相对大小可视化）
+                            ui.add(egui::ProgressBar::new(pct).desired_width(200.0).fill(
+                                if pct > 0.5 {
+                                    ADVANCED_COLOR
+                                } else if pct > 0.2 {
+                                    CAUTION_COLOR
+                                } else {
+                                    SAFE_COLOR
+                                },
+                            ));
+
+                            // 大小
+                            ui.label(egui::RichText::new(&size_str).size(13.0).strong());
+
+                            // 百分比
+                            let total_pct = if total_size > 0 {
+                                item.size_bytes as f32 / total_size as f32 * 100.0
+                            } else {
+                                0.0
+                            };
+                            ui.label(
+                                egui::RichText::new(format!("{:.1}%", total_pct))
+                                    .size(11.0)
+                                    .color(TEXT_TERTIARY),
+                            );
+
+                            // 目录：显示"进入"提示
+                            if is_dir {
+                                ui.label(egui::RichText::new("→").size(16.0).color(BRAND));
+                            }
+                        });
+
+                        ui.separator();
                     }
                 });
-
-                ui.separator();
-            }
         });
 }
 
@@ -6219,34 +6214,45 @@ fn render_overview_panel(
     ui.add_space(10.0);
 
     if any_scanning {
-        ui_scanning(ui, app);
+        let scan_size = ui.available_size();
+        egui::Frame::none()
+            .fill(LIST_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .show(ui, |ui| {
+                ui.set_min_size(scan_size);
+                ui_scanning(ui, app);
+            });
     } else if recommendation_items.is_empty() {
-        ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
-            ui.label(egui::RichText::new("🧹").size(48.0));
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new(app.t("overview_empty_title"))
-                    .size(16.0)
-                    .strong()
-                    .color(TEXT_PRIMARY),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(app.t("overview_empty_hint"))
-                    .size(13.0)
-                    .color(TEXT_TERTIARY),
-            );
-        });
+        let empty_size = ui.available_size();
+        egui::Frame::none()
+            .fill(LIST_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .show(ui, |ui| {
+                ui.set_min_size(empty_size);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("🧹").size(48.0));
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(app.t("overview_empty_title"))
+                            .size(16.0)
+                            .strong()
+                            .color(TEXT_PRIMARY),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(app.t("overview_empty_hint"))
+                            .size(13.0)
+                            .color(TEXT_TERTIARY),
+                    );
+                });
+            });
     } else {
         // 一键清理按钮
         let total_safe_size: u64 = recommendation_items
             .iter()
             .map(|(_, _, item)| item.size_bytes)
             .sum();
-        let can_clean = matches!(app.confirm, ConfirmState::None);
-        let clean_btn = ui.add_enabled(
-            can_clean,
+        let clean_btn = ui.add(
             egui::Button::new(
                 egui::RichText::new(format!(
                     "🗑 {} {} ({})",
@@ -6260,95 +6266,115 @@ fn render_overview_panel(
             .rounding(egui::Rounding::same(8.0))
             .min_size(egui::vec2(ui.available_width(), 40.0)),
         );
-        if clean_btn.clicked() && can_clean {
-            // 选中所有推荐项并准备跨 Tab 删除
-            let to_delete: Vec<(usize, usize)> = recommendation_items
-                .iter()
-                .map(|(tab_idx, item_idx, _)| (*tab_idx, *item_idx))
-                .collect();
-            for &(tab_idx, item_idx) in &to_delete {
+        if clean_btn.clicked() {
+            // 选中所有推荐项并准备删除
+            for &(tab_idx, item_idx, _) in &recommendation_items {
                 if let Some(item) = app.results[tab_idx].get_mut(item_idx) {
                     item.selected = true;
                 }
             }
-            app.prepare_delete_cross_tab(to_delete);
+            app.prepare_delete();
         }
         ui.add_space(12.0);
 
-        // 推荐项列表（支持单个 cell 选中/取消）
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let mut toggled: std::collections::HashSet<(usize, usize)> =
-                std::collections::HashSet::new();
-            for &(tab_idx, item_idx, ref item) in &recommendation_items {
-                let tab = Tab::all()[tab_idx];
-                let tab_title_text = tab_title(&tab, app);
-                let selected = item.selected;
-
-                let frame_resp = egui::Frame::none()
-                    .fill(SURFACE_ELEVATED)
-                    .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        // 推荐项列表：占满剩余高度（预留底部删除栏空间）
+        let bottom_bar_height = 64.0;
+        let list_size = egui::vec2(
+            ui.available_width(),
+            (ui.available_height() - bottom_bar_height - 12.0).max(0.0),
+        );
+        egui::Frame::none()
+            .fill(LIST_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .show(ui, |ui| {
+                ui.set_min_size(list_size);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let checkbox_resp = render_custom_checkbox(ui, selected, true);
-                            if checkbox_resp.clicked() {
+                        ui.add_space(10.0);
+                        let mut toggled: std::collections::HashSet<(usize, usize)> =
+                            std::collections::HashSet::new();
+                        for &(tab_idx, item_idx, ref item) in &recommendation_items {
+                            let tab = Tab::all()[tab_idx];
+                            let tab_title_text = tab_title(&tab, app);
+                            let selected = item.selected;
+
+                            let frame_resp = egui::Frame::none()
+                                .fill(SURFACE_ELEVATED)
+                                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                                .rounding(egui::Rounding::same(8.0))
+                                .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let checkbox_resp = render_custom_checkbox(ui, selected, true);
+                                        if checkbox_resp.clicked() {
+                                            toggled.insert((tab_idx, item_idx));
+                                        }
+
+                                        ui.add_space(10.0);
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.colored_label(
+                                                    TEXT_PRIMARY,
+                                                    egui::RichText::new(&item.category)
+                                                        .size(13.0)
+                                                        .strong(),
+                                                );
+                                                ui.add_space(6.0);
+                                                ui.colored_label(
+                                                    TEXT_TERTIARY,
+                                                    egui::RichText::new(format!(
+                                                        "· {}",
+                                                        tab_title_text
+                                                    ))
+                                                    .size(11.0),
+                                                );
+                                            });
+                                            ui.colored_label(
+                                                TEXT_SECONDARY,
+                                                egui::RichText::new(truncate_path(&item.path, 70))
+                                                    .size(11.0),
+                                            );
+                                            ui.colored_label(
+                                                TEXT_SECONDARY,
+                                                egui::RichText::new(&item.description).size(11.0),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.colored_label(
+                                                    TEXT_PRIMARY,
+                                                    egui::RichText::new(format_size(
+                                                        item.size_bytes,
+                                                    ))
+                                                    .size(14.0)
+                                                    .strong()
+                                                    .monospace(),
+                                                );
+                                            },
+                                        );
+                                    });
+                                });
+
+                            // 点击整行空白处也可切换选中（与复选框去重）
+                            if frame_resp.response.clicked() {
                                 toggled.insert((tab_idx, item_idx));
                             }
 
-                            ui.add_space(10.0);
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(
-                                        TEXT_PRIMARY,
-                                        egui::RichText::new(&item.category).size(13.0).strong(),
-                                    );
-                                    ui.add_space(6.0);
-                                    ui.colored_label(
-                                        TEXT_TERTIARY,
-                                        egui::RichText::new(format!("· {}", tab_title_text))
-                                            .size(11.0),
-                                    );
-                                });
-                                ui.colored_label(
-                                    TEXT_SECONDARY,
-                                    egui::RichText::new(truncate_path(&item.path, 70)).size(11.0),
-                                );
-                                ui.colored_label(
-                                    TEXT_SECONDARY,
-                                    egui::RichText::new(&item.description).size(11.0),
-                                );
-                            });
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.colored_label(
-                                        TEXT_PRIMARY,
-                                        egui::RichText::new(format_size(item.size_bytes))
-                                            .size(14.0)
-                                            .strong()
-                                            .monospace(),
-                                    );
-                                },
-                            );
-                        });
+                            ui.add_space(6.0);
+                        }
+
+                        // 应用选中变更到实际结果
+                        for (tab_idx, item_idx) in toggled {
+                            if let Some(item) = app.results[tab_idx].get_mut(item_idx) {
+                                item.selected = !item.selected;
+                            }
+                        }
+
+                        ui.add_space(10.0);
                     });
-
-                // 点击整行空白处也可切换选中（与复选框去重）
-                if frame_resp.response.clicked() {
-                    toggled.insert((tab_idx, item_idx));
-                }
-
-                ui.add_space(6.0);
-            }
-
-            // 应用选中变更到实际结果
-            for (tab_idx, item_idx) in toggled {
-                if let Some(item) = app.results[tab_idx].get_mut(item_idx) {
-                    item.selected = !item.selected;
-                }
-            }
-        });
+            });
 
         ui.add_space(12.0);
 
@@ -6412,10 +6438,12 @@ fn render_overview_panel(
                                     app.t("delete"),
                                     format_size(selected_sz)
                                 ))
-                                .color(egui::Color32::WHITE),
+                                .color(egui::Color32::WHITE)
+                                .size(13.0),
                             )
                             .fill(DANGER_COLOR)
-                            .rounding(egui::Rounding::same(8.0)),
+                            .rounding(egui::Rounding::same(8.0))
+                            .min_size([0.0, 28.0].into()),
                         );
                         if delete_btn.clicked() {
                             app.prepare_delete_cross_tab(selected_in_overview.clone());
@@ -6449,27 +6477,41 @@ fn render_optimize_panel(
     let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
 
     if is_scanning {
-        ui_scanning(ui, app);
+        let scan_size = ui.available_size();
+        egui::Frame::none()
+            .fill(LIST_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .show(ui, |ui| {
+                ui.set_min_size(scan_size);
+                ui_scanning(ui, app);
+            });
         return;
     }
 
     if items.is_empty() {
-        ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            ui.label(
-                egui::RichText::new(app.t("optimize_click_to_scan"))
-                    .size(16.0)
-                    .color(TEXT_TERTIARY),
-            );
-            ui.add_space(10.0);
-            let scan_button = format!("🔍 {}", app.t("scan"));
-            if ui
-                .button(egui::RichText::new(scan_button).size(16.0))
-                .clicked()
-            {
-                start_scan(app, scan_rx);
-            }
-        });
+        let empty_size = ui.available_size();
+        egui::Frame::none()
+            .fill(LIST_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .show(ui, |ui| {
+                ui.set_min_size(empty_size);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(80.0);
+                    ui.label(
+                        egui::RichText::new(app.t("optimize_click_to_scan"))
+                            .size(16.0)
+                            .color(TEXT_TERTIARY),
+                    );
+                    ui.add_space(10.0);
+                    let scan_button = format!("🔍 {}", app.t("scan"));
+                    if ui
+                        .button(egui::RichText::new(scan_button).size(16.0))
+                        .clicked()
+                    {
+                        start_scan(app, scan_rx);
+                    }
+                });
+            });
         return;
     }
 
@@ -6482,56 +6524,94 @@ fn render_optimize_panel(
     );
     ui.add_space(10.0);
 
-    // 优化任务列表
+    // 优化任务列表：占满剩余高度
     let mut task_to_run: Option<usize> = None;
+    let list_size = ui.available_size();
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (i, item) in items.iter().enumerate() {
-            egui::Frame::group(ui.style())
-                .fill(SURFACE)
-                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-                .inner_margin(12.0)
-                .outer_margin(4.0)
+    egui::Frame::none()
+        .fill(LIST_BG)
+        .rounding(egui::Rounding::same(8.0))
+        .show(ui, |ui| {
+            ui.set_min_size(list_size);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // 图标
-                        ui.label(egui::RichText::new("⚙️").size(20.0));
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                let title_key = format!("optimize_{}", item.path);
-                                let title = app.t(&title_key);
-                                // 如果 key 不存在（返回空字符串），fallback 到原始 path
-                                let title = if title.is_empty() { &item.path } else { title };
-                                ui.label(egui::RichText::new(title).strong().size(14.0));
-                                ui.label(
-                                    egui::RichText::new(recommend_badge_text(
-                                        &item.recommend,
-                                        app.lang_en,
-                                    ))
-                                    .size(11.0),
-                                );
+                    ui.add_space(10.0);
+                    for (i, item) in items.iter().enumerate() {
+                        egui::Frame::group(ui.style())
+                            .fill(SURFACE)
+                            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                            .inner_margin(12.0)
+                            .outer_margin(4.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // 图标
+                                    ui.label(egui::RichText::new("⚙️").size(20.0));
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            let title_key = format!("optimize_{}", item.path);
+                                            let title = app.t(&title_key);
+                                            // 如果 key 不存在（返回空字符串），fallback 到原始 path
+                                            let title =
+                                                if title.is_empty() { &item.path } else { title };
+                                            ui.label(
+                                                egui::RichText::new(title).strong().size(14.0),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(recommend_badge_text(
+                                                    &item.recommend,
+                                                    app.lang_en,
+                                                ))
+                                                .size(11.0),
+                                            );
+                                        });
+                                        let desc_en = i18n::translate_description(
+                                            &item.description,
+                                            app.lang_en,
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(&desc_en)
+                                                .size(12.0)
+                                                .color(TEXT_SECONDARY),
+                                        );
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let run_text =
+                                                if app.lang_en { "▶ Run" } else { "▶ 执行" };
+                                            if ui
+                                                .button(egui::RichText::new(run_text).size(13.0))
+                                                .clicked()
+                                            {
+                                                task_to_run = Some(i);
+                                            }
+                                        },
+                                    );
+                                });
                             });
-                            let desc_en =
-                                i18n::translate_description(&item.description, app.lang_en);
-                            ui.label(
-                                egui::RichText::new(&desc_en)
-                                    .size(12.0)
-                                    .color(TEXT_SECONDARY),
-                            );
+                    }
+
+                    // 显示优化日志（与任务列表一起滚动）
+                    if !app.logs.is_empty() {
+                        ui.add_space(5.0);
+                        ui.collapsing(app.t("optimize_logs"), |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(150.0)
+                                .show(ui, |ui| {
+                                    for log in &app.logs {
+                                        ui.label(
+                                            egui::RichText::new(log)
+                                                .size(11.0)
+                                                .color(TEXT_SECONDARY),
+                                        );
+                                    }
+                                });
                         });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let run_text = if app.lang_en { "▶ Run" } else { "▶ 执行" };
-                            if ui
-                                .button(egui::RichText::new(run_text).size(13.0))
-                                .clicked()
-                            {
-                                task_to_run = Some(i);
-                            }
-                        });
-                    });
+                    }
+                    ui.add_space(10.0);
                 });
-        }
-    });
+        });
 
     // 执行选中的优化任务
     if let Some(task_idx) = task_to_run {
@@ -6540,113 +6620,114 @@ fn render_optimize_panel(
             app.logs.push(log);
         }
     }
-
-    // 显示优化日志
-    if !app.logs.is_empty() {
-        ui.add_space(5.0);
-        ui.collapsing(app.t("optimize_logs"), |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(150.0)
-                .show(ui, |ui| {
-                    for log in &app.logs {
-                        ui.label(egui::RichText::new(log).size(11.0).color(TEXT_SECONDARY));
-                    }
-                });
-        });
-    }
 }
 
 /// 设置面板（设计稿 4.6 样式）
 fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.add_space(4.0);
+    let settings_size = ui.available_size();
+    egui::Frame::none()
+        .fill(LIST_BG)
+        .rounding(egui::Rounding::same(8.0))
+        .show(ui, |ui| {
+            ui.set_min_size(settings_size);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.add_space(10.0);
 
-        // 通用设置卡片
-        settings_card(ui, app.t("settings_general"), |ui| {
-            render_settings_item(
-                ui,
-                app.t("setting_menubar_icon"),
-                app.t("setting_menubar_icon_desc"),
-                &mut app.settings_menubar_icon,
-                true,
-            );
-            render_settings_item(
-                ui,
-                app.t("setting_keep_sudo"),
-                app.t("setting_keep_sudo_desc"),
-                &mut app.settings_keep_sudo,
-                true,
-            );
-            render_settings_item(
-                ui,
-                app.t("setting_scan_cache"),
-                app.t("setting_scan_cache_desc"),
-                &mut app.settings_scan_cache,
-                true,
-            );
-        });
+                    // 通用设置卡片
+                    settings_card(ui, app.t("settings_general"), |ui| {
+                        render_settings_item(
+                            ui,
+                            app.t("setting_menubar_icon"),
+                            app.t("setting_menubar_icon_desc"),
+                            &mut app.settings_menubar_icon,
+                            true,
+                        );
+                        render_settings_item(
+                            ui,
+                            app.t("setting_keep_sudo"),
+                            app.t("setting_keep_sudo_desc"),
+                            &mut app.settings_keep_sudo,
+                            true,
+                        );
+                        render_settings_item(
+                            ui,
+                            app.t("setting_scan_cache"),
+                            app.t("setting_scan_cache_desc"),
+                            &mut app.settings_scan_cache,
+                            true,
+                        );
+                    });
 
-        ui.add_space(12.0);
+                    ui.add_space(12.0);
 
-        // 安全设置卡片
-        settings_card(ui, app.t("settings_safety"), |ui| {
-            render_settings_item(
-                ui,
-                app.t("setting_confirm_advanced"),
-                app.t("setting_confirm_advanced_desc"),
-                &mut app.settings_confirm_advanced,
-                true,
-            );
-            let lid_enabled = cfg!(target_os = "macos");
-            render_settings_item(
-                ui,
-                app.t("setting_prevent_lid_close"),
-                app.t("setting_prevent_lid_close_desc"),
-                &mut app.settings_prevent_lid_close,
-                lid_enabled,
-            );
-        });
+                    // 安全设置卡片
+                    settings_card(ui, app.t("settings_safety"), |ui| {
+                        render_settings_item(
+                            ui,
+                            app.t("setting_confirm_advanced"),
+                            app.t("setting_confirm_advanced_desc"),
+                            &mut app.settings_confirm_advanced,
+                            true,
+                        );
+                        let lid_enabled = cfg!(target_os = "macos");
+                        render_settings_item(
+                            ui,
+                            app.t("setting_prevent_lid_close"),
+                            app.t("setting_prevent_lid_close_desc"),
+                            &mut app.settings_prevent_lid_close,
+                            lid_enabled,
+                        );
+                    });
 
-        ui.add_space(12.0);
+                    ui.add_space(12.0);
 
-        // 语言设置卡片
-        settings_card(ui, app.t("settings_language"), |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.colored_label(
-                        TEXT_PRIMARY,
-                        egui::RichText::new(app.t("setting_language"))
-                            .size(13.0)
-                            .strong(),
-                    );
-                    ui.colored_label(
-                        TEXT_SECONDARY,
-                        egui::RichText::new(app.t("setting_language_current")).size(12.0),
-                    );
+                    // 语言设置卡片
+                    settings_card(ui, app.t("settings_language"), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.colored_label(
+                                    TEXT_PRIMARY,
+                                    egui::RichText::new(app.t("setting_language"))
+                                        .size(13.0)
+                                        .strong(),
+                                );
+                                ui.colored_label(
+                                    TEXT_SECONDARY,
+                                    egui::RichText::new(app.t("setting_language_current"))
+                                        .size(12.0),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let btn_text = if app.lang_en {
+                                        app.t("switch_to_chinese")
+                                    } else {
+                                        app.t("switch_to_english")
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(btn_text).size(13.0),
+                                            )
+                                            .fill(SURFACE_ELEVATED)
+                                            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                                            .rounding(egui::Rounding::same(8.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        app.toggle_lang();
+                                    }
+                                },
+                            );
+                        });
+                    });
+
+                    ui.add_space(20.0);
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let btn_text = if app.lang_en {
-                        app.t("switch_to_chinese")
-                    } else {
-                        app.t("switch_to_english")
-                    };
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new(btn_text).size(13.0))
-                                .fill(SURFACE_ELEVATED)
-                                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-                                .rounding(egui::Rounding::same(8.0)),
-                        )
-                        .clicked()
-                    {
-                        app.toggle_lang();
-                    }
-                });
-            });
         });
-
-        ui.add_space(20.0);
-    });
 }
 
 /// 设置卡片容器
@@ -6975,7 +7056,8 @@ fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
                                     );
                                 } else {
                                     for log in app.logs.iter().rev().take(20) {
-                                        let color = if log.starts_with('✓') || log.starts_with('✅') {
+                                        let color = if log.starts_with('✓') || log.starts_with('✅')
+                                        {
                                             SAFE_COLOR
                                         } else if log.starts_with('✗') || log.starts_with('⛔') {
                                             ADVANCED_COLOR
@@ -6996,559 +7078,4 @@ fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
     });
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(100));
-}
-
-// =========================================================================
-//  App卸载 Tab 左右分栏渲染
-// =========================================================================
-
-/// 计算 App卸载 Tab 的分组信息
-///
-/// 返回 (分组名, 该分组下所有项的原始索引列表) 的列表。
-fn compute_app_uninstall_groups(
-    items: &[ScanItem],
-    filtered_indices: &[usize],
-) -> Vec<(String, Vec<usize>)> {
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-    let mut group_map: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-
-    for &display_idx in filtered_indices {
-        let item = &items[display_idx];
-        if let Some(app_name) = extract_app_name(&item.category) {
-            let idx = *group_map.entry(app_name.to_string()).or_insert_with(|| {
-                groups.push((app_name.to_string(), Vec::new()));
-                groups.len() - 1
-            });
-            groups[idx].1.push(display_idx);
-        } else {
-            let idx = *group_map.entry(item.category.clone()).or_insert_with(|| {
-                groups.push((item.category.clone(), Vec::new()));
-                groups.len() - 1
-            });
-            groups[idx].1.push(display_idx);
-        }
-    }
-
-    groups
-}
-
-/// 渲染 App卸载 Tab 左侧应用列表
-fn render_app_uninstall_list(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    items: &[ScanItem],
-    filtered_indices: &[usize],
-    tab_idx: usize,
-) {
-    let mut toggled_indices: Vec<usize> = Vec::new();
-    let mut checkbox_clicked: bool = false;
-    let groups = compute_app_uninstall_groups(items, filtered_indices);
-
-    // 如果当前选中的分组不在列表中，自动选择第一个
-    let selected = app.selected_app_group.clone();
-    let selected_exists = selected
-        .as_ref()
-        .map(|s| groups.iter().any(|(name, _)| name == s))
-        .unwrap_or(false);
-    if !selected_exists && !groups.is_empty() {
-        app.selected_app_group = Some(groups[0].0.clone());
-    }
-
-    for (app_name, indices) in &groups {
-        let total_size: u64 = indices.iter().map(|&i| items[i].size_bytes).sum();
-        let deletable_indices: Vec<usize> = indices
-            .iter()
-            .copied()
-            .filter(|&i| items[i].deletable)
-            .collect();
-        let all_selected = deletable_indices.iter().all(|&i| items[i].selected);
-        let any_selected = deletable_indices.iter().any(|&i| items[i].selected);
-        let has_deletable = !deletable_indices.is_empty();
-        let is_selected = app.selected_app_group.as_deref() == Some(app_name);
-
-        let uninstall_count = indices
-            .iter()
-            .filter(|&&i| items[i].category.ends_with(" (卸载)"))
-            .count();
-        let data_count = indices
-            .iter()
-            .filter(|&&i| items[i].category.ends_with(" 数据"))
-            .count();
-        let cache_count = indices
-            .iter()
-            .filter(|&&i| items[i].category.ends_with(" 缓存"))
-            .count();
-        let file_count = indices.len();
-
-        // 应用路径：优先取卸载项路径
-        let app_path: String = indices
-            .iter()
-            .find(|&&i| items[i].category.ends_with(" (卸载)"))
-            .map(|&i| items[i].path.clone())
-            .unwrap_or_else(|| items[indices[0]].path.clone());
-
-        let bg = if is_selected {
-            BRAND_SOFT
-        } else {
-            SURFACE_ELEVATED
-        };
-        let stroke = if any_selected {
-            BRAND
-        } else if is_selected {
-            BRAND
-        } else {
-            BORDER_LIGHT
-        };
-
-        let frame = egui::Frame::none()
-            .fill(bg)
-            .stroke(egui::Stroke::new(1.0, stroke))
-            .rounding(egui::Rounding::same(10.0))
-            .inner_margin(egui::Margin::symmetric(10.0, 8.0));
-
-        checkbox_clicked = false;
-        let resp = frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.set_width(ui.available_width());
-
-                // 父复选框
-                let checkbox_resp = render_custom_checkbox(
-                    ui,
-                    all_selected || any_selected,
-                    has_deletable,
-                );
-                if checkbox_resp.clicked() && has_deletable {
-                    checkbox_clicked = true;
-                    let target = !all_selected;
-                    for &idx in &deletable_indices {
-                        if items[idx].selected != target {
-                            toggled_indices.push(idx);
-                        }
-                    }
-                }
-
-                ui.add_space(6.0);
-
-                ui.vertical(|ui| {
-                    ui.set_width(ui.available_width() - 40.0);
-
-                    // 应用名 + 大小
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(app_name)
-                                    .size(14.0)
-                                    .strong()
-                                    .color(TEXT_PRIMARY),
-                            )
-                            .truncate(),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let size_str = if total_size == 0 {
-                                "—".to_string()
-                            } else {
-                                format_size(total_size)
-                            };
-                            ui.colored_label(
-                                TEXT_PRIMARY,
-                                egui::RichText::new(&size_str)
-                                    .size(13.0)
-                                    .strong()
-                                    .monospace(),
-                            );
-                        });
-                    });
-
-                    // 路径 + 子项类型徽章
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&app_path)
-                                    .size(11.0)
-                                    .monospace()
-                                    .color(TEXT_TERTIARY),
-                            )
-                            .truncate(),
-                        );
-
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                let (app_fg, app_bg, _) =
-                                    recommend_badge_colors(&crate::scanner::Recommend::Caution);
-                                let (data_fg, data_bg, _) =
-                                    recommend_badge_colors(&crate::scanner::Recommend::Advanced);
-                                let (cache_fg, cache_bg, _) =
-                                    recommend_badge_colors(&crate::scanner::Recommend::Safe);
-                                let (file_fg, file_bg, _) =
-                                    recommend_badge_colors(&crate::scanner::Recommend::CacheOnly);
-
-                                if uninstall_count > 0 {
-                                    render_status_badge(
-                                        ui,
-                                        &format!("应用 · {}", uninstall_count),
-                                        app_fg,
-                                        app_bg,
-                                    );
-                                    ui.add_space(4.0);
-                                }
-                                if data_count > 0 {
-                                    render_status_badge(
-                                        ui,
-                                        &format!("数据 · {}", data_count),
-                                        data_fg,
-                                        data_bg,
-                                    );
-                                    ui.add_space(4.0);
-                                }
-                                if cache_count > 0 {
-                                    render_status_badge(
-                                        ui,
-                                        &format!("缓存 · {}", cache_count),
-                                        cache_fg,
-                                        cache_bg,
-                                    );
-                                    ui.add_space(4.0);
-                                }
-                                if uninstall_count == 0 && data_count == 0 && cache_count == 0 {
-                                    render_status_badge(
-                                        ui,
-                                        &format!("文件 · {}", file_count),
-                                        file_fg,
-                                        file_bg,
-                                    );
-                                }
-                            },
-                        );
-                    });
-                });
-            });
-        });
-
-        // 为卡片除复选框外的区域增加显式可点击区域，确保能选中应用分组
-        let card_rect = resp.response.rect;
-        let click_rect = egui::Rect::from_min_max(
-            egui::pos2(card_rect.min.x + 34.0, card_rect.min.y),
-            card_rect.max,
-        );
-        let card_id = ui.make_persistent_id(format!("app_uninstall_card_{}", app_name));
-        let card_resp = ui.interact(click_rect, card_id, egui::Sense::click());
-        if card_resp.clicked() && !checkbox_clicked && !card_resp.drag_started() {
-            app.selected_app_group = Some(app_name.clone());
-        }
-        // 悬停时未选中项增加高亮背景
-        if card_resp.hovered() && !is_selected {
-            ui.painter().rect_filled(card_rect, egui::Rounding::same(10.0), SURFACE_HOVER);
-        }
-
-        ui.add_space(6.0);
-    }
-
-    // 应用选中变更
-    for idx in toggled_indices {
-        let items_mut = &mut app.results[tab_idx];
-        if idx < items_mut.len() && items_mut[idx].deletable {
-            items_mut[idx].selected = !items_mut[idx].selected;
-        }
-    }
-}
-
-/// 渲染 App卸载 Tab 右侧详情面板
-fn render_app_uninstall_detail(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    items: &[ScanItem],
-    filtered_indices: &[usize],
-    associated_details: &std::collections::HashMap<String, Vec<(String, u64, String)>>,
-    expanded_items: &std::collections::HashSet<String>,
-) {
-    let groups = compute_app_uninstall_groups(items, filtered_indices);
-    let Some((app_name, indices)) = groups
-        .iter()
-        .find(|(name, _)| Some(name.as_str()) == app.selected_app_group.as_deref())
-    else {
-        ui.vertical_centered(|ui| {
-            ui.add_space(40.0);
-            ui.colored_label(
-                TEXT_TERTIARY,
-                egui::RichText::new("请选择左侧应用查看详情").size(14.0),
-            );
-        });
-        return;
-    };
-
-    let tab_idx = app.tab_index();
-    let mut toggled_indices: Vec<usize> = Vec::new();
-    let mut expand_toggles: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-
-    // 子项卡片
-    for &display_idx in indices {
-        let item = &items[display_idx];
-        let is_expanded = expanded_items.contains(&item.path);
-        let has_details = !item.batch_paths.is_empty()
-            && associated_details.contains_key(&item.path);
-        let locked = !item.deletable;
-
-        let child_frame = egui::Frame::none()
-            .fill(SURFACE_ELEVATED)
-            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-            .rounding(egui::Rounding::same(10.0))
-            .inner_margin(egui::Margin::symmetric(12.0, 8.0));
-
-        let mut checkbox_clicked = false;
-        let resp = child_frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.set_width(ui.available_width());
-
-                // 复选框
-                let cb_resp = render_custom_checkbox(ui, item.selected && !locked, !locked);
-                if cb_resp.clicked() && !locked {
-                    checkbox_clicked = true;
-                    toggled_indices.push(display_idx);
-                }
-
-                ui.add_space(8.0);
-
-                ui.vertical(|ui| {
-                    ui.set_width(ui.available_width() - 40.0);
-
-                    // 标题行
-                    ui.horizontal(|ui| {
-                        let title = uninstall_child_title(&item.category, app.lang_en);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(title)
-                                    .size(14.0)
-                                    .strong()
-                                    .color(if locked { TEXT_TERTIARY } else { TEXT_PRIMARY }),
-                            )
-                            .truncate(),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                let size_str = if item.size_bytes == 0 {
-                                    "—".to_string()
-                                } else {
-                                    format_size(item.size_bytes)
-                                };
-                                ui.colored_label(
-                                    TEXT_PRIMARY,
-                                    egui::RichText::new(&size_str)
-                                        .size(13.0)
-                                        .strong()
-                                        .monospace(),
-                                );
-                            },
-                        );
-                    });
-
-                    // 路径：batch_paths 多个时显示"等 N 项"
-                    let display_path = if item.batch_paths.len() > 1 {
-                        format!("{} 等 {} 项", item.path, item.batch_paths.len())
-                    } else {
-                        item.path.clone()
-                    };
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&display_path)
-                                .size(12.0)
-                                .monospace()
-                                .color(TEXT_TERTIARY),
-                        )
-                        .truncate(),
-                    );
-
-                    // 状态徽章 + 描述
-                    ui.horizontal(|ui| {
-                        if locked {
-                            render_status_badge(
-                                ui,
-                                app.t("badge_undeletable"),
-                                TEXT_TERTIARY,
-                                egui::Color32::from_rgb(239, 239, 242),
-                            );
-                        } else {
-                            let (fg, bg, label) = recommend_badge_colors(&item.recommend);
-                            render_status_badge(ui, label, fg, bg);
-                        }
-                        ui.add_space(4.0);
-                        let desc = i18n::translate_description(&item.description, app.lang_en);
-                        ui.colored_label(TEXT_SECONDARY, egui::RichText::new(&desc).size(12.0));
-                    });
-
-                    // 不可删除原因
-                    if locked && !item.undeletable_reason.is_empty() {
-                        let reason =
-                            i18n::translate_undeletable_reason(&item.undeletable_reason, app.lang_en);
-                        ui.colored_label(
-                            ADVANCED_COLOR,
-                            egui::RichText::new(format!("⚠️ {}", reason)).size(11.0),
-                        );
-                    }
-                });
-            });
-        });
-
-        // 展开按钮
-        if has_details {
-            let expand_icon = if is_expanded { "▼ 展开详情" } else { "▶ 展开详情" };
-            if ui.button(expand_icon).clicked() && !expand_toggles.contains(&item.path) {
-                expand_toggles.insert(item.path.clone());
-            }
-        }
-
-        // 展开时显示关联文件明细
-        if has_details && is_expanded {
-            if let Some(details) = associated_details.get(&item.path) {
-                ui.add_space(6.0);
-                for (detail_path, detail_size, detail_label) in details {
-                    let detail_frame = egui::Frame::none()
-                        .fill(SURFACE_MUTED)
-                        .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-                        .rounding(egui::Rounding::same(6.0))
-                        .inner_margin(egui::Margin::symmetric(10.0, 6.0));
-
-                    detail_frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_space(12.0);
-                            ui.colored_label(BRAND, egui::RichText::new(detail_label).size(12.0));
-                            let sz_str = if *detail_size == 0 {
-                                "—".to_string()
-                            } else {
-                                format_size(*detail_size)
-                            };
-                            ui.colored_label(
-                                TEXT_SECONDARY,
-                                egui::RichText::new(&sz_str).size(12.0).monospace(),
-                            );
-                            ui.add_space(4.0);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(detail_path)
-                                        .size(10.0)
-                                        .monospace()
-                                        .color(TEXT_TERTIARY),
-                                )
-                                .truncate(),
-                            );
-                        });
-                    });
-                    ui.add_space(4.0);
-                }
-            }
-        }
-
-        // 整行点击切换选中（避免与复选框冲突）
-        let child_rect = resp.response.rect;
-        let child_click_rect = egui::Rect::from_min_max(
-            egui::pos2(child_rect.min.x + 34.0, child_rect.min.y),
-            child_rect.max,
-        );
-        let child_id = ui.make_persistent_id(format!("app_uninstall_child_{}", item.path));
-        let child_resp = ui.interact(child_click_rect, child_id, egui::Sense::click());
-        if child_resp.clicked()
-            && !checkbox_clicked
-            && item.deletable
-            && !child_resp.drag_started()
-        {
-            toggled_indices.push(display_idx);
-        }
-        if child_resp.hovered() && item.deletable {
-            ui.painter().rect_filled(child_rect, egui::Rounding::same(10.0), SURFACE_HOVER);
-        }
-
-        ui.add_space(6.0);
-    }
-
-    // 应用选中变更
-    for idx in toggled_indices {
-        let items_mut = &mut app.results[tab_idx];
-        if idx < items_mut.len() && items_mut[idx].deletable {
-            items_mut[idx].selected = !items_mut[idx].selected;
-        }
-    }
-
-    // 应用展开/收起变更
-    for path in expand_toggles {
-        if !app.expanded_items.insert(path.clone()) {
-            app.expanded_items.remove(&path);
-        }
-    }
-}
-
-/// 渲染 App卸载 Tab 底部固定删除栏
-///
-/// 设计稿要求：底部固定栏显示已选中项目信息 + 取消/删除按钮。
-fn render_app_uninstall_bottom_bar(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    selected_cnt: usize,
-    selected_sz: u64,
-) {
-    let frame = egui::Frame::none()
-        .fill(SURFACE_ELEVATED)
-        .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-        .rounding(egui::Rounding::same(12.0))
-        .inner_margin(egui::Margin::symmetric(16.0, 12.0));
-
-    frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.set_width(ui.available_width());
-
-            // 左侧：已选中信息
-            if selected_cnt == 0 {
-                ui.colored_label(
-                    TEXT_TERTIARY,
-                    egui::RichText::new("未选择任何项目").size(13.0),
-                );
-            } else {
-                ui.colored_label(
-                    TEXT_PRIMARY,
-                    egui::RichText::new(format!(
-                        "已选中 {} 个应用的部分项目 · 可释放 {}",
-                        selected_cnt,
-                        format_size(selected_sz)
-                    ))
-                    .size(13.0)
-                    .strong(),
-                );
-            }
-
-            // 右侧：取消 + 删除按钮
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let delete_enabled = selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
-                let delete_btn = ui.add_enabled(
-                    delete_enabled,
-                    egui::Button::new(
-                        egui::RichText::new(format!(
-                            "{} {}",
-                            app.t("delete"),
-                            format_size(selected_sz)
-                        ))
-                        .color(egui::Color32::WHITE),
-                    )
-                    .fill(DANGER_COLOR)
-                    .rounding(egui::Rounding::same(8.0)),
-                );
-                if delete_btn.clicked() {
-                    app.prepare_delete();
-                }
-
-                ui.add_space(8.0);
-
-                if ui
-                    .button(
-                        egui::RichText::new(app.t("cancel"))
-                            .color(TEXT_SECONDARY),
-                    )
-                    .clicked()
-                {
-                    app.deselect_all();
-                }
-            });
-        });
-    });
 }
