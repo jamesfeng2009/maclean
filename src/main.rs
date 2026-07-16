@@ -364,7 +364,16 @@ fn main() -> eframe::Result {
             }
             if hud_toggle {
                 if let Some(app) = &mut APP {
-                    app.hud_open = !app.hud_open;
+                    let minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+                    if minimized {
+                        // 窗口最小化时：恢复窗口并打开 HUD
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        app.hud_open = true;
+                    } else {
+                        // 窗口已显示：切换 HUD 展开/收起
+                        app.hud_open = !app.hud_open;
+                    }
                 }
             }
 
