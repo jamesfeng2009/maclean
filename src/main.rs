@@ -306,7 +306,7 @@ fn main() -> eframe::Result {
             }
 
             // 轮询菜单栏事件
-            let mut hud_toggle = false;
+            let mut hud_click: Option<menubar::ClickInfo> = None;
             if let Some(ref mb) = MENUBAR {
                 let actions = mb.poll_events();
                 if !actions.is_empty() {
@@ -358,22 +358,26 @@ fn main() -> eframe::Result {
                 }
 
                 // 点击托盘图标：展开/收起 HUD
-                if mb.poll_click() {
-                    hud_toggle = true;
+                if let Some(click_info) = mb.poll_click() {
+                    hud_click = Some(click_info);
                 }
             }
-            if hud_toggle {
+            if let Some(click_info) = hud_click {
                 if let Some(app) = &mut APP {
                     let minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
-                    if minimized {
-                        // 窗口最小化时：恢复窗口并打开 HUD
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    // 无论最小化还是后台，都先把主窗口拉到前台
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    if minimized || !app.hud_open {
+                        // 窗口最小化或 HUD 关闭时：打开 HUD
                         app.hud_open = true;
                     } else {
-                        // 窗口已显示：切换 HUD 展开/收起
-                        app.hud_open = !app.hud_open;
+                        // 窗口已显示且 HUD 已打开：收起 HUD
+                        app.hud_open = false;
                     }
+                    // 记录托盘点击位置，供 HUD 窗口定位使用
+                    app.last_hud_click_pos = Some((click_info.x, click_info.y));
                 }
             }
 
@@ -910,13 +914,22 @@ fn render_app_uninstall_panel(
 ) {
     let tab_idx = app.tab_index();
     let items = &app.results[tab_idx];
+
+    // App 卸载 Tab 没有分类标签栏，避免从其他 Tab 带入的 filter_category
+    // 把全部项过滤掉而界面上又无入口清除。
+    if app.filter_category.is_some() {
+        app.filter_category = None;
+    }
+
     let filtered_indices = app.filtered_indices();
     let recommend_filter = app.app_uninstall_recommend_filter;
     crate::logger::info(&format!(
-        "render_app_uninstall_panel: tab={:?}, items={}, filtered={}",
+        "render_app_uninstall_panel: tab={:?}, items={}, filtered={}, recommend_filter={:?}, query={:?}",
         app.tab,
         items.len(),
-        filtered_indices.len()
+        filtered_indices.len(),
+        recommend_filter,
+        app.filter_query
     ));
     let mut groups = build_uninstall_groups(items, &filtered_indices);
 
@@ -939,6 +952,10 @@ fn render_app_uninstall_panel(
         size_b.cmp(&size_a)
     });
 
+    // 即使分组为空也要渲染过滤胶囊，否则用户无法看到/清除已激活的推荐过滤条件
+    render_app_uninstall_filter_pills(ui, app);
+    ui.add_space(10.0);
+
     if groups.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
@@ -951,8 +968,6 @@ fn render_app_uninstall_panel(
         return;
     }
 
-    render_app_uninstall_filter_pills(ui, app);
-    ui.add_space(10.0);
     render_app_uninstall_action_bar(ui, app, &groups);
     ui.add_space(10.0);
 

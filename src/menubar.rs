@@ -4,8 +4,7 @@
 //! 实时显示可释放空间，点击展开快捷操作 HUD。
 
 use std::time::Instant;
-use tray_icon::menu::Submenu;
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 /// 菜单栏操作事件
 #[derive(Debug, Clone)]
@@ -18,6 +17,15 @@ pub enum TrayAction {
     QuickClean,
     /// 退出应用
     Quit,
+}
+
+/// 托盘图标点击信息
+#[derive(Debug, Clone, Copy)]
+pub struct ClickInfo {
+    /// 托盘图标在屏幕坐标系中的中心 X（逻辑像素）
+    pub x: f32,
+    /// 托盘图标在屏幕坐标系中的底部 Y（逻辑像素）
+    pub y: f32,
 }
 
 /// 菜单栏 HUD 管理器
@@ -46,11 +54,8 @@ impl MenuBarHud {
     pub fn init(&mut self) {
         let icon = create_icon(0.0);
 
-        // 使用空菜单；具体交互由 egui 绘制的 HUD 窗口处理
-        let menu = Submenu::new("Maclean", true);
-
+        // 不使用原生菜单，具体交互由 egui 绘制的 HUD 窗口处理
         let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_tooltip("Maclean")
             .with_icon(icon)
@@ -124,16 +129,32 @@ impl MenuBarHud {
 
     /// 轮询托盘图标点击事件
     ///
-    /// 返回 true 表示用户点击了托盘图标，应展开/收起 HUD。
-    pub fn poll_click(&self) -> bool {
+    /// 返回点击位置信息。仅对左键松开（Up）事件响应，避免 macOS 上
+    /// mouseDown + mouseUp 产生两次 Click 事件导致 HUD 被连续切换回原始状态。
+    pub fn poll_click(&self) -> Option<ClickInfo> {
         let receiver = TrayIconEvent::receiver();
-        let mut clicked = false;
+        let mut click_info: Option<ClickInfo> = None;
         while let Ok(event) = receiver.try_recv() {
-            if matches!(event, TrayIconEvent::Click { .. }) {
-                clicked = true;
+            log::log(&format!("托盘事件: {:?}", event));
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                rect,
+                ..
+            } = event
+            {
+                let scale_factor = rect.size.width as f32 / rect.position.x.max(1.0) as f32;
+                let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+                    scale_factor
+                } else {
+                    1.0
+                };
+                let x = (rect.position.x + rect.size.width as f64 / 2.0) as f32 / scale_factor;
+                let y = (rect.position.y + rect.size.height as f64) as f32 / scale_factor;
+                click_info = Some(ClickInfo { x, y });
             }
         }
-        clicked
+        click_info
     }
 }
 

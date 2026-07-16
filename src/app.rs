@@ -248,6 +248,8 @@ pub struct App {
     pub settings_prevent_lid_close: bool,
     /// 菜单栏 HUD 是否展开
     pub hud_open: bool,
+    /// 上次点击托盘图标的位置（逻辑像素），用于 HUD 窗口定位
+    pub last_hud_click_pos: Option<(f32, f32)>,
     /// 残留项选中状态（与残留列表一一对应，true=选中清理）
     pub residual_selected: Vec<bool>,
     /// 残留清理中（正在执行清理操作）
@@ -382,6 +384,7 @@ impl App {
             filter_active: false,
             disk_last_check: std::time::Instant::now(),
             show_residual_dialog: false,
+            last_hud_click_pos: None,
             residual_selected: Vec::new(),
             residual_cleaning: false,
             #[cfg(target_os = "windows")]
