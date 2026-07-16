@@ -2110,11 +2110,19 @@ fn render_gui(
     let app_uninstall_show_footer = app.tab == crate::app::Tab::AppUninstall
         && !matches!(app.scan_states[app.tab_index()], ScanState::Scanning)
         && !app.results[app.tab_index()].is_empty();
+    let overview_show_footer = app.tab == crate::app::Tab::Overview
+        && !matches!(app.scan_states[0], ScanState::Scanning);
     if app_uninstall_show_footer {
         egui::TopBottomPanel::bottom("app_uninstall_footer")
             .frame(egui::Frame::side_top_panel(&ctx.style()).fill(SURFACE_ELEVATED))
             .show(ctx, |ui| {
                 render_app_uninstall_footer(ui, app);
+            });
+    } else if overview_show_footer {
+        egui::TopBottomPanel::bottom("overview_footer")
+            .frame(egui::Frame::side_top_panel(&ctx.style()).fill(SURFACE_ELEVATED))
+            .show(ctx, |ui| {
+                render_overview_footer(ui, app);
             });
     } else if app.tab != crate::app::Tab::AppUninstall && app.tab != crate::app::Tab::Overview {
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
@@ -6640,6 +6648,113 @@ fn display_path_short(path: &std::path::Path, lang_en: bool) -> String {
     }
 }
 
+/// 概览 Tab 底部删除栏
+///
+/// 显示当前在概览页中选中的推荐项，并提供删除/取消入口。
+/// 该函数由外层 TopBottomPanel 调用，确保底部栏始终固定在窗口底部。
+fn render_overview_footer(ui: &mut egui::Ui, app: &mut App) {
+    // 重新聚合所有 Tab 的 Safe/CacheOnly 推荐项（与 render_overview_panel 保持一致）
+    let mut recommendation_items: Vec<(usize, usize, u64)> = Vec::new();
+    for tab_idx in 1..app.results.len() {
+        for (item_idx, item) in app.results[tab_idx].iter().enumerate() {
+            if !item.deletable {
+                continue;
+            }
+            if matches!(
+                item.recommend,
+                crate::scanner::Recommend::Safe | crate::scanner::Recommend::CacheOnly
+            ) {
+                recommendation_items.push((tab_idx, item_idx, item.size_bytes));
+            }
+        }
+    }
+
+    let selected_in_overview: Vec<(usize, usize)> = recommendation_items
+        .iter()
+        .filter(|(tab_idx, item_idx, _)| {
+            app.results[*tab_idx]
+                .get(*item_idx)
+                .map(|i| i.selected)
+                .unwrap_or(false)
+        })
+        .map(|(tab_idx, item_idx, _)| (*tab_idx, *item_idx))
+        .collect();
+    let selected_cnt = selected_in_overview.len();
+    let selected_sz: u64 = selected_in_overview
+        .iter()
+        .map(|(tab_idx, item_idx)| {
+            app.results[*tab_idx]
+                .get(*item_idx)
+                .map(|i| i.size_bytes)
+                .unwrap_or(0)
+        })
+        .sum();
+
+    egui::Frame::none()
+        .fill(SURFACE_ELEVATED)
+        .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+        .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_width(ui.available_width());
+
+                if selected_cnt == 0 {
+                    ui.colored_label(
+                        TEXT_TERTIARY,
+                        egui::RichText::new("未选择任何项目").size(13.0),
+                    );
+                } else {
+                    ui.colored_label(
+                        TEXT_PRIMARY,
+                        egui::RichText::new(format!(
+                            "已选中 {} 项 · 可释放 {}",
+                            selected_cnt,
+                            format_size(selected_sz)
+                        ))
+                        .size(13.0)
+                        .strong(),
+                    );
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let delete_enabled =
+                        selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
+                    let delete_btn = ui.add_enabled(
+                        delete_enabled,
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{} {}",
+                                app.t("delete"),
+                                format_size(selected_sz)
+                            ))
+                            .color(egui::Color32::WHITE)
+                            .size(13.0),
+                        )
+                        .fill(DANGER_COLOR)
+                        .rounding(egui::Rounding::same(8.0))
+                        .min_size([0.0, 32.0].into()),
+                    );
+                    if delete_btn.clicked() {
+                        app.prepare_delete_cross_tab(selected_in_overview.clone());
+                    }
+
+                    ui.add_space(8.0);
+
+                    if ui
+                        .button(egui::RichText::new(app.t("cancel")).color(TEXT_SECONDARY))
+                        .clicked()
+                    {
+                        for (tab_idx, item_idx) in &selected_in_overview {
+                            if let Some(item) = app.results[*tab_idx].get_mut(*item_idx) {
+                                item.selected = false;
+                            }
+                        }
+                    }
+                });
+            });
+        });
+}
+
 /// 概览面板：聚合所有 Tab 的推荐清理项
 fn render_overview_panel(
     ui: &mut egui::Ui,
@@ -6873,12 +6988,8 @@ fn render_overview_panel(
         }
         ui.add_space(12.0);
 
-        // 推荐项列表：占满剩余高度（预留底部删除栏空间）
-        let bottom_bar_height = 64.0;
-        let list_size = egui::vec2(
-            ui.available_width(),
-            (ui.available_height() - bottom_bar_height - 12.0).max(0.0),
-        );
+        // 推荐项列表：占满 CentralPanel 剩余高度（底部删除栏已移到外层 TopBottomPanel）
+        let list_size = egui::vec2(ui.available_width(), ui.available_height().max(0.0));
         egui::Frame::none()
             .fill(LIST_BG)
             .rounding(egui::Rounding::same(8.0))
@@ -6975,95 +7086,6 @@ fn render_overview_panel(
 
                         ui.add_space(10.0);
                     });
-            });
-
-        ui.add_space(12.0);
-
-        // 底部删除栏：显示当前选中的推荐项并提供删除/取消入口
-        let selected_in_overview: Vec<(usize, usize)> = recommendation_items
-            .iter()
-            .filter(|(tab_idx, item_idx, _)| {
-                app.results[*tab_idx]
-                    .get(*item_idx)
-                    .map(|i| i.selected)
-                    .unwrap_or(false)
-            })
-            .map(|(tab_idx, item_idx, _)| (*tab_idx, *item_idx))
-            .collect();
-        let selected_cnt = selected_in_overview.len();
-        let selected_sz: u64 = selected_in_overview
-            .iter()
-            .map(|(tab_idx, item_idx)| {
-                app.results[*tab_idx]
-                    .get(*item_idx)
-                    .map(|i| i.size_bytes)
-                    .unwrap_or(0)
-            })
-            .sum();
-
-        egui::Frame::none()
-            .fill(SURFACE_ELEVATED)
-            .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
-            .rounding(egui::Rounding::same(12.0))
-            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_width(ui.available_width());
-
-                    if selected_cnt == 0 {
-                        ui.colored_label(
-                            TEXT_TERTIARY,
-                            egui::RichText::new("未选择任何项目").size(13.0),
-                        );
-                    } else {
-                        ui.colored_label(
-                            TEXT_PRIMARY,
-                            egui::RichText::new(format!(
-                                "已选中 {} 项 · 可释放 {}",
-                                selected_cnt,
-                                format_size(selected_sz)
-                            ))
-                            .size(13.0)
-                            .strong(),
-                        );
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let delete_enabled =
-                            selected_cnt > 0 && matches!(app.confirm, ConfirmState::None);
-                        let delete_btn = ui.add_enabled(
-                            delete_enabled,
-                            egui::Button::new(
-                                egui::RichText::new(format!(
-                                    "{} {}",
-                                    app.t("delete"),
-                                    format_size(selected_sz)
-                                ))
-                                .color(egui::Color32::WHITE)
-                                .size(13.0),
-                            )
-                            .fill(DANGER_COLOR)
-                            .rounding(egui::Rounding::same(8.0))
-                            .min_size([0.0, 28.0].into()),
-                        );
-                        if delete_btn.clicked() {
-                            app.prepare_delete_cross_tab(selected_in_overview.clone());
-                        }
-
-                        ui.add_space(8.0);
-
-                        if ui
-                            .button(egui::RichText::new(app.t("cancel")).color(TEXT_SECONDARY))
-                            .clicked()
-                        {
-                            for (tab_idx, item_idx) in &selected_in_overview {
-                                if let Some(item) = app.results[*tab_idx].get_mut(*item_idx) {
-                                    item.selected = false;
-                                }
-                            }
-                        }
-                    });
-                });
             });
     }
 }
