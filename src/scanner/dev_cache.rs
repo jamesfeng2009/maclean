@@ -1246,19 +1246,21 @@ fn scan_build_artifacts(items: &mut Vec<ScanItem>) {
 }
 
 // =========================================================================
-//  安装包清理（Downloads 下的 dmg/pkg/zip 等）
+//  安装包清理（Downloads / Desktop 下的 dmg/pkg/exe/msi 等）
 // =========================================================================
 
-/// 扫描 Downloads 目录下的安装包文件
+/// 扫描安装包文件（Downloads、Desktop 等位置）
+///
+/// 智能检测安装包对应的应用是否已安装：
+/// - 已安装 → 标记 Safe（安装包可安全删除）
+/// - 未安装 → 标记 Caution（用户可能还需要安装）
 fn scan_installer_files(items: &mut Vec<ScanItem>) {
     let home = home_dir();
-    let downloads = home.join("Downloads");
 
-    if !downloads.is_dir() {
-        return;
-    }
+    // 扫描多个常见位置
+    let scan_dirs = [home.join("Downloads"), home.join("Desktop")];
 
-    // 安装包扩展名 (跨平台)
+    // 安装包扩展名（按平台区分）
     #[cfg(target_os = "macos")]
     let installer_exts = [".dmg", ".pkg", ".iso", ".zip", ".tar.gz", ".tgz", ".7z"];
     #[cfg(target_os = "windows")]
@@ -1266,38 +1268,48 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let installer_exts = [".iso", ".zip", ".tar.gz", ".tgz", ".7z"];
 
-    let mut installers: Vec<(String, u64, String)> = Vec::new(); // (path, size, filename)
+    let mut installers: Vec<(String, u64, String, bool)> = Vec::new();
+    // (path, size, filename, is_installed)
 
-    // 递归扫描 Downloads（最多 2 层深度）
-    for entry in walkdir::WalkDir::new(&downloads)
-        .max_depth(2)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let filename = entry.file_name().to_string_lossy().to_lowercase();
-        let path_str = path.to_string_lossy().to_string();
-
-        // 检查是否是安装包
-        let is_installer = installer_exts.iter().any(|ext| filename.ends_with(ext));
-        if !is_installer {
+    for dir in &scan_dirs {
+        if !dir.is_dir() {
             continue;
         }
 
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        if size < 50 * 1024 * 1024 {
-            // 小于 50MB 的不展示
-            continue;
-        }
+        for entry in walkdir::WalkDir::new(dir)
+            .max_depth(2)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let filename_lower = entry.file_name().to_string_lossy().to_lowercase();
+            let path_str = path.to_string_lossy().to_string();
 
-        installers.push((
-            path_str,
-            size,
-            entry.file_name().to_string_lossy().to_string(),
-        ));
+            // 检查是否是安装包扩展名
+            let is_installer = installer_exts.iter().any(|ext| filename_lower.ends_with(ext));
+            if !is_installer {
+                continue;
+            }
+
+            // .zip 特殊处理：需要包含安装包特征，避免误删用户压缩包
+            if filename_lower.ends_with(".zip") && !is_installer_zip(&filename_lower) {
+                continue;
+            }
+
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if size < 50 * 1024 * 1024 {
+                // 小于 50MB 的不展示
+                continue;
+            }
+
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let installed = check_app_installed(&filename);
+
+            installers.push((path_str, size, filename, installed));
+        }
     }
 
     if installers.is_empty() {
@@ -1307,8 +1319,19 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
     // 按大小降序排序
     installers.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // 每个安装包作为独立项展示，用户可以单独选择删除
-    for (path, size, filename) in installers {
+    for (path, size, filename, installed) in installers {
+        let (recommend, description) = if installed {
+            (
+                Recommend::Safe,
+                format!("{} 已安装，安装包可安全删除", filename),
+            )
+        } else {
+            (
+                Recommend::Caution,
+                format!("{} 的安装包，删除后需重新下载安装", filename),
+            )
+        };
+
         items.push(ScanItem {
             path,
             size_bytes: size,
@@ -1317,10 +1340,178 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
             deletable: true,
             undeletable_reason: String::new(),
             batch_paths: Vec::new(),
-            recommend: Recommend::Caution,
-            description: format!("Downloads 下的安装包: {}", filename),
+            recommend,
+            description,
         });
     }
+}
+
+/// 检查 .zip 文件名是否像安装包（避免误删用户普通压缩包）
+fn is_installer_zip(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    lower.contains("setup")
+        || lower.contains("install")
+        || lower.contains("installer")
+        || lower.contains("pkg")
+        || lower.contains("download")
+}
+
+/// 检查安装包对应的应用是否已安装（跨平台入口）
+fn check_app_installed(installer_filename: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        check_app_installed_macos(installer_filename)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        check_app_installed_windows(installer_filename)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        false
+    }
+}
+
+/// macOS: 从安装包文件名提取应用名，检查 /Applications 和 ~/Applications
+#[cfg(target_os = "macos")]
+fn check_app_installed_macos(installer_filename: &str) -> bool {
+    // 从文件名提取应用名（去掉扩展名）
+    let stem = std::path::Path::new(installer_filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if stem.is_empty() {
+        return false;
+    }
+
+    // 移除常见平台/架构后缀，得到核心应用名
+    let app_name = stem
+        .replace("-darwin-universal", "")
+        .replace("-darwin-arm64", "")
+        .replace("-darwin-x64", "")
+        .replace("-macos", "")
+        .replace("-mac", "")
+        .replace("-osx", "")
+        .trim()
+        .to_string();
+
+    if app_name.is_empty() {
+        return false;
+    }
+
+    // 精确匹配：/Applications/<AppName>.app
+    let exact_path = format!("/Applications/{}.app", app_name);
+    if std::path::Path::new(&exact_path).exists() {
+        return true;
+    }
+
+    // 精确匹配：~/Applications/<AppName>.app
+    let user_app = home_dir()
+        .join("Applications")
+        .join(format!("{}.app", app_name));
+    if user_app.exists() {
+        return true;
+    }
+
+    // 模糊匹配：/Applications 下是否有包含关键词的 .app
+    let app_lower = app_name.to_lowercase();
+    for search_dir in &["/Applications", &home_dir().join("Applications").to_string_lossy()] {
+        if let Ok(entries) = std::fs::read_dir(search_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(".app") {
+                        let name_lower = name.to_lowercase().replace(".app", "");
+                        // 双向包含匹配
+                        if name_lower.contains(&app_lower) || app_lower.contains(&name_lower) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Windows: 从安装包文件名提取应用名，查注册表 Uninstall 键
+#[cfg(target_os = "windows")]
+fn check_app_installed_windows(installer_filename: &str) -> bool {
+    // 从文件名提取应用名（去掉扩展名）
+    let stem = std::path::Path::new(installer_filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if stem.is_empty() {
+        return false;
+    }
+
+    // 移除常见安装包后缀，得到核心应用名
+    let app_name = stem
+        .replace("Setup", "")
+        .replace("setup", "")
+        .replace("Installer", "")
+        .replace("installer", "")
+        .replace("Install", "")
+        .replace("install", "")
+        .replace("x64", "")
+        .replace("x86", "")
+        .replace("win64", "")
+        .replace("win32", "")
+        .replace("amd64", "")
+        .replace("-", " ")
+        .replace("_", " ")
+        .trim()
+        .to_string();
+
+    if app_name.len() < 2 {
+        return false;
+    }
+
+    // 通过注册表 Uninstall 键查找（64位 + 32位 + 用户级）
+    let uninstall_keys = [
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+    ];
+
+    for key_path in &uninstall_keys {
+        if let Ok(output) = std::process::Command::new("reg")
+            .args([
+                "query",
+                &format!("HKLM\\{}", key_path),
+                "/s",
+                "/f",
+                &app_name,
+            ])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("DisplayName") {
+                return true;
+            }
+        }
+    }
+
+    // 也查用户级注册表
+    if let Ok(output) = std::process::Command::new("reg")
+        .args([
+            "query",
+            "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            "/s",
+            "/f",
+            &app_name,
+        ])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("DisplayName") {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// 格式化文件大小（本地辅助函数）
