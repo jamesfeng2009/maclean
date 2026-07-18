@@ -7,7 +7,9 @@ mod aewp;
 mod app;
 mod app_protection;
 mod cli;
+mod config;
 mod i18n;
+mod license;
 mod logger;
 mod menubar;
 mod platform;
@@ -17,6 +19,7 @@ mod scanner;
 mod sudo_keepalive;
 #[cfg(target_os = "macos")]
 mod touchid;
+mod updater;
 
 use std::sync::mpsc;
 
@@ -94,7 +97,39 @@ pub fn log_scan_step(msg: &str) {
     logger::info(msg);
 }
 
+/// 从项目根目录 `.env` 加载环境变量（仅开发用，无第三方依赖）
+///
+/// 解析 KEY=VALUE 格式，忽略空行和 # 注释。
+/// 若变量已存在于系统环境，则保留系统值（方便 launch.json / shell 覆盖）。
+fn load_dotenv() {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let path = cwd.join(".env");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            // 已存在的环境变量优先，不覆盖
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+}
+
 fn main() -> eframe::Result {
+    // 优先加载 .env（开发模式 MACLEAN_DEV=1 等配置）
+    load_dotenv();
+
     // 初始化日志系统（CLI 和 GUI 模式都需要）
     logger::init();
 
@@ -458,7 +493,12 @@ fn main() -> eframe::Result {
                                         ));
                                         app.prepare_delete();
                                         let to_delete = app.confirm_delete();
-                                        start_delete(to_delete, app.lang_en, &mut DELETE_RX);
+                                        start_delete(
+                                            to_delete,
+                                            app.lang_en,
+                                            &mut DELETE_RX,
+                                            app.settings_auto_restore_point,
+                                        );
                                     } else {
                                         log_scan_step(app.t("log_quickclean_none"));
                                     }
@@ -2071,6 +2111,47 @@ fn render_gui(
         app.t("window_title").to_string(),
     ));
 
+    // 轮询后台更新检查结果
+    app.poll_update();
+
+    // ========== 更新提示横幅（顶部）==========
+    if !app.update_dismissed {
+        if let Some(info) = app.update_available.clone() {
+            egui::TopBottomPanel::top("update_banner").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        BRAND,
+                        egui::RichText::new(if app.lang_en {
+                            format!("⬆ New version v{} is available", info.version)
+                        } else {
+                            format!("⬆ 发现新版本 v{}", info.version)
+                        })
+                        .size(13.0)
+                        .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(egui::RichText::new("✕").size(12.0)).clicked() {
+                            app.update_dismissed = true;
+                        }
+                        if ui
+                            .button(
+                                egui::RichText::new(if app.lang_en {
+                                    "Download"
+                                } else {
+                                    "前往下载"
+                                })
+                                .size(13.0),
+                            )
+                            .clicked()
+                        {
+                            open_url(&info.url);
+                        }
+                    });
+                });
+            });
+        }
+    }
+
     // ========== 磁盘告警横幅（顶部）==========
     let (alert_level, alert_color, free_pct) = app.disk_alert_level();
     if alert_level >= 1 {
@@ -3002,6 +3083,11 @@ fn render_gui(
         show_summary_window(ctx, app, ok, fail, skip, delete_rx);
     }
 
+    // License 激活弹窗（额度用尽时弹出）
+    if app.show_license_dialog {
+        show_license_window(ctx, app);
+    }
+
     // Windows: 残留清理弹窗（卸载后检测到残留时弹出）
     #[cfg(target_os = "windows")]
     if app.show_residual_dialog {
@@ -3727,6 +3813,7 @@ fn start_delete(
     to_delete: Vec<(String, String, Vec<String>, bool)>,
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+    auto_restore: bool,
 ) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
@@ -3736,6 +3823,20 @@ fn start_delete(
             std::sync::Mutex::new(Vec::new());
 
         logger::info(&format!("删除任务开始: {} 项", to_delete.len()));
+
+        // P1-1: Windows 批次删除前自动创建系统还原点（20h 频率限制，开关控制）
+        #[cfg(not(target_os = "windows"))]
+        let _ = auto_restore;
+        #[cfg(target_os = "windows")]
+        if auto_restore {
+            let (ok, msg) = platform::windows_backup::ensure_restore_point(false);
+            let text = match (ok, msg.as_str()) {
+                (true, "created") => App::t_lang(lang_en, "restore_point_created").to_string(),
+                (true, _) => App::t_lang(lang_en, "restore_point_skipped").to_string(),
+                (false, _) => App::t_lang(lang_en, "restore_point_failed").to_string(),
+            };
+            let _ = tx.send(DeleteMessage::Info(text));
+        }
 
         // ========== 阶段1: 普通删除（多线程并行） ==========
         let worker_count = std::cmp::min(4, to_delete.len().max(1));
@@ -4743,7 +4844,12 @@ fn show_confirm_window(
                     if danger_btn.clicked() {
                         app.show_preview = false;
                         let to_delete = app.confirm_delete();
-                        start_delete(to_delete, app.lang_en, delete_rx);
+                        start_delete(
+                            to_delete,
+                            app.lang_en,
+                            delete_rx,
+                            app.settings_auto_restore_point,
+                        );
                     }
 
                     ui.add_space(8.0);
@@ -5828,6 +5934,116 @@ fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
 
     // 删除中持续刷新 UI
     ctx.request_repaint_after(std::time::Duration::from_millis(50));
+}
+
+/// 跨平台在默认浏览器打开 URL
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+/// License 激活弹窗（免费额度用尽时弹出）
+fn show_license_window(ctx: &egui::Context, app: &mut App) {
+    egui::Window::new(if app.lang_en { "Upgrade to Pro" } else { "升级到 Pro 版" })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(460.0);
+            ui.set_max_width(500.0);
+            ui.add_space(8.0);
+
+            // 额度说明
+            let used = crate::license::quota_used();
+            let total = crate::license::FREE_CLEAN_QUOTA_BYTES;
+            let msg = if app.lang_en {
+                format!(
+                    "Free cleanup quota exhausted ({}/{}). Activate Pro for unlimited cleaning.",
+                    crate::scanner::format_size(used),
+                    crate::scanner::format_size(total)
+                )
+            } else {
+                format!(
+                    "免费清理额度已用完（{}/{}）。激活 Pro 版后可无限清理。",
+                    crate::scanner::format_size(used),
+                    crate::scanner::format_size(total)
+                )
+            };
+            ui.colored_label(TEXT_PRIMARY, egui::RichText::new(msg).size(14.0));
+            ui.add_space(8.0);
+
+            // Pro 权益
+            let benefits: &[&str] = if app.lang_en {
+                &[
+                    "Unlimited cleanup, uninstall & optimization",
+                    "60+ developer cache categories",
+                    "APFS snapshot management",
+                    "Lifetime updates, one-time purchase",
+                ]
+            } else {
+                &[
+                    "无限清理、卸载与系统优化",
+                    "60+ 开发者缓存类别",
+                    "APFS 快照管理",
+                    "买断制，终身免费更新",
+                ]
+            };
+            for b in benefits {
+                ui.colored_label(SAFE_COLOR, egui::RichText::new(format!("✓ {}", b)).size(12.0));
+            }
+            ui.add_space(10.0);
+
+            // License 输入
+            ui.colored_label(
+                TEXT_SECONDARY,
+                egui::RichText::new(if app.lang_en {
+                    "Enter your license key:"
+                } else {
+                    "输入 License Key："
+                })
+                .size(12.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.license_input)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("MACL-..."),
+            );
+
+            if let Some(err) = &app.license_error {
+                ui.add_space(4.0);
+                ui.colored_label(ADVANCED_COLOR, egui::RichText::new(err).size(12.0));
+            }
+            ui.add_space(10.0);
+
+            // 按钮行
+            ui.horizontal(|ui| {
+                if ui
+                    .button(egui::RichText::new(if app.lang_en { "Activate" } else { "激活" }).size(13.0))
+                    .clicked()
+                {
+                    app.try_activate_license();
+                }
+                if ui
+                    .button(egui::RichText::new(if app.lang_en { "Buy Pro" } else { "购买 Pro" }).size(13.0))
+                    .clicked()
+                {
+                    open_url("https://maclean.app/buy");
+                }
+                if ui
+                    .button(egui::RichText::new(app.t("cancel")).size(13.0))
+                    .clicked()
+                {
+                    app.show_license_dialog = false;
+                }
+            });
+            ui.add_space(4.0);
+        });
 }
 
 /// 删除完成汇总弹窗
@@ -7239,6 +7455,17 @@ fn render_optimize_panel(
     // 执行选中的优化任务
     if let Some(task_idx) = task_to_run {
         if let Some(item) = items.get(task_idx) {
+            // P1-1: Windows 优化任务执行前自动创建系统还原点（20h 频率限制，开关控制）
+            #[cfg(target_os = "windows")]
+            if app.settings_auto_restore_point {
+                let (ok, msg) = platform::windows_backup::ensure_restore_point(false);
+                let text = match (ok, msg.as_str()) {
+                    (true, "created") => App::t_lang(app.lang_en, "restore_point_created"),
+                    (true, _) => App::t_lang(app.lang_en, "restore_point_skipped"),
+                    (false, _) => App::t_lang(app.lang_en, "restore_point_failed"),
+                };
+                app.logs.push(text.to_string());
+            }
             let log = execute_optimize_task(&item.path, app.lang_en);
             app.logs.push(log);
         }
@@ -7247,6 +7474,17 @@ fn render_optimize_panel(
 
 /// 设置面板（设计稿 4.6 样式）
 fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
+    // 入口快照：用于离开时检测设置变更并自动保存（P2-2）
+    let settings_snapshot = (
+        app.lang_en,
+        app.settings_menubar_icon,
+        app.settings_keep_sudo,
+        app.settings_scan_cache,
+        app.settings_confirm_advanced,
+        app.settings_prevent_lid_close,
+        app.settings_auto_restore_point,
+    );
+
     let settings_size = ui.available_size();
     egui::Frame::none()
         .fill(LIST_BG)
@@ -7302,6 +7540,84 @@ fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                             &mut app.settings_prevent_lid_close,
                             lid_enabled,
                         );
+                        // P1-1: 操作前自动创建还原点（Windows only）
+                        let win_enabled = cfg!(target_os = "windows");
+                        render_settings_item(
+                            ui,
+                            app.t("setting_auto_restore_point"),
+                            app.t("setting_auto_restore_point_desc"),
+                            &mut app.settings_auto_restore_point,
+                            win_enabled,
+                        );
+
+                        // P1-3: 还原上次注册表修改入口（Windows only）
+                        #[cfg(target_os = "windows")]
+                        {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.colored_label(
+                                        TEXT_PRIMARY,
+                                        egui::RichText::new(app.t("setting_restore_last"))
+                                            .size(13.0)
+                                            .strong(),
+                                    );
+                                    ui.colored_label(
+                                        TEXT_SECONDARY,
+                                        egui::RichText::new(app.t("setting_restore_last_desc"))
+                                            .size(12.0),
+                                    );
+                                    // 最近备份信息
+                                    if let Some((time, source, count)) =
+                                        platform::windows_backup::last_backup_summary()
+                                    {
+                                        let info = app.tf(
+                                            "restore_last_backup_info",
+                                            &[&time, &source, &count.to_string()],
+                                        );
+                                        ui.colored_label(
+                                            TEXT_TERTIARY,
+                                            egui::RichText::new(info).size(11.0),
+                                        );
+                                    }
+                                    // 上次执行结果
+                                    if let Some(ref result) = app.last_restore_result {
+                                        ui.colored_label(
+                                            TEXT_SECONDARY,
+                                            egui::RichText::new(result).size(11.0),
+                                        );
+                                    }
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(
+                                                        app.t("restore_last_btn"),
+                                                    )
+                                                    .size(13.0),
+                                                )
+                                                .fill(SURFACE_ELEVATED)
+                                                .stroke(egui::Stroke::new(1.0, BORDER_LIGHT))
+                                                .rounding(egui::Rounding::same(8.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            let (ok, msg) =
+                                                platform::windows_backup::restore_last_backup();
+                                            app.last_restore_result = Some(match (ok, msg.as_str()) {
+                                                (true, m) => app.tf("restore_last_success", &[m]),
+                                                (false, "none") => {
+                                                    app.t("restore_last_none").to_string()
+                                                }
+                                                _ => app.t("restore_last_failed").to_string(),
+                                            });
+                                        }
+                                    },
+                                );
+                            });
+                        }
                     });
 
                     ui.add_space(12.0);
@@ -7348,9 +7664,243 @@ fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                         });
                     });
 
+                    ui.add_space(12.0);
+
+                    // P2-2: 配置管理卡片（导入/导出 + 配置目录）
+                    settings_card(ui, app.t("settings_config_mgmt"), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.colored_label(
+                                    TEXT_PRIMARY,
+                                    egui::RichText::new(app.t("config_dir_label"))
+                                        .size(13.0)
+                                        .strong(),
+                                );
+                                ui.colored_label(
+                                    TEXT_TERTIARY,
+                                    egui::RichText::new(
+                                        config::config_dir().display().to_string(),
+                                    )
+                                    .size(11.0),
+                                );
+                                ui.colored_label(
+                                    TEXT_SECONDARY,
+                                    egui::RichText::new(app.t("config_apps_hint")).size(11.0),
+                                );
+                                // 上次执行结果
+                                if let Some(ref result) = app.config_manage_result {
+                                    ui.colored_label(
+                                        TEXT_SECONDARY,
+                                        egui::RichText::new(result).size(11.0),
+                                    );
+                                }
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button(egui::RichText::new(app.t("config_open_btn")).size(12.0))
+                                        .clicked()
+                                    {
+                                        config::open_in_file_manager(&config::config_dir());
+                                    }
+                                    ui.add_space(6.0);
+                                    if ui
+                                        .button(egui::RichText::new(app.t("config_import_btn")).size(12.0))
+                                        .clicked()
+                                    {
+                                        let dir = config::default_export_dir();
+                                        let (ok, msg) = config::import_config(&dir);
+                                        app.config_manage_result = Some(match (ok, msg.as_str()) {
+                                            (true, m) => app.tf("config_import_success", &[m]),
+                                            (false, "no_config_found") => {
+                                                app.t("config_no_config_found").to_string()
+                                            }
+                                            (false, m) => app.tf("config_import_failed", &[m]),
+                                        });
+                                    }
+                                    ui.add_space(6.0);
+                                    if ui
+                                        .button(egui::RichText::new(app.t("config_export_btn")).size(12.0))
+                                        .clicked()
+                                    {
+                                        // 导出前先落盘当前设置，保证导出内容最新
+                                        app.save_settings();
+                                        let dir = config::default_export_dir();
+                                        let dir_display = dir.display().to_string();
+                                        let (ok, msg) = config::export_config(&dir);
+                                        app.config_manage_result = Some(match (ok, msg.as_str()) {
+                                            (true, _) => {
+                                                app.tf("config_export_success", &[&dir_display])
+                                            }
+                                            (false, "nothing_to_export") => {
+                                                app.t("config_nothing_to_export").to_string()
+                                            }
+                                            (false, m) => app.tf("config_export_failed", &[m]),
+                                        });
+                                    }
+                                },
+                            );
+                        });
+                    });
+
+                    ui.add_space(12.0);
+
+                    // Pro 授权卡片
+                    let lic_status = app.license_status.clone();
+                    settings_card(
+                        ui,
+                        if app.lang_en { "Pro License" } else { "Pro 授权" },
+                        |ui| match &lic_status {
+                            crate::license::LicenseStatus::Activated { email, plan } => {
+                                let is_dev = crate::license::is_dev_mode();
+                                ui.colored_label(
+                                    if is_dev { CAUTION_COLOR } else { SAFE_COLOR },
+                                    egui::RichText::new(if is_dev {
+                                        if app.lang_en {
+                                            "🛠 Developer mode"
+                                        } else {
+                                            "🛠 开发者模式"
+                                        }
+                                    } else if app.lang_en {
+                                        "✓ Pro activated"
+                                    } else {
+                                        "✓ Pro 版已激活"
+                                    })
+                                    .size(13.0)
+                                    .strong(),
+                                );
+                                let plan_label = if plan == "lifetime" {
+                                    if app.lang_en { "Lifetime" } else { "终身版" }
+                                } else {
+                                    plan.as_str()
+                                };
+                                ui.colored_label(
+                                    TEXT_SECONDARY,
+                                    egui::RichText::new(format!("{} · {}", email, plan_label))
+                                        .size(12.0),
+                                );
+                                ui.add_space(8.0);
+                                if ui
+                                    .button(
+                                        egui::RichText::new(if app.lang_en {
+                                            "Deactivate"
+                                        } else {
+                                            "解除激活"
+                                        })
+                                        .size(12.0),
+                                    )
+                                    .clicked()
+                                {
+                                    crate::license::deactivate();
+                                    app.license_status = crate::license::LicenseStatus::Free;
+                                }
+                            }
+                            crate::license::LicenseStatus::Free => {
+                                let remaining = crate::license::quota_remaining();
+                                let total = crate::license::FREE_CLEAN_QUOTA_BYTES;
+                                let used_ratio = 1.0 - (remaining as f32 / total as f32);
+                                ui.colored_label(
+                                    TEXT_PRIMARY,
+                                    egui::RichText::new(if app.lang_en {
+                                        "Free plan"
+                                    } else {
+                                        "免费版"
+                                    })
+                                    .size(13.0)
+                                    .strong(),
+                                );
+                                ui.colored_label(
+                                    TEXT_SECONDARY,
+                                    egui::RichText::new(if app.lang_en {
+                                        format!(
+                                            "Cleanup quota remaining: {} / {}",
+                                            crate::scanner::format_size(remaining),
+                                            crate::scanner::format_size(total)
+                                        )
+                                    } else {
+                                        format!(
+                                            "清理额度剩余：{} / {}",
+                                            crate::scanner::format_size(remaining),
+                                            crate::scanner::format_size(total)
+                                        )
+                                    })
+                                    .size(12.0),
+                                );
+                                ui.add_space(4.0);
+                                ui.add(
+                                    egui::ProgressBar::new(used_ratio)
+                                        .desired_height(4.0)
+                                        .fill(if used_ratio > 0.9 {
+                                            ADVANCED_COLOR
+                                        } else {
+                                            SAFE_COLOR
+                                        }),
+                                );
+                                ui.add_space(10.0);
+
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut app.license_input)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("MACL-..."),
+                                );
+                                if let Some(err) = &app.license_error {
+                                    ui.add_space(4.0);
+                                    ui.colored_label(
+                                        ADVANCED_COLOR,
+                                        egui::RichText::new(err).size(12.0),
+                                    );
+                                }
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .button(
+                                            egui::RichText::new(if app.lang_en {
+                                                "Activate"
+                                            } else {
+                                                "激活"
+                                            })
+                                            .size(13.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        app.try_activate_license();
+                                    }
+                                    if ui
+                                        .button(
+                                            egui::RichText::new(if app.lang_en {
+                                                "Buy Pro"
+                                            } else {
+                                                "购买 Pro"
+                                            })
+                                            .size(13.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        open_url("https://maclean.app/buy");
+                                    }
+                                });
+                            }
+                        },
+                    );
+
                     ui.add_space(20.0);
                 });
         });
+
+    // P2-2: 设置变更自动保存（对比入口快照，有变化才写盘）
+    let current = (
+        app.lang_en,
+        app.settings_menubar_icon,
+        app.settings_keep_sudo,
+        app.settings_scan_cache,
+        app.settings_confirm_advanced,
+        app.settings_prevent_lid_close,
+        app.settings_auto_restore_point,
+    );
+    if current != settings_snapshot {
+        app.save_settings();
+    }
 }
 
 /// 设置卡片容器
@@ -7410,7 +7960,21 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let result = match task_name {
+    // Windows 平台：路由到 Windows 专属实现
+    #[cfg(target_os = "windows")]
+    let result = execute_windows_optimize_task(task_name, lang_en);
+
+    // macOS 及其他平台：原有 macOS 实现
+    #[cfg(not(target_os = "windows"))]
+    let result = execute_macos_optimize_task(task_name, lang_en);
+
+    format!("[{}] {}", timestamp, result)
+}
+
+/// macOS 优化任务执行
+#[cfg(not(target_os = "windows"))]
+fn execute_macos_optimize_task(task_name: &str, lang_en: bool) -> String {
+    match task_name {
         "dns_cache_flush" => {
             // dscacheutil 和 killall 在现代 macOS 上需要 sudo
             let r1 = std::process::Command::new("dscacheutil")
@@ -7534,9 +8098,249 @@ fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
             }
         }
         _ => App::tf_lang(lang_en, "opt_unknown", &[task_name]),
-    };
+    }
+}
 
-    format!("[{}] {}", timestamp, result)
+/// Windows 优化任务执行
+///
+/// 参考 Win11Debloat (https://github.com/Raphire/Win11Debloat) 实现。
+/// 注册表操作统一通过 `reg.exe` 命令执行，避免引入 winreg 等额外依赖。
+#[cfg(target_os = "windows")]
+fn execute_windows_optimize_task(task_name: &str, lang_en: bool) -> String {
+    // P1-2: 注册表修改类任务执行前自动备份相关键（reg export 到备份目录）
+    let reg_keys: &[&str] = match task_name {
+        "win_disable_telemetry" => &[
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection",
+        ],
+        "win_disable_copilot" => &[
+            r"HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot",
+        ],
+        "win_disable_suggestions" => &[
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+        ],
+        "win_disable_fast_startup" => &[
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power",
+        ],
+        _ => &[],
+    };
+    for key in reg_keys {
+        platform::windows_backup::backup_registry_key(key, task_name);
+    }
+
+    match task_name {
+        "win_dns_flush" => {
+            let r = std::process::Command::new("ipconfig")
+                .arg("/flushdns")
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_win_dns_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_win_dns_fail").to_string(),
+            }
+        }
+        "win_temp_cleanup" => {
+            // 清理临时目录、缩略图缓存、交付优化缓存
+            let mut total_cleaned = 0u64;
+
+            // 1. 用户临时文件
+            if let Ok(temp) = std::env::var("TEMP") {
+                total_cleaned += clean_dir_size(&temp);
+            }
+            if let Ok(tmp) = std::env::var("TMP") {
+                total_cleaned += clean_dir_size(&tmp);
+            }
+            // 2. Windows 临时文件
+            total_cleaned += clean_dir_size(r"C:\Windows\Temp");
+            // 3. 缩略图缓存
+            if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+                let thumb_cache = format!(
+                    r"{}\Microsoft\Windows\Explorer",
+                    localappdata
+                );
+                total_cleaned += clean_dir_size(&thumb_cache);
+            }
+            // 4. 交付优化缓存
+            let _ = std::process::Command::new("cleanmgr")
+                .args(["/sagerun:1", "/d", "C:"])
+                .output();
+
+            App::tf_lang(
+                lang_en,
+                "opt_win_temp_success",
+                &[&crate::scanner::format_size(total_cleaned)],
+            )
+        }
+        "win_disable_telemetry" => {
+            // HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection AllowTelemetry = 0
+            let r = std::process::Command::new("reg")
+                .args([
+                    "add",
+                    r"HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection",
+                    "/v",
+                    "AllowTelemetry",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "0",
+                    "/f",
+                ])
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_win_telemetry_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_win_telemetry_fail").to_string(),
+            }
+        }
+        "win_disable_copilot" => {
+            // HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot TurnOffWindowsCopilot = 1
+            let r = std::process::Command::new("reg")
+                .args([
+                    "add",
+                    r"HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot",
+                    "/v",
+                    "TurnOffWindowsCopilot",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "1",
+                    "/f",
+                ])
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_win_copilot_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_win_copilot_fail").to_string(),
+            }
+        }
+        "win_disable_suggestions" => {
+            // 关闭开始菜单建议、锁屏广告、设置建议
+            let keys = [
+                (
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                    "Start_IrisRecommendations",
+                ),
+                (
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                    "SubscribedContent-338388Enabled",
+                ),
+                (
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                    "SubscribedContent-338389Enabled",
+                ),
+                (
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                    "SystemPaneSuggestionsEnabled",
+                ),
+            ];
+            let mut success = true;
+            for (key, value) in keys {
+                let r = std::process::Command::new("reg")
+                    .args([
+                        "add", key, "/v", value, "/t", "REG_DWORD", "/d", "0", "/f",
+                    ])
+                    .output();
+                if !r.map(|o| o.status.success()).unwrap_or(false) {
+                    success = false;
+                }
+            }
+            if success {
+                App::t_lang(lang_en, "opt_win_suggestions_success").to_string()
+            } else {
+                App::t_lang(lang_en, "opt_win_suggestions_fail").to_string()
+            }
+        }
+        "win_startup_audit" => {
+            // 打开任务管理器启动页
+            let r = std::process::Command::new("taskmgr")
+                .arg("/4")
+                .spawn();
+            match r {
+                Ok(_) => App::t_lang(lang_en, "opt_win_startup_opened").to_string(),
+                Err(_) => App::t_lang(lang_en, "opt_win_startup_fail").to_string(),
+            }
+        }
+        "win_disable_fast_startup" => {
+            // HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power HiberbootEnabled = 0
+            let r = std::process::Command::new("reg")
+                .args([
+                    "add",
+                    r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power",
+                    "/v",
+                    "HiberbootEnabled",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "0",
+                    "/f",
+                ])
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_win_faststartup_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_win_faststartup_fail").to_string(),
+            }
+        }
+        "win_restore_point" => {
+            // 手动触发：强制创建还原点（跳过 20h 频率限制）
+            let (ok, _msg) = platform::windows_backup::ensure_restore_point(true);
+            if ok {
+                App::t_lang(lang_en, "opt_win_restore_success").to_string()
+            } else {
+                App::t_lang(lang_en, "opt_win_restore_fail").to_string()
+            }
+        }
+        "win_restart_explorer" => {
+            // taskkill /f /im explorer.exe && start explorer.exe
+            let r1 = std::process::Command::new("taskkill")
+                .args(["/f", "/im", "explorer.exe"])
+                .output();
+            let r2 = std::process::Command::new("explorer.exe").spawn();
+            let success = r1.map(|o| o.status.success()).unwrap_or(false) && r2.is_ok();
+            if success {
+                App::t_lang(lang_en, "opt_win_explorer_success").to_string()
+            } else {
+                App::t_lang(lang_en, "opt_win_explorer_fail").to_string()
+            }
+        }
+        "win_trim_drives" => {
+            // 对系统盘执行 TRIM / 碎片整理
+            let r = std::process::Command::new("defrag")
+                .args(["C:", "/O", "/H"])
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_win_trim_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_win_trim_fail").to_string(),
+            }
+        }
+        _ => App::tf_lang(lang_en, "opt_unknown", &[task_name]),
+    }
+}
+
+/// 计算并清空目录，返回清理的字节数
+#[cfg(target_os = "windows")]
+fn clean_dir_size(dir: &str) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if let Ok(meta) = path.metadata() {
+                total += meta.len();
+            }
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    total
 }
 
 /// 扫描中 UI

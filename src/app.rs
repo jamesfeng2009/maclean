@@ -230,6 +230,8 @@ pub struct App {
     pub scan_current_path: String,
     /// 当前分类过滤（按 category 前缀过滤）
     pub filter_category: Option<String>,
+    /// 用户配置（启动时从 config.json 加载）
+    pub user_config: crate::config::AppConfig,
     /// App卸载 Tab 已展开的应用分组名集合
     pub expanded_app_groups: std::collections::HashSet<String>,
     /// App卸载 Tab 当前按推荐等级过滤（Safe / Caution / Advanced）
@@ -246,6 +248,12 @@ pub struct App {
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS only）
     pub settings_prevent_lid_close: bool,
+    /// 操作前自动创建系统还原点（Windows only）
+    pub settings_auto_restore_point: bool,
+    /// "还原上次修改"操作的执行结果（设置页显示）
+    pub last_restore_result: Option<String>,
+    /// "配置导入/导出"操作的执行结果（设置页显示）
+    pub config_manage_result: Option<String>,
     /// 菜单栏 HUD 是否展开
     pub hud_open: bool,
     /// 上次点击托盘图标的位置（逻辑像素），用于 HUD 窗口定位
@@ -254,6 +262,20 @@ pub struct App {
     pub residual_selected: Vec<bool>,
     /// 残留清理中（正在执行清理操作）
     pub residual_cleaning: bool,
+    /// License 激活状态（启动时加载）
+    pub license_status: crate::license::LicenseStatus,
+    /// License 输入框内容
+    pub license_input: String,
+    /// License 激活错误提示
+    pub license_error: Option<String>,
+    /// 是否显示"额度用尽需激活"弹窗
+    pub show_license_dialog: bool,
+    /// 检测到的新版本（有更新时填充）
+    pub update_available: Option<crate::updater::UpdateInfo>,
+    /// 更新检查后台线程的结果通道
+    pub update_rx: Option<std::sync::mpsc::Receiver<crate::updater::UpdateInfo>>,
+    /// 用户已忽略当前版本的更新提示（本次运行内不再显示）
+    pub update_dismissed: bool,
     /// Windows: 卸载后检测到的残留信息
     #[cfg(target_os = "windows")]
     pub uninstall_residual: Option<scanner::windows_apps::UninstallResidual>,
@@ -313,6 +335,15 @@ impl App {
     /// 创建新 App 状态
     pub fn new() -> Self {
         let (disk_total, disk_free) = get_disk_info();
+        let user_config = crate::config::load_config();
+
+        // 后台线程检查更新（阻塞网络调用，结果经 channel 回传，失败静默）
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(info) = crate::updater::check_latest() {
+                let _ = update_tx.send(info);
+            }
+        });
 
         Self {
             tab: Tab::Overview,
@@ -347,12 +378,16 @@ impl App {
             pending_delete: Vec::new(),
             should_quit: false,
             scan_time_ms: [0; 9],
-            lang_en: false, // 默认中文
-            settings_menubar_icon: true,
-            settings_keep_sudo: true,
-            settings_scan_cache: true,
-            settings_confirm_advanced: true,
-            settings_prevent_lid_close: true,
+            lang_en: user_config.lang_en,
+            settings_menubar_icon: user_config.settings_menubar_icon,
+            settings_keep_sudo: user_config.settings_keep_sudo,
+            settings_scan_cache: user_config.settings_scan_cache,
+            settings_confirm_advanced: user_config.settings_confirm_advanced,
+            settings_prevent_lid_close: user_config.settings_prevent_lid_close,
+            settings_auto_restore_point: user_config.settings_auto_restore_point,
+            last_restore_result: None,
+            config_manage_result: None,
+            user_config,
             hud_open: false,
             scan_current_path: String::new(),
             filter_category: None,
@@ -387,6 +422,13 @@ impl App {
             last_hud_click_pos: None,
             residual_selected: Vec::new(),
             residual_cleaning: false,
+            license_status: crate::license::load_status(),
+            license_input: String::new(),
+            license_error: None,
+            show_license_dialog: false,
+            update_available: None,
+            update_rx: Some(update_rx),
+            update_dismissed: false,
             #[cfg(target_os = "windows")]
             uninstall_residual: None,
         }
@@ -903,6 +945,10 @@ impl App {
             return;
         }
 
+        if !self.quota_gate_for(&selected) {
+            return;
+        }
+
         self.pending_delete = selected;
         self.confirm = ConfirmState::Pending;
     }
@@ -924,8 +970,80 @@ impl App {
             return;
         }
 
+        if !self.quota_gate_for(&selected) {
+            return;
+        }
+
         self.pending_delete = selected;
         self.confirm = ConfirmState::Pending;
+    }
+
+    /// 免费额度闸门：返回 true 表示放行，false 表示拦截并弹激活窗
+    fn quota_gate_for(&mut self, selected: &[(usize, usize)]) -> bool {
+        // 开发者模式无限制
+        if crate::license::is_dev_mode() {
+            return true;
+        }
+        // 已激活用户无限制
+        if matches!(
+            self.license_status,
+            crate::license::LicenseStatus::Activated { .. }
+        ) {
+            return true;
+        }
+
+        let plan_bytes: u64 = selected
+            .iter()
+            .filter_map(|(tab_idx, item_idx)| {
+                self.results.get(*tab_idx).and_then(|v| v.get(*item_idx))
+            })
+            .map(|item| item.size_bytes)
+            .sum();
+
+        if crate::license::check_quota_allow(plan_bytes).is_none() {
+            return true;
+        }
+
+        // 额度不足，弹激活窗口
+        self.show_license_dialog = true;
+        false
+    }
+
+    /// 轮询后台更新检查结果（主循环每帧调用，非阻塞）
+    pub fn poll_update(&mut self) {
+        if let Some(rx) = &self.update_rx {
+            if let Ok(info) = rx.try_recv() {
+                self.update_available = Some(info);
+                self.update_rx = None;
+            }
+        }
+    }
+
+    /// 尝试激活 License（UI 调用）
+    pub fn try_activate_license(&mut self) {
+        let key = self.license_input.trim().to_string();
+        if key.is_empty() {
+            self.license_error = Some(if self.lang_en {
+                "Please enter your license key".to_string()
+            } else {
+                "请输入 License Key".to_string()
+            });
+            return;
+        }
+        match crate::license::activate(&key) {
+            Ok(payload) => {
+                self.license_status = crate::license::LicenseStatus::Activated {
+                    email: payload.email,
+                    plan: payload.plan,
+                };
+                self.license_error = None;
+                self.license_input.clear();
+                self.show_license_dialog = false;
+            }
+            Err(e) => {
+                self.license_error = Some(e);
+            }
+        }
     }
 
     /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths, use_trash) 供后台线程使用
@@ -999,16 +1117,28 @@ impl App {
         // 按 Tab 分组处理：移除成功删除的项，取消该 Tab 的选中状态
         let mut affected_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let deleted = self.deleted_paths.clone();
+        let mut freed_bytes: u64 = 0;
 
         for (tab_idx, item_idx) in &self.pending_delete {
             affected_tabs.insert(*tab_idx);
             if let Some(item) = self.results.get_mut(*tab_idx).and_then(|v| v.get_mut(*item_idx)) {
                 item.selected = false;
                 if deleted.contains(&item.path) {
+                    freed_bytes = freed_bytes.saturating_add(item.size_bytes);
                     // 标记为已删除（稍后统一移除）
                     item.path = String::new();
                 }
             }
+        }
+
+        // 免费版记录额度消耗（已激活用户无需记录）
+        if freed_bytes > 0
+            && matches!(
+                self.license_status,
+                crate::license::LicenseStatus::Free
+            )
+        {
+            crate::license::quota_add(freed_bytes);
         }
 
         let affected_tabs_clone = affected_tabs.clone();
@@ -1106,6 +1236,19 @@ impl App {
     /// 切换中英文语言
     pub fn toggle_lang(&mut self) {
         self.lang_en = !self.lang_en;
+        self.user_config.lang_en = self.lang_en;
+        crate::config::save_config(&self.user_config);
+    }
+
+    /// 保存当前设置到 user_config 并写盘
+    pub fn save_settings(&mut self) {
+        self.user_config.settings_menubar_icon = self.settings_menubar_icon;
+        self.user_config.settings_keep_sudo = self.settings_keep_sudo;
+        self.user_config.settings_scan_cache = self.settings_scan_cache;
+        self.user_config.settings_confirm_advanced = self.settings_confirm_advanced;
+        self.user_config.settings_prevent_lid_close = self.settings_prevent_lid_close;
+        self.user_config.settings_auto_restore_point = self.settings_auto_restore_point;
+        crate::config::save_config(&self.user_config);
     }
 
     /// 根据当前语言返回 UI 文本
@@ -1143,6 +1286,30 @@ impl App {
                 "setting_confirm_advanced_desc" => "Advanced items require manual confirmation",
                 "setting_prevent_lid_close" => "Prevent deletion while lid is closed",
                 "setting_prevent_lid_close_desc" => "Detect MacBook clamshell state to avoid accidental deletion",
+                "setting_auto_restore_point" => "Auto-create restore point before operations",
+                "setting_auto_restore_point_desc" => "Create a system restore point before cleanup/optimization (Windows)",
+                "setting_restore_last" => "Restore last registry modification",
+                "setting_restore_last_desc" => "Re-import the most recent registry backup made before optimization. Restores old values only; newly added keys must be removed manually",
+                "restore_last_btn" => "Restore",
+                "restore_last_none" => "No registry backup found",
+                "restore_last_success" => "✅ Restored: {0}",
+                "restore_last_failed" => "⚠️ Restore failed (administrator may be required)",
+                "restore_last_backup_info" => "Last backup: {0} ({1}, {2} keys)",
+                "restore_point_created" => "✅ System restore point created",
+                "restore_point_skipped" => "⏭️ Recent restore point exists, skipped",
+                "restore_point_failed" => "⚠️ Failed to create restore point (administrator required)",
+                "settings_config_mgmt" => "Config Management",
+                "config_dir_label" => "Config directory",
+                "config_export_btn" => "Export Config",
+                "config_import_btn" => "Import Config",
+                "config_open_btn" => "Open Folder",
+                "config_export_success" => "✅ Config exported to: {0}",
+                "config_export_failed" => "⚠️ Export failed: {0}",
+                "config_import_success" => "✅ Config imported ({0}). Restart to fully apply",
+                "config_import_failed" => "⚠️ Import failed: {0}",
+                "config_nothing_to_export" => "⚠️ Nothing to export yet",
+                "config_no_config_found" => "⚠️ No config.json / apps.json found in the folder",
+                "config_apps_hint" => "Place a custom apps.json here to override the built-in bloatware list",
                 "setting_language" => "Interface language",
                 "setting_language_current" => "Current: Simplified Chinese",
                 "switch_to_english" => "Switch to English",
@@ -1257,6 +1424,17 @@ impl App {
                 "optimize_memory_pressure_release" => "Release Memory Pressure",
                 "optimize_spotlight_reindex" => "Rebuild Spotlight Index",
                 "optimize_login_items_audit" => "Audit Login Items",
+                // Windows 优化任务
+                "optimize_win_dns_flush" => "Flush DNS Cache",
+                "optimize_win_temp_cleanup" => "Clean Temp Files",
+                "optimize_win_disable_telemetry" => "Disable Telemetry",
+                "optimize_win_disable_copilot" => "Disable Copilot",
+                "optimize_win_disable_suggestions" => "Disable Ads & Suggestions",
+                "optimize_win_startup_audit" => "Audit Startup Items",
+                "optimize_win_disable_fast_startup" => "Disable Fast Startup",
+                "optimize_win_restore_point" => "Create Restore Point",
+                "optimize_win_restart_explorer" => "Restart Explorer",
+                "optimize_win_trim_drives" => "Optimize Drives (TRIM/Defrag)",
                 "optimize_logs" => "📋 Optimize Logs",
                 // 优化任务执行结果
                 "opt_dns_success" => "✅ DNS cache flushed",
@@ -1275,6 +1453,27 @@ impl App {
                 "opt_spotlight_fail" => "⚠️ Spotlight reindex requires admin privileges. Run in Terminal: sudo mdutil -E /",
                 "opt_login_items_opened" => "✅ Opened System Settings > Login Items",
                 "opt_login_items_fail" => "⚠️ Failed to open Login Items settings",
+                // Windows 优化任务结果
+                "opt_win_dns_success" => "✅ DNS cache flushed",
+                "opt_win_dns_fail" => "⚠️ DNS flush failed. Run in CMD: ipconfig /flushdns",
+                "opt_win_temp_success" => "✅ Cleaned {0} of temp files",
+                "opt_win_temp_fail" => "⚠️ Temp file cleanup failed",
+                "opt_win_telemetry_success" => "✅ Telemetry disabled (registry policy set)",
+                "opt_win_telemetry_fail" => "⚠️ Failed to disable telemetry. Run as Administrator",
+                "opt_win_copilot_success" => "✅ Copilot disabled (registry policy set)",
+                "opt_win_copilot_fail" => "⚠️ Failed to disable Copilot. Run as Administrator",
+                "opt_win_suggestions_success" => "✅ Ads & suggestions disabled",
+                "opt_win_suggestions_fail" => "⚠️ Failed to disable suggestions. Run as Administrator",
+                "opt_win_startup_opened" => "✅ Opened Task Manager > Startup",
+                "opt_win_startup_fail" => "⚠️ Failed to open Task Manager",
+                "opt_win_faststartup_success" => "✅ Fast startup disabled",
+                "opt_win_faststartup_fail" => "⚠️ Failed to disable fast startup. Run as Administrator",
+                "opt_win_restore_success" => "✅ System restore point created",
+                "opt_win_restore_fail" => "⚠️ Failed to create restore point. Run as Administrator",
+                "opt_win_explorer_success" => "✅ Explorer restarted",
+                "opt_win_explorer_fail" => "⚠️ Failed to restart Explorer",
+                "opt_win_trim_success" => "✅ Drive optimization started",
+                "opt_win_trim_fail" => "⚠️ Drive optimization failed. Run as Administrator",
                 "opt_unknown" => "⚠️ Unknown optimization task: {0}",
                 // 权限引导
                 "permission_title" => "Permission Settings",
@@ -1441,6 +1640,30 @@ impl App {
                 "setting_confirm_advanced_desc" => "Advanced 项目必须手动确认",
                 "setting_prevent_lid_close" => "合盖时禁止删除",
                 "setting_prevent_lid_close_desc" => "检测 MacBook 合盖状态，防止误触",
+                "setting_auto_restore_point" => "操作前自动创建系统还原点",
+                "setting_auto_restore_point_desc" => "清理/优化前自动备份系统状态（Windows）",
+                "setting_restore_last" => "还原上次注册表修改",
+                "setting_restore_last_desc" => "重新导入优化前自动备份的注册表文件。仅恢复被覆盖的旧值，新增的键值需手动删除",
+                "restore_last_btn" => "还原",
+                "restore_last_none" => "未找到注册表备份",
+                "restore_last_success" => "✅ 已还原: {0}",
+                "restore_last_failed" => "⚠️ 还原失败（可能需要管理员权限）",
+                "restore_last_backup_info" => "最近备份: {0}（{1}，{2} 个键）",
+                "restore_point_created" => "✅ 系统还原点已创建",
+                "restore_point_skipped" => "⏭️ 近期已有还原点，跳过创建",
+                "restore_point_failed" => "⚠️ 还原点创建失败（需管理员权限）",
+                "settings_config_mgmt" => "配置管理",
+                "config_dir_label" => "配置目录",
+                "config_export_btn" => "导出配置",
+                "config_import_btn" => "导入配置",
+                "config_open_btn" => "打开文件夹",
+                "config_export_success" => "✅ 配置已导出到: {0}",
+                "config_export_failed" => "⚠️ 导出失败: {0}",
+                "config_import_success" => "✅ 配置已导入（{0}），重启后完全生效",
+                "config_import_failed" => "⚠️ 导入失败: {0}",
+                "config_nothing_to_export" => "⚠️ 暂无可导出的配置",
+                "config_no_config_found" => "⚠️ 该文件夹中未找到 config.json / apps.json",
+                "config_apps_hint" => "将自定义 apps.json 放入配置目录可覆盖内置应用列表",
                 "setting_language" => "界面语言",
                 "setting_language_current" => "当前：简体中文",
                 "switch_to_english" => "切换 English",
@@ -1551,6 +1774,17 @@ impl App {
                 "optimize_memory_pressure_release" => "内存压力释放",
                 "optimize_spotlight_reindex" => "Spotlight 索引重建",
                 "optimize_login_items_audit" => "登录项审计",
+                // Windows 优化任务
+                "optimize_win_dns_flush" => "DNS 缓存刷新",
+                "optimize_win_temp_cleanup" => "临时文件清理",
+                "optimize_win_disable_telemetry" => "关闭遥测",
+                "optimize_win_disable_copilot" => "禁用 Copilot",
+                "optimize_win_disable_suggestions" => "关闭广告与建议",
+                "optimize_win_startup_audit" => "启动项审计",
+                "optimize_win_disable_fast_startup" => "关闭快速启动",
+                "optimize_win_restore_point" => "创建系统还原点",
+                "optimize_win_restart_explorer" => "重启资源管理器",
+                "optimize_win_trim_drives" => "驱动器优化 (TRIM/碎片整理)",
                 "optimize_logs" => "📋 优化日志",
                 // 优化任务执行结果
                 "opt_dns_success" => "✅ DNS 缓存已刷新",
@@ -1569,6 +1803,27 @@ impl App {
                 "opt_spotlight_fail" => "⚠️ Spotlight 重建需要管理员权限。请在终端执行：sudo mdutil -E /",
                 "opt_login_items_opened" => "✅ 已打开系统设置 > 登录项",
                 "opt_login_items_fail" => "⚠️ 无法打开登录项设置",
+                // Windows 优化任务结果
+                "opt_win_dns_success" => "✅ DNS 缓存已刷新",
+                "opt_win_dns_fail" => "⚠️ DNS 刷新失败。请在 CMD 执行：ipconfig /flushdns",
+                "opt_win_temp_success" => "✅ 已清理 {0} 临时文件",
+                "opt_win_temp_fail" => "⚠️ 临时文件清理失败",
+                "opt_win_telemetry_success" => "✅ 遥测已关闭（注册表策略已设置）",
+                "opt_win_telemetry_fail" => "⚠️ 关闭遥测失败，请以管理员身份运行",
+                "opt_win_copilot_success" => "✅ Copilot 已禁用（注册表策略已设置）",
+                "opt_win_copilot_fail" => "⚠️ 禁用 Copilot 失败，请以管理员身份运行",
+                "opt_win_suggestions_success" => "✅ 广告与建议已关闭",
+                "opt_win_suggestions_fail" => "⚠️ 关闭建议失败，请以管理员身份运行",
+                "opt_win_startup_opened" => "✅ 已打开任务管理器 > 启动",
+                "opt_win_startup_fail" => "⚠️ 无法打开任务管理器",
+                "opt_win_faststartup_success" => "✅ 快速启动已关闭",
+                "opt_win_faststartup_fail" => "⚠️ 关闭快速启动失败，请以管理员身份运行",
+                "opt_win_restore_success" => "✅ 系统还原点已创建",
+                "opt_win_restore_fail" => "⚠️ 创建还原点失败，请以管理员身份运行",
+                "opt_win_explorer_success" => "✅ 资源管理器已重启",
+                "opt_win_explorer_fail" => "⚠️ 重启资源管理器失败",
+                "opt_win_trim_success" => "✅ 驱动器优化已启动",
+                "opt_win_trim_fail" => "⚠️ 驱动器优化失败，请以管理员身份运行",
                 "opt_unknown" => "⚠️ 未知的优化任务: {0}",
                 // 权限引导
                 "permission_title" => "权限设置",

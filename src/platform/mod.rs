@@ -7,6 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
+// Windows 操作前备份模块（系统还原点 + 注册表备份 + 还原入口）
+#[cfg(target_os = "windows")]
+pub mod windows_backup;
+
 /// 获取当前用户 home 目录
 ///
 /// macOS: $HOME

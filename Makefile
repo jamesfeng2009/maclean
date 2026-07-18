@@ -16,6 +16,14 @@ release:
 run: build
 	./target/debug/maclean
 
+## 开发者模式运行（跳过 License/额度限制）
+dev: build
+	MACLEAN_DEV=1 ./target/debug/maclean
+
+## 开发者模式运行（release）
+dev-release: release
+	MACLEAN_DEV=1 ./target/release/maclean
+
 ## 运行 (release)
 run-release: release
 	./target/release/maclean
@@ -70,6 +78,8 @@ help:
 	@echo "  make build       - 编译 debug 版本"
 	@echo "  make release     - 编译 release 版本"
 	@echo "  make run         - 运行 debug 版本"
+	@echo "  make dev         - 开发者模式运行（无 License 限制）"
+	@echo "  make dev-release - 开发者模式运行 release 版本"
 	@echo "  make run-release - 运行 release 版本"
 	@echo "  make package     - 打包 .pkg 和 .dmg"
 	@echo "  make install     - 安装到 /usr/local/bin"

@@ -397,6 +397,35 @@ fn exact_description_en(desc: &str) -> Option<&'static str> {
         "重建 Spotlight 搜索索引，修复搜索不到文件的问题" => {
             Some("Rebuild Spotlight search index, fixes files not found in search")
         }
+        // === Windows 优化任务描述 ===
+        // （"刷新 DNS 缓存，修复网络解析问题" 与 macOS 任务共用，已在上方定义，此处去重）
+        "清理 Windows 临时文件、缩略图缓存、交付优化缓存" => {
+            Some("Clean Windows temp files, thumbnail cache, delivery optimization cache")
+        }
+        "关闭 Windows 遥测与诊断数据收集，减少隐私泄露" => {
+            Some("Disable Windows telemetry and diagnostic data collection, reduces privacy exposure")
+        }
+        "禁用 Windows Copilot 与 AI 功能，释放内存与后台资源" => {
+            Some("Disable Windows Copilot and AI features, frees memory and background resources")
+        }
+        "关闭开始菜单、设置、锁屏的推荐与广告内容" => {
+            Some("Disable recommended and promotional content in Start menu, Settings, and lock screen")
+        }
+        "审计开机启动项与计划任务，加快开机速度" => {
+            Some("Audit startup items and scheduled tasks, speeds up boot time")
+        }
+        "关闭快速启动，减少休眠文件占用并避免驱动异常" => {
+            Some("Disable fast startup, reduces hibernation file usage and avoids driver issues")
+        }
+        "创建系统还原点，优化前自动备份当前状态" => {
+            Some("Create system restore point, automatically backs up current state before optimization")
+        }
+        "重启资源管理器，刷新任务栏/开始菜单/桌面" => {
+            Some("Restart Explorer, refreshes taskbar/Start menu/desktop")
+        }
+        "对 SSD 执行 TRIM 优化，对 HDD 执行碎片整理" => {
+            Some("Run TRIM optimization for SSDs, defragmentation for HDDs")
+        }
         // === 注册表新增缓存描述 ===
         "Carthage 依赖构建缓存，可安全删除" => {
             Some("Carthage dependency build cache, safe to delete")

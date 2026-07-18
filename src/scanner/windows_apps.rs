@@ -18,6 +18,265 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 // =========================================================================
+//  UWP 预装应用数据库（bloatware 列表）
+//
+//  参考 Win11Debloat (https://github.com/Raphire/Win11Debloat) Config/Apps.json
+//  收录 50+ 个常见预装 UWP 应用，带友好名称、推荐等级、卸载方式。
+//  用于在 App 卸载 Tab 中高亮显示可安全清理的 bloatware。
+// =========================================================================
+
+/// UWP 预装应用条目
+#[derive(Debug, Clone)]
+pub struct BloatwareEntry {
+    /// 友好显示名称
+    pub friendly_name: &'static str,
+    /// UWP 包名或 AppId（用于匹配 Get-AppxPackage / WinGet）
+    pub app_id: &'static str,
+    /// 描述
+    pub description: &'static str,
+    /// 是否默认选中（对应 Win11Debloat 的 SelectedByDefault）
+    pub selected_by_default: bool,
+    /// 推荐等级（对应 maclean 的 Recommend）
+    pub recommend: Recommend,
+    /// 卸载方式：Appx / WinGet / AppxOrWinGet
+    pub removal_method: RemovalMethod,
+}
+
+/// 卸载方式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemovalMethod {
+    /// 通过 Remove-AppxPackage 卸载
+    Appx,
+    /// 通过 winget uninstall 卸载
+    WinGet,
+    /// 优先 Appx，失败则尝试 WinGet
+    AppxOrWinGet,
+}
+
+// =========================================================================
+//  P2-1: 动态 bloatware 数据库（用户 apps.json 可覆盖内置 DB）
+// =========================================================================
+
+/// 可序列化的 bloatware 条目（owned 版本，兼容 Win11Debloat Apps.json 格式）
+///
+/// JSON 示例:
+/// ```json
+/// {
+///   "FriendlyName": "Clipchamp",
+///   "AppId": "Clipchamp.Clipchamp",
+///   "Description": "Video editor from Microsoft",
+///   "SelectedByDefault": true,
+///   "Recommendation": "safe",
+///   "RemovalMethod": "Appx"
+/// }
+/// ```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct BloatwareEntryOwned {
+    pub friendly_name: String,
+    pub app_id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub selected_by_default: bool,
+    #[serde(rename = "Recommendation", with = "recommend_serde", default = "default_recommend")]
+    pub recommend: Recommend,
+    #[serde(default = "default_removal_method")]
+    pub removal_method: RemovalMethod,
+}
+
+fn default_recommend() -> Recommend {
+    Recommend::Safe
+}
+
+fn default_removal_method() -> RemovalMethod {
+    RemovalMethod::Appx
+}
+
+/// Recommend 与 Win11Debloat 字符串格式的互转
+///
+/// JSON: "safe" | "caution" | "advanced" | "cacheonly"（大小写不敏感）
+mod recommend_serde {
+    use super::Recommend;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(r: &Recommend, s: S) -> Result<S::Ok, S::Error> {
+        let text = match r {
+            Recommend::Safe => "safe",
+            Recommend::CacheOnly => "cacheonly",
+            Recommend::Caution => "caution",
+            Recommend::Advanced => "advanced",
+        };
+        s.serialize_str(text)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Recommend, D::Error> {
+        let text = String::deserialize(d)?.to_lowercase();
+        Ok(match text.as_str() {
+            "safe" => Recommend::Safe,
+            "cacheonly" | "cache_only" | "cache" => Recommend::CacheOnly,
+            "caution" => Recommend::Caution,
+            "advanced" => Recommend::Advanced,
+            _ => Recommend::Safe,
+        })
+    }
+}
+
+/// Win11Debloat Apps.json 顶层结构
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct AppsJsonFile {
+    #[serde(default)]
+    #[allow(dead_code)]
+    version: String,
+    apps: Vec<BloatwareEntryOwned>,
+}
+
+/// 内置 DB 转 owned 版本
+fn builtin_entries_owned() -> Vec<BloatwareEntryOwned> {
+    BLOATWARE_DB
+        .iter()
+        .map(|e| BloatwareEntryOwned {
+            friendly_name: e.friendly_name.to_string(),
+            app_id: e.app_id.to_string(),
+            description: e.description.to_string(),
+            selected_by_default: e.selected_by_default,
+            recommend: e.recommend,
+            removal_method: e.removal_method,
+        })
+        .collect()
+}
+
+/// 加载 bloatware 条目（用户 apps.json 优先，内置 DB 兜底）
+fn load_bloatware_entries() -> Vec<BloatwareEntryOwned> {
+    let user_path = crate::config::apps_json_path();
+    if let Ok(content) = std::fs::read_to_string(&user_path) {
+        match serde_json::from_str::<AppsJsonFile>(&content) {
+            Ok(cfg) if !cfg.apps.is_empty() => {
+                crate::logger::info(&format!(
+                    "已加载用户 bloatware 配置 ({}): {} 项",
+                    user_path.display(),
+                    cfg.apps.len()
+                ));
+                return cfg.apps;
+            }
+            Ok(_) => {
+                crate::logger::error("用户 apps.json 为空，回退内置数据库");
+            }
+            Err(e) => {
+                crate::logger::error(&format!("用户 apps.json 解析失败（回退内置）: {}", e));
+            }
+        }
+    }
+    builtin_entries_owned()
+}
+
+/// 全局 bloatware 数据库（启动时加载一次）
+static BLOATWARE_CACHE: std::sync::OnceLock<Vec<BloatwareEntryOwned>> =
+    std::sync::OnceLock::new();
+
+/// 获取 bloatware 数据库引用
+pub fn bloatware_db() -> &'static [BloatwareEntryOwned] {
+    BLOATWARE_CACHE.get_or_init(load_bloatware_entries)
+}
+
+/// 内置 bloatware 数据库（50+ 项）
+///
+/// 按类别分组：Microsoft 系 → OEM/第三方 → 游戏/娱乐 → 工具
+pub const BLOATWARE_DB: &[BloatwareEntry] = &[
+    // ===== Microsoft 系 =====
+    BloatwareEntry { friendly_name: "Clipchamp", app_id: "Clipchamp.Clipchamp", description: "Video editor from Microsoft", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "3D Builder", app_id: "Microsoft.3DBuilder", description: "Basic 3D modeling software", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Cortana", app_id: "Microsoft.549981C3F5F10", description: "Microsoft Cortana voice assistant (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing Finance", app_id: "Microsoft.BingFinance", description: "Finance news and tracking via Bing (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing Food And Drink", app_id: "Microsoft.BingFoodAndDrink", description: "Recipes and food news via Bing (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing Health And Fitness", app_id: "Microsoft.BingHealthAndFitness", description: "Health and fitness tracking/news via Bing (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing News", app_id: "Microsoft.BingNews", description: "News aggregator via Bing (Replaced by Microsoft News/Start)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing Sports", app_id: "Microsoft.BingSports", description: "Sports news and scores via Bing (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing Translator", app_id: "Microsoft.BingTranslator", description: "Translation service via Bing", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing Travel", app_id: "Microsoft.BingTravel", description: "Travel planning and news via Bing (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Bing Weather", app_id: "Microsoft.BingWeather", description: "Weather forecast via Bing", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft Copilot", app_id: "XP9CXNGPPJ97XX", description: "AI assistant integrated into Windows", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::WinGet },
+    BloatwareEntry { friendly_name: "Copilot+ AI Hub", app_id: "Microsoft.Windows.AIHub", description: "Copilot+ AI Hub app (Windows 11 24H2+)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft PC Manager", app_id: "Microsoft.PCManager", description: "Microsoft PC Manager system cleanup tool", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Get Started", app_id: "Microsoft.Getstarted", description: "Tips and introductory guide for Windows", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Messaging", app_id: "Microsoft.Messaging", description: "Messaging app (Largely discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "3D Viewer", app_id: "Microsoft.Microsoft3DViewer", description: "Viewer for 3D models", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft Journal", app_id: "Microsoft.MicrosoftJournal", description: "Digital note-taking app optimized for pen input", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Office Hub", app_id: "Microsoft.MicrosoftOfficeHub", description: "Hub to access Microsoft Office apps and documents", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Power BI", app_id: "Microsoft.MicrosoftPowerBIForWindows", description: "Business analytics service client", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Solitaire Collection", app_id: "Microsoft.MicrosoftSolitaireCollection", description: "Collection of solitaire card games", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Sticky Notes", app_id: "Microsoft.MicrosoftStickyNotes", description: "Digital sticky notes app (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Mixed Reality Portal", app_id: "Microsoft.MixedReality.Portal", description: "Portal for Windows Mixed Reality headsets", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Network Speed Test", app_id: "Microsoft.NetworkSpeedTest", description: "Internet connection speed test utility", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft News", app_id: "Microsoft.News", description: "News aggregator (now part of Microsoft Start)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "OneNote", app_id: "Microsoft.Office.OneNote", description: "Digital note-taking app (UWP version)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Sway", app_id: "Microsoft.Office.Sway", description: "Presentation and storytelling app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "One Connect", app_id: "Microsoft.OneConnect", description: "Mobile Operator management app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Print 3D", app_id: "Microsoft.Print3D", description: "3D printing preparation software", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Power Automate", app_id: "Microsoft.PowerAutomateDesktop", description: "Desktop automation tool (RPA)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Skype (UWP)", app_id: "Microsoft.SkypeApp", description: "Skype communication app (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft To Do", app_id: "Microsoft.Todos", description: "To-do list and task management app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Dev Home", app_id: "Microsoft.Windows.DevHome", description: "Developer dashboard (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Alarms & Clock", app_id: "Microsoft.WindowsAlarms", description: "Alarms & Clock app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Feedback Hub", app_id: "Microsoft.WindowsFeedbackHub", description: "App for providing feedback to Microsoft", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Windows Maps", app_id: "Microsoft.WindowsMaps", description: "Mapping and navigation app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Sound Recorder", app_id: "Microsoft.WindowsSoundRecorder", description: "Basic audio recording app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Xbox Console Companion", app_id: "Microsoft.XboxApp", description: "Old Xbox Console Companion App (Discontinued)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Movies & TV", app_id: "Microsoft.ZuneVideo", description: "Movies & TV app (Films & TV)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Family Safety", app_id: "MicrosoftCorporationII.MicrosoftFamily", description: "Family Safety App for managing family accounts", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Quick Assist", app_id: "MicrosoftCorporationII.QuickAssist", description: "Remote assistance tool", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft Teams (Old)", app_id: "MicrosoftTeams", description: "Old Microsoft Teams personal (MS Store)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft Teams (New)", app_id: "MSTeams", description: "New Microsoft Teams app (Work/School/Personal)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    // ===== OEM/第三方 =====
+    BloatwareEntry { friendly_name: "ACG Media Player", app_id: "ACGMediaPlayer", description: "Media player app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Actipro Software", app_id: "ActiproSoftwareLLC", description: "UI controls or software components, often bundled by OEMs", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Adobe Photoshop Express", app_id: "AdobeSystemsIncorporated.AdobePhotoshopExpress", description: "Basic photo editing app from Adobe", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Amazon", app_id: "Amazon.com.Amazon", description: "Amazon shopping app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Prime Video", app_id: "AmazonVideo.PrimeVideo", description: "Amazon Prime Video streaming service app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Autodesk SketchBook", app_id: "AutodeskSketchBook", description: "Digital drawing and sketching app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Candy Crush Saga", app_id: "CandyCrushSaga", description: "Popular puzzle game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Candy Crush Soda Saga", app_id: "CandyCrushSodaSaga", description: "Puzzle game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Disney Magic Kingdoms", app_id: "DisneyMagicKingdoms", description: "Disney-themed simulation game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Dolby Access", app_id: "DolbyLaboratories.DolbyAccess", description: "Dolby Atmos sound enhancement app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Dolby Audio", app_id: "DolbyLaboratories.DolbyAudio", description: "Dolby audio driver companion app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Dragon Mania Legends", app_id: "DragonManiaLegends", description: "Dragon breeding simulation game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Farm Heroes Saga", app_id: "FarmHeroesSaga", description: "Puzzle game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Hidden City", app_id: "HiddenCityMysteryofShadows", description: "Hidden object adventure game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "iHeartRadio", app_id: "iHeartRadio", description: "Radio and music streaming app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "LinkedIn", app_id: "LinkedInforWindows", description: "Professional networking app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "March of Empires", app_id: "MarchofEmpires", description: "Strategy game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Minecraft", app_id: "Minecraft", description: "Minecraft for Windows 10/11 (Bedrock Edition)", selected_by_default: true, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Netflix", app_id: "Netflix", description: "Streaming service app", selected_by_default: true, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Pandora", app_id: "PandoraMediaInc", description: "Music streaming app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Phototastic Collage", app_id: "PhototasticCollage", description: "Photo collage maker", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "PicsArt Photo Studio", app_id: "PicsArtPhotoStudio", description: "Photo editing app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Royal Revolt 2", app_id: "RoyalRevolt2", description: "Strategy game", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Shazam", app_id: "Shazam", description: "Music recognition app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Snapchat", app_id: "Snapchat", description: "Social media app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Speed Test by Ookla", app_id: "Ookla.Speedtest", description: "Internet speed test app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Spotify", app_id: "SpotifyAB.SpotifyMusic", description: "Music streaming app", selected_by_default: true, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "TikTok", app_id: "TikTok", description: "Short video app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "TripAdvisor", app_id: "TripAdvisor", description: "Travel reviews app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Twitter", app_id: "Twitter", description: "Social media app (X)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Viber", app_id: "Viber", description: "Messaging and calling app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Wikipedia", app_id: "Wikipedia", description: "Wikipedia app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Wunderlist", app_id: "Wunderlist", description: "To-do list app (Discontinued, replaced by Microsoft To Do)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Xbox Game Bar", app_id: "Microsoft.XboxGamingOverlay", description: "Game bar overlay for recording and sharing", selected_by_default: false, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Xbox Game Speech Window", app_id: "Microsoft.XboxSpeechToTextOverlay", description: "Speech-to-text overlay for gaming", selected_by_default: false, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Xbox Identity Provider", app_id: "Microsoft.XboxIdentityProvider", description: "Xbox authentication provider", selected_by_default: false, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Your Phone", app_id: "Microsoft.YourPhone", description: "Phone Link companion app", selected_by_default: false, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Groove Music", app_id: "Microsoft.ZuneMusic", description: "Music player (Discontinued, replaced by Media Player)", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Mail and Calendar", app_id: "microsoft.windowscommunicationsapps", description: "Built-in mail and calendar app", selected_by_default: false, recommend: Recommend::Caution, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft People", app_id: "Microsoft.People", description: "Contacts management app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Microsoft Edge", app_id: "Microsoft.MicrosoftEdge", description: "Web browser (Stable)", selected_by_default: false, recommend: Recommend::Advanced, removal_method: RemovalMethod::AppxOrWinGet },
+    BloatwareEntry { friendly_name: "Microsoft Edge Dev", app_id: "Microsoft.MicrosoftEdgeDevToolsClient", description: "Edge developer tools", selected_by_default: false, recommend: Recommend::Advanced, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Paint 3D", app_id: "Microsoft.MSPaint", description: "3D painting app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Voice Recorder", app_id: "Microsoft.WindowsSoundRecorder", description: "Voice recording app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+    BloatwareEntry { friendly_name: "Weather", app_id: "Microsoft.BingWeather", description: "Weather app", selected_by_default: true, recommend: Recommend::Safe, removal_method: RemovalMethod::Appx },
+];
+
+// =========================================================================
 //  磁盘扫描配置
 //
 //  默认只扫描 C 盘（大部分应用安装在 C 盘）。
@@ -360,6 +619,65 @@ fn is_critical_system_app(app: &WindowsAppInfo) -> bool {
     }
 
     false
+}
+
+/// 在 bloatware 数据库中查找匹配的应用
+///
+/// 匹配策略（按优先级）：
+/// 1. 精确匹配 app_id（UWP 的 Name 字段即包名，如 Microsoft.BingWeather）
+/// 2. 精确匹配 app_id 与 PackageFullName 的 Name 段（第一个 '_' 之前）
+/// 3. 精确匹配 friendly_name（应用显示名，主要命中 Win32 DisplayName）
+/// 4. 模糊匹配：应用名/包全名包含 app_id 或 friendly_name
+///
+/// 数据源为动态 bloatware_db()（用户 apps.json 可覆盖内置 DB）。
+/// 返回匹配的 BloatwareEntryOwned 引用，未匹配返回 None。
+fn find_bloatware_match(app: &WindowsAppInfo) -> Option<&'static BloatwareEntryOwned> {
+    let name_lower = app.name.to_lowercase();
+    let key_lower = app.key_name.to_lowercase();
+    let db = bloatware_db();
+
+    // 1. 精确匹配 app_id（UWP 扫描时 name 字段存的就是包名）
+    for entry in db {
+        if entry.app_id.eq_ignore_ascii_case(&app.name) {
+            return Some(entry);
+        }
+    }
+
+    // 2. PackageFullName 的 Name 段匹配（格式: <Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>）
+    if app.is_uwp {
+        let pkg_name = app.key_name.split('_').next().unwrap_or("");
+        if !pkg_name.is_empty() {
+            for entry in db {
+                if entry.app_id.eq_ignore_ascii_case(pkg_name) {
+                    return Some(entry);
+                }
+            }
+        }
+    }
+
+    // 3. 精确匹配 friendly_name（应用显示名）
+    for entry in db {
+        if entry.friendly_name.eq_ignore_ascii_case(&app.name) {
+            return Some(entry);
+        }
+    }
+
+    // 4. 模糊匹配：应用名/包全名包含 app_id 或 friendly_name（处理版本后缀等变体）
+    for entry in db {
+        let app_id_lower = entry.app_id.to_lowercase();
+        let friendly_lower = entry.friendly_name.to_lowercase();
+
+        // 应用名包含 app_id（如 "Microsoft.BingWeather_8wekyb3d8bbwe"）
+        if key_lower.contains(&app_id_lower) {
+            return Some(entry);
+        }
+        // 应用名包含 friendly_name（如 "Microsoft Copilot" 匹配 "Microsoft Copilot"）
+        if name_lower.contains(&friendly_lower) {
+            return Some(entry);
+        }
+    }
+
+    None
 }
 
 /// 判断是否为安全/MDM 软件
@@ -1388,6 +1706,7 @@ impl Scanner for WindowsUninstallScanner {
 
         for app in apps {
             let protection = check_protection(&app);
+            let bloatware_match = find_bloatware_match(&app);
 
             // 记录保护检测日志
             match protection {
@@ -1407,6 +1726,20 @@ impl Scanner for WindowsUninstallScanner {
                     ));
                 }
                 WinProtectionLevel::None => {}
+            }
+
+            // 记录 bloatware 匹配日志
+            if let Some(ref bw) = bloatware_match {
+                crate::logger::info(&format!(
+                    "Bloatware 匹配: {} -> {} ({})",
+                    app.name,
+                    bw.friendly_name,
+                    match bw.removal_method {
+                        RemovalMethod::Appx => "Appx",
+                        RemovalMethod::WinGet => "WinGet",
+                        RemovalMethod::AppxOrWinGet => "AppxOrWinGet",
+                    }
+                ));
             }
 
             let (deletable, reason, desc_suffix) = match protection {
@@ -1459,23 +1792,43 @@ impl Scanner for WindowsUninstallScanner {
                 (Vec::new(), 0, Vec::new(), 0)
             };
 
-            // 1) 应用卸载项：只卸载应用本体
-            items.push(ScanItem {
-                path: uninstall_path,
-                size_bytes: size,
-                category: format!("{} (卸载)", app.name),
-                selected: false,
-                deletable,
-                undeletable_reason: reason,
-                batch_paths: Vec::new(),
-                recommend: Recommend::Caution,
-                description: format!(
+            // 确定卸载项的推荐等级和描述
+            // Bloatware 匹配优先，其次保护级别，默认 Caution
+            let (uninstall_recommend, uninstall_desc) = if let Some(ref bw) = bloatware_match {
+                let desc = format!(
+                    "🗑️ {} ({}) - {} | {} | 大小: {}",
+                    app.name,
+                    if app.is_uwp { "UWP" } else { "Win32" },
+                    bw.friendly_name,
+                    bw.description,
+                    display_size
+                );
+                (bw.recommend, desc)
+            } else {
+                let desc = format!(
                     "{} ({}){} - 大小: {} | 仅卸载应用本体，不会删除用户数据与缓存",
                     app.name,
                     if app.is_uwp { "UWP" } else { "Win32" },
                     desc_suffix,
                     display_size
-                ),
+                );
+                (Recommend::Caution, desc)
+            };
+
+            // 1) 应用卸载项：只卸载应用本体
+            items.push(ScanItem {
+                path: uninstall_path,
+                size_bytes: size,
+                category: format!("{} (卸载)", app.name),
+                selected: bloatware_match
+                    .as_ref()
+                    .map(|bw| bw.selected_by_default)
+                    .unwrap_or(false),
+                deletable,
+                undeletable_reason: reason,
+                batch_paths: Vec::new(),
+                recommend: uninstall_recommend,
+                description: uninstall_desc,
             });
 
             // 2) 应用数据项（Advanced）：删数据类文件
@@ -1692,21 +2045,182 @@ pub fn uninstall_app(path: &str) -> (bool, String) {
 }
 
 /// 卸载 UWP/Store 应用
+///
+/// 根据 BLOATWARE_DB 中的 removal_method 决定卸载方式：
+/// - Appx（默认）:   Remove-AppxPackage，失败尝试 -AllUsers
+/// - WinGet:         优先 winget uninstall，失败回退 Appx
+/// - AppxOrWinGet:   优先 Appx，失败回退 WinGet
+/// - 未匹配条目:     默认 Appx
+///
+/// Appx 卸载成功后会尝试清理 provisioned package（防止新用户登录时重装）。
 fn uninstall_uwp(package_full_name: &str) -> (bool, String) {
-    let ps_cmd = format!("Remove-AppxPackage -Package '{}'", package_full_name);
+    // PackageFullName 格式: <Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>
+    let package_name = package_full_name.split('_').next().unwrap_or(package_full_name);
+    let entry = bloatware_db()
+        .iter()
+        .find(|e| e.app_id.eq_ignore_ascii_case(package_name));
+
+    match entry.map(|e| e.removal_method) {
+        Some(RemovalMethod::WinGet) => {
+            let r = uninstall_uwp_winget(entry.unwrap());
+            if r.0 {
+                r
+            } else {
+                // winget 失败（可能未安装），回退 Appx
+                let fallback = uninstall_uwp_appx(package_full_name);
+                if fallback.0 {
+                    fallback
+                } else {
+                    r
+                }
+            }
+        }
+        Some(RemovalMethod::AppxOrWinGet) => {
+            let r = uninstall_uwp_appx(package_full_name);
+            if r.0 {
+                r
+            } else {
+                uninstall_uwp_winget(entry.unwrap())
+            }
+        }
+        _ => uninstall_uwp_appx(package_full_name),
+    }
+}
+
+/// 通过 PowerShell Remove-AppxPackage 卸载 UWP 应用
+///
+/// 1. 先按当前用户卸载（Remove-AppxPackage -Package）
+/// 2. 失败则尝试所有用户（Get-AppxPackage -AllUsers | Remove-AppxPackage -AllUsers，需管理员）
+/// 3. 成功后清理 provisioned package（阻止重装后复活，失败不影响结果）
+fn uninstall_uwp_appx(package_full_name: &str) -> (bool, String) {
+    let ps_cmd = format!(
+        "Remove-AppxPackage -Package '{}' -ErrorAction Stop",
+        package_full_name
+    );
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
         .output();
-    match output {
+
+    let success = match output {
         Ok(out) => {
             if out.status.success() {
-                (true, format!("UWP 应用 {} 已卸载", package_full_name))
+                true
             } else {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                (false, format!("UWP 卸载失败: {}", stderr))
+                // 当前用户卸载失败，尝试所有用户（需管理员权限）
+                let package_name =
+                    package_full_name.split('_').next().unwrap_or(package_full_name);
+                let all_users_cmd = format!(
+                    "Get-AppxPackage -AllUsers -Name '{}' | Remove-AppxPackage -AllUsers -ErrorAction Stop",
+                    package_name
+                );
+                match Command::new("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", &all_users_cmd])
+                    .output()
+                {
+                    Ok(retry) if retry.status.success() => true,
+                    Ok(retry) => {
+                        let stderr = String::from_utf8_lossy(&retry.stderr);
+                        return (
+                            false,
+                            format!("UWP 卸载失败（含 AllUsers 重试）: {}", stderr.trim()),
+                        );
+                    }
+                    Err(e) => return (false, format!("执行 PowerShell 失败: {}", e)),
+                }
             }
         }
-        Err(e) => (false, format!("执行 PowerShell 失败: {}", e)),
+        Err(e) => return (false, format!("执行 PowerShell 失败: {}", e)),
+    };
+
+    if success {
+        // 清理 provisioned package（阻止新用户登录时重装，需管理员，失败不影响结果）
+        let package_name = package_full_name.split('_').next().unwrap_or(package_full_name);
+        cleanup_provisioned_package(package_name);
+        (true, format!("UWP 应用 {} 已卸载", package_full_name))
+    } else {
+        (false, format!("UWP 应用 {} 卸载失败", package_full_name))
+    }
+}
+
+/// 清理 provisioned package（防止应用在新用户登录时自动重装）
+///
+/// 需要管理员权限，失败静默忽略（仅记日志），不影响卸载主流程。
+fn cleanup_provisioned_package(package_name: &str) {
+    let ps_cmd = format!(
+        "Get-AppxProvisionedPackage -Online | Where-Object {{$_.DisplayName -eq '{}'}} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Out-Null",
+        package_name
+    );
+    match Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            crate::logger::info(&format!(
+                "已清理 provisioned package: {}",
+                package_name
+            ));
+        }
+        _ => {
+            crate::logger::info(&format!(
+                "provisioned package 清理跳过（需管理员或不存在）: {}",
+                package_name
+            ));
+        }
+    }
+}
+
+/// 通过 winget 卸载应用
+///
+/// 1. 优先 `winget uninstall --id <AppId>`（精确）
+/// 2. 失败则 `winget uninstall --name "<FriendlyName>"`（按名称匹配）
+fn uninstall_uwp_winget(entry: &BloatwareEntryOwned) -> (bool, String) {
+    // 尝试 --id 精确卸载
+    let id_result = Command::new("winget")
+        .args([
+            "uninstall",
+            "--id",
+            entry.app_id.as_str(),
+            "--silent",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ])
+        .output();
+
+    match id_result {
+        Ok(out) if out.status.success() => {
+            return (true, format!("{} 已通过 winget 卸载", entry.friendly_name));
+        }
+        Ok(_) => {} // 继续尝试 --name
+        Err(e) => {
+            // winget 命令不存在
+            return (false, format!("winget 不可用: {}", e));
+        }
+    }
+
+    // 回退：按名称卸载
+    let name_result = Command::new("winget")
+        .args([
+            "uninstall",
+            "--name",
+            entry.friendly_name.as_str(),
+            "--silent",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ])
+        .output();
+
+    match name_result {
+        Ok(out) if out.status.success() => {
+            (true, format!("{} 已通过 winget 卸载", entry.friendly_name))
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            (
+                false,
+                format!("winget 卸载 {} 失败: {}", entry.friendly_name, stderr.trim()),
+            )
+        }
+        Err(e) => (false, format!("winget 不可用: {}", e)),
     }
 }
 

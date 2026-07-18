@@ -24,30 +24,12 @@ impl Scanner for OptimizeScanner {
     fn scan(&self) -> ScanResult {
         let start = Instant::now();
 
-        // 8 项安全的系统优化任务
-        // path 使用英文 key，UI 层通过 app.t("optimize_xxx") 翻译显示
-        let items = vec![
-            make_task("dns_cache_flush", "刷新 DNS 缓存，修复网络解析问题"),
-            make_task(
-                "quicklook_rebuild",
-                "清理 QuickLook 缩略图缓存，修复预览问题",
-            ),
-            make_task(
-                "launchservices_rebuild",
-                "重建 LaunchServices 数据库，修复\"打开方式\"菜单问题",
-            ),
-            make_task("saved_state_cleanup", "清理超过 30 天的应用保存状态"),
-            make_task("gatekeeper_cleanup", "清理 Gatekeeper 下载追踪记录"),
-            make_task(
-                "memory_pressure_release",
-                "释放非活跃内存，提升系统响应速度",
-            ),
-            make_task(
-                "spotlight_reindex",
-                "重建 Spotlight 搜索索引，修复搜索不到文件的问题",
-            ),
-            make_task("login_items_audit", &scan_login_items_description()),
-        ];
+        // 平台专属优化任务
+        let items = if cfg!(target_os = "windows") {
+            windows_optimize_tasks()
+        } else {
+            macos_optimize_tasks()
+        };
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
@@ -58,6 +40,78 @@ impl Scanner for OptimizeScanner {
             scan_time_ms,
         }
     }
+}
+
+/// macOS 优化任务（8 项）
+fn macos_optimize_tasks() -> Vec<ScanItem> {
+    vec![
+        make_task("dns_cache_flush", "刷新 DNS 缓存，修复网络解析问题"),
+        make_task(
+            "quicklook_rebuild",
+            "清理 QuickLook 缩略图缓存，修复预览问题",
+        ),
+        make_task(
+            "launchservices_rebuild",
+            "重建 LaunchServices 数据库，修复\"打开方式\"菜单问题",
+        ),
+        make_task("saved_state_cleanup", "清理超过 30 天的应用保存状态"),
+        make_task("gatekeeper_cleanup", "清理 Gatekeeper 下载追踪记录"),
+        make_task(
+            "memory_pressure_release",
+            "释放非活跃内存，提升系统响应速度",
+        ),
+        make_task(
+            "spotlight_reindex",
+            "重建 Spotlight 搜索索引，修复搜索不到文件的问题",
+        ),
+        make_task("login_items_audit", &scan_login_items_description()),
+    ]
+}
+
+/// Windows 优化任务（10 项）
+///
+/// 参考 Win11Debloat (https://github.com/Raphire/Win11Debloat) 设计，
+/// 聚焦清理、隐私、性能三类安全优化，不涉及系统关键服务。
+fn windows_optimize_tasks() -> Vec<ScanItem> {
+    vec![
+        make_task("win_dns_flush", "刷新 DNS 缓存，修复网络解析问题"),
+        make_task(
+            "win_temp_cleanup",
+            "清理 Windows 临时文件、缩略图缓存、交付优化缓存",
+        ),
+        make_task(
+            "win_disable_telemetry",
+            "关闭 Windows 遥测与诊断数据收集，减少隐私泄露",
+        ),
+        make_task(
+            "win_disable_copilot",
+            "禁用 Windows Copilot 与 AI 功能，释放内存与后台资源",
+        ),
+        make_task(
+            "win_disable_suggestions",
+            "关闭开始菜单、设置、锁屏的推荐与广告内容",
+        ),
+        make_task(
+            "win_startup_audit",
+            "审计开机启动项与计划任务，加快开机速度",
+        ),
+        make_task(
+            "win_disable_fast_startup",
+            "关闭快速启动，减少休眠文件占用并避免驱动异常",
+        ),
+        make_task(
+            "win_restore_point",
+            "创建系统还原点，优化前自动备份当前状态",
+        ),
+        make_task(
+            "win_restart_explorer",
+            "重启资源管理器，刷新任务栏/开始菜单/桌面",
+        ),
+        make_task(
+            "win_trim_drives",
+            "对 SSD 执行 TRIM 优化，对 HDD 执行碎片整理",
+        ),
+    ]
 }
 
 // =========================================================================
