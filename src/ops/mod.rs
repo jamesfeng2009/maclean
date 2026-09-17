@@ -262,11 +262,12 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
 
 /// 启动所有 Tab 的后台扫描（用于概览页"扫描全部"）
 pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
-    // 标记所有 Tab 为扫描中
-    for tab_idx in 1..app.results.len() {
-        app.scan_states[tab_idx] = ScanState::Scanning;
-    }
-    app.scan_progress = 0.0;
+    // 标记所有 Tab 为扫描中，并清空上一次结果
+    //
+    // 必须与 start_scan 一样 clear()：PartialItems 走 extend，
+    // 不清空的话二次「扫描全部」时列表是旧+新叠加，概览统计翻倍；
+    // 若某 Tab 扫描 panic 没发 Done，重复项还会固化下来。
+    app.reset_for_full_scan();
 
     let (tx, rx) = mpsc::channel();
     *scan_rx = Some(rx);
@@ -899,7 +900,7 @@ pub(crate) fn start_delete(
                                     residual.env_vars.iter().filter(|e| e.deletable).count(),
                                     residual.filesystem.len(),
                                     residual.filesystem.iter().filter(|f| f.deletable).count(),
-                                    format_size(fs_size),
+                                    scanner::format_size(fs_size),
                                 ));
                                 // 发送残留信息到 UI，弹出残留清理弹窗让用户选择
                                 let _ = tx.send(DeleteMessage::ResidualFound(residual));
@@ -1191,14 +1192,79 @@ pub(crate) fn write_private_temp_file(prefix: &str, ext: &str, content: &str) ->
     Some(path)
 }
 
-/// sudo 删除前的二次安全校验（P0-1）
+/// 创建名称不可预测、独占打开的临时文件（Windows 实现）
 ///
-/// 阶段一（普通删除）已做过 `safety` 校验，但两个阶段之间存在时间差：
+/// Windows 没有 unix 的 `O_NOFOLLOW` / `mode(0o600)`，这里用等价手段达到同样的
+/// 保护强度（设计目标与 unix 版一致）：
+/// - `create_new(true)` → `CREATE_NEW`：目标已存在（**包括**那里已有一个符号链接
+///   或 junction 占位）就直接失败，既不覆盖也不跟随，等价于 `O_EXCL | O_NOFOLLOW`
+/// - `share_mode(0)`：独占打开，同机其它进程无法再读写该文件，等价于 0600 的作用
+/// - 文件名混入纳秒时间戳 + pid + 尝试序号，不可用"猜下一个名字"的方式占位
+///
+/// 这条防线是为了让随后的 UAC 提权删除脚本不会被本地其它进程预先占位 / 替换，
+/// 否则就是标准的本地提权路径（参见 unix 版注释里的 P0-2 说明）。
+#[cfg(target_os = "windows")]
+pub(crate) fn create_private_temp_file(
+    prefix: &str,
+    ext: &str,
+) -> Option<(std::path::PathBuf, std::fs::File)> {
+    use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const SHARE_NONE: u32 = 0;
+
+    for attempt in 0..64u64 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(attempt as u128);
+        let mixed = nanos ^ (((std::process::id() as u128) << 40) ^ ((attempt as u128) << 100));
+        let name = format!("{}_{:032x}.{}", prefix, mixed, ext);
+        let path = std::env::temp_dir().join(name);
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(SHARE_NONE)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if file.flush().is_ok() {
+                    return Some((path, file));
+                }
+                let _ = std::fs::remove_file(&path);
+            }
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// 写入一个受保护的临时文本文件，返回路径（见 create_private_temp_file 安全说明）
+#[cfg(target_os = "windows")]
+pub(crate) fn write_private_temp_file(
+    prefix: &str,
+    ext: &str,
+    content: &str,
+) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    let (path, mut file) = create_private_temp_file(prefix, ext)?;
+    file.write_all(content.as_bytes()).ok()?;
+    file.flush().ok()?;
+    Some(path)
+}
+
+/// **不可逆删除之前的二次安全校验**（P0-1）
+///
+/// 名字里不再写 "sudo"：GUI 的提权删除和 CLI 的 `clean` 都要过这一层，
+/// 语义是「执行删除的那一刻之前重做校验」，跟要不要提权无关。
+///
+/// 为什么必须复做：扫描时做过 `safety` 校验，但到真正删除之间有时间差，
 /// 路径可能已被替换成别的东西（TOCTOU），也可能被换成了符号链接。
-/// 阶段二以 root 执行 `rm -rf`，一旦放行不可恢复，所以这里必须逐项重做校验。
+/// 这一层的删除一旦放行不可恢复，所以必须逐项重做。
 ///
 /// 返回：`(允许放行的项, 被拦截的项及原因)`
-pub(crate) fn sanitize_for_sudo(
+pub(crate) fn sanitize_before_delete(
     items: Vec<(String, String)>,
     lang_en: bool,
 ) -> (Vec<(String, String)>, Vec<(String, String, String)>) {
@@ -1254,6 +1320,10 @@ pub(crate) fn sanitize_for_sudo(
 /// 启动后台 sudo 删除线程
 /// 使用 egui 内置输入框收集到的密码，通过 sudo -S 的 stdin 传入，
 /// 避免调用 System Events / osascript 触发钥匙串弹窗。
+///
+/// macOS 专属：`sudo -S` + `/bin/bash` 脚本 + `xcrun simctl` 三者共同构成这条链路，
+/// 离开 macOS 都不成立。Windows 的实现走 UAC 提权，见下方同名函数。
+#[cfg(target_os = "macos")]
 pub(crate) fn start_sudo_delete(
     failed_items: Vec<(String, String)>,
     password: String,
@@ -1265,7 +1335,7 @@ pub(crate) fn start_sudo_delete(
     }
 
     // P0-1：sudo 以 root 执行 rm -rf，放行前必须重做安全校验
-    let (failed_items, rejected) = sanitize_for_sudo(failed_items, lang_en);
+    let (failed_items, rejected) = sanitize_before_delete(failed_items, lang_en);
 
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
@@ -1702,20 +1772,28 @@ exit 0
 }
 
 /// 使用 Touch ID 的 sudo 删除（不需要密码，sudo 自动触发 Touch ID）
+/// 启动 Touch ID 提权的删除线程
+///
+/// 返回是否真的拉起了线程 —— 调用方据此决定要不要保留 `delete_rx`。
+/// （空 `failed_items` 时直接返回 false，不碰 `delete_rx`。）
+///
+/// macOS 专属：依赖 pam_tid / sudo_local 这套 Touch ID 提权机制。
+#[cfg(target_os = "macos")]
 pub(crate) fn start_sudo_delete_touchid(
     failed_items: Vec<(String, String)>,
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
-) {
+) -> bool {
     if failed_items.is_empty() {
-        return;
+        return false;
     }
 
     // P0-1：与密码路径同样，放行前必须重做安全校验
-    let (failed_items, rejected) = sanitize_for_sudo(failed_items, lang_en);
+    let (failed_items, rejected) = sanitize_before_delete(failed_items, lang_en);
 
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
+    let started = true;
 
     std::thread::spawn(move || {
         for (path, category, reason) in &rejected {
@@ -2141,6 +2219,8 @@ exit 0
         let _ = std::fs::remove_file(&tmp_script);
         let _ = tx.send(DeleteMessage::Done);
     });
+
+    started
 }
 
 /// 跨平台在默认浏览器打开 URL
@@ -2534,3 +2614,332 @@ pub(crate) fn clean_dir_size(dir: &str) -> u64 {
     total
 }
 
+
+// =========================================================================
+//  Windows UAC 提权删除
+// =========================================================================
+//
+//  macOS 侧用 `sudo -S` 复用系统授权；Windows 没有 sudo，正确做法是 UAC 提权
+//  （`Start-Process -Verb RunAs`），由系统弹窗完成授权。
+//
+//  下面的 `escape_ps_single_quoted` / `build_uac_delete_script` 故意不加
+//  `#[cfg(target_os = "windows")]`：它们是纯字符串处理，跨平台可编译，
+//  因此能在开发机（macOS）上跑真正的单元测试。命令构造是这个链路里唯一
+//  可确定性测试的部分，也是最容易被注入突破的部分，必须有测试兜。
+
+/// PowerShell 单引号字符串内的转义：`'` → `''`
+///
+/// 删除脚本里的路径一律用单引号字符串字面量承载（单引号串不做变量展开、
+/// 不解释反引号，语义最接近"原样传参"）。唯一能突破它的是路径里自带的
+/// 单引号，所以只需要把 `'` 翻倍。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn escape_ps_single_quoted(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// 生成 UAC 提权删除脚本的内容
+///
+/// `items` 为 (路径, 类别)，`result_path` 为脚本写回逐项结果的位置。
+/// 脚本对每项输出一行 `OK\t<path>` 或 `FAIL\t<path>\t<原因>`，主进程据此上报。
+///
+/// 注意 `Remove-Item` 必须走 `-LiteralPath`：默认的 `-Path` 会把 `[` `]`
+/// 当通配符解释，含方括号的目录（如 `foo[1]`）会被匹配错或直接报错。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn build_uac_delete_script(items: &[(String, String)], result_path: &str) -> String {
+    let mut s = String::new();
+    s.push_str("$ErrorActionPreference = 'Stop'\n");
+    s.push_str("$lines = New-Object System.Collections.Generic.List[string]\n");
+    s.push_str("$paths = @(\n");
+    for (path, _category) in items {
+        // 路径中含 `;` 等字符在单引号字面量里是安全的，只需转义单引号
+        s.push_str(&format!("'{}'\n", escape_ps_single_quoted(path)));
+    }
+    s.push_str(")\n");
+    s.push_str(
+        r#"foreach ($p in $paths) {
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    try {
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+        }
+        if (Test-Path -LiteralPath $p) {
+            [void]$lines.Add("FAIL`t$p`tdelete reported no error but target still exists")
+        } else {
+            [void]$lines.Add("OK`t$p")
+        }
+    } catch {
+        [void]$lines.Add("FAIL`t$p`t$($_.Exception.Message)")
+    }
+}
+"#,
+    );
+    s.push_str(&format!(
+        "[System.IO.File]::WriteAllLines('{}', $lines, [System.Text.UTF8Encoding]::new($false))\n",
+        escape_ps_single_quoted(result_path)
+    ));
+    s
+}
+
+/// 启动 UAC 提权删除线程（Windows 实现）
+///
+/// 与 macOS 版 `start_sudo_delete` 同签名（方便 UI 层不分平台调用）：
+/// 普通删除失败的项目走到这里，用管理员权限重试一次。
+///
+/// 安全约束（与 macOS 侧对齐）：
+/// - 放行前用 `sanitize_before_delete` 逐项重做 safety 校验，防阶段间的 TOCTOU
+/// - 脚本与结果文件都写在不可预测、独占打开的临时文件里（见各自的
+///   `create_private_temp_file` 说明），避免被本地进程占位后以管理员执行
+/// - 路径经单引号转义后嵌入脚本
+///
+/// `password` 参数在 Windows 上不使用：授权由系统 UAC 弹窗完成，
+/// 自绘输入框收集密码既不安全也无处可用。这里显式消费掉避免误用。
+#[cfg(target_os = "windows")]
+pub(crate) fn start_sudo_delete(
+    failed_items: Vec<(String, String)>,
+    password: String,
+    lang_en: bool,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
+    // Windows 不做命令行密码，交给 UAC
+    let _ = password;
+
+    if failed_items.is_empty() {
+        return;
+    }
+
+    // P0-1：以管理员权限删除前必须重做安全校验
+    let (failed_items, rejected) = sanitize_before_delete(failed_items, lang_en);
+
+    let (tx, rx) = mpsc::channel();
+    *delete_rx = Some(rx);
+
+    std::thread::spawn(move || {
+        // 先播报被安全校验拦截的项，避免用户以为软件没干活
+        for (path, category, reason) in rejected {
+            let line = App::tf_lang(lang_en, "log_sudo_rejected", &[&path, &reason]);
+            let _ = tx.send(DeleteMessage::Log(line, path, category, false));
+        }
+
+        if failed_items.is_empty() {
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        }
+
+        let _ = tx.send(DeleteMessage::Info(
+            App::t_lang(lang_en, "log_sudo_phase").to_string(),
+        ));
+
+        // path -> category，结果文件里只有路径，需要回填类别来发日志
+        let category_of: std::collections::HashMap<String, String> = failed_items
+            .iter()
+            .map(|(p, c)| (p.clone(), c.clone()))
+            .collect();
+
+        // 结果文件：脚本以管理员身份写回逐项结果
+        let Some(result_path) = write_private_temp_file("maclean_uac_res", "log", "") else {
+            crate::logger::error("无法安全创建结果文件，放弃 UAC 提权删除");
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        };
+        let result_path_str = result_path.to_string_lossy().to_string();
+
+        let Some(script_path) = write_private_temp_file(
+            "maclean_uac_del",
+            "ps1",
+            &build_uac_delete_script(&failed_items, &result_path_str),
+        ) else {
+            crate::logger::error("无法安全创建删除脚本，放弃 UAC 提权删除");
+            let _ = std::fs::remove_file(&result_path);
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        };
+        let script_path_str = script_path.to_string_lossy().to_string();
+
+        // Start-Process -Verb RunAs 触发 UAC；-Wait 保证本次删除跑完才继续。
+        // 用户在 UAC 弹窗点"否"会抛异常 → catch 分支返回非零，据此区分"被拒绝"
+        // 与"删除失败"，不要用同一句报错糊过去。
+        let launcher = format!(
+            "try {{ $null = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','{}') -Verb RunAs -Wait -PassThru; exit 0 }} catch {{ exit 1 }}",
+            escape_ps_single_quoted(&script_path_str)
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &launcher])
+            .status();
+
+        let uac_failed = match status {
+            Ok(s) => !s.success(),
+            Err(e) => {
+                crate::logger::error(&format!("无法启动 UAC 提权进程: {}", e));
+                true
+            }
+        };
+
+        let Ok(results) = std::fs::read_to_string(&result_path) else {
+            crate::logger::error("未能读回 UAC 删除结果");
+            let _ = std::fs::remove_file(&script_path);
+            let _ = std::fs::remove_file(&result_path);
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        };
+
+        let mut reported = 0usize;
+        for raw_line in results.lines() {
+            let line = raw_line.trim_end_matches(['\r', '\n']);
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut parts = line.splitn(3, '\t');
+            let status = parts.next().unwrap_or("");
+            let path = parts.next().unwrap_or("").to_string();
+            if path.is_empty() {
+                continue;
+            }
+            let category = category_of.get(&path).cloned().unwrap_or_default();
+            let message = parts.next().unwrap_or("").to_string();
+            reported += 1;
+            match status {
+                "OK" => {
+                    // 复用 macOS 侧同一句话：Deleted [<类别>] <路径> (admin privileges)
+                    let _ = tx.send(DeleteMessage::Log(
+                        App::tf_lang(lang_en, "log_deleted_sudo", &[&category, &path]),
+                        path,
+                        category,
+                        true,
+                    ));
+                }
+                _ => {
+                    // log_delete_failed 有两个占位符：路径 + 失败原因
+                    let reason = if message.is_empty() {
+                        App::t_lang(lang_en, "log_still_exists").to_string()
+                    } else {
+                        message
+                    };
+                    let _ = tx.send(DeleteMessage::Log(
+                        App::tf_lang(lang_en, "log_delete_failed", &[&path, &reason]),
+                        path,
+                        category,
+                        false,
+                    ));
+                }
+            }
+        }
+
+        // UAC 被拒绝时脚本根本没执行，结果文件是空的，这里要明确告诉用户
+        if uac_failed && reported == 0 {
+            let _ = tx.send(DeleteMessage::Info(
+                App::t_lang(lang_en, "sudo_cancelled_log").to_string(),
+            ));
+        }
+
+        let _ = std::fs::remove_file(&script_path);
+        let _ = std::fs::remove_file(&result_path);
+        let _ = tx.send(DeleteMessage::Done);
+    });
+}
+
+/// 其它平台（Linux 等）的提权删除
+///
+/// 既没有 macOS 的 `sudo -S`，也没有 Windows 的 UAC，所谓"提权重试"无从谈起。
+/// 这里退化为再删一次并**如实上报结果**：不做 sudo 幻想，也不把失败粉饰成成功。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn start_sudo_delete(
+    failed_items: Vec<(String, String)>,
+    password: String,
+    lang_en: bool,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) {
+    let _ = password;
+    if failed_items.is_empty() {
+        return;
+    }
+
+    let (failed_items, rejected) = sanitize_before_delete(failed_items, lang_en);
+
+    let (tx, rx) = mpsc::channel();
+    *delete_rx = Some(rx);
+
+    std::thread::spawn(move || {
+        for (path, category, reason) in rejected {
+            let line = App::tf_lang(lang_en, "log_sudo_rejected", &[&path, &reason]);
+            let _ = tx.send(DeleteMessage::Log(line, path, category, false));
+        }
+
+        for (path, category) in failed_items {
+            let ok = best_effort_delete(std::path::Path::new(&path));
+            let line = if ok {
+                App::tf_lang(lang_en, "log_deleted_sudo", &[&category, &path])
+            } else {
+                App::tf_lang(
+                    lang_en,
+                    "log_delete_failed",
+                    &[&path, App::t_lang(lang_en, "log_still_exists")],
+                )
+            };
+            let _ = tx.send(DeleteMessage::Log(line, path, category, ok));
+        }
+
+        let _ = tx.send(DeleteMessage::Done);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ps_single_quote_is_doubled() {
+        assert_eq!(escape_ps_single_quoted("plain"), "plain");
+        assert_eq!(escape_ps_single_quoted("Bob's App"), "Bob''s App");
+        assert_eq!(escape_ps_single_quoted("a'b'c"), "a''b''c");
+    }
+
+    #[test]
+    fn ps_escape_neutralises_quote_breakout() {
+        // 恶意路径试图提前闭合单引号再拼一条命令出去
+        let evil = "C:\\x'; Remove-Item -LiteralPath C:\\Windows -Recurse -Force; echo '";
+        let escaped = escape_ps_single_quoted(evil);
+        // 转义后不应再出现"单个单引号跟着命令"的结构
+        assert!(
+            !escaped.contains("' Remove-Item"),
+            "注入串没有被转义: {}",
+            escaped
+        );
+        assert_eq!(escaped.matches('\'').count(), evil.matches('\'').count() * 2);
+    }
+
+    #[test]
+    fn uac_script_uses_literalpath_and_escapes_paths() {
+        let items = vec![
+            (
+                "C:\\Users\\Bob\\AppData\\Local\\Temp\\x".to_string(),
+                "临时文件".to_string(),
+            ),
+            ("C:\\Users\\Bob's\\cache".to_string(), "Cache".to_string()),
+        ];
+        let script = build_uac_delete_script(&items, "C:\\tmp\\result.log");
+
+        // -LiteralPath 而非 -Path：否则含 [] 的目录会被当通配符
+        assert!(script.contains("Remove-Item -LiteralPath $p -Recurse -Force"));
+        assert!(script.contains("Test-Path -LiteralPath $p"));
+        // 两条路径都被写入，且带撇号的那条做了转义
+        assert!(script.contains("'C:\\Users\\Bob\\AppData\\Local\\Temp\\x'"));
+        assert!(script.contains("'C:\\Users\\Bob''s\\cache'"));
+        // 结果文件落盘
+        assert!(script.contains("[System.IO.File]::WriteAllLines('C:\\tmp\\result.log'"));
+    }
+
+    #[test]
+    fn uac_script_result_line_protocol() {
+        let items = vec![("C:\\a".to_string(), "A".to_string())];
+        let script = build_uac_delete_script(&items, "C:\\r");
+        assert!(script.contains("OK`t$p"), "缺少成功行协议");
+        assert!(script.contains("FAIL`t$p"), "缺少失败行协议");
+    }
+
+    #[test]
+    fn uac_script_empty_items_still_valid() {
+        let script = build_uac_delete_script(&[], "C:\\r");
+        assert!(script.contains("$paths = @(\n)"));
+        assert!(script.contains("WriteAllLines"));
+    }
+}

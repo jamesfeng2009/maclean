@@ -13,7 +13,6 @@ use crate::scanner::app_cache::AppCacheScanner;
 use crate::scanner::app_data::AppDataScanner;
 use crate::scanner::dev_cache::DevCacheScanner;
 use crate::scanner::large_files::LargeFileScanner;
-#[cfg(target_os = "macos")]
 use crate::scanner::optimize::OptimizeScanner;
 #[cfg(target_os = "macos")]
 use crate::scanner::uninstall::UninstallScanner;
@@ -126,7 +125,6 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
         "app-data" => AppDataScanner::new().scan().items,
         #[cfg(target_os = "macos")]
         "app-uninstall" => UninstallScanner::new().scan().items,
-        #[cfg(target_os = "macos")]
         "optimize" => OptimizeScanner::new().scan().items,
         #[cfg(target_os = "macos")]
         "apfs" => ApfsScanner::new().scan().items,
@@ -310,17 +308,32 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
             continue;
         }
 
+        // 删除前复做安全校验（与 GUI 同一层）
+        //
+        // 扫描时判过 `deletable`，但从扫描到删除有时间差：路径可能已被替换
+        // （TOCTOU），也可能被换成符号链接 —— 对软链执行 remove_dir_all 会
+        // 顺着链接删到目标之外。GUI 侧 ops::sanitize_before_delete 一直在做
+        // 这件事，CLI 原先完全跳过，等于绕过整层防护直接删。
+        let pairs: Vec<(String, String)> = to_clean
+            .iter()
+            .filter(|i| !i.path.starts_with("snapshot:"))
+            .map(|i| (i.path.clone(), i.category.clone()))
+            .collect();
+        let skipped_snapshots = to_clean.len() - pairs.len();
+
+        let (allowed, rejected) = crate::ops::sanitize_before_delete(pairs, false);
+
+        for (path, _category, reason) in &rejected {
+            println!("  🛡️  已拦截 {} — {}", path, reason);
+        }
+        if skipped_snapshots > 0 {
+            println!("  ⏭️  跳过 {} 个 APFS 快照（需特殊处理）", skipped_snapshots);
+        }
+
         // 实际删除
         let mut success = 0usize;
         let mut failed = 0usize;
-        for item in &to_clean {
-            let path = &item.path;
-            if path.starts_with("snapshot:") {
-                // APFS 快照跳过（需要特殊处理）
-                println!("  ⏭️  跳过快照: {}", path);
-                continue;
-            }
-
+        for (path, _category) in &allowed {
             let result = if std::path::Path::new(path).is_dir() {
                 std::fs::remove_dir_all(path)
             } else {
@@ -339,7 +352,12 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
             }
         }
 
-        println!("\n  完成：成功 {}，失败 {}", success, failed);
+        println!(
+            "\n  完成：成功 {}，失败 {}，安全拦截 {}",
+            success,
+            failed,
+            rejected.len()
+        );
     }
 }
 
@@ -458,5 +476,62 @@ fn cmd_log(tail: Option<usize>, open: bool) {
         println!("\n用法:");
         println!("  maclean log --tail 50    # 查看最近 50 行日志");
         println!("  maclean log --open       # 在文件管理器中打开日志目录");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // -----------------------------------------------------------------
+    //  #33 · CLI 删除路径的安全校验
+    //
+    //  `cmd_clean` 曾经只按 `item.deletable` 过滤就 `remove_dir_all`，
+    //  全程没有任何 safety 调用，也没有软链复查 —— GUI 侧一直在
+    //  `ops::sanitize_before_delete` 里做这件事，CLI 整层跳过。
+    //
+    //  cmd_clean 要真扫一遍磁盘才跑得起来，没法在测试里端到端执行，
+    //  所以这里用源码级断言钉住接线，防止有人把校验删回去。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn clean_command_runs_the_same_pre_delete_gate_as_the_gui() {
+        let src = include_str!("cli.rs");
+        let body = src[src.find("fn cmd_clean").expect("cmd_clean 不见了")..]
+            .split("\nfn ")
+            .next()
+            .unwrap();
+
+        assert!(
+            body.contains("sanitize_before_delete("),
+            "CLI 删除前没有复做安全校验，等于绕过保护直接删"
+        );
+        // 删除循环必须遍历校验放行后的列表，而不是原始扫描结果。
+        // 注意不能简单断言 "不出现 to_clean" —— dry-run 分支要用它列清单，
+        // 那是合法的。
+        assert!(
+            body.contains("for (path, _category) in &allowed"),
+            "删除循环没有走校验放行后的 allowed 列表"
+        );
+        let deletion_loop = body[body.find("for (path, _category) in &allowed").unwrap()..]
+            .split("\n        }")
+            .next()
+            .unwrap();
+        assert!(
+            !deletion_loop.contains("&to_clean"),
+            "删除循环又直接用上了未校验的 to_clean"
+        );
+    }
+
+    #[test]
+    fn clean_command_reports_intercepted_items_instead_of_deleting_them() {
+        // 被拦截的项必须显式告知用户，不能静默跳过 —— 否则用户以为删干净了
+        let src = include_str!("cli.rs");
+        let body = src[src.find("fn cmd_clean").expect("cmd_clean 不见了")..]
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(
+            body.contains("已拦截"),
+            "被安全校验拦下的项没有打印出来，用户无从得知"
+        );
     }
 }

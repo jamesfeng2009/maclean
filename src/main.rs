@@ -159,16 +159,16 @@ fn get_disk_info() -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-use crate::ops::*;
-
-    use super::*;
+    // 上轮补 P0 回归测试时加的：sanitize_before_delete / write_private_temp_file 等
+    // 都从这里来。别改成逐个具名导入再删这条 —— 编译能过但测试会集体失踪。
+    use crate::ops::*;
 
     // ---------- P0-1: sudo 阶段二次校验 ----------
 
     #[test]
     fn sanitize_rejects_path_with_newline() {
         // 换行会让 sudo 脚本的单引号包裹失效 → 命令注入
-        let (allowed, rejected) = sanitize_for_sudo(
+        let (allowed, rejected) = sanitize_before_delete(
             vec![("/tmp/foo\n/bin/rm -rf /".to_string(), "缓存".to_string())],
             false,
         );
@@ -178,7 +178,7 @@ use crate::ops::*;
 
     #[test]
     fn sanitize_rejects_path_with_command_substitution() {
-        let (allowed, rejected) = sanitize_for_sudo(
+        let (allowed, rejected) = sanitize_before_delete(
             vec![("/tmp/$(whoami)".to_string(), "缓存".to_string())],
             false,
         );
@@ -189,7 +189,7 @@ use crate::ops::*;
     #[test]
     fn sanitize_rejects_path_with_backtick() {
         let (allowed, rejected) =
-            sanitize_for_sudo(vec![("/tmp/a`id`b".to_string(), "缓存".to_string())], false);
+            sanitize_before_delete(vec![("/tmp/a`id`b".to_string(), "缓存".to_string())], false);
         assert!(allowed.is_empty());
         assert_eq!(rejected.len(), 1);
     }
@@ -197,7 +197,7 @@ use crate::ops::*;
     #[test]
     fn sanitize_rejects_system_protected_path() {
         // 系统关键目录即使在阶段一漏过，阶段二也必须拦下
-        let (allowed, rejected) = sanitize_for_sudo(
+        let (allowed, rejected) = sanitize_before_delete(
             vec![("/System/Library/Foo".to_string(), "缓存".to_string())],
             false,
         );
@@ -208,7 +208,7 @@ use crate::ops::*;
     #[test]
     fn sanitize_rejects_empty_path() {
         let (allowed, rejected) =
-            sanitize_for_sudo(vec![(String::new(), "缓存".to_string())], false);
+            sanitize_before_delete(vec![(String::new(), "缓存".to_string())], false);
         assert!(allowed.is_empty());
         assert_eq!(rejected.len(), 1);
     }

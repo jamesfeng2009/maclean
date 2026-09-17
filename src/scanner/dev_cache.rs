@@ -47,8 +47,7 @@ impl Scanner for DevCacheScanner {
         #[cfg(target_os = "macos")]
         items.extend(scan_homebrew_caches());
         items.extend(scan_pip_caches());
-        // JetBrains 跨平台（macOS 路径，Windows 上会返回空）
-        #[cfg(target_os = "macos")]
+        // JetBrains 跨平台：macOS 与 Windows 各有自己的根目录，见 jetbrains_roots
         items.extend(scan_jetbrains_caches());
 
         // Java/Gradle/Maven 和 Python 缓存（跨平台）
@@ -200,7 +199,10 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.is_empty() || path.starts_with(".") {
+                // 注意：这里要判断的是**文件名**是否以 . 开头。
+                // 原写法 `path.starts_with(".")` 是对完整路径做 Path 组件匹配，
+                // 恒为 false，导致隐藏目录完全没被过滤。
+                if name.is_empty() || name.starts_with('.') {
                     continue;
                 }
                 let size = dir_size(&path);
@@ -780,12 +782,47 @@ fn scan_pip_caches() -> Vec<ScanItem> {
 // =========================================================================
 
 /// 扫描 JetBrains IDE 相关缓存和旧版本配置
+/// JetBrains 的配置根目录与缓存根目录
+///
+/// macOS: ~/Library/Application Support/JetBrains、~/Library/Caches/JetBrains
+/// Windows: %APPDATA%\JetBrains、%LOCALAPPDATA%\JetBrains
+///
+/// 环境变量从参数注入（而不是在函数里读）是为了可测：一旦写死读 env，
+/// 就只能在某台装了 JetBrains 的真机上验证，写不出确定性的用例。
+fn jetbrains_roots(
+    windows: bool,
+    home: &std::path::Path,
+    appdata: Option<&str>,
+    localappdata: Option<&str>,
+) -> (PathBuf, PathBuf) {
+    if windows {
+        let config = appdata
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Roaming"));
+        let cache = localappdata
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"));
+        (config.join("JetBrains"), cache.join("JetBrains"))
+    } else {
+        (
+            home.join("Library/Application Support/JetBrains"),
+            home.join("Library/Caches/JetBrains"),
+        )
+    }
+}
+
 fn scan_jetbrains_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
     let home = home_dir();
+    let windows = cfg!(target_os = "windows");
+    let (jb_support, jb_caches) = jetbrains_roots(
+        windows,
+        &home,
+        std::env::var("APPDATA").ok().as_deref(),
+        std::env::var("LOCALAPPDATA").ok().as_deref(),
+    );
 
-    // 1. ~/Library/Application Support/JetBrains/ - 找出非最新版本的配置目录
-    let jb_support = home.join("Library/Application Support/JetBrains");
+    // 1. 配置根目录 - 找出非最新版本的配置目录
     if jb_support.is_dir() {
         // 收集所有版本目录，按产品名分组
         // key: 产品名 (如 "IntelliJIdea"), value: (目录全名, 版本号字符串)
@@ -803,8 +840,10 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
 
         // 对每个产品，按版本降序排序，保留最新版本，其余标记为旧版
         for (_product, mut versions) in products {
-            // 版本号格式如 "2024.2"，字符串比较即可正确排序
-            versions.sort_by(|a, b| b.1.cmp(&a.1));
+            // 必须走 version_compare 的自然序：字符串比较会认为
+            // "2024.10" < "2024.2"，于是把更新的版本当成旧版删掉。
+            // 降序：排在最前的是最新版，会被 skip(1) 保留。
+            versions.sort_by(|a, b| version_compare(&b.1, &a.1));
 
             // 跳过最新版本（第一个），其余作为旧版
             for (dir_name, _) in versions.iter().skip(1) {
@@ -825,8 +864,7 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
         }
     }
 
-    // 2. ~/Library/Caches/JetBrains - IDE 缓存目录
-    let jb_caches = home.join("Library/Caches/JetBrains");
+    // 2. 缓存根目录 - 重启 IDE 会自动重建，可安全删除
     if jb_caches.is_dir() {
         let size = dir_size(&jb_caches);
         items.push(ScanItem {
@@ -849,7 +887,8 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
 ///
 /// 输出示例：
 ///   Total Disk Images: 3 (24.2G)
-/// 解析最后一行的总大小（例如 24.2G）。
+/// 解析最后一行的总大小（例如 24.2G），进制固定 1024（已实测，见
+/// `parse_total_disk_image_size` 的注释）。
 ///
 /// 注：普通 dir_size() 也能遍历该目录，但会跳过无权限子目录，结果可能
 /// 偏大（包含 overlay 文件）或不准确。simctl 提供 Apple 官方的 runtime
@@ -861,19 +900,7 @@ fn get_simulator_runtime_size() -> Option<u64> {
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // 查找 Total Disk Images 行，例如 "Total Disk Images: 3 (24.2G)"
-    for line in stdout.lines() {
-        if let Some(start) = line.find("(") {
-            if let Some(end) = line.find(")") {
-                let size_str = &line[start + 1..end];
-                let bytes = parse_size_str(size_str.trim());
-                if bytes > 0 {
-                    return Some(bytes);
-                }
-            }
-        }
-    }
-    None
+    parse_total_disk_image_size(&stdout)
 }
 
 /// 获取模拟器 Cryptex 目录大小
@@ -1734,24 +1761,44 @@ fn get_docker_reclaimable_size() -> u64 {
         return 0;
     }
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    sum_docker_reclaimable(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 汇总 `docker system df` 输出里的可回收空间（跨平台纯函数）
+///
+/// 抽出来是因为这段有两个静默出错的点，且都不容易从 UI 表面看出来：
+///
+/// 1. **单位是 1000 进制**。`docker` 用 Go 的 humanize，`1.2GB` = 1.2e9 而非
+///    1.2 * 1024³。按 1024 解析会把 1GB 高估 7.4%、1TB 高估 10%，
+///    用户看到的"可回收空间"全是虚标的。底下 `parse_size_str` 的 `si` 参数
+///    就是为这个留的，这里必须传 true。
+/// 2. **Local Volumes 要排除**。`docker system prune` 默认**不清理**数据卷，
+///    算进去同样虚高 —— 而 UI 描述里写的是"不会清理数据卷"，自相矛盾。
+fn sum_docker_reclaimable(stdout: &str) -> u64 {
     let mut total: u64 = 0;
     for line in stdout.lines() {
         // 每行: "Images\t1.2GB\t800MB (66%)"
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
-            // Reclaimable 列: "800MB (66%)" 或 "0B"
+            if parts[0].trim() == "Local Volumes" {
+                continue;
+            }
             let reclaim_str = parts[2].split_whitespace().next().unwrap_or("0B");
-            total += parse_size_str(reclaim_str);
+            total += parse_size_str(reclaim_str, true);
         }
     }
     total
 }
 
-/// 解析 Docker/人类可读的大小字符串为字节数
+/// 解析人类可读的大小字符串为字节数
 ///
 /// 支持: 1.2GB, 800MB, 50KB, 1024B, 0B, 24.2G, 100M, 10K
-fn parse_size_str(s: &str) -> u64 {
+///
+/// `si` = true 按 1000 进制，false 按 1024 进制。
+/// Docker（`docker system df`）用的是 Go 的 humanize，是 **1000 进制**；
+/// 之前统一按 1024 解析，1GB 会高估 7.4%、1TB 高估 10%，
+/// 用户看到的"可回收空间"是虚高的。
+fn parse_size_str(s: &str, si: bool) -> u64 {
     let s = s.trim();
     if s.is_empty() || s == "0B" {
         return 0;
@@ -1763,16 +1810,75 @@ fn parse_size_str(s: &str) -> u64 {
         .map(|idx| (&s[..idx], &s[idx..]))
         .unwrap_or((s, "B"));
 
-    let num: f64 = num_part.parse().unwrap_or(0.0);
+    // trim 是为了容忍 "1024 B" 这种数字与单位之间带空格的写法
+    let num: f64 = num_part.trim().parse().unwrap_or(0.0);
+    let base: f64 = if si { 1000.0 } else { 1024.0 };
     let multiplier: f64 = match unit.to_uppercase().as_str() {
-        "GB" | "G" => 1024.0 * 1024.0 * 1024.0,
-        "MB" | "M" => 1024.0 * 1024.0,
-        "KB" | "K" => 1024.0,
+        "GB" | "G" => base * base * base,
+        "MB" | "M" => base * base,
+        "KB" | "K" => base,
         "B" => 1.0,
-        _ => 1.0,
+        // 认不出的单位一律按"解析失败"处理，不要回落成 1 字节。
+        // 早期这里写 `_ => 1.0`，于是 simctl 输出里的 build 号 "22F77"
+        // 被当成 size 解析成 22 —— 24.6G 的镜像被报成 22 字节。
+        _ => return 0,
     };
 
     (num * multiplier) as u64
+}
+
+/// 括号内容是否像一条合法的 size 串（数字 + K/M/G/B/T 单位）
+///
+/// `simctl runtime list` 的**每一行**都可能带括号：`iOS 18.5 (22F77) - ... (Ready)`。
+/// 只取"第一个括号"而不校验内容，就会被 build 号和状态词骗掉。
+fn is_size_token(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let idx = match t.find(|c: char| c.is_ascii_alphabetic()) {
+        Some(i) => i,
+        None => return false,
+    };
+    let (num, unit) = (t[..idx].trim(), t[idx..].trim());
+    if num.is_empty() || num.parse::<f64>().is_err() {
+        return false;
+    }
+    if !num.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return false;
+    }
+    matches!(
+        unit.to_uppercase().as_str(),
+        "B" | "K" | "KB" | "M" | "MB" | "G" | "GB" | "T" | "TB"
+    )
+}
+
+/// 从 `xcrun simctl runtime list` 的输出里解析镜像总大小
+///
+/// 只认 `Total Disk Images` 那一行，且括号内容必须通过 `is_size_token`。
+///
+/// 二进制进制是**实测**结论，不是猜的：本机三份 runtime 的 `sizeBytes`
+/// 精确总和 26,371,017,423 B，对 `24.6G × 1024³` 偏差 -0.16%（四舍五入级），
+/// 对 `24.6G × 1000³` 偏差 +7.2%。所以这里固定用 1024，`si = false`。
+fn parse_total_disk_image_size(stdout: &str) -> Option<u64> {
+    for line in stdout.lines() {
+        if !line.contains("Total Disk Images") {
+            continue;
+        }
+        let (start, end) = match (line.find('('), line.find(')')) {
+            (Some(s), Some(e)) if e > s => (s, e),
+            _ => continue,
+        };
+        let token = &line[start + 1..end];
+        if !is_size_token(token) {
+            continue;
+        }
+        let bytes = parse_size_str(token.trim(), false);
+        if bytes > 0 {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 /// 扫描 Docker 相关缓存
@@ -2394,6 +2500,29 @@ fn extract_quoted_value(line: &str) -> Option<String> {
 /// .DS_Store 是 Finder 自动生成的目录元数据文件（保存图标位置、排序方式等），
 /// 可安全删除，Finder 会在下次访问目录时自动重建。
 ///
+/// 目录遍历时是否应跳过该目录
+///
+/// 黑名单里混着两种形式：单个目录名（`node_modules`）和带斜杠的相对路径
+/// （`Library/Caches`）。原来对后者也用 `name == skip` 比较，而 `name` 只是
+/// 单个文件名 —— 那些带斜杠的项**永不生效**，遍历仍会深入
+/// Caches / Application Support 这些动辄几十 GB 的目录。
+///
+/// 抽成自由函数是为了能单测：这条过滤规则错了不会报错，只会默默变慢。
+fn should_skip_dir_entry(name: &str, path: &std::path::Path, skip_dirs: &[&str]) -> bool {
+    for skip in skip_dirs {
+        if skip.contains('/') {
+            // 按路径后缀匹配；要求前导分隔符，避免 "...FooLibrary/Caches" 误伤
+            let p = path.to_string_lossy().replace('\\', "/");
+            if p.ends_with(&format!("/{}", skip)) {
+                return true;
+            }
+        } else if name == *skip {
+            return true;
+        }
+    }
+    false
+}
+
 /// 递归扫描主目录（最大深度 5），跳过系统保护目录和大型缓存目录，
 /// 将所有 .DS_Store 路径聚合为单个 ScanItem，通过 batch_paths 批量删除。
 fn scan_ds_store_files() -> Vec<ScanItem> {
@@ -2436,10 +2565,13 @@ fn scan_ds_store_files() -> Vec<ScanItem> {
             if e.depth() > 0 && e.file_type().is_dir() {
                 let name = e.file_name().to_string_lossy().to_string();
                 // 跳过黑名单目录
-                for skip in skip_dirs {
-                    if name == *skip {
-                        return false;
-                    }
+                //
+                // 黑名单里混有两种形式：单个目录名（"node_modules"）和带斜杠的
+                // 相对路径（"Library/Caches"）。原实现对后者也用 `name == skip`
+                // 比较，而 name 只是单个文件名 —— 这些项**永不生效**，
+                // 遍历仍会深入 Caches / Application Support 等目录。
+                if should_skip_dir_entry(&name, e.path(), skip_dirs) {
+                    return false;
                 }
                 // 跳过隐藏目录（.开头），但允许 .DS_Store 所在的当前层
                 if name.starts_with('.') && e.depth() > 0 {
@@ -2699,6 +2831,246 @@ fn scan_docker_windows() -> Vec<ScanItem> {
 mod tests {
     use super::*;
 
+
+    // ---------- 版本号自然序（防止误删最新版 IDE 配置） ----------
+
+    #[test]
+    fn jetbrains_version_sort_must_not_be_lexical() {
+        // JetBrains 目录名形如 IntelliJIdea2024.10 / IntelliJIdea2024.2。
+        // 按字符串排会把 2024.10 判成更旧而删掉它 —— 那正是用户正在用的版本。
+        assert_eq!(version_compare("2024.10", "2024.2"), std::cmp::Ordering::Greater);
+        assert_eq!(version_compare("2025.1", "2024.10"), std::cmp::Ordering::Greater);
+        // 冒烟：字符串比较确实是错的，用来证明这条断言有约束力
+        assert!("2024.10" < "2024.2", "字符串比较本应判反，否则这条测试失去意义");
+    }
+
+    #[test]
+    fn parse_jetbrains_dir_splits_product_and_version() {
+        assert_eq!(
+            parse_jetbrains_dir("IntelliJIdea2024.2"),
+            Some(("IntelliJIdea".to_string(), "2024.2".to_string()))
+        );
+        assert_eq!(
+            parse_jetbrains_dir("PyCharm2024.10"),
+            Some(("PyCharm".to_string(), "2024.10".to_string()))
+        );
+        // 无版本的目录（如 "JetBrains" 本身）不应被当成旧版本
+        assert_eq!(parse_jetbrains_dir("JetBrains"), None);
+    }
+
+
+    // ---------- X-4: Docker 可回收空间（说法修复后必须有测试兜住） ----------
+
+    #[test]
+    fn docker_reclaimable_uses_si_units() {
+        // docker 用 Go humanize，是 1000 进制：1GB = 1e9，不是 2^30。
+        // 按 1024 解析会把 1GB 算成 1073741824，虚高 7.4%。
+        assert_eq!(parse_size_str("1GB", true), 1_000_000_000);
+        assert_eq!(parse_size_str("1GB", false), 1_073_741_824);
+        assert_eq!(
+            sum_docker_reclaimable("Images\t1.2GB\t1.2GB (100%)\n"),
+            1_200_000_000
+        );
+        // 若有人把 si 改回 false，这条必然差出 7% 以上
+        let si = parse_size_str("1.2GB", true);
+        let binary = parse_size_str("1.2GB", false);
+        assert!(si < binary, "SI 结果应当小于 1024 进制结果");
+    }
+
+    #[test]
+    fn docker_local_volumes_are_excluded() {
+        // UI 描述写死了"不会清理数据卷"，但 docker prune 默认也不清理卷，
+        // 把 RECLAIMABLE 算进去就是纯虚高 200MB。
+        // 注意列数：`--format "{{.Type}}\t{{.Size}}\t{{.Reclaimable}}"` 是 **3 列**。
+        // 照文档开头那张可读表格（TYPE TOTAL ACTIVE SIZE RECLAIMABLE）写测试
+        // 数据会多出一列，取到的就变成 SIZE 而不是 RECLAIMABLE —— 我自己
+        // 第一版就是这么写错的，留在这提醒后来人。
+        let df = concat!(
+            "Images\t1.2GB\t800MB (66%)\n",
+            "Containers\t50MB\t30MB (60%)\n",
+            "Local Volumes\t500MB\t200MB (40%)\n",
+            "Build Cache\t300MB\t300MB\n",
+        );
+        let expected = 800_000_000 + 30_000_000 + 300_000_000;
+        assert_eq!(sum_docker_reclaimable(df), expected);
+    }
+
+    #[test]
+    fn docker_local_volumes_excluded_wherever_they_appear() {
+        // 排除逻辑不能依赖"卷在第几行" —— docker 调整输出顺序就会漏
+        let reordered = concat!(
+            "Local Volumes\t500MB\t200MB (40%)\n",
+            "Images\t1.2GB\t800MB (66%)\n",
+        );
+        assert_eq!(sum_docker_reclaimable(reordered), 800_000_000);
+    }
+
+    #[test]
+    fn docker_df_malformed_output_never_panics() {
+        assert_eq!(sum_docker_reclaimable(""), 0);
+        assert_eq!(sum_docker_reclaimable("garbage\nno tabs here\n"), 0);
+        assert_eq!(sum_docker_reclaimable("Only\tone\n"), 0);
+        assert_eq!(sum_docker_reclaimable("A\tB\t10MB (5%)\n"), 10_000_000);
+        assert_eq!(sum_docker_reclaimable("A\tB\tnotasize (10%)\n"), 0);
+        assert_eq!(sum_docker_reclaimable("A\tB\t0B\n"), 0);
+    }
+
+    // -----------------------------------------------------------------
+    //  #37 · simctl runtime 大小解析
+    //
+    //  测试数据取自本机 `xcrun simctl runtime list` 的真实输出，不是编的。
+    // -----------------------------------------------------------------
+
+    /// 本机真实输出（三份 runtime）
+    const REAL_SIMCTL_OUTPUT: &str = concat!(
+        "== Disk Images ==\n",
+        "-- iOS --\n",
+        "iOS 18.5 (22F77) - 6A2AE2AB-F08D-4390-BB6B-AC43B4F2A470 (Ready)\n",
+        "iOS 18.3.1 (22D8075) - 4083C6AC-D29B-4518-A3C0-27239613FE2E (Ready)\n",
+        "iOS 18.4 (22E238) - 37237C0E-5FD8-4BDC-806F-C1D127365729 (Ready)\n",
+        "\n",
+        "Total Disk Images: 3 (24.6G)\n",
+    );
+
+    #[test]
+    fn simctl_total_is_read_from_the_total_line_not_the_first_paren() {
+        // 原始缺陷：循环取"第一个含括号的行"，拿到的是 build 号 "22F77"，
+        // parse_size_str 对未知单位回落成 1.0 → 整个 24.6G 被算成 **22 字节**。
+        assert_eq!(
+            parse_total_disk_image_size(REAL_SIMCTL_OUTPUT),
+            Some(26_414_048_870)
+        );
+        // 明确钉住那个错误答案不会回来
+        assert_ne!(parse_total_disk_image_size(REAL_SIMCTL_OUTPUT), Some(22));
+    }
+
+    #[test]
+    fn simctl_size_uses_binary_units_verified_against_real_bytes() {
+        // 进制是实测结论：三份 runtime 的 sizeBytes 精确总和 26,371,017,423 B。
+        // 24.6G 按 1024³ = 26,414,048,870（偏差 -0.16%，四舍五入级）；
+        // 按 1000³ = 24,600,000,000（偏差 +7.2%）。所以必须是 1024。
+        let parsed = parse_total_disk_image_size(REAL_SIMCTL_OUTPUT).unwrap();
+        let binary = 24.6f64 * 1024.0 * 1024.0 * 1024.0;
+        let decimal = 24.6f64 * 1000.0 * 1000.0 * 1000.0;
+        assert!(
+            (parsed as f64 - binary).abs() / binary < 0.01,
+            "simctl 应按 1024 进制解析，实际 {} vs 1024³ {}",
+            parsed,
+            binary
+        );
+        assert!(
+            (parsed as f64 - decimal).abs() / decimal > 0.05,
+            "若按 1000 进制解析会差 7% 以上，说明进制被改错了"
+        );
+    }
+
+    #[test]
+    fn simctl_junk_parens_are_never_treated_as_sizes() {
+        assert!(!is_size_token("22F77"));
+        assert!(!is_size_token("Ready"));
+        assert!(!is_size_token(""));
+        assert!(!is_size_token("G"));
+        assert!(!is_size_token("abc"));
+        assert!(is_size_token("24.6G"));
+        assert!(is_size_token("800MB"));
+        assert!(is_size_token("512K"));
+        assert!(is_size_token("1024 B"));
+    }
+
+    #[test]
+    fn unparseable_size_units_return_zero_instead_of_one_byte() {
+        // `_ => 1.0` 的旧兜底会把任何垃圾变成"N 字节"并当作有效结果
+        assert_eq!(parse_size_str("22F77", false), 0);
+        assert_eq!(parse_size_str("Ready", true), 0);
+        // 合法输入不受影响
+        assert_eq!(parse_size_str("1GB", false), 1_073_741_824);
+        assert_eq!(parse_size_str("0B", false), 0);
+    }
+
+    #[test]
+    fn simctl_output_without_total_line_yields_none() {
+        assert_eq!(parse_total_disk_image_size("== Disk Images ==\n"), None);
+        assert_eq!(parse_total_disk_image_size(""), None);
+        // 只有 Total 行但括号内不是 size
+        assert_eq!(
+            parse_total_disk_image_size("Total Disk Images: 3 (Ready)\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn docker_reclaimable_call_site_uses_the_pure_parser() {
+        // 纯函数再对，没人调用等于没修。上一次是有人顺手改好的，
+        // 但没有任何测试盯着，随时可能被改回去。
+        let src = include_str!("dev_cache.rs");
+        let f = src[src
+            .find("fn get_docker_reclaimable_size")
+            .expect("get_docker_reclaimable_size 不见了")..]
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(
+            f.contains("sum_docker_reclaimable("),
+            "get_docker_reclaimable_size 没有调用纯解析函数"
+        );
+        // 并且必须显式传 si=true
+        let parser_call = src[src.find("fn sum_docker_reclaimable").unwrap()..]
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(
+            parser_call.contains("parse_size_str(reclaim_str, true)"),
+            "sum_docker_reclaimable 丢失了 si=true"
+        );
+    }
+
+    // ---------- W-9: JetBrains 跨平台路径 ----------
+
+    #[test]
+    fn jetbrains_roots_on_macos() {
+        let home = PathBuf::from("/Users/bob");
+        let (config, cache) = jetbrains_roots(false, &home, None, None);
+        assert_eq!(config, home.join("Library/Application Support/JetBrains"));
+        assert_eq!(cache, home.join("Library/Caches/JetBrains"));
+    }
+
+    #[test]
+    fn jetbrains_roots_on_windows_use_appdata() {
+        let home = PathBuf::from("C:/Users/Bob");
+        let (config, cache) = jetbrains_roots(
+            true,
+            &home,
+            Some("C:/Users/Bob/AppData/Roaming"),
+            Some("C:/Users/Bob/AppData/Local"),
+        );
+        assert_eq!(config, PathBuf::from("C:/Users/Bob/AppData/Roaming/JetBrains"));
+        assert_eq!(cache, PathBuf::from("C:/Users/Bob/AppData/Local/JetBrains"));
+    }
+
+    #[test]
+    fn jetbrains_roots_on_windows_fall_back_when_env_missing() {
+        // 环境变量取不到时也要落在合理位置，而不是退回 macOS 路径
+        let home = PathBuf::from("C:/Users/Bob");
+        let (config, cache) = jetbrains_roots(true, &home, None, None);
+        assert_eq!(config, home.join("AppData/Roaming/JetBrains"));
+        assert_eq!(cache, home.join("AppData/Local/JetBrains"));
+    }
+
+    #[test]
+    fn windows_home_dir_never_yields_macos_layout() {
+        // 反向验证：Windows 分支绝不能产出 macOS 的 Library 路径
+        let home = PathBuf::from("C:/Users/Bob");
+        let (config, cache) = jetbrains_roots(
+            true,
+            &home,
+            Some("C:/Users/Bob/AppData/Roaming"),
+            Some("C:/Users/Bob/AppData/Local"),
+        );
+        assert!(!config.to_string_lossy().contains("Library"));
+        assert!(!cache.to_string_lossy().contains("Library"));
+    }
+
+
     #[test]
     fn version_compare_is_numeric_not_lexical() {
         // 字典序下 "1.10" < "1.9"，会把新版本误判成旧版本删掉
@@ -2730,5 +3102,100 @@ mod tests {
         versions.sort_by(|a, b| compare_versions(a, b));
         assert_eq!(versions.last().copied(), Some("2.0"));
         assert_eq!(versions.first().copied(), Some("1.2"));
+    }
+
+    // ---------- P1-9: 黑名单里带斜杠的项必须真的生效 ----------
+    //
+    // 修复前这些项和 `name`（单个文件名）做全等比较，永远不匹配，
+    // 遍历会深入 Caches / Application Support 这些动辄几十 GB 的目录。
+    // 这条规则错了不会报错，只会默默变慢 —— 所以必须有单测锁住。
+    #[test]
+    fn skip_dirs_with_slash_actually_match() {
+        let skips: &[&str] = &[
+            "Library/Caches",
+            "Library/Application Support",
+            ".git",
+            "node_modules",
+        ];
+        assert!(
+            should_skip_dir_entry("Caches", Path::new("/Users/jeff/Library/Caches"), skips),
+            "~/Library/Caches 必须被跳过"
+        );
+        assert!(
+            should_skip_dir_entry(
+                "Application Support",
+                Path::new("/Users/jeff/Library/Application Support"),
+                skips
+            ),
+            "~/Library/Application Support 必须被跳过"
+        );
+        assert!(should_skip_dir_entry(
+            "Containers",
+            Path::new("/Users/jeff/Library/Containers"),
+            &["Library/Containers"]
+        ));
+    }
+
+    #[test]
+    fn skip_dirs_suffix_match_requires_separator() {
+        let skips: &[&str] = &["Library/Caches"];
+        assert!(
+            !should_skip_dir_entry("Caches", Path::new("/Users/jeff/MyLibrary/Caches"), skips),
+            "MyLibrary/Caches 不应命中 Library/Caches（缺少前导分隔符）"
+        );
+        assert!(should_skip_dir_entry(
+            "Caches",
+            Path::new("/Users/jeff/Library/Caches"),
+            skips
+        ));
+    }
+
+    #[test]
+    fn skip_dirs_plain_names_match_by_name() {
+        let skips: &[&str] = &["node_modules", ".git", "target"];
+        assert!(should_skip_dir_entry(
+            "node_modules",
+            Path::new("/Users/jeff/proj/node_modules"),
+            skips
+        ));
+        assert!(should_skip_dir_entry(
+            ".git",
+            Path::new("/Users/jeff/proj/.git"),
+            skips
+        ));
+        assert!(!should_skip_dir_entry(
+            "src",
+            Path::new("/Users/jeff/proj/src"),
+            skips
+        ));
+        // 路径里含目标名但目录名不同 —— 不能误伤
+        assert!(!should_skip_dir_entry(
+            "targets-of-opportunity",
+            Path::new("/Users/jeff/targets-of-opportunity"),
+            skips
+        ));
+    }
+
+    /// P1-10：隐藏目录判断应看**文件名**，而不是对完整路径调 Path::starts_with
+    ///
+    /// `Path::starts_with` 按路径**组件**匹配，对绝对路径
+    /// （"/Users/jeff/.cache"）恒为 false —— 原实现的隐藏目录过滤完全失效。
+    #[test]
+    fn hidden_dir_detection_uses_file_name() {
+        let hidden = Path::new("/Users/jeff/.cache");
+        assert!(
+            !hidden.starts_with("."),
+            "锁住修复前的错误行为：绝对路径做组件匹配恒为 false"
+        );
+        let name = hidden.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with('.'), "正确做法是判断文件名");
+
+        let normal = Path::new("/Users/jeff/Library");
+        assert!(!normal
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with('.'));
     }
 }
