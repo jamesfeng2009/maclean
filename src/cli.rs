@@ -327,7 +327,10 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
             println!("  🛡️  已拦截 {} — {}", path, reason);
         }
         if skipped_snapshots > 0 {
-            println!("  ⏭️  跳过 {} 个 APFS 快照（需特殊处理）", skipped_snapshots);
+            println!(
+                "  ⏭️  跳过 {} 个 APFS 快照（需特殊处理）",
+                skipped_snapshots
+            );
         }
 
         // 实际删除

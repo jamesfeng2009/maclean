@@ -34,8 +34,18 @@ impl Btn {
         use egui::Color32 as C;
         match self {
             Btn::Primary => (theme::brand(), C::WHITE, C::TRANSPARENT, theme::brand_600()),
-            Btn::Secondary => (theme::surface(), theme::text(), theme::line_2(), theme::surface_3()),
-            Btn::Ghost => (C::TRANSPARENT, theme::text_2(), C::TRANSPARENT, theme::surface_3()),
+            Btn::Secondary => (
+                theme::surface(),
+                theme::text(),
+                theme::line_2(),
+                theme::surface_3(),
+            ),
+            Btn::Ghost => (
+                C::TRANSPARENT,
+                theme::text_2(),
+                C::TRANSPARENT,
+                theme::surface_3(),
+            ),
             Btn::Danger => (
                 theme::danger(),
                 C::WHITE,
@@ -202,7 +212,15 @@ pub fn checkbox(ui: &mut egui::Ui, state: Check, enabled: bool) -> egui::Respons
         let filled = matches!(state, Check::On | Check::Partial);
 
         if filled {
-            painter.rect_filled(rect, rr, if enabled { theme::brand() } else { theme::line_3() });
+            painter.rect_filled(
+                rect,
+                rr,
+                if enabled {
+                    theme::brand()
+                } else {
+                    theme::line_3()
+                },
+            );
             let ic = if state == Check::On {
                 Icon::Check
             } else {
@@ -262,7 +280,11 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, enabled: bool) -> egui::Respo
         } else {
             rect.min.x + knob_r + 2.0
         };
-        painter.circle_filled(egui::pos2(knob_x, rect.center().y), knob_r, egui::Color32::WHITE);
+        painter.circle_filled(
+            egui::pos2(knob_x, rect.center().y),
+            knob_r,
+            egui::Color32::WHITE,
+        );
     }
     response
 }
@@ -274,7 +296,13 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, enabled: bool) -> egui::Respo
 /// 状态徽标（高 20，圆角 4，11/600）
 ///
 /// 左侧 6px 圆点或 11px 图标。等级徽标一律走 `recommend_badge`，颜色不要自己配。
-pub fn badge(ui: &mut egui::Ui, text: &str, fg: egui::Color32, bg: egui::Color32, ic: Option<Icon>) {
+pub fn badge(
+    ui: &mut egui::Ui,
+    text: &str,
+    fg: egui::Color32,
+    bg: egui::Color32,
+    ic: Option<Icon>,
+) {
     let height = 20.0;
     let font = egui::FontId::proportional(11.0);
     let galley = ui
@@ -301,10 +329,7 @@ pub fn badge(ui: &mut egui::Ui, text: &str, fg: egui::Color32, bg: egui::Color32
             painter.circle_filled(egui::pos2(rect.min.x + pad_x + 3.0, cy), 3.0, fg);
         }
         painter.galley(
-            egui::pos2(
-                rect.min.x + pad_x + dot + gap,
-                cy - galley.size().y / 2.0,
-            ),
+            egui::pos2(rect.min.x + pad_x + dot + gap, cy - galley.size().y / 2.0),
             galley,
             fg,
         );
@@ -320,10 +345,8 @@ pub fn recommend_badge(ui: &mut egui::Ui, rec: &Recommend, lang_en: bool) {
 
 /// 占比条（80×6，表示该项占当前列表总量的比例）
 pub fn ratio_bar(ui: &mut egui::Ui, ratio: f32, color: egui::Color32) {
-    let (rect, _resp) = ui.allocate_exact_size(
-        egui::vec2(theme::BAR_W, theme::BAR_H),
-        egui::Sense::hover(),
-    );
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(theme::BAR_W, theme::BAR_H), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, theme::r(3.0), theme::surface_3());
@@ -337,7 +360,8 @@ pub fn ratio_bar(ui: &mut egui::Ui, ratio: f32, color: egui::Color32) {
 
 /// 通用进度条（用于扫描 / 删除进度）
 pub fn progress_bar(ui: &mut egui::Ui, width: f32, ratio: f32, color: egui::Color32) {
-    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, theme::BAR_H), egui::Sense::hover());
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(width, theme::BAR_H), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, theme::r(3.0), theme::surface_3());
@@ -363,7 +387,8 @@ pub fn scrim(ctx: &egui::Context) {
         .fixed_pos(screen.min)
         .interactable(false)
         .show(ctx, |ui| {
-            ui.painter().rect_filled(screen, egui::Rounding::ZERO, theme::scrim());
+            ui.painter()
+                .rect_filled(screen, egui::Rounding::ZERO, theme::scrim());
         });
 }
 
@@ -404,18 +429,19 @@ pub fn modal_header(
             ui.horizontal(|ui| {
                 let (rect, _r) =
                     ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, theme::r(theme::R_MD), ic_bg);
+                ui.painter().rect_filled(rect, theme::r(theme::R_MD), ic_bg);
                 let ir = egui::Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0));
                 icons::paint(ui.painter(), ir, ic, ic_fg);
 
                 ui.add_space(theme::S3);
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(title).size(15.0).strong().color(theme::text()));
-                    ui.colored_label(
-                        theme::text_2(),
-                        egui::RichText::new(subtitle).size(12.0),
+                    ui.label(
+                        egui::RichText::new(title)
+                            .size(15.0)
+                            .strong()
+                            .color(theme::text()),
                     );
+                    ui.colored_label(theme::text_2(), egui::RichText::new(subtitle).size(12.0));
                 });
             });
         });
@@ -475,19 +501,19 @@ pub fn state_page(
                 ui.add_space(56.0);
                 let (rect, _r) =
                     ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, theme::r(theme::R_LG), ic_bg);
+                ui.painter().rect_filled(rect, theme::r(theme::R_LG), ic_bg);
                 let ir = egui::Rect::from_center_size(rect.center(), egui::vec2(24.0, 24.0));
                 icons::paint(ui.painter(), ir, ic, ic_color);
 
                 ui.add_space(theme::S4);
-                ui.label(egui::RichText::new(title).size(14.0).strong().color(theme::text()));
-                ui.add_space(theme::S1);
                 ui.label(
-                    egui::RichText::new(desc)
-                        .size(12.0)
-                        .color(theme::text_3()),
+                    egui::RichText::new(title)
+                        .size(14.0)
+                        .strong()
+                        .color(theme::text()),
                 );
+                ui.add_space(theme::S1);
+                ui.label(egui::RichText::new(desc).size(12.0).color(theme::text_3()));
                 if let Some((label, aic)) = action {
                     ui.add_space(theme::S4);
                     if button(ui, Some(aic), label, Btn::Primary, theme::BTN_H).clicked() {

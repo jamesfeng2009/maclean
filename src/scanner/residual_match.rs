@@ -783,9 +783,7 @@ mod tests {
             "HKLM\\SOFTWARE\\Wow6432Node\\JavaSoft\\Java Runtime Environment"
         ));
         // 末段是纯单词容器（"Prefs" 挂着所有 Java 版本的偏好设置）
-        assert!(!is_deletable_reg_path(
-            "HKLM\\SOFTWARE\\JavaSoft\\Prefs"
-        ));
+        assert!(!is_deletable_reg_path("HKLM\\SOFTWARE\\JavaSoft\\Prefs"));
         // 缺 hive → 不是完整键路径
         assert!(!is_deletable_reg_path(
             "SOFTWARE\\JavaSoft\\Java Runtime Environment\\1.8.0_291"
@@ -869,7 +867,9 @@ mod tests {
         // 共享厂商容器
         assert!(!is_deletable_reg_key_basic("HKCU\\SOFTWARE\\Microsoft"));
         assert!(!is_deletable_reg_key_basic("HKLM\\SOFTWARE\\JavaSoft"));
-        assert!(!is_deletable_reg_key_basic("HKLM\\SOFTWARE\\Wow6432Node\\Oracle"));
+        assert!(!is_deletable_reg_key_basic(
+            "HKLM\\SOFTWARE\\Wow6432Node\\Oracle"
+        ));
         // 没有 hive / 找不到 SOFTWARE
         assert!(!is_deletable_reg_key_basic("SOFTWARE\\Zoom"));
         assert!(!is_deletable_reg_key_basic("Zoom"));
@@ -887,7 +887,9 @@ mod tests {
             r"C:\Users\me\AppData\Roaming\Microsoft"
         ));
         assert!(!is_deletable_fs_path(r"C:\Users\me\AppData\Local\Google"));
-        assert!(!is_deletable_fs_path(r"C:\Users\me\AppData\LocalLow\Oracle"));
+        assert!(!is_deletable_fs_path(
+            r"C:\Users\me\AppData\LocalLow\Oracle"
+        ));
         // 盘符根、单段、空路径
         assert!(!is_deletable_fs_path(r"C:\"));
         assert!(!is_deletable_fs_path("/"));
@@ -936,7 +938,9 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
-        src[src.find(needle).unwrap_or_else(|| panic!("{} 不见了", needle))..]
+        src[src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{} 不见了", needle))..]
             .split("\npub fn ")
             .next()
             .unwrap_or("")
@@ -949,7 +953,8 @@ mod tests {
         let src = include_str!("windows_apps.rs");
         let body = fn_body(src, "pub fn clean_all_residuals");
         assert!(
-            body.contains("delete_registry_residual(") && body.contains("delete_filesystem_residual("),
+            body.contains("delete_registry_residual(")
+                && body.contains("delete_filesystem_residual("),
             "批量清理没有走带闸门的删除出口"
         );
         assert!(
@@ -993,10 +998,7 @@ mod tests {
         // 否则 UI 会把它当成可勾选项交给 reg delete。
         let src = include_str!("windows_apps.rs");
         let body = fn_body(src, "pub fn scan_registry_residual");
-        assert!(
-            body.contains("is_system"),
-            "扫描注册表残留没有区分系统级键"
-        );
+        assert!(body.contains("is_system"), "扫描注册表残留没有区分系统级键");
     }
 
     #[test]

@@ -85,12 +85,10 @@ fn extract_reg_value(output: &str, name: &str) -> Option<String> {
     for raw in output.lines() {
         let line = raw.trim();
         // 名字后必须紧跟空白，避免 HOME 匹配到 HOMEDRIVE
-        let Some(rest) = line.strip_prefix(name).filter(|r| {
-            r.chars()
-                .next()
-                .map(|c| c.is_whitespace())
-                .unwrap_or(false)
-        }) else {
+        let Some(rest) = line
+            .strip_prefix(name)
+            .filter(|r| r.chars().next().map(|c| c.is_whitespace()).unwrap_or(false))
+        else {
             continue;
         };
         // 第二列是注册表类型：REG_SZ / REG_EXPAND_SZ / REG_MULTI_SZ / REG_DWORD
@@ -192,12 +190,12 @@ const WINDOWS_HOMES_EXACT: &[&str] = &[
     "AppData/Local",
     "AppData/LocalLow",
     "AppData/Roaming",
-    "AppData/Local/Packages",                    // UWP 应用数据容器根目录
-    "AppData/Roaming/Firefox/Profiles",          // Firefox profile 列表根
+    "AppData/Local/Packages",           // UWP 应用数据容器根目录
+    "AppData/Roaming/Firefox/Profiles", // Firefox profile 列表根
     "AppData/Local/Google/Chrome/User Data/Default", // Chrome profile（内含密码/历史）
     "AppData/Local/Microsoft/Edge/User Data/Default", // Edge profile
-    "Documents/Outlook Files",                   // Outlook 本地数据文件
-    "OneDrive",                                  // 同步根目录（删了会连带云端）
+    "Documents/Outlook Files",          // Outlook 本地数据文件
+    "OneDrive",                         // 同步根目录（删了会连带云端）
 ];
 
 /// Windows 侧 home 黑名单：前缀匹配（自身与整个子树都禁）
@@ -205,13 +203,13 @@ const WINDOWS_HOMES_EXACT: &[&str] = &[
 /// 凭据/证书/邮件数据一类：这些目录下的任何内容都不能由清理工具处理，
 /// 误删会导致用户无法登录、邮件丢失或触发企业安全策略告警。
 const WINDOWS_HOMES_PREFIX: &[&str] = &[
-    "AppData/Local/Microsoft/Credentials",       // Windows 凭据管理器
-    "AppData/Local/Microsoft/Vault",             // Web 凭据保管库
-    "AppData/Local/Microsoft/Protect",           // DPAPI 用户密钥（含加密用主密钥）
+    "AppData/Local/Microsoft/Credentials", // Windows 凭据管理器
+    "AppData/Local/Microsoft/Vault",       // Web 凭据保管库
+    "AppData/Local/Microsoft/Protect",     // DPAPI 用户密钥（含加密用主密钥）
     "AppData/Roaming/Microsoft/Credentials",
     "AppData/Roaming/Microsoft/Protect",
     "AppData/Roaming/Microsoft/SystemCertificates", // 用户根证书存储
-    "AppData/Local/Microsoft/Outlook",           // OST/PST 邮件数据
+    "AppData/Local/Microsoft/Outlook",              // OST/PST 邮件数据
     "AppData/Roaming/Microsoft/Outlook",
     ".ssh",   // SSH 密钥
     ".gnupg", // GPG 密钥
@@ -1137,8 +1135,6 @@ fn chrono_like_timestamp() -> String {
 mod tests {
     use super::*;
 
-
-
     // ---------- W-5: Windows 用户关键目录保护 ----------
     //
     // 这里刻意用**正斜杠**书写 Windows 路径（C:/Users/Bob/...）。
@@ -1160,11 +1156,7 @@ mod tests {
             "C:/Users/Bob/.gnupg/private-keys-v1.d/key",
         ] {
             let verdict = check_home_paths_for_platform(Path::new(p), p, &homes, true);
-            assert!(
-                verdict.is_some(),
-                "Windows 用户敏感目录未被拦截: {}",
-                p
-            );
+            assert!(verdict.is_some(), "Windows 用户敏感目录未被拦截: {}", p);
         }
     }
 
@@ -1265,7 +1257,6 @@ mod tests {
         assert_eq!(extract_reg_value("", "USERPROFILE"), None);
     }
 
-
     // ---------- W-10: 敏感文件名检测支持 Windows 分隔符 ----------
 
     #[test]
@@ -1285,8 +1276,14 @@ mod tests {
 
     #[test]
     fn sensitive_name_hit_returns_none_for_plain_paths() {
-        assert_eq!(sensitive_name_hit("/Users/Bob/project/src/main.rs", "main.rs"), None);
-        assert_eq!(sensitive_name_hit(r"C:\Users\Bob\project\main.rs", "main.rs"), None);
+        assert_eq!(
+            sensitive_name_hit("/Users/Bob/project/src/main.rs", "main.rs"),
+            None
+        );
+        assert_eq!(
+            sensitive_name_hit(r"C:\Users\Bob\project\main.rs", "main.rs"),
+            None
+        );
     }
 
     #[test]

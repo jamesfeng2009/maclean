@@ -9,8 +9,8 @@ use std::sync::mpsc;
 
 use crate::app::{App, ScanState, Tab};
 // 模块路径本身也要引入：代码里大量写成 `scanner::Foo` / `logger::info(..)`
-use crate::{logger, platform, safety, scanner};
 use crate::scanner::{ScanItem, Scanner};
+use crate::{logger, platform, safety, scanner};
 
 /// 后台扫描消息
 pub(crate) enum ScanMessage {
@@ -434,7 +434,11 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
 /// 排序后按每批最多 10 项分割，每批之间 sleep 50ms，
 /// 让 UI 有机会渲染已发现的项。发送完毕后调用方再发送 Done
 /// （Done 携带完整列表，会覆盖累积的部分项，保证最终结果一致）。
-pub(crate) fn send_items_in_batches(tx: &mpsc::Sender<ScanMessage>, items: &[ScanItem], tab_idx: u64) {
+pub(crate) fn send_items_in_batches(
+    tx: &mpsc::Sender<ScanMessage>,
+    items: &[ScanItem],
+    tab_idx: u64,
+) {
     // 按大小降序排序，让用户先看到最大的项
     let mut sorted: Vec<ScanItem> = items.to_vec();
     sorted.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
@@ -1184,7 +1188,11 @@ pub(crate) fn create_private_temp_file(
 
 /// 写入一个受保护的临时文本文件，返回路径（见 create_private_temp_file 安全说明）
 #[cfg(unix)]
-pub(crate) fn write_private_temp_file(prefix: &str, ext: &str, content: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn write_private_temp_file(
+    prefix: &str,
+    ext: &str,
+    content: &str,
+) -> Option<std::path::PathBuf> {
     use std::io::Write;
     let (path, mut file) = create_private_temp_file(prefix, ext)?;
     file.write_all(content.as_bytes()).ok()?;
@@ -2614,7 +2622,6 @@ pub(crate) fn clean_dir_size(dir: &str) -> u64 {
     total
 }
 
-
 // =========================================================================
 //  Windows UAC 提权删除
 // =========================================================================
@@ -2904,7 +2911,10 @@ mod tests {
             "注入串没有被转义: {}",
             escaped
         );
-        assert_eq!(escaped.matches('\'').count(), evil.matches('\'').count() * 2);
+        assert_eq!(
+            escaped.matches('\'').count(),
+            evil.matches('\'').count() * 2
+        );
     }
 
     #[test]

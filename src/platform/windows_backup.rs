@@ -313,7 +313,10 @@ pub fn restore_last_backup() -> (bool, String) {
         if let Err(reason) =
             super::reg_safety::validate_backup_entry_content(&entry.reg_key, &content)
         {
-            crate::logger::warn(&format!("拒绝导入不安全的备份 {}: {}", entry.reg_file, reason));
+            crate::logger::warn(&format!(
+                "拒绝导入不安全的备份 {}: {}",
+                entry.reg_file, reason
+            ));
             fail_count += 1;
             continue;
         }

@@ -202,7 +202,6 @@ fn count_plist_files(dir: &str) -> usize {
         .unwrap_or(0)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

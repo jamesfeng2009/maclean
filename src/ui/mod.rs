@@ -23,10 +23,10 @@ use crate::ops::start_sudo_delete_touchid;
 // 不 cfg 限定的话本机（macOS）会报 unused import。
 #[cfg(target_os = "windows")]
 use crate::platform;
-use crate::{config, i18n, menubar, safety, scanner, theme};
 use crate::scanner::{format_size, Recommend, ScanItem};
 use crate::theme::*;
 use crate::widgets;
+use crate::{config, i18n, menubar, safety, scanner, theme};
 use crate::{get_disk_info, log_scan_step, logger};
 #[cfg(target_os = "macos")]
 use crate::{sudo_keepalive, touchid};
@@ -42,10 +42,10 @@ pub(crate) enum HudAction {
 
 /// 渲染菜单栏 HUD 悬浮窗口
 pub(crate) fn render_hud_window(
-ctx: &egui::Context,
-app: &mut App,
-scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
-auto_clean_after_scan: &mut bool,
+    ctx: &egui::Context,
+    app: &mut App,
+    scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+    auto_clean_after_scan: &mut bool,
 ) {
     if !app.hud_open {
         return;
@@ -102,8 +102,7 @@ auto_clean_after_scan: &mut bool,
                 let padding = egui::vec2(8.0, 8.0);
                 let icon_w = 16.0 + 8.0;
                 let desired_size = galley.size() + padding * 2.0 + egui::vec2(icon_w, 0.0);
-                let (rect, response) =
-                    ui.allocate_exact_size(desired_size, egui::Sense::click());
+                let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
                 if ui.is_rect_visible(rect) {
                     if response.hovered() {
                         ui.painter().rect_filled(
@@ -190,7 +189,6 @@ auto_clean_after_scan: &mut bool,
         None => {}
     }
 }
-
 
 /// 概览页「一键清理」：跨 Tab 选中推荐项并进入确认
 ///
@@ -312,7 +310,6 @@ impl Gui {
         if let Some(click_info) = self.menubar.poll_click() {
             hud_click = Some(click_info);
         }
-    
 
         if let Some(click_info) = hud_click {
             if let Some(app) = Some(&mut self.app) {
@@ -735,12 +732,7 @@ impl eframe::App for Gui {
 
         let app = &mut self.app;
         render_gui(ctx, app, &mut self.scan_rx, &mut self.delete_rx);
-        render_hud_window(
-            ctx,
-            app,
-            &mut self.scan_rx,
-            &mut self.auto_clean_after_scan,
-        );
+        render_hud_window(ctx, app, &mut self.scan_rx, &mut self.auto_clean_after_scan);
     }
 }
 
@@ -867,7 +859,11 @@ pub(crate) fn uninstall_child_badge_label(category: &str, lang_en: bool) -> Stri
 /// 渲染支持未选 / 部分选中 / 全选三种状态的自定义复选框
 ///
 /// state: 0=未选, 1=部分选中（短横线）, 2=全选（对勾）
-pub(crate) fn render_custom_checkbox_tri(ui: &mut egui::Ui, state: u8, enabled: bool) -> egui::Response {
+pub(crate) fn render_custom_checkbox_tri(
+    ui: &mut egui::Ui,
+    state: u8,
+    enabled: bool,
+) -> egui::Response {
     // state: 0=未选, 1=部分选中, 2=全选
     let state = match state {
         2 => widgets::Check::On,
@@ -1108,7 +1104,11 @@ pub(crate) fn render_app_uninstall_group_card(
                         } else {
                             icons::Icon::ChevronDown
                         };
-                        let arrow_color = if is_expanded { theme::brand() } else { theme::text_3() };
+                        let arrow_color = if is_expanded {
+                            theme::brand()
+                        } else {
+                            theme::text_3()
+                        };
                         let (arrow_rect, arrow_resp) =
                             ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
                         if ui.is_rect_visible(arrow_rect) {
@@ -1255,7 +1255,6 @@ pub(crate) fn render_app_uninstall_filter_pills(
     total_size: u64,
     stats: &std::collections::HashMap<crate::scanner::Recommend, (usize, u64)>,
 ) {
-
     struct PillInfo {
         rec: Option<crate::scanner::Recommend>,
         label: &'static str,
@@ -1557,12 +1556,13 @@ pub(crate) fn render_app_uninstall_child_row(
                 ui.horizontal(|ui| {
                     let title = uninstall_child_title(&item.category, app.lang_en);
                     ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(title)
-                                .size(13.0)
-                                .strong()
-                                .color(if locked { theme::text_3() } else { theme::text() }),
-                        )
+                        egui::Label::new(egui::RichText::new(title).size(13.0).strong().color(
+                            if locked {
+                                theme::text_3()
+                            } else {
+                                theme::text()
+                            },
+                        ))
                         .truncate(),
                     );
 
@@ -1573,7 +1573,11 @@ pub(crate) fn render_app_uninstall_child_row(
                             format_size(item.size_bytes)
                         };
                         ui.colored_label(
-                            if locked { theme::text_3() } else { theme::text() },
+                            if locked {
+                                theme::text_3()
+                            } else {
+                                theme::text()
+                            },
                             egui::RichText::new(&size_str)
                                 .size(13.0)
                                 .strong()
@@ -1737,7 +1741,11 @@ pub(crate) fn render_category_tab(
         Some(c) => format!("{} ({})", label, c),
         None => label.to_string(),
     };
-    let text_color = if active { theme::brand() } else { theme::text_2() };
+    let text_color = if active {
+        theme::brand()
+    } else {
+        theme::text_2()
+    };
     let bottom_stroke = if active {
         egui::Stroke::new(2.0, theme::brand())
     } else {
@@ -1775,7 +1783,9 @@ pub(crate) fn render_category_tab(
 }
 
 /// 状态徽章颜色与背景
-pub(crate) fn recommend_badge_colors(rec: &Recommend) -> (egui::Color32, egui::Color32, &'static str) {
+pub(crate) fn recommend_badge_colors(
+    rec: &Recommend,
+) -> (egui::Color32, egui::Color32, &'static str) {
     match rec {
         Recommend::Safe => (theme::safe(), theme::safe_50(), "Safe"),
         Recommend::CacheOnly => (theme::cache(), theme::cache_50(), "Cache only"),
@@ -1785,7 +1795,12 @@ pub(crate) fn recommend_badge_colors(rec: &Recommend) -> (egui::Color32, egui::C
 }
 
 /// 渲染状态徽章
-pub(crate) fn render_status_badge(ui: &mut egui::Ui, text: &str, fg: egui::Color32, bg: egui::Color32) {
+pub(crate) fn render_status_badge(
+    ui: &mut egui::Ui,
+    text: &str,
+    fg: egui::Color32,
+    bg: egui::Color32,
+) {
     let galley = ui.painter().layout(
         text.to_string(),
         egui::FontId::new(11.0, egui::FontFamily::Proportional),
@@ -1807,7 +1822,11 @@ pub(crate) fn render_status_badge(ui: &mut egui::Ui, text: &str, fg: egui::Color
 }
 
 /// 渲染自定义复选框
-pub(crate) fn render_custom_checkbox(ui: &mut egui::Ui, checked: bool, enabled: bool) -> egui::Response {
+pub(crate) fn render_custom_checkbox(
+    ui: &mut egui::Ui,
+    checked: bool,
+    enabled: bool,
+) -> egui::Response {
     // 设计稿 3.2：16×16、圆角 4、禁用态灰底但**不隐藏**
     widgets::checkbox(
         ui,
@@ -1821,7 +1840,11 @@ pub(crate) fn render_custom_checkbox(ui: &mut egui::Ui, checked: bool, enabled: 
 }
 
 /// 渲染设置页 Toggle 开关
-pub(crate) fn render_settings_toggle(ui: &mut egui::Ui, value: &mut bool, enabled: bool) -> egui::Response {
+pub(crate) fn render_settings_toggle(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    enabled: bool,
+) -> egui::Response {
     widgets::toggle(ui, value, enabled)
 }
 
@@ -1915,10 +1938,13 @@ pub(crate) fn render_scan_item_row(
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(&title_text)
-                                    .size(13.0)
-                                    .strong()
-                                    .color(if locked { theme::text_3() } else { theme::text() }),
+                                egui::RichText::new(&title_text).size(13.0).strong().color(
+                                    if locked {
+                                        theme::text_3()
+                                    } else {
+                                        theme::text()
+                                    },
+                                ),
                             )
                             .truncate(),
                         );
@@ -1949,7 +1975,11 @@ pub(crate) fn render_scan_item_row(
                 format_size(item.size_bytes)
             };
             ui.colored_label(
-                if locked { theme::text_4() } else { theme::text() },
+                if locked {
+                    theme::text_4()
+                } else {
+                    theme::text()
+                },
                 egui::RichText::new(&size_str)
                     .size(13.0)
                     .strong()
@@ -2007,7 +2037,10 @@ pub(crate) fn render_scan_item_row(
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add_space(42.0); // 缩进对齐主行文字
-                            ui.colored_label(theme::brand(), egui::RichText::new(detail_label).size(11.0));
+                            ui.colored_label(
+                                theme::brand(),
+                                egui::RichText::new(detail_label).size(11.0),
+                            );
                             let sz_str = if *detail_size == 0 {
                                 "—".to_string()
                             } else {
@@ -2127,7 +2160,11 @@ pub(crate) fn render_gui(
                         if widgets::icon_button(ui, icons::Icon::X, BTN_H_SM).clicked() {
                             app.update_dismissed = true;
                         }
-                        let label = if app.lang_en { "Download" } else { "前往下载" };
+                        let label = if app.lang_en {
+                            "Download"
+                        } else {
+                            "前往下载"
+                        };
                         if widgets::button(ui, None, label, widgets::Btn::Primary, BTN_H_SM)
                             .clicked()
                         {
@@ -2185,8 +2222,7 @@ pub(crate) fn render_gui(
     let app_uninstall_show_footer = app.tab == crate::app::Tab::AppUninstall
         && !app.tab_scanning(app.tab_index())
         && !app.results[app.tab_index()].is_empty();
-    let overview_show_footer =
-        app.tab == crate::app::Tab::Overview && !app.any_scanning();
+    let overview_show_footer = app.tab == crate::app::Tab::Overview && !app.any_scanning();
     if app_uninstall_show_footer {
         egui::TopBottomPanel::bottom("app_uninstall_footer")
             .frame(egui::Frame::side_top_panel(&ctx.style()).fill(theme::surface()))
@@ -2353,8 +2389,11 @@ pub(crate) fn render_gui(
                                 bar_rect.min,
                                 egui::vec2(fill_width, bar_height),
                             );
-                            ui.painter()
-                                .rect_filled(fill_rect, egui::Rounding::same(3.0), theme::brand());
+                            ui.painter().rect_filled(
+                                fill_rect,
+                                egui::Rounding::same(3.0),
+                                theme::brand(),
+                            );
                         }
                         ui.allocate_rect(bar_rect, egui::Sense::hover());
                     });
@@ -2387,7 +2426,11 @@ pub(crate) fn render_gui(
                                 ui,
                                 icons::NAV_ICONS[i],
                                 16.0,
-                                if is_selected { theme::brand() } else { theme::text_2() },
+                                if is_selected {
+                                    theme::brand()
+                                } else {
+                                    theme::text_2()
+                                },
                             );
                             ui.add_space(9.0);
                             ui.label(egui::RichText::new(title).size(13.0).color(if is_selected {
@@ -2434,7 +2477,8 @@ pub(crate) fn render_gui(
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let lang_label = if app.lang_en { "中文" } else { "EN" };
-                    if widgets::button(ui, None, lang_label, widgets::Btn::Ghost, BTN_H_SM).clicked()
+                    if widgets::button(ui, None, lang_label, widgets::Btn::Ghost, BTN_H_SM)
+                        .clicked()
                     {
                         app.toggle_lang();
                     }
@@ -2862,10 +2906,8 @@ pub(crate) fn render_gui(
                         let associated_details = app.associated_details.clone();
                         let expanded_items = app.expanded_items.clone();
                         // 占比条分母：当前可见列表的总容量
-                        let visible_total: u64 = filtered_indices
-                            .iter()
-                            .map(|&i| items[i].size_bytes)
-                            .sum();
+                        let visible_total: u64 =
+                            filtered_indices.iter().map(|&i| items[i].size_bytes).sum();
 
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
@@ -3203,7 +3245,12 @@ pub(crate) fn show_confirm_window(
                         &format!("{} {}", count, app.t("items")),
                         theme::text(),
                     );
-                    render_confirm_row(ui, app.t("confirm_releasable"), &format_size(size), theme::brand());
+                    render_confirm_row(
+                        ui,
+                        app.t("confirm_releasable"),
+                        &format_size(size),
+                        theme::brand(),
+                    );
                     if safe_cnt > 0 {
                         render_confirm_row(
                             ui,
@@ -3352,7 +3399,12 @@ pub(crate) fn show_confirm_window(
 }
 
 /// 确认弹窗中的单行 Key-Value
-pub(crate) fn render_confirm_row(ui: &mut egui::Ui, label: &str, value: &str, value_color: egui::Color32) {
+pub(crate) fn render_confirm_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    value_color: egui::Color32,
+) {
     ui.horizontal(|ui| {
         ui.colored_label(theme::text_2(), egui::RichText::new(label).size(13.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3443,7 +3495,10 @@ pub(crate) fn show_sudo_password_window(
 
                 if let Some(ref err) = app.sudo_error {
                     ui.add_space(8.0);
-                    ui.colored_label(theme::danger(), egui::RichText::new(err).size(13.0).strong());
+                    ui.colored_label(
+                        theme::danger(),
+                        egui::RichText::new(err).size(13.0).strong(),
+                    );
                 }
 
                 ui.add_space(12.0);
@@ -3616,7 +3671,10 @@ pub(crate) fn show_touch_id_setup_window(
 
                 if let Some(ref err) = app.touch_id_error {
                     ui.add_space(8.0);
-                    ui.colored_label(theme::danger(), egui::RichText::new(err).size(13.0).strong());
+                    ui.colored_label(
+                        theme::danger(),
+                        egui::RichText::new(err).size(13.0).strong(),
+                    );
                 }
 
                 ui.add_space(12.0);
@@ -3821,18 +3879,23 @@ pub(crate) fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) 
                     .collect();
                 if !recent_logs.is_empty() {
                     ui.add_space(10.0);
-                    egui::Frame::group(ui.style()).fill(theme::surface()).show(ui, |ui| {
-                        ui.set_min_width(360.0);
-                        ui.label(
-                            egui::RichText::new(app.t("touchid_verify_log"))
-                                .size(11.0)
-                                .strong(),
-                        );
-                        ui.add_space(4.0);
-                        for log in recent_logs {
-                            ui.colored_label(theme::text_2(), egui::RichText::new(log).size(10.0));
-                        }
-                    });
+                    egui::Frame::group(ui.style())
+                        .fill(theme::surface())
+                        .show(ui, |ui| {
+                            ui.set_min_width(360.0);
+                            ui.label(
+                                egui::RichText::new(app.t("touchid_verify_log"))
+                                    .size(11.0)
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+                            for log in recent_logs {
+                                ui.colored_label(
+                                    theme::text_2(),
+                                    egui::RichText::new(log).size(10.0),
+                                );
+                            }
+                        });
                 }
 
                 ui.add_space(12.0);
@@ -3909,7 +3972,11 @@ pub(crate) fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
             ui.add(
                 egui::ProgressBar::new(progress)
                     .desired_width(ui.available_width().max(440.0))
-                    .fill(if in_sudo_phase { theme::caution() } else { theme::brand() })
+                    .fill(if in_sudo_phase {
+                        theme::caution()
+                    } else {
+                        theme::brand()
+                    })
                     .text(format!("{}%", (progress * 100.0) as u32)),
             );
 
@@ -4624,7 +4691,10 @@ pub(crate) fn show_residual_window(
                 // 清理中提示
                 if is_cleaning {
                     ui.add_space(5.0);
-                    ui.colored_label(theme::brand(), egui::RichText::new("⏳ 正在清理残留...").size(12.0));
+                    ui.colored_label(
+                        theme::brand(),
+                        egui::RichText::new("⏳ 正在清理残留...").size(12.0),
+                    );
                     ctx.request_repaint_after(std::time::Duration::from_millis(50));
                 }
             });
@@ -4670,10 +4740,7 @@ pub(crate) fn render_disk_analyzer(
         // 返回上一级按钮
         let back_enabled = has_history && !is_scanning;
         if ui
-            .add_enabled(
-                back_enabled,
-                egui::Button::new(app.t("back")),
-            )
+            .add_enabled(back_enabled, egui::Button::new(app.t("back")))
             .clicked()
         {
             app.disk_analyzer_back();
@@ -5481,7 +5548,8 @@ pub(crate) fn render_optimize_panel(
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            let run_text = if app.lang_en { "Run" } else { "执行" };
+                                            let run_text =
+                                                if app.lang_en { "Run" } else { "执行" };
                                             if widgets::button(
                                                 ui,
                                                 Some(icons::Icon::ChevronRight),
@@ -5577,8 +5645,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                                 );
                                 ui.colored_label(
                                     theme::text_2(),
-                                    egui::RichText::new(app.t("setting_dark_mode_desc"))
-                                        .size(12.0),
+                                    egui::RichText::new(app.t("setting_dark_mode_desc")).size(12.0),
                                 );
                             });
                             ui.with_layout(
@@ -5865,7 +5932,11 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                             crate::license::LicenseStatus::Activated { email, plan } => {
                                 let is_dev = crate::license::is_dev_mode();
                                 ui.colored_label(
-                                    if is_dev { theme::caution() } else { theme::safe() },
+                                    if is_dev {
+                                        theme::caution()
+                                    } else {
+                                        theme::safe()
+                                    },
                                     egui::RichText::new(if is_dev {
                                         if app.lang_en {
                                             "Developer mode"
@@ -6018,7 +6089,11 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
 }
 
 /// 设置卡片容器
-pub(crate) fn settings_card<R>(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub(crate) fn settings_card<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     egui::Frame::none()
         .fill(theme::surface())
         .stroke(egui::Stroke::new(1.0, theme::line()))
@@ -6047,7 +6122,10 @@ pub(crate) fn render_settings_item(
 ) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.colored_label(theme::text(), egui::RichText::new(label).size(13.0).strong());
+            ui.colored_label(
+                theme::text(),
+                egui::RichText::new(label).size(13.0).strong(),
+            );
             ui.colored_label(theme::text_2(), egui::RichText::new(desc).size(12.0));
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -6230,7 +6308,6 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(100));
 }
-
 
 #[cfg(test)]
 mod tests {

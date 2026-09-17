@@ -2831,17 +2831,25 @@ fn scan_docker_windows() -> Vec<ScanItem> {
 mod tests {
     use super::*;
 
-
     // ---------- 版本号自然序（防止误删最新版 IDE 配置） ----------
 
     #[test]
     fn jetbrains_version_sort_must_not_be_lexical() {
         // JetBrains 目录名形如 IntelliJIdea2024.10 / IntelliJIdea2024.2。
         // 按字符串排会把 2024.10 判成更旧而删掉它 —— 那正是用户正在用的版本。
-        assert_eq!(version_compare("2024.10", "2024.2"), std::cmp::Ordering::Greater);
-        assert_eq!(version_compare("2025.1", "2024.10"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            version_compare("2024.10", "2024.2"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            version_compare("2025.1", "2024.10"),
+            std::cmp::Ordering::Greater
+        );
         // 冒烟：字符串比较确实是错的，用来证明这条断言有约束力
-        assert!("2024.10" < "2024.2", "字符串比较本应判反，否则这条测试失去意义");
+        assert!(
+            "2024.10" < "2024.2",
+            "字符串比较本应判反，否则这条测试失去意义"
+        );
     }
 
     #[test]
@@ -2857,7 +2865,6 @@ mod tests {
         // 无版本的目录（如 "JetBrains" 本身）不应被当成旧版本
         assert_eq!(parse_jetbrains_dir("JetBrains"), None);
     }
-
 
     // ---------- X-4: Docker 可回收空间（说法修复后必须有测试兜住） ----------
 
@@ -3043,7 +3050,10 @@ mod tests {
             Some("C:/Users/Bob/AppData/Roaming"),
             Some("C:/Users/Bob/AppData/Local"),
         );
-        assert_eq!(config, PathBuf::from("C:/Users/Bob/AppData/Roaming/JetBrains"));
+        assert_eq!(
+            config,
+            PathBuf::from("C:/Users/Bob/AppData/Roaming/JetBrains")
+        );
         assert_eq!(cache, PathBuf::from("C:/Users/Bob/AppData/Local/JetBrains"));
     }
 
@@ -3069,7 +3079,6 @@ mod tests {
         assert!(!config.to_string_lossy().contains("Library"));
         assert!(!cache.to_string_lossy().contains("Library"));
     }
-
 
     #[test]
     fn version_compare_is_numeric_not_lexical() {

@@ -13,16 +13,16 @@ mod icons;
 mod license;
 mod logger;
 mod menubar;
+mod ops;
 mod platform;
 mod safety;
 mod scanner;
 #[cfg(target_os = "macos")]
 mod sudo_keepalive;
 mod theme;
-mod ops;
-mod ui;
 #[cfg(target_os = "macos")]
 mod touchid;
+mod ui;
 mod updater;
 mod widgets;
 
