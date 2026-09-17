@@ -816,6 +816,62 @@ const VERSION_SUFFIXES: &[&str] = &[
     "Technology Preview",
 ];
 
+/// 判断一个字符串是否可以安全地用作路径的**单个**组件
+///
+/// `CFBundleIdentifier` / `CFBundleName` 都来自应用的 Info.plist，作者可以填任意值。
+///   若不校验就拼进 `home.join(format!("Library/Containers/{}", bid))`，
+///   `../../../../Users/xxx/Documents` 这类值会让拼出的路径穿越到 home 之外，
+///   从而把整个 Documents 目录当作"应用关联数据"列入删除列表（历史 bug）。
+///
+/// 这里只禁止真正危险的东西（分隔符、`..`、隐藏名、控制字符），
+/// 不限制空格/括号/加号等合法字符，避免误伤 "Microsoft Edge"、
+/// "Visual Studio Code" 这类真实应用名。
+fn is_safe_path_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s != "."
+        && s != ".."
+        && !s.contains("..")
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.starts_with('.')
+        && !s.chars().any(|c| c.is_control())
+}
+
+/// 关联文件候选路径的安全边界
+///
+/// `find_associated_files` 只允许产出两类路径：
+/// - 当前用户 home 下的文件
+/// - 系统级 LaunchAgents / LaunchDaemons（需 sudo 删除）
+///
+/// 其余一律拒绝，包括任何通过 `..` 或符号链接穿越出边界的路径。
+/// 这是入口字符校验之外的第二道闸 —— 即使将来新增了拼接点忘了校验，
+/// 出口这里也能兜住。
+fn is_allowed_associated_path(path: &Path, home: &Path) -> bool {
+    let raw_roots: [&Path; 3] = [
+        home,
+        Path::new("/Library/LaunchAgents"),
+        Path::new("/Library/LaunchDaemons"),
+    ];
+    // 归一化为真实路径，便于按组件匹配（而非字符串前缀）
+    let roots: Vec<PathBuf> = raw_roots
+        .iter()
+        .map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf()))
+        .collect();
+
+    // 显式 `..` 组件直接拒绝（无需 stat，最快）
+    if path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return false;
+    }
+
+    // 能解析就用真实路径比对（防符号链接穿越），否则退化为原路径
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    roots.iter().any(|r| target.starts_with(r))
+}
+
 /// 查找应用的关联文件
 ///
 /// 基于 bundle ID 和应用名搜索 ~/Library/ 下的各类关联路径。
@@ -846,10 +902,17 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     let mut paths = Vec::new();
 
     // 生成应用名称变体（含版本后缀剥离）
-    let name_variants = generate_name_variants(app_name);
+    // 安全：这些变体会被拼进路径，先筛掉可用于穿越的变体
+    let name_variants: Vec<String> = generate_name_variants(app_name)
+        .into_iter()
+        .filter(|n| is_safe_path_segment(n))
+        .collect();
 
     // 生成 bundle ID 变体（剥离版本后缀）
-    let bundle_id_variants = generate_bundle_id_variants(bundle_id);
+    let bundle_id_variants: Vec<String> = generate_bundle_id_variants(bundle_id)
+        .into_iter()
+        .filter(|b| is_safe_path_segment(b))
+        .collect();
 
     // ---- 按 bundle ID 匹配的路径 ----
 
@@ -995,7 +1058,12 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     // 这些是应用插件/扩展，它们的关联文件需要一并清理
     // (在 scan_app 中调用时传入 app_path，这里通过额外参数实现)
 
+    // 出口兜底：只保留落在允许根目录之内的路径。
+    // 上面 18 个拼接点任何一个漏校验，这里都能拦住。
     paths
+        .into_iter()
+        .filter(|p| is_allowed_associated_path(Path::new(p), &home))
+        .collect()
 }
 
 /// 生成应用名称的命名变体
@@ -1671,6 +1739,102 @@ mod tests {
         // 普通第三方应用不应被过滤
         assert!(!is_system_library_name("Google Chrome"));
         assert!(!is_system_library_name("com.jetbrains.intellij"));
+    }
+
+    // ---------- P0-4: bundle ID / 应用名不得用于路径穿越 ----------
+
+    #[test]
+    fn safe_path_segment_rejects_traversal() {
+        // 合法应用名必须放行（含空格、点、连字符）
+        assert!(is_safe_path_segment("com.example.app"));
+        assert!(is_safe_path_segment("Microsoft Edge"));
+        assert!(is_safe_path_segment("Visual Studio Code"));
+        assert!(is_safe_path_segment("com.jetbrains.intellij"));
+
+        // 危险值必须拦截
+        assert!(!is_safe_path_segment("../.."));
+        assert!(!is_safe_path_segment(".."));
+        assert!(!is_safe_path_segment("."));
+        assert!(!is_safe_path_segment("a/../b"));
+        assert!(!is_safe_path_segment("/etc"));
+        assert!(!is_safe_path_segment("Library/Caches"));
+        assert!(!is_safe_path_segment(""));
+        // 隐藏名（.ssh / .git 等）不得作为关联文件名
+        assert!(!is_safe_path_segment(".ssh"));
+    }
+
+    #[test]
+    fn allowed_associated_path_rejects_outside_home() {
+        let home = home_dir();
+        assert!(is_allowed_associated_path(
+            &home.join("Library/Caches/Foo"),
+            &home
+        ));
+        // 系统级 LaunchAgents 允许（需 sudo 删除）
+        assert!(is_allowed_associated_path(
+            Path::new("/Library/LaunchAgents/com.foo.plist"),
+            &home
+        ));
+        // home 之外一律拒绝
+        assert!(!is_allowed_associated_path(Path::new("/etc/passwd"), &home));
+        assert!(!is_allowed_associated_path(
+            Path::new("/Users/Shared/Evil"),
+            &home
+        ));
+    }
+
+    #[test]
+    fn associated_files_reject_path_traversal_bundle_id() {
+        // CFBundleIdentifier 来自 Info.plist，应用作者可填任意值。
+        // 恶意值不得让 find_associated_files 产出 home 之外的路径 ——
+        // 否则整个 Documents 会被当作"应用关联数据"列入删除。
+        let home = home_dir();
+        let home_str = home.to_string_lossy().to_string();
+        for malicious in [
+            "../../../../Users/Shared/Documents",
+            "../../../..",
+            "/etc",
+            "..",
+            "/Applications",
+            "..%2f..",
+            "Foo/../../etc",
+        ] {
+            let paths = find_associated_files(malicious, "Evil App");
+            for p in &paths {
+                // 独立断言：**不复用** is_allowed_associated_path，
+                // 否则那个函数本身出错时这个测试会跟着一起失效。
+                let in_allowed_root = p.starts_with(&home_str)
+                    || p.starts_with("/Library/LaunchAgents")
+                    || p.starts_with("/Library/LaunchDaemons");
+                assert!(
+                    in_allowed_root,
+                    "恶意 bundle id {:?} 产出了越界路径: {}",
+                    malicious, p
+                );
+                assert!(
+                    !p.contains(".."),
+                    "恶意 bundle id {:?} 产出了含 '..' 的路径: {}",
+                    malicious,
+                    p
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn associated_files_still_finds_legitimate_paths() {
+        // 收紧校验不能把正常功能改坏：合法 bundle ID 仍应产出候选路径
+        // （这里只校验"不抛错 + 结果均在允许范围内"，不强依赖本机是否装了该应用）
+        let home = home_dir();
+        let paths = find_associated_files("com.apple.Safari", "Safari");
+        for p in &paths {
+            assert!(
+                is_allowed_associated_path(Path::new(p), &home),
+                "合法 bundle id 产出了越界路径: {}",
+                p
+            );
+        }
+        let _ = paths;
     }
 
     #[test]

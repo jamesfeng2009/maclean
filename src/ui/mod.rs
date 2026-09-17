@@ -13,9 +13,16 @@ use crate::app::{App, ConfirmState, ScanState, Tab};
 use crate::icons;
 use crate::ops::{
     execute_optimize_task, open_url, start_delete, start_scan, start_scan_all, start_sudo_delete,
-    start_sudo_delete_touchid, DeleteMessage, ScanMessage,
+    DeleteMessage, ScanMessage,
 };
+// Touch ID 提权删除是 macOS 专属 DRM 机制，Windows/Linux 上该函数不存在
+#[cfg(target_os = "macos")]
+use crate::ops::start_sudo_delete_touchid;
 // 模块路径本身也要引入：代码里大量写成 `theme::text()` / `scanner::Foo`
+// `platform` 只在 Windows 分支里用到（还原点 / 注册表备份入口），
+// 不 cfg 限定的话本机（macOS）会报 unused import。
+#[cfg(target_os = "windows")]
+use crate::platform;
 use crate::{config, i18n, menubar, safety, scanner, theme};
 use crate::scanner::{format_size, Recommend, ScanItem};
 use crate::theme::*;
@@ -159,7 +166,7 @@ auto_clean_after_scan: &mut bool,
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             app.tab = Tab::DevCache;
-            if !matches!(app.current_scan_state(), ScanState::Scanning) {
+            if !app.any_scanning() {
                 *auto_clean_after_scan = true;
                 start_scan(app, scan_rx);
             }
@@ -185,6 +192,24 @@ auto_clean_after_scan: &mut bool,
 }
 
 
+/// 概览页「一键清理」：跨 Tab 选中推荐项并进入确认
+///
+/// 单独抽成函数是为了可测 —— 按钮点击本身需要 egui 上下文，无法单测，
+/// 但按钮背后的这条逻辑必须锁定。
+///
+/// 必须用 `prepare_delete_cross_tab`，不能用 `prepare_delete`：
+/// 当前 tab 是 Overview，而 `prepare_delete` 只扫 `tab_index()`（=0）的
+/// `results[0]` —— Overview 的 results 恒为空，会导致静默 return、
+/// 确认框永不弹出，只在其他 Tab 留下莫名其妙的预选（历史 bug）。
+pub(crate) fn one_click_clean(app: &mut App, items: &[(usize, usize)]) {
+    for &(tab_idx, item_idx) in items {
+        if let Some(item) = app.results[tab_idx].get_mut(item_idx) {
+            item.selected = true;
+        }
+    }
+    app.prepare_delete_cross_tab(items.to_vec());
+}
+
 /// GUI 应用层：持有 eframe 每帧回调之间需要保持的全部可变状态
 ///
 /// 2026-09 之前这里是 `run_simple_native` 闭包里的 7 个 `static mut`，读写全靠
@@ -201,6 +226,10 @@ pub(crate) struct Gui {
     last_disk_update: f64,
     /// QuickClean 标志：扫描完成后自动选中 Safe 项并删除
     auto_clean_after_scan: bool,
+    /// 仅供测试：强制 Touch ID 状态（available, enabled），绕开真实系统查询。
+    /// 否则测试只能在"机器真的启用了 Touch ID sudo"时才能覆盖该分支。
+    #[cfg(test)]
+    force_touch_id: Option<(bool, bool)>,
 }
 
 impl Gui {
@@ -213,6 +242,8 @@ impl Gui {
             needs_init: true,
             last_disk_update: 0.0,
             auto_clean_after_scan: false,
+            #[cfg(test)]
+            force_touch_id: None,
         }
     }
 
@@ -248,7 +279,7 @@ impl Gui {
                     // 快速扫描：只扫描不删除
                     self.auto_clean_after_scan = false;
                     if let Some(app) = Some(&mut self.app) {
-                        if !matches!(app.current_scan_state(), ScanState::Scanning) {
+                        if !app.any_scanning() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                             start_scan(app, &mut self.scan_rx);
                         }
@@ -264,8 +295,7 @@ impl Gui {
                     // 2. 切换到开发者缓存 Tab 并开始扫描
                     if let Some(app) = Some(&mut self.app) {
                         app.tab = Tab::DevCache;
-                        let state = app.current_scan_state().clone();
-                        if !matches!(state, ScanState::Scanning) {
+                        if !app.any_scanning() {
                             // 设置标志：扫描完成后自动选择 Safe 项并删除
                             self.auto_clean_after_scan = true;
                             start_scan(app, &mut self.scan_rx);
@@ -326,13 +356,21 @@ impl Gui {
     /// 收取后台扫描线程的消息
     fn poll_scan(&mut self) {
         let mut clear_scan_rx = false;
+        // 至少有一个 Tab 已经扫完。
+        //
+        // 进度估算线程每 200ms 发一次 Progress，扫描线程结束后它才退出，
+        // 所以在 Done 之后仍会收到几条 Progress —— 不拦掉的话进度条会从
+        // 100% 回退到 99.x%（多 Tab 扫描时尤其明显）。
+        let mut scan_finished = false;
         // 检查后台扫描结果
         if let Some(rx) = self.scan_rx.as_ref() {
             loop {
                 match rx.try_recv() {
                     Ok(ScanMessage::Progress(p)) => {
-                        if let Some(app) = Some(&mut self.app) {
-                            app.scan_progress = p;
+                        if !scan_finished {
+                            if let Some(app) = Some(&mut self.app) {
+                                app.scan_progress = p;
+                            }
                         }
                     }
                     Ok(ScanMessage::PartialItems(items, tab_idx)) => {
@@ -366,6 +404,8 @@ impl Gui {
                             app.disk_total = total;
                             app.disk_free = free;
                         }
+                        // 之后的 Progress 一律忽略，避免进度条回退
+                        scan_finished = true;
                         // 单个 Tab 扫描完成后不 break，继续接收 AllDone 或更多 Done
                     }
                     Ok(ScanMessage::AllDone) => {
@@ -411,8 +451,165 @@ impl Gui {
         }
     }
 
+    /// 全局键盘快捷键
+    ///
+    /// 重构到 `impl eframe::App` 之后，`next_tab` / `move_up` / `toggle_select` /
+    /// `quit` 这几个方法失去了调用点，界面却仍在提示「按 R 扫描」，
+    /// 除托盘外也没有退出路径。这里把它们接回来。
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // 搜索框 / 密码框等获得焦点时不抢按键
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+
+        let (cmd, q, r, tab, up, down, space, esc, slash) = ctx.input(|i| {
+            (
+                i.modifiers.command,
+                i.key_pressed(egui::Key::Q),
+                i.key_pressed(egui::Key::R),
+                i.key_pressed(egui::Key::Tab),
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::Escape),
+                i.key_pressed(egui::Key::Slash),
+            )
+        });
+
+        if cmd && q {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        // Esc：取消删除确认（弹窗内部自己的 Esc 处理仍然优先）
+        if esc && !matches!(self.app.confirm, ConfirmState::None) {
+            self.app.cancel_delete();
+            return;
+        }
+
+        // 确认/删除进行中，其余快捷键一律不响应
+        if !matches!(self.app.confirm, ConfirmState::None) {
+            return;
+        }
+
+        if slash {
+            self.app.filter_active = true;
+            return;
+        }
+
+        if tab {
+            self.app.next_tab();
+            return;
+        }
+        if up {
+            self.app.move_up();
+            return;
+        }
+        if down {
+            self.app.move_down();
+            return;
+        }
+        if space {
+            self.app.toggle_select();
+            return;
+        }
+
+        // R：重新扫描当前 Tab（界面上就是这么提示的）
+        if r && !self.app.any_scanning() && !self.app.is_non_scannable_tab() {
+            start_scan(&mut self.app, &mut self.scan_rx);
+        }
+    }
+
+    /// 处理「部分项需要管理员权限」
+    ///
+    /// 返回是否拉起了新的删除线程 —— 调用方据此决定 `delete_rx` 的去留。
+    #[cfg(target_os = "macos")]
+    fn handle_need_password(&mut self, items: Vec<(String, String)>) -> bool {
+        #[cfg(test)]
+        let (available, enabled) = match self.force_touch_id {
+            Some(v) => v,
+            None => (
+                touchid::touch_id_available(),
+                touchid::sudo_touch_id_enabled(),
+            ),
+        };
+        #[cfg(not(test))]
+        let (available, enabled) = (
+            touchid::touch_id_available(),
+            touchid::sudo_touch_id_enabled(),
+        );
+        let clamshell_closed = safety::is_clamshell_closed();
+        self.route_need_password(items, enabled, available, clamshell_closed)
+    }
+
+    /// 同上（非 macOS：没有 Touch ID，一律走密码输入）
+    #[cfg(not(target_os = "macos"))]
+    fn handle_need_password(&mut self, items: Vec<(String, String)>) -> bool {
+        let app = &mut self.app;
+        app.sudo_failed_items = items;
+        app.sudo_password_input.clear();
+        app.sudo_password = None;
+        app.sudo_error = None;
+        app.touch_id_error = None;
+        app.confirm = ConfirmState::NeedSudoPassword;
+        false
+    }
+
+    /// 决策 + 副作用：不查询系统状态，三个条件由调用方传入，便于单测覆盖各分支
+    #[cfg(target_os = "macos")]
+    fn route_need_password(
+        &mut self,
+        items: Vec<(String, String)>,
+        touch_id_enabled: bool,
+        touch_id_available: bool,
+        clamshell_closed: bool,
+    ) -> bool {
+        {
+            let app = &mut self.app;
+            app.sudo_failed_items = items;
+            app.sudo_password_input.clear();
+            app.sudo_password = None;
+            app.sudo_error = None;
+            app.touch_id_error = None;
+            app.touch_id_available = touch_id_available;
+            app.touch_id_enabled = touch_id_enabled;
+            if clamshell_closed {
+                // 合盖时 Touch ID 不可用，回退到密码输入
+                app.touch_id_error = Some(app.t("touchid_clamshell_error").to_string());
+                app.touch_id_available = false;
+            }
+        }
+
+        if touch_id_enabled && !clamshell_closed {
+            // Touch ID 已启用：直接用 sudo（Touch ID 自动触发）
+            let items = self.app.sudo_failed_items.clone();
+            if items.is_empty() {
+                // 没有真正需要提权的项：直接收尾。
+                // 否则会停在"Touch ID 验证中"却没有任何线程在跑。
+                self.app.finish_delete();
+                return false;
+            }
+            self.app.confirm = ConfirmState::SudoWithTouchId;
+            self.app.delete_done = 0;
+            self.app.delete_total = items.len();
+            let lang_en = self.app.lang_en;
+            start_sudo_delete_touchid(items, lang_en, &mut self.delete_rx)
+        } else if touch_id_available && !clamshell_closed {
+            // Touch ID 可用但未启用：提示用户是否启用
+            self.app.confirm = ConfirmState::OfferTouchIdSetup;
+            false
+        } else {
+            // 无 Touch ID 或合盖：走密码输入流程
+            self.app.confirm = ConfirmState::NeedSudoPassword;
+            false
+        }
+    }
+
     /// 收取后台删除线程的消息
     fn poll_delete(&mut self) {
+        // 语义：**只在删除流程真正结束时**才置 true。
+        // 若某个分支重新拉起了删除线程（如 Touch ID 路径），self.delete_rx 里
+        // 已是新线程的 receiver，必须保持 false，否则后续消息无人接收。
         let mut clear_delete_rx = false;
         // 检查后台删除进度
         if let Some(rx) = self.delete_rx.as_ref() {
@@ -429,64 +626,13 @@ impl Gui {
                         }
                     }
                     Ok(DeleteMessage::NeedPassword(items)) => {
-                        if let Some(app) = Some(&mut self.app) {
-                            app.sudo_failed_items = items;
-                            app.sudo_password_input.clear();
-                            app.sudo_password = None;
-                            app.sudo_error = None;
-                            app.touch_id_error = None;
-                            // 刷新 Touch ID 状态 (macOS 专属)
-                            #[cfg(target_os = "macos")]
-                            {
-                                app.touch_id_available = touchid::touch_id_available();
-                                app.touch_id_enabled = touchid::sudo_touch_id_enabled();
-                            }
-
-                            // 合盖检测：Touch ID 在合盖时不可用，回退到密码输入 (macOS 专属)
-                            #[cfg(target_os = "macos")]
-                            let clamshell_closed = safety::is_clamshell_closed();
-                            #[cfg(not(target_os = "macos"))]
-                            let clamshell_closed = false;
-                            if clamshell_closed {
-                                app.touch_id_error =
-                                    Some(app.t("touchid_clamshell_error").to_string());
-                                app.touch_id_available = false;
-                            }
-
-                            if app.touch_id_enabled && !clamshell_closed {
-                                // Touch ID 已启用：直接用 sudo（Touch ID 自动触发）(macOS 专属)
-                                #[cfg(target_os = "macos")]
-                                {
-                                    app.confirm = ConfirmState::SudoWithTouchId;
-                                    let items = app.sudo_failed_items.clone();
-                                    app.delete_done = 0;
-                                    app.delete_total = items.len();
-                                    start_sudo_delete_touchid(
-                                        items,
-                                        app.lang_en,
-                                        &mut self.delete_rx,
-                                    );
-                                }
-                                #[cfg(not(target_os = "macos"))]
-                                {
-                                    app.confirm = ConfirmState::NeedSudoPassword;
-                                }
-                            } else if app.touch_id_available && !clamshell_closed {
-                                // Touch ID 可用但未启用：提示用户是否启用 (macOS 专属)
-                                #[cfg(target_os = "macos")]
-                                {
-                                    app.confirm = ConfirmState::OfferTouchIdSetup;
-                                }
-                                #[cfg(not(target_os = "macos"))]
-                                {
-                                    app.confirm = ConfirmState::NeedSudoPassword;
-                                }
-                            } else {
-                                // 无 Touch ID 或合盖：走密码输入流程
-                                app.confirm = ConfirmState::NeedSudoPassword;
-                            }
-                        }
-                        clear_delete_rx = true;
+                        // 本分支可能会**重新拉起**一条删除线程（Touch ID 路径），
+                        // 那 self.delete_rx 里就是新线程的 receiver，绝不能清掉。
+                        let started_new_delete = self.handle_need_password(items);
+                        // 只有**没有**重新拉起删除线程时，这条通道才真的结束了。
+                        // Touch ID 分支会把新线程的 receiver 写进 self.delete_rx，
+                        // 此时清掉会导致消息无人接收、confirm 永久卡在 SudoWithTouchId。
+                        clear_delete_rx = !started_new_delete;
                         break;
                     }
                     Ok(DeleteMessage::Done) => {
@@ -577,6 +723,7 @@ impl eframe::App for Gui {
         self.poll_tray_releasable();
         self.poll_scan();
         self.poll_delete();
+        self.handle_shortcuts(ctx);
 
         // 磁盘监控：每 5 秒轮询磁盘空间
         self.app.poll_disk_space();
@@ -754,6 +901,45 @@ pub(crate) fn build_uninstall_groups(
     groups
 }
 
+/// 统计 App 卸载页底部胶囊要展示的数字：应用数、总大小、各推荐等级的 (应用数, 大小)
+///
+/// 单独抽出来有两个原因：
+///   1. 可测 —— 之前这段埋在渲染函数里，"CacheOnly 归入 Safe" 这类口径没有测试能锁；
+///   2. 调用方手里才有 `&[ScanItem]`，把结果算好传下去可以避免同时持有
+///      `&mut App` 和 `&App::results`（借用冲突）。
+pub(crate) fn uninstall_pill_stats(
+    items: &[ScanItem],
+    groups: &[(String, Vec<usize>)],
+) -> (
+    usize,
+    u64,
+    std::collections::HashMap<Recommend, (usize, u64)>,
+) {
+    let mut stats: std::collections::HashMap<Recommend, (usize, u64)> =
+        std::collections::HashMap::new();
+    for (_, indices) in groups {
+        let mut seen = std::collections::HashSet::new();
+        for &idx in indices {
+            if let Some(item) = items.get(idx) {
+                // CacheOnly 在 UI 中归入 Safe
+                let rec_key = if item.recommend == Recommend::CacheOnly {
+                    Recommend::Safe
+                } else {
+                    item.recommend
+                };
+                let entry = stats.entry(rec_key).or_insert((0, 0));
+                entry.1 += item.size_bytes;
+                if seen.insert(rec_key) {
+                    entry.0 += 1;
+                }
+            }
+        }
+    }
+    let total_apps = groups.len();
+    let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
+    (total_apps, total_size, stats)
+}
+
 /// 渲染 App 卸载 Tab 的完整内容区
 ///
 /// 严格按设计稿实现：顶部分类胶囊 + 操作工具栏，下方是单一垂直滚动列表，
@@ -762,6 +948,7 @@ pub(crate) fn render_app_uninstall_panel(
     ui: &mut egui::Ui,
     app: &mut App,
     _scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+    groups_unfiltered: &[(String, Vec<usize>)],
 ) {
     let tab_idx = app.tab_index();
     let items = &app.results[tab_idx];
@@ -772,17 +959,14 @@ pub(crate) fn render_app_uninstall_panel(
         app.filter_category = None;
     }
 
-    let filtered_indices = app.filtered_indices();
     let recommend_filter = app.app_uninstall_recommend_filter;
-    crate::logger::info(&format!(
-        "render_app_uninstall_panel: tab={:?}, items={}, filtered={}, recommend_filter={:?}, query={:?}",
-        app.tab,
-        items.len(),
-        filtered_indices.len(),
-        recommend_filter,
-        app.filter_query
-    ));
-    let mut groups = build_uninstall_groups(items, &filtered_indices);
+    // 分组由上层统一构建后传入。
+    //
+    // 之前每帧要构建 3 次：本函数 1 次，内部 render_app_uninstall_filter_pills
+    // 再 1 次，render_gui 的副标题还要 1 次 —— 输入完全一样，纯浪费。
+    // 这里 to_vec() 是必须的：本函数会按推荐等级 retain + 排序，不能改到
+    // 上层那份（pills 要拿未过滤的分组算统计）。
+    let mut groups = groups_unfiltered.to_vec();
 
     // 按推荐等级过滤应用分组
     if let Some(rec_filter) = recommend_filter {
@@ -803,8 +987,11 @@ pub(crate) fn render_app_uninstall_panel(
         size_b.cmp(&size_a)
     });
 
+    // 统计必须在 items 借用有效期内算完 —— 之后要独占借用 app 去渲染胶囊
+    let (pill_apps, pill_size, pill_stats) = uninstall_pill_stats(items, groups_unfiltered);
+
     // 即使分组为空也要渲染过滤胶囊，否则用户无法看到/清除已激活的推荐过滤条件
-    render_app_uninstall_filter_pills(ui, app);
+    render_app_uninstall_filter_pills(ui, app, pill_apps, pill_size, &pill_stats);
     ui.add_space(10.0);
 
     if groups.is_empty() {
@@ -1060,34 +1247,14 @@ pub(crate) fn render_app_uninstall_group_card(
 ///
 /// 设计稿：全部 / Safe / Caution / Advanced 四个胶囊，其中 Safe/Caution/Advanced
 /// 的头部为对应颜色的徽章，全部胶囊头部为普通文本。
-pub(crate) fn render_app_uninstall_filter_pills(ui: &mut egui::Ui, app: &mut App) {
-    let tab_idx = app.tab_index();
-    let items = &app.results[tab_idx];
-    let filtered_indices = app.filtered_indices();
-    let groups = build_uninstall_groups(items, &filtered_indices);
-
-    // 统计各推荐等级的应用数与累计大小（CacheOnly 在 UI 中归入 Safe）
-    let mut stats: std::collections::HashMap<crate::scanner::Recommend, (usize, u64)> =
-        std::collections::HashMap::new();
-    for (_, indices) in &groups {
-        let mut seen = std::collections::HashSet::new();
-        for &idx in indices {
-            let rec = items[idx].recommend;
-            let rec_key = if rec == crate::scanner::Recommend::CacheOnly {
-                crate::scanner::Recommend::Safe
-            } else {
-                rec
-            };
-            let entry = stats.entry(rec_key).or_insert((0, 0));
-            entry.1 += items[idx].size_bytes;
-            if seen.insert(rec_key) {
-                entry.0 += 1;
-            }
-        }
-    }
-
-    let total_apps = groups.len();
-    let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_app_uninstall_filter_pills(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    total_apps: usize,
+    total_size: u64,
+    stats: &std::collections::HashMap<crate::scanner::Recommend, (usize, u64)>,
+) {
 
     struct PillInfo {
         rec: Option<crate::scanner::Recommend>,
@@ -1928,6 +2095,17 @@ pub(crate) fn render_gui(
         app.t("window_title").to_string(),
     ));
 
+    // App 卸载 Tab 的分组每帧要用到 3 次（侧栏副标题、面板本体、底部胶囊），
+    // 三处的输入完全一致 —— 在这里构建一次往下传，避免重复 O(n) 分组。
+    // （Scanning / Idle 时 AppUninstall 列表是空的，构建成本可忽略，
+    //   但为避免每帧多一次分配，非该 Tab 时直接给空 Vec。）
+    let uninstall_groups: Vec<(String, Vec<usize>)> = if app.tab == Tab::AppUninstall {
+        let idx = app.tab_index();
+        build_uninstall_groups(&app.results[idx], &app.filtered_indices())
+    } else {
+        Vec::new()
+    };
+
     // 轮询后台更新检查结果
     app.poll_update();
 
@@ -1988,8 +2166,14 @@ pub(crate) fn render_gui(
                     .clicked()
                     {
                         // 跳转到开发者缓存 Tab（通常回收空间最大）
-                        app.tab = crate::app::Tab::DevCache;
-                        app.list_index = 0;
+                        //
+                        // 必须有守卫：确认框弹出或删除进行中时切 Tab，会让
+                        // 确认框的统计（依赖当前 Tab）与 pending_delete 错位。
+                        // 导航栏点击是带这个守卫的，这里之前漏了。
+                        if matches!(app.confirm, ConfirmState::None) && !app.any_scanning() {
+                            app.tab = crate::app::Tab::DevCache;
+                            app.list_index = 0;
+                        }
                     }
                 }
             });
@@ -1999,10 +2183,10 @@ pub(crate) fn render_gui(
     // ========== 底部 Footer ==========
     // App卸载 / 概览 Tab 自带固定底部删除栏，避免与全局 Footer 重复
     let app_uninstall_show_footer = app.tab == crate::app::Tab::AppUninstall
-        && !matches!(app.scan_states[app.tab_index()], ScanState::Scanning)
+        && !app.tab_scanning(app.tab_index())
         && !app.results[app.tab_index()].is_empty();
     let overview_show_footer =
-        app.tab == crate::app::Tab::Overview && !matches!(app.scan_states[0], ScanState::Scanning);
+        app.tab == crate::app::Tab::Overview && !app.any_scanning();
     if app_uninstall_show_footer {
         egui::TopBottomPanel::bottom("app_uninstall_footer")
             .frame(egui::Frame::side_top_panel(&ctx.style()).fill(theme::surface()))
@@ -2305,12 +2489,13 @@ pub(crate) fn render_gui(
                                     ScanState::Scanning => format!("⏳ {}", app.t("scanning")),
                                     ScanState::Done => {
                                         let items = &app.results[tab_idx_h];
-                                        let filtered = app.filtered_indices();
-                                        let groups = build_uninstall_groups(items, &filtered);
                                         let total: u64 = items.iter().map(|i| i.size_bytes).sum();
                                         app.tf(
                                             "app_uninstall_subtitle",
-                                            &[&groups.len().to_string(), &format_size(total)],
+                                            &[
+                                                &uninstall_groups.len().to_string(),
+                                                &format_size(total),
+                                            ],
                                         )
                                     }
                                 }
@@ -2337,8 +2522,7 @@ pub(crate) fn render_gui(
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // 强制刷新按钮（清除缓存后重新扫描）
-                            let is_scanning =
-                                matches!(app.current_scan_state(), ScanState::Scanning);
+                            let is_scanning = app.any_scanning();
                             let refresh_btn = widgets::icon_button_enabled(
                                 ui,
                                 icons::Icon::Refresh,
@@ -2443,14 +2627,14 @@ pub(crate) fn render_gui(
 
             // --- App 卸载 Tab：三栏布局 + 双滚动条 ---
             if app.tab == Tab::AppUninstall {
-                let is_scanning = matches!(app.scan_states[app.tab_index()], ScanState::Scanning);
+                let is_scanning = app.tab_scanning(app.tab_index());
                 let is_empty = app.results[app.tab_index()].is_empty();
                 if is_scanning {
                     ui_scanning(ui, app);
                 } else if is_empty {
                     render_empty_state(ui, app, scan_rx);
                 } else {
-                    render_app_uninstall_panel(ui, app, scan_rx);
+                    render_app_uninstall_panel(ui, app, scan_rx, &uninstall_groups);
                 }
                 return;
             }
@@ -2458,7 +2642,7 @@ pub(crate) fn render_gui(
             // --- 扫描结果区 ---
             let tab_idx = app.tab_index();
             let items = app.results[tab_idx].clone();
-            let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
+            let is_scanning = app.tab_scanning(tab_idx);
 
             // --- 分类过滤标签页（Overview / LargeFiles / SystemOptimize / Settings 除外）---
             let show_category_tabs = !matches!(
@@ -2937,9 +3121,11 @@ pub(crate) fn show_confirm_window(
     app: &mut App,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
 ) {
-    let count = app.selected_count();
-    let size = app.selected_total_size();
-    let idx = app.tab_index();
+    // 统计一律以 pending_delete 为准（可能跨 Tab），不能按当前 Tab 统计：
+    // 概览页触发的跨 Tab 删除时当前 tab == Overview，results[0] 恒为空，
+    // 会显示「0 项 / 0 B」却在确认后真实删除 N 个文件（历史 bug）。
+    let count = app.pending_count();
+    let size = app.pending_total_size();
 
     let mut safe_cnt = 0usize;
     let mut safe_sz = 0u64;
@@ -2949,8 +3135,8 @@ pub(crate) fn show_confirm_window(
     let mut advanced_sz = 0u64;
     let mut needs_admin = false;
 
-    for item in &app.results[idx] {
-        if !item.selected || !item.deletable {
+    for item in app.pending_items() {
+        if !item.deletable {
             continue;
         }
         match item.recommend {
@@ -3088,9 +3274,11 @@ pub(crate) fn show_confirm_window(
                     .show(ui, |ui| {
                         ui.set_max_height(150.0);
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            let items: Vec<_> = app.results[idx]
-                                .iter()
-                                .filter(|item| item.selected && item.deletable)
+                            // 预览列表同样以 pending_delete 为准（跨 Tab 安全）
+                            let items: Vec<_> = app
+                                .pending_items()
+                                .into_iter()
+                                .filter(|item| item.deletable)
                                 .collect();
                             for item in &items {
                                 ui.horizontal(|ui| {
@@ -4056,7 +4244,7 @@ pub(crate) fn show_summary_window(
                                     );
                                     ui.vertical(|ui| {
                                         ui.colored_label(
-                                            egui::Color32::from_rgb(200, 120, 100),
+                                            theme::text_2(),
                                             egui::RichText::new(category).size(11.0),
                                         );
                                         ui.add(
@@ -4265,7 +4453,7 @@ pub(crate) fn show_residual_window(
                         // 文件系统残留
                         if fs_len > 0 {
                             ui.colored_label(
-                                egui::Color32::from_rgb(255, 180, 100),
+                                theme::caution(),
                                 egui::RichText::new(format!(
                                     "文件系统残留 ({} 项, {})",
                                     fs_len,
@@ -4473,7 +4661,7 @@ pub(crate) fn render_disk_analyzer(
 ) {
     let tab_idx = app.tab_index();
     let items = app.results[tab_idx].clone();
-    let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
+    let is_scanning = app.tab_scanning(tab_idx);
     let current_path = app.disk_analyzer_current_path();
     let has_history = !app.disk_analyzer_history.is_empty();
 
@@ -4919,7 +5107,7 @@ pub(crate) fn render_overview_panel(
 
         // Safe 可释放空间（主 pill）
         let safe_resp = egui::Frame::none()
-            .fill(egui::Color32::from_rgb(232, 255, 243))
+            .fill(theme::safe_50())
             .stroke(egui::Stroke::new(1.0, theme::safe()))
             .rounding(egui::Rounding::same(14.0))
             .inner_margin(egui::Margin::symmetric(16.0, 10.0))
@@ -4957,7 +5145,7 @@ pub(crate) fn render_overview_panel(
 
         // Caution pill
         let caution_resp = egui::Frame::none()
-            .fill(egui::Color32::from_rgb(255, 247, 230))
+            .fill(theme::caution_50())
             .stroke(egui::Stroke::new(1.0, theme::caution()))
             .rounding(egui::Rounding::same(14.0))
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
@@ -4989,7 +5177,7 @@ pub(crate) fn render_overview_panel(
 
         // Advanced pill
         let advanced_resp = egui::Frame::none()
-            .fill(egui::Color32::from_rgb(255, 233, 230))
+            .fill(theme::danger_50())
             .stroke(egui::Stroke::new(1.0, theme::danger()))
             .rounding(egui::Rounding::same(14.0))
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
@@ -5073,13 +5261,11 @@ pub(crate) fn render_overview_panel(
             BTN_H_LG,
         );
         if clean_btn.clicked() {
-            // 选中所有推荐项并准备删除
-            for &(tab_idx, item_idx, _) in &recommendation_items {
-                if let Some(item) = app.results[tab_idx].get_mut(item_idx) {
-                    item.selected = true;
-                }
-            }
-            app.prepare_delete();
+            let cross: Vec<(usize, usize)> = recommendation_items
+                .iter()
+                .map(|(tab_idx, item_idx, _)| (*tab_idx, *item_idx))
+                .collect();
+            one_click_clean(app, &cross);
         }
         ui.add_space(12.0);
 
@@ -5193,7 +5379,7 @@ pub(crate) fn render_optimize_panel(
 ) {
     let tab_idx = app.tab_index();
     let items = app.results[tab_idx].clone();
-    let is_scanning = matches!(app.scan_states[tab_idx], ScanState::Scanning);
+    let is_scanning = app.tab_scanning(tab_idx);
 
     if is_scanning {
         let scan_size = ui.available_size();
@@ -6045,3 +6231,373 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
         .request_repaint_after(std::time::Duration::from_millis(100));
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::{Recommend, ScanItem};
+
+    /// 构造一个可删除的测试条目
+    fn mk_item(path: &str, size: u64) -> ScanItem {
+        ScanItem {
+            path: path.to_string(),
+            size_bytes: size,
+            category: "test".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            recommend: Recommend::Safe,
+            description: String::new(),
+            batch_paths: Vec::new(),
+        }
+    }
+
+    fn empty_app() -> App {
+        let mut app = App::new();
+        for v in app.results.iter_mut() {
+            v.clear();
+        }
+        app
+    }
+
+    // ---------- P0-1 / P0-3: 跨 Tab 删除的统计必须真实 ----------
+
+    #[test]
+    fn overview_prepare_delete_is_noop_but_cross_tab_works() {
+        let mut app = empty_app();
+        app.results[1].push(mk_item("/tmp/tab1_item", 100));
+        app.results[3].push(mk_item("/tmp/tab3_item", 200));
+        app.tab = Tab::Overview;
+
+        // 原 bug 复现：prepare_delete 只看当前 Tab（Overview=0），
+        // results[0] 恒为空 → 静默 return，确认框永不弹出，
+        // 只在其他 Tab 留下莫名其妙的预选。
+        app.prepare_delete();
+        assert!(
+            app.pending_delete.is_empty(),
+            "Overview 上 prepare_delete 选不到任何东西 —— 这正是 P0-1 的根因"
+        );
+
+        // 正确入口：走 UI「一键清理」真正调用的那个函数
+        one_click_clean(&mut app, &[(1, 0), (3, 0)]);
+
+        // P0-3：确认框现在按 pending_delete 统计，必须是真实的 2 项 / 300B
+        assert_eq!(app.pending_count(), 2, "确认框不能显示 0 项");
+        assert_eq!(app.pending_total_size(), 300, "确认框不能显示 0 B");
+        assert!(
+            matches!(app.confirm, ConfirmState::Pending),
+            "应进入确认状态, 实际 {:?}",
+            app.confirm
+        );
+
+        // 对照组：旧的按当前 Tab 统计方式会给出 0，锁死这个差异
+        assert_eq!(
+            app.selected_count(),
+            0,
+            "当前 Tab(Overview) 选中数为 0 —— 证明确认框必须走 pending_* 而非 selected_*"
+        );
+    }
+
+    #[test]
+    fn pending_items_ignores_out_of_range_indices() {
+        let mut app = empty_app();
+        app.results[2].push(mk_item("/tmp/only", 42));
+
+        app.pending_delete = vec![(2, 0), (99, 0), (2, 99)];
+        assert_eq!(app.pending_count(), 1, "越界索引必须被忽略而不是 panic");
+        assert_eq!(app.pending_total_size(), 42);
+    }
+
+    #[test]
+    fn pending_items_skips_undeletable() {
+        let mut app = empty_app();
+        let mut blocked = mk_item("/tmp/blocked", 999);
+        blocked.deletable = false;
+        app.results[1].push(mk_item("/tmp/ok", 10));
+        app.results[1].push(blocked);
+
+        // pending_delete 是权威列表，但确认框只统计可删除的
+        app.pending_delete = vec![(1, 0), (1, 1)];
+        assert_eq!(app.pending_count(), 2, "pending 本身不去重/过滤");
+        let deletable_sum: u64 = app
+            .pending_items()
+            .iter()
+            .filter(|i| i.deletable)
+            .map(|i| i.size_bytes)
+            .sum();
+        assert_eq!(deletable_sum, 10, "不可删除项不应计入可释放空间");
+    }
+
+    // ---------- P0-2: Touch ID 分支不得丢掉新 receiver ----------
+
+    /// Touch ID 分支的**决策**：不查系统状态，三个条件直接传入
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn touch_id_route_decisions() {
+        // 用一个会被 sanitize 拒绝的系统路径：线程只会发一条 Done 就退出，
+        // 不会真的执行 sudo 或删除任何东西。
+        let rejected = || {
+            vec![(
+                "/System/Library/ShouldBeRejected".to_string(),
+                "test".to_string(),
+            )]
+        };
+
+        // 已启用 → 走 Touch ID
+        let mut gui = Gui::new();
+        let (_keep, rx) = mpsc::channel::<DeleteMessage>();
+        gui.delete_rx = Some(rx);
+        let started = gui.route_need_password(rejected(), true, true, false);
+        assert!(started, "Touch ID 已启用时应拉起删除线程");
+        assert!(matches!(gui.app.confirm, ConfirmState::SudoWithTouchId));
+        assert!(gui.delete_rx.is_some(), "拉起线程后 receiver 必须还在");
+
+        // 可用但未启用 → 提示开启
+        let mut gui = Gui::new();
+        let started = gui.route_need_password(rejected(), false, true, false);
+        assert!(!started);
+        assert!(matches!(gui.app.confirm, ConfirmState::OfferTouchIdSetup));
+
+        // 不支持 → 密码输入
+        let mut gui = Gui::new();
+        let started = gui.route_need_password(rejected(), false, false, false);
+        assert!(!started);
+        assert!(matches!(gui.app.confirm, ConfirmState::NeedSudoPassword));
+
+        // 合盖 → 即使已启用也退化为密码输入
+        let mut gui = Gui::new();
+        let started = gui.route_need_password(rejected(), true, true, true);
+        assert!(!started, "合盖时 Touch ID 不可用");
+        assert!(matches!(gui.app.confirm, ConfirmState::NeedSudoPassword));
+    }
+
+    /// P0-2 回归：走完 poll_delete 后，Touch ID 分支拉起的 receiver 不得被清掉
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn poll_delete_keeps_rx_when_touch_id_thread_started() {
+        if safety::is_clamshell_closed() {
+            eprintln!("跳过：合盖状态下 Touch ID 不可用");
+            return;
+        }
+        let mut gui = Gui::new();
+        // 强制启用 Touch ID，否则本测试只能在真的配了 pam_tid 的机器上生效
+        gui.force_touch_id = Some((true, true));
+
+        let (tx, rx) = mpsc::channel::<DeleteMessage>();
+        gui.delete_rx = Some(rx);
+        tx.send(DeleteMessage::NeedPassword(vec![(
+            "/System/Library/ShouldBeRejected".to_string(),
+            "test".to_string(),
+        )]))
+        .unwrap();
+
+        gui.poll_delete();
+
+        assert!(
+            matches!(gui.app.confirm, ConfirmState::SudoWithTouchId),
+            "强制启用后应走 Touch ID 分支, 实际 {:?}",
+            gui.app.confirm
+        );
+        assert!(
+            gui.delete_rx.is_some(),
+            "Touch ID 分支拉起了新线程，delete_rx 必须保留 —— 修复前这里被无条件清空，\
+             导致后续消息无人接收、confirm 永久卡在 SudoWithTouchId"
+        );
+    }
+
+    /// 未启用 Touch ID 时，本轮没有新线程，通道应当被清理
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn poll_delete_clears_rx_when_no_thread_started() {
+        let mut gui = Gui::new();
+        gui.force_touch_id = Some((false, false));
+
+        let (tx, rx) = mpsc::channel::<DeleteMessage>();
+        gui.delete_rx = Some(rx);
+        tx.send(DeleteMessage::NeedPassword(vec![(
+            "/System/Library/ShouldBeRejected".to_string(),
+            "test".to_string(),
+        )]))
+        .unwrap();
+
+        gui.poll_delete();
+
+        assert!(matches!(gui.app.confirm, ConfirmState::NeedSudoPassword));
+        assert!(
+            gui.delete_rx.is_none(),
+            "未拉起新线程时应清理通道，避免残留 receiver"
+        );
+    }
+
+    fn mk_rec_item(recommend: Recommend, size: u64) -> ScanItem {
+        ScanItem {
+            path: format!("/tmp/rec_{:?}_{}", recommend, size),
+            size_bytes: size,
+            category: "test".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            recommend,
+            description: String::new(),
+            batch_paths: Vec::new(),
+        }
+    }
+
+    // ---------- P1-18: App 卸载胶囊统计口径（从渲染函数里抽出的纯逻辑） ----------
+
+    #[test]
+    fn pill_stats_merges_cache_only_into_safe() {
+        // UI 口径：CacheOnly 归入 Safe 展示。这条口径之前埋在渲染函数里，
+        // 没有任何测试能锁住它。
+        let items = vec![
+            mk_rec_item(Recommend::Safe, 100),
+            mk_rec_item(Recommend::CacheOnly, 50),
+            mk_rec_item(Recommend::Caution, 70),
+        ];
+        // App A 同时含 Safe 与 CacheOnly 两项
+        let groups = vec![
+            ("App A".to_string(), vec![0, 1]),
+            ("App B".to_string(), vec![2]),
+        ];
+
+        let (apps, total, stats) = uninstall_pill_stats(&items, &groups);
+        assert_eq!(apps, 2, "应用数按分组数统计");
+        assert_eq!(total, 220, "总大小统计全部条目");
+        assert_eq!(
+            stats.get(&Recommend::Safe),
+            Some(&(1, 150)),
+            "CacheOnly 必须并入 Safe：App A 算 1 个应用、150 字节"
+        );
+        assert_eq!(stats.get(&Recommend::Caution), Some(&(1, 70)));
+        assert!(
+            !stats.contains_key(&Recommend::CacheOnly),
+            "CacheOnly 不应作为独立分类出现在胶囊上"
+        );
+    }
+
+    #[test]
+    fn pill_stats_ignores_out_of_range_indices() {
+        // 分组里可能残留上一帧扫描结果的索引，越界不能 panic
+        let items = vec![mk_rec_item(Recommend::Safe, 10)];
+        let groups = vec![("App".to_string(), vec![0, 99])];
+
+        let (apps, total, stats) = uninstall_pill_stats(&items, &groups);
+        assert_eq!(apps, 1);
+        assert_eq!(total, 10, "总大小按 items 本身算，与分组索引无关");
+        assert_eq!(stats.get(&Recommend::Safe), Some(&(1, 10)));
+    }
+
+    #[test]
+    fn pill_stats_handles_empty_input() {
+        let (apps, total, stats) = uninstall_pill_stats(&[], &[]);
+        assert_eq!(apps, 0);
+        assert_eq!(total, 0);
+        assert!(stats.is_empty());
+    }
+
+    // ---------- P1-19: Done 之后到达的 Progress 不得让进度条回退 ----------
+
+    // ---------- P1-7: 二次「扫描全部」不能叠加旧结果 ----------
+
+    #[test]
+    fn reset_for_full_scan_clears_previous_results() {
+        let mut app = empty_app();
+        for idx in 1..app.results.len() {
+            app.results[idx].push(mk_item("/tmp/old_stale_item", 999));
+        }
+        // Overview（索引 0）不参与扫描，必须保持原样
+        app.results[0].push(mk_item("/tmp/never_scanned", 1));
+        app.scan_progress = 0.9;
+
+        app.reset_for_full_scan();
+
+        for idx in 1..app.results.len() {
+            assert!(
+                app.results[idx].is_empty(),
+                "results[{idx}] 必须被清空 —— 否则 PartialItems extend 会让二次扫描结果翻倍"
+            );
+            assert!(app.tab_scanning(idx), " results[{idx}] 应被标记为扫描中");
+        }
+        assert_eq!(
+            app.results[0].len(),
+            1,
+            "Overview 的结果槽不属于任何扫描任务，不应被清掉"
+        );
+        assert_eq!(app.scan_progress, 0.0);
+    }
+
+    // ---------- P1-8: 扫描态判定必须区分「当前 Tab」与「任意 Tab」 ----------
+
+    #[test]
+    fn any_scanning_covers_other_tabs() {
+        let mut app = empty_app();
+        assert!(!app.any_scanning());
+
+        // 场景：用户正在 DevCache(3) 单扫，却切到 Overview 点了「扫描全部」
+        app.tab = Tab::Overview;
+        app.scan_states[3] = ScanState::Scanning;
+
+        assert!(
+            app.any_scanning(),
+            "别的 Tab 在扫描时也算正在扫描 —— 否则能并发拉起多轮全量扫描把 I/O 打满"
+        );
+        assert!(
+            !app.tab_scanning(app.tab_index()),
+            "Overview 自身没在扫描，tab_scanning 应为 false"
+        );
+        assert!(app.tab_scanning(3), "DevCache 正在扫描");
+
+        // 对全部非 Overview Tab 成立
+        for idx in 1..app.results.len() {
+            let mut a = empty_app();
+            a.scan_states[idx] = ScanState::Scanning;
+            a.tab = Tab::Overview;
+            assert!(a.any_scanning(), "Tab {idx} 扫描中应被 any_scanning 发现");
+        }
+    }
+
+    #[test]
+    fn scan_progress_does_not_regress_after_done() {
+        let mut gui = Gui::new();
+        let (tx, rx) = mpsc::channel::<ScanMessage>();
+        gui.scan_rx = Some(rx);
+
+        // 模拟：扫描线程报进度 → 完成 → 200ms 估算线程又补发一条旧进度
+        tx.send(ScanMessage::Progress(0.6)).unwrap();
+        gui.poll_scan();
+        assert!(
+            (gui.app.scan_progress - 0.6).abs() < 1e-6,
+            "正常进度应生效, 实际 {}",
+            gui.app.scan_progress
+        );
+
+        tx.send(ScanMessage::Done(vec![], 1, 1)).unwrap();
+        // 估算线程晚到的那条 —— 修复前会把 1.0 拉回 0.7，进度条肉眼可见地倒退
+        tx.send(ScanMessage::Progress(0.7)).unwrap();
+        gui.poll_scan();
+
+        assert_eq!(
+            gui.app.scan_progress, 1.0,
+            "Done 之后收到的 Progress 必须被忽略，否则多 Tab 扫描时进度条会来回跳"
+        );
+    }
+
+    #[test]
+    fn poll_delete_finishes_when_nothing_needs_privilege() {
+        // 空 items 进 Touch ID 分支时不能停在"Touch ID 验证中"——
+        // 没有任何线程在跑，弹窗永远等不到消息。
+        let mut gui = Gui::new();
+        let (tx, rx) = mpsc::channel::<DeleteMessage>();
+        gui.delete_rx = Some(rx);
+        tx.send(DeleteMessage::NeedPassword(vec![])).unwrap();
+
+        gui.poll_delete();
+
+        assert!(
+            !matches!(gui.app.confirm, ConfirmState::SudoWithTouchId),
+            "没有需要提权的项时不应停在 SudoWithTouchId, 实际 {:?}",
+            gui.app.confirm
+        );
+        assert!(gui.delete_rx.is_none(), "本轮没有新线程，通道应被清理");
+    }
+}

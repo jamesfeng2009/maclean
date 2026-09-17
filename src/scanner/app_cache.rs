@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{dir_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 /// 50MB 阈值
 const CONTAINER_MIN: u64 = 50 * 1024 * 1024;
@@ -28,10 +28,33 @@ impl AppCacheScanner {
     }
 }
 
+/// 按路径去重，保留首次出现的那一项
+///
+/// `scan_app_support_caches` 与 `scan_browser_caches` 都用同一份
+/// `CACHE_DIR_NAMES` 做匹配，Chrome 的 `Default/Cache`、`Default/GPUCache`
+/// 这类目录会被两个函数各扫一次 —— 同一路径进列表两次，
+/// `total_size` 直接翻倍，用户看到的"可释放空间"是虚高的。
+fn dedup_by_path(items: Vec<ScanItem>) -> Vec<ScanItem> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.path.clone()))
+        .collect()
+}
+
 impl Scanner for AppCacheScanner {
     fn scan(&self) -> ScanResult {
         let start = Instant::now();
         let mut items = Vec::new();
+
+        // home 获取不到时不要硬扫（否则会退化为扫描系统目录）
+        if !has_home() {
+            return ScanResult {
+                items: Vec::new(),
+                total_size: 0,
+                scan_time_ms: 0,
+            };
+        }
 
         items.extend(scan_containers());
         items.extend(scan_group_containers());
@@ -39,6 +62,14 @@ impl Scanner for AppCacheScanner {
         items.extend(scan_system_caches());
         items.extend(scan_logs());
         items.extend(scan_browser_caches());
+
+        // 按路径去重（保留首次出现的那一项）
+        //
+        // scan_app_support_caches 与 scan_browser_caches 都用 CACHE_DIR_NAMES
+        // 做匹配，Chrome 的 Default/Cache、Default/GPUCache 这类目录会被两个
+        // 函数各扫一次 —— 同一路径进列表两次，total_size 直接翻倍，
+        // 用户看到的"可释放空间"是虚高的。
+        items = dedup_by_path(items);
 
         // 按大小降序排列
         items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
@@ -766,4 +797,72 @@ fn scan_chromium_cache_subdirs(
     }
 
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::Recommend;
+
+    fn mk(path: &str, size: u64) -> ScanItem {
+        ScanItem {
+            path: path.to_string(),
+            size_bytes: size,
+            category: "test".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            recommend: Recommend::Safe,
+            description: String::new(),
+            batch_paths: Vec::new(),
+        }
+    }
+
+    /// P1-14：同一路径被两个子扫描器各扫一次时必须只保留一个
+    ///
+    /// 不去重的话 Chrome 的 Default/Cache、Default/GPUCache 会各出现两次，
+    /// 界面上看着是两个不同的 1GB 目录，实际是同一个 —— 加起来就翻倍了。
+    #[test]
+    fn dedup_removes_repeated_paths() {
+        let items = vec![
+            mk("/Users/j/Library/Caches/Google/Chrome/Default/Cache", 1000),
+            mk(
+                "/Users/j/Library/Caches/Google/Chrome/Default/GPUCache",
+                500,
+            ),
+            mk("/Users/j/Library/Caches/Google/Chrome/Default/Cache", 1000),
+        ];
+        let out = dedup_by_path(items);
+        assert_eq!(out.len(), 2, "重复路径必须被去掉");
+        assert_eq!(
+            out[0].path,
+            "/Users/j/Library/Caches/Google/Chrome/Default/Cache"
+        );
+        assert_eq!(
+            out[1].path,
+            "/Users/j/Library/Caches/Google/Chrome/Default/GPUCache"
+        );
+        assert_eq!(
+            out.iter().map(|i| i.size_bytes).sum::<u64>(),
+            1500,
+            "总大小不能翻倍"
+        );
+    }
+
+    #[test]
+    fn dedup_keeps_distinct_paths_in_order() {
+        let items = vec![mk("/a", 1), mk("/b", 2), mk("/a", 3)];
+        let out = dedup_by_path(items);
+        assert_eq!(
+            out.iter().map(|i| i.path.as_str()).collect::<Vec<_>>(),
+            vec!["/a", "/b"]
+        );
+        // 保留的是首次出现那一项（大小 1，不是后来的 3）
+        assert_eq!(out[0].size_bytes, 1);
+    }
+
+    #[test]
+    fn dedup_handles_empty() {
+        assert!(dedup_by_path(Vec::new()).is_empty());
+    }
 }

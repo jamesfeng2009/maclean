@@ -40,13 +40,13 @@ impl Btn {
                 theme::danger(),
                 C::WHITE,
                 C::TRANSPARENT,
-                egui::Color32::from_rgb(0xC4, 0x3C, 0x30),
+                theme::danger_600(),
             ),
             Btn::DangerSoft => (
                 theme::danger_50(),
                 theme::danger(),
-                egui::Color32::from_rgb(0xF7, 0xD4, 0xD0),
-                egui::Color32::from_rgb(0xFA, 0xDC, 0xD8),
+                theme::danger_100(),
+                theme::danger_100(),
             ),
         }
     }
@@ -513,9 +513,9 @@ pub enum BannerKind {
 impl BannerKind {
     fn colors(self) -> (egui::Color32, egui::Color32) {
         match self {
-            BannerKind::Info => (theme::info_50(), egui::Color32::from_rgb(0x1B, 0x4E, 0x8C)),
-            BannerKind::Warn => (theme::caution_50(), egui::Color32::from_rgb(0x6B, 0x44, 0x08)),
-            BannerKind::Crit => (theme::danger_50(), egui::Color32::from_rgb(0x7A, 0x24, 0x19)),
+            BannerKind::Info => (theme::info_50(), theme::info()),
+            BannerKind::Warn => (theme::caution_50(), theme::caution()),
+            BannerKind::Crit => (theme::danger_50(), theme::danger()),
         }
     }
 }

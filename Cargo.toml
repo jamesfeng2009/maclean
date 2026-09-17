@@ -21,6 +21,13 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 sha2 = "0.10"
 
+[features]
+# 开发模式：跳过全部 License / 额度限制，仅用于本地开发调试。
+#
+# !! 发布构建（scripts/build-package.sh、CI、Homebrew）一律不得启用此 feature !!
+# 启用后打出的包任何人都能免费用完整功能。
+dev-mode = []
+
 [[bin]]
 name = "maclean"
 path = "src/main.rs"

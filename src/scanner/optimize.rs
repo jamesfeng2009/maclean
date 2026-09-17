@@ -201,3 +201,75 @@ fn count_plist_files(dir: &str) -> usize {
         })
         .unwrap_or(0)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Windows 的优化代码（`execute_windows_optimize_task`）是 cfg(windows)，
+    // 开发机上编译不到也就跑不到。所以这一组测试改用两个手段把覆盖面补回来：
+    // 1. 清单构造函数 `windows_optimize_tasks()` 本身没有 cfg，可以直接验证
+    // 2. 对无法编译的部分做源码级检查，至少保证"接口是对齐的"
+
+    #[test]
+    fn windows_task_list_is_populated() {
+        let tasks = windows_optimize_tasks();
+        assert!(!tasks.is_empty(), "Windows 优化清单为空");
+        for t in &tasks {
+            assert!(
+                t.path.starts_with("win_"),
+                "Windows 清单里混入了非 win_ 任务: {}",
+                t.path
+            );
+            assert!(!t.description.is_empty(), "任务 {} 缺少说明文案", t.path);
+        }
+    }
+
+    #[test]
+    fn platform_task_lists_do_not_leak_into_each_other() {
+        let win_items = windows_optimize_tasks();
+        let mac_items = macos_optimize_tasks();
+        let win: Vec<&str> = win_items.iter().map(|t| t.path.as_str()).collect();
+        let mac: Vec<&str> = mac_items.iter().map(|t| t.path.as_str()).collect();
+        for n in &mac {
+            assert!(
+                !n.starts_with("win_"),
+                "macOS 清单里混入了 Windows 任务: {}",
+                n
+            );
+        }
+        // 两边都不应为空：任一边空掉意味着某个平台的优化 Tab 是块白板
+        assert!(!win.is_empty());
+        assert!(!mac.is_empty());
+    }
+
+    #[test]
+    fn every_windows_task_has_an_executor_branch() {
+        // UI 会把这份清单渲染成一排按钮；若执行器里没有对应分支，
+        // 点下去会落到 `opt_unknown`，用户会以为点了但什么都没发生。
+        // 这里做源码级检查就是为了拦住这类"清单和实现不同步"。
+        let ops_src = include_str!("../ops/mod.rs");
+        for item in windows_optimize_tasks() {
+            assert!(
+                ops_src.contains(&format!("\"{}\" =>", item.path)),
+                "优化任务 {} 在 execute_windows_optimize_task 里没有对应分支",
+                item.path
+            );
+        }
+    }
+
+    #[test]
+    fn every_windows_task_has_an_i18n_label() {
+        // 同理：app.rs 里必须有 optimize_<任务名> 的中英文案
+        let app_src = include_str!("../app.rs");
+        for item in windows_optimize_tasks() {
+            let key = format!("optimize_{}", item.path);
+            assert!(
+                app_src.contains(&format!("\"{}\"", key)),
+                "缺少文案 key: {}",
+                key
+            );
+        }
+    }
+}

@@ -119,6 +119,10 @@ pub struct Palette {
     pub caution_50: egui::Color32,
     pub danger: egui::Color32,
     pub danger_50: egui::Color32,
+    /// 危险色描边（Danger 弱化按钮的边框）
+    pub danger_100: egui::Color32,
+    /// 危险色强调（Danger 按钮 hover）
+    pub danger_600: egui::Color32,
 
     /// 信息
     pub info: egui::Color32,
@@ -159,6 +163,8 @@ impl Palette {
         caution_50: egui::Color32::from_rgb(0xFD, 0xF3, 0xE2),
         danger: egui::Color32::from_rgb(0xDC, 0x4B, 0x3E),
         danger_50: egui::Color32::from_rgb(0xFD, 0xED, 0xEB),
+        danger_100: egui::Color32::from_rgb(0xF7, 0xD4, 0xD0),
+        danger_600: egui::Color32::from_rgb(0xC4, 0x3C, 0x30),
 
         info: egui::Color32::from_rgb(0x2F, 0x6F, 0xD0),
         info_50: egui::Color32::from_rgb(0xEA, 0xF2, 0xFD),
@@ -200,6 +206,8 @@ impl Palette {
         caution_50: egui::Color32::from_rgb(0x2F, 0x2A, 0x1F),
         danger: egui::Color32::from_rgb(0xF0, 0x70, 0x5F),
         danger_50: egui::Color32::from_rgb(0x33, 0x20, 0x1E),
+        danger_100: egui::Color32::from_rgb(0x43, 0x2A, 0x26),
+        danger_600: egui::Color32::from_rgb(0xF5, 0x8E, 0x80),
 
         info: egui::Color32::from_rgb(0x5B, 0x96, 0xE8),
         info_50: egui::Color32::from_rgb(0x15, 0x23, 0x34),
@@ -346,6 +354,14 @@ pub fn danger() -> egui::Color32 {
 #[inline]
 pub fn danger_50() -> egui::Color32 {
     current().danger_50
+}
+#[inline]
+pub fn danger_100() -> egui::Color32 {
+    current().danger_100
+}
+#[inline]
+pub fn danger_600() -> egui::Color32 {
+    current().danger_600
 }
 #[inline]
 pub fn info() -> egui::Color32 {
@@ -592,6 +608,8 @@ mod tests {
             ("caution_50", l.caution_50, d.caution_50),
             ("danger", l.danger, d.danger),
             ("danger_50", l.danger_50, d.danger_50),
+            ("danger_100", l.danger_100, d.danger_100),
+            ("danger_600", l.danger_600, d.danger_600),
             ("info", l.info, d.info),
             ("info_50", l.info_50, d.info_50),
             ("scrim", l.scrim, d.scrim),

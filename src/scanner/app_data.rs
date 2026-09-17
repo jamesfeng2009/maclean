@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{dir_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 /// 100MB 阈值（只有大于此值的目录才展示）
 const APP_DATA_MIN: u64 = 100 * 1024 * 1024;
@@ -33,6 +33,15 @@ impl Scanner for AppDataScanner {
     fn scan(&self) -> ScanResult {
         let start = Instant::now();
         let mut items = Vec::new();
+
+        // home 获取不到时不要硬扫（否则会退化为扫描系统目录）
+        if !has_home() {
+            return ScanResult {
+                items: Vec::new(),
+                total_size: 0,
+                scan_time_ms: 0,
+            };
+        }
 
         items.extend(scan_application_support());
 

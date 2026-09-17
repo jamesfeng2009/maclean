@@ -30,7 +30,10 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-check-
 
       - name: Cargo check (Windows)
-        run: cargo check --target x86_64-pc-windows-msvc
+        # --all-targets 必须带上：否则 #[cfg(test)] 里的 Windows 分支不会被编译，
+        # 测试代码烂掉也发现不了。2026-09 之前正是漏了这个参数，
+        # 让 13 个 Windows 编译错误在工作区里躺了很久也没人察觉。
+        run: cargo check --target x86_64-pc-windows-msvc --all-targets
 
   windows-build:
     name: Windows release build
@@ -55,6 +58,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-build-
 
       - name: Build release
+        # 注意：release 构建不得启用 dev-mode feature，否则打出的 exe 人人免费用
         run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Upload artifact

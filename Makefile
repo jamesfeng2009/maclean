@@ -18,12 +18,13 @@ run: build
 	./target/debug/maclean
 
 ## 开发者模式运行（跳过 License/额度限制）
-dev: build
-	MACLEAN_DEV=1 ./target/debug/maclean
+## 走编译期 feature，不再读 MACLEAN_DEV 环境变量（避免发布包被运行时绕过）
+dev:
+	cargo run --features dev-mode
 
 ## 开发者模式运行（release）
-dev-release: release
-	MACLEAN_DEV=1 ./target/release/maclean
+dev-release:
+	cargo run --release --features dev-mode
 
 ## 运行 (release)
 run-release: release

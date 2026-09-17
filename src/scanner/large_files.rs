@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use super::{home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
 /// 单目录遍历超时 10 秒
 const DIR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -77,6 +77,13 @@ impl LargeFileScanner {
 impl Scanner for LargeFileScanner {
     /// 默认扫描用户主目录
     fn scan(&self) -> ScanResult {
+        if !has_home() {
+            return ScanResult {
+                items: Vec::new(),
+                total_size: 0,
+                scan_time_ms: 0,
+            };
+        }
         scan_directory(&home_dir())
     }
 }

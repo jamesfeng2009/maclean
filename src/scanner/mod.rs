@@ -12,8 +12,9 @@ pub mod cache;
 // 导出子模块
 #[cfg(target_os = "macos")]
 pub mod apfs;
-// app_cache/app_data/uninstall/optimize 扫描 macOS 专属路径（~/Library/Containers 等）
-// Windows 上暂不支持，用 cfg 包装避免编译错误
+// app_cache/app_data/uninstall 扫描 macOS 专属路径（~/Library/Containers 等），
+// Windows 上不支持，用 cfg 包装。optimize 内部已按平台返回不同任务清单，
+// 无需限制平台（Windows 有自己的 Win11Debloat 风格任务）。
 #[cfg(target_os = "macos")]
 pub mod app_cache;
 #[cfg(target_os = "macos")]
@@ -21,8 +22,10 @@ pub mod app_data;
 pub mod cache_registry;
 pub mod dev_cache;
 pub mod large_files;
-#[cfg(target_os = "macos")]
 pub mod optimize;
+// 残留名称匹配：刻意不限定平台，见模块顶部注释。放在 scanner 根而非
+// windows_apps 内，是为了让它（连同规定的删除保护）在开发机上可被编译和测试。
+mod residual_match;
 #[cfg(target_os = "macos")]
 pub mod uninstall;
 // Windows 专属模块
@@ -189,9 +192,18 @@ pub fn dir_size(path: &Path) -> u64 {
 
 /// 获取当前用户的 home 目录
 ///
-/// 使用 dirs crate 获取，若获取失败则回退到 "/"。
+/// 使用 dirs crate 获取，若获取失败则返回**空路径**（而不是 "/"）。
+///
+/// 之所以不能回退到 "/"：各扫描器都拿它去 join("Library/...")，回退到 "/"
+/// 会变成扫描 `/Library/Application Support`、`/Library/Caches` 这类系统目录，
+/// 且扫描结果被标为可删除。
 pub fn home_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+    dirs::home_dir().unwrap_or_default()
+}
+
+/// home 目录是否有效（扫描器入口应先用它做守卫）
+pub fn has_home() -> bool {
+    !home_dir().as_os_str().is_empty()
 }
 
 #[cfg(test)]

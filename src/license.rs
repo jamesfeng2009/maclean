@@ -26,14 +26,18 @@ use crate::logger;
 /// 免费版累计清理额度（500MB）
 pub const FREE_CLEAN_QUOTA_BYTES: u64 = 500 * 1024 * 1024;
 
-/// 开发者白名单模式：环境变量 MACLEAN_DEV=1 时跳过所有 License 限制
+/// 开发者白名单模式：仅在编译期 feature `dev-mode` 开启时跳过所有 License 限制
 ///
 /// 用途：开发/测试阶段无阻碍体验全部功能，无需真实 License。
-/// 安全：正式发布时不设置该变量，逻辑与之前完全一致，无硬编码密钥。
+/// 本地开发请用 `make dev`（等价于 `cargo run --features dev-mode`）。
+///
+/// 安全：原实现读运行时环境变量 `MACLEAN_DEV`，且没有任何 cfg/feature 门控 ——
+/// 这意味着**正式发布的二进制**里只要 `MACLEAN_DEV=1 open -a Maclean` 就能
+/// 绕过全部付费校验（`quota_gate_for` / `load_status` / `check_quota_allow`）。
+/// 改为编译期 feature 后，不带该 feature 的构建里这个分支会被整体编译掉，
+/// 二进制中不存在任何运行时绕过入口（改环境变量、注入 .env 均无效）。
 pub fn is_dev_mode() -> bool {
-    std::env::var("MACLEAN_DEV")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    cfg!(feature = "dev-mode")
 }
 
 /// License payload（被签名的数据）
@@ -397,6 +401,24 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- P0-6: 开发者后门不得存在于发布构建 ----------
+
+    #[cfg(not(feature = "dev-mode"))]
+    #[test]
+    fn dev_mode_is_off_without_feature() {
+        // 未启用 dev-mode feature 时，is_dev_mode() 必须恒为 false，
+        // 且不能存在任何运行时绕过入口（环境变量 / .env 注入均无效）。
+        assert!(!is_dev_mode());
+
+        // 即便有人设置了历史上那个环境变量，也不得生效
+        std::env::set_var("MACLEAN_DEV", "1");
+        assert!(
+            !is_dev_mode(),
+            "MACLEAN_DEV 环境变量仍能开启开发模式 —— 发布包可被绕过"
+        );
+        std::env::remove_var("MACLEAN_DEV");
+    }
 
     #[test]
     fn test_quota_default() {

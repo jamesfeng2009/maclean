@@ -565,6 +565,49 @@ impl App {
         &self.scan_states[self.tab_index()]
     }
 
+    /// 当前 Tab 是否在扫描中
+    ///
+    /// 与 `any_scanning()` 的区别要明确：
+    /// - 判断"本 Tab 的按钮能不能点"用 `tab_scanning(idx)`
+    /// - 判断"全局有没有扫描在跑"（概览页、底部删除栏）必须用 `any_scanning()`
+    ///
+    /// 之前 UI 里混用 `current_scan_state()`，而 `start_scan_all` 不置
+    /// `scan_states[0]`（Overview），导致概览页「扫描」按钮扫描中永不置灰，
+    /// 可以并发拉起多轮全量扫描。
+    pub fn any_scanning(&self) -> bool {
+        self.scan_states
+            .iter()
+            .any(|s| matches!(s, ScanState::Scanning))
+    }
+
+    /// 该 Tab 是否可以扫描（概览与设置页没有可扫内容）
+    pub fn is_non_scannable_tab(&self) -> bool {
+        matches!(self.tab, Tab::Overview | Tab::Settings)
+    }
+
+    /// 进入「扫描全部」前的状态复位
+    ///
+    /// 必须与单 Tab 的 `start_scan` 一样清空 results：`PartialItems` 走 extend，
+    /// 不清空的话二次「扫描全部」时列表是旧+新叠加，概览统计翻倍；
+    /// 若某 Tab 扫描 panic 没发 Done，重复项还会固化下来。
+    ///
+    /// 单独抽出来是因为 `start_scan_all` 会真的拉起后台线程，没法单测。
+    pub fn reset_for_full_scan(&mut self) {
+        for tab_idx in 1..self.results.len() {
+            self.scan_states[tab_idx] = ScanState::Scanning;
+            self.results[tab_idx].clear();
+        }
+        self.scan_progress = 0.0;
+    }
+
+    /// 指定 Tab 是否在扫描中
+    pub fn tab_scanning(&self, tab_idx: usize) -> bool {
+        self.scan_states
+            .get(tab_idx)
+            .map(|s| matches!(s, ScanState::Scanning))
+            .unwrap_or(false)
+    }
+
     /// 列表向上移动
     pub fn move_up(&mut self) {
         if self.list_index > 0 {
@@ -784,8 +827,12 @@ impl App {
                     }
                 }
             }
+            // 系统优化：Windows 有专属任务清单（Win11Debloat 风格），正常可用
             #[cfg(not(target_os = "macos"))]
-            Tab::SystemOptimize | Tab::Apfs => scanner::ScanResult {
+            Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
+            // APFS 是 macOS 文件系统专属，其它平台恒定为空
+            #[cfg(not(target_os = "macos"))]
+            Tab::Apfs => scanner::ScanResult {
                 items: Vec::new(),
                 total_size: 0,
                 scan_time_ms: 0,
@@ -926,6 +973,31 @@ impl App {
     /// 获取当前 Tab 选中项的数量
     pub fn selected_count(&self) -> usize {
         self.current_items().iter().filter(|i| i.selected).count()
+    }
+
+    /// 取出 `pending_delete` 指向的条目（可能跨 Tab）
+    ///
+    /// 确认框的一切统计都必须走这里，而不是 `selected_count()` /
+    /// `selected_total_size()` —— 后者只统计**当前 Tab**，而跨 Tab 删除
+    /// （概览一键清理、概览底部删除栏）时当前 Tab 是 Overview，其 results 恒为空，
+    /// 会显示「0 项 / 0 B」却在点确认后真实删除 N 个文件（历史 bug）。
+    pub fn pending_items(&self) -> Vec<&crate::scanner::ScanItem> {
+        self.pending_delete
+            .iter()
+            .filter_map(|(tab_idx, item_idx)| {
+                self.results.get(*tab_idx).and_then(|v| v.get(*item_idx))
+            })
+            .collect()
+    }
+
+    /// `pending_delete` 的条目数（跨 Tab 安全）
+    pub fn pending_count(&self) -> usize {
+        self.pending_items().len()
+    }
+
+    /// `pending_delete` 的总大小（跨 Tab 安全）
+    pub fn pending_total_size(&self) -> u64 {
+        self.pending_items().iter().map(|i| i.size_bytes).sum()
     }
 
     /// 统计所有 Tab 中可安全释放的总大小（Safe / CacheOnly）
