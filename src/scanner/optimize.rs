@@ -149,9 +149,10 @@ fn make_task(name: &str, description: &str) -> ScanItem {
 fn scan_login_items_description() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut user_login = 0usize;
-    let mut user_agents = 0usize;
-    let mut system_agents = 0usize;
-    let mut system_daemons = 0usize;
+    // 延迟初始化：这三个变量在下面无条件赋值，给初值反而会被编译器判定为"写入未读"
+    let user_agents: usize;
+    let system_agents: usize;
+    let system_daemons: usize;
 
     // 用户登录项（Login Items plist）
     let loginitems_plist = format!("{}/Library/Preferences/com.apple.loginitems.plist", home);

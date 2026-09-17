@@ -617,17 +617,33 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
                     let cask_dir = entry.path();
                     let cask_name = entry.file_name().to_string_lossy().to_string();
                     if let Ok(version_entries) = std::fs::read_dir(&cask_dir) {
-                        let versions: Vec<_> = version_entries.filter_map(|e| e.ok()).collect();
+                        // 只保留真正的版本目录：跳过 latest（软链/当前版）和隐藏目录
+                        let mut versions: Vec<_> = version_entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                let name = e.file_name().to_string_lossy().to_string();
+                                !name.starts_with('.') && name.to_lowercase() != "latest"
+                            })
+                            .collect();
+
                         if versions.len() > 1 {
-                            // 有多个版本，旧版本可清理
+                            // P2 修复：read_dir 的返回顺序是文件系统顺序，
+                            // 直接与"最后一个"比较会把最新版当旧版删掉。
+                            // 必须按版本号排序后再保留最大的一个。
+                            versions.sort_by(|a, b| {
+                                compare_versions(
+                                    &a.file_name().to_string_lossy(),
+                                    &b.file_name().to_string_lossy(),
+                                )
+                            });
+
+                            // 有多个版本，除最新版本外都可清理
                             let mut total_old_size: u64 = 0;
                             let mut old_paths: Vec<String> = Vec::new();
-                            for (i, v) in versions.iter().enumerate() {
-                                if i < versions.len() - 1 {
-                                    let size = dir_size(&v.path());
-                                    total_old_size += size;
-                                    old_paths.push(v.path().to_string_lossy().to_string());
-                                }
+                            for v in versions.iter().take(versions.len() - 1) {
+                                let size = dir_size(&v.path());
+                                total_old_size += size;
+                                old_paths.push(v.path().to_string_lossy().to_string());
                             }
                             if total_old_size > 10 * 1024 * 1024 {
                                 items.push(ScanItem {
@@ -655,6 +671,66 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
 // =========================================================================
 //  pip 缓存扫描
 // =========================================================================
+
+/// 比较两个版本号字符串（自然版本序，而非字典序）
+///
+/// 用于 Homebrew Caskroom 的多版本目录排序：字典序下 "1.10" < "1.9"，
+/// 会把新版本误判成旧版本删除。这里把每段拆成「数字 / 文本」再逐段比较。
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parse(s: &str) -> Vec<(u64, String)> {
+        let mut out: Vec<(u64, String)> = Vec::new();
+        let mut num = String::new();
+        for c in s.chars() {
+            if c.is_ascii_digit() {
+                num.push(c);
+            } else {
+                if !num.is_empty() {
+                    out.push((num.parse::<u64>().unwrap_or(0), String::new()));
+                    num.clear();
+                }
+                // 分隔符只作为段落边界，不参与比较
+                if !matches!(c, '.' | '-' | '_' | '+') {
+                    out.push((0, c.to_lowercase().to_string()));
+                }
+            }
+        }
+        if !num.is_empty() {
+            out.push((num.parse::<u64>().unwrap_or(0), String::new()));
+        }
+        out
+    }
+
+    let pa = parse(a);
+    let pb = parse(b);
+
+    for i in 0..pa.len().max(pb.len()) {
+        match (pa.get(i), pb.get(i)) {
+            (Some(x), Some(y)) => match x.cmp(y) {
+                std::cmp::Ordering::Equal => continue,
+                non_eq => return non_eq,
+            },
+            // 一方已结束：多出来的若是字母段（预发布标识 beta/rc/alpha）则更小，
+            // 若是数字段（1.0.0.1）则更大 —— 遵循 semver 的语义
+            (Some(x), None) => {
+                return if x.1.is_empty() {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                }
+            }
+            (None, Some(y)) => {
+                return if y.1.is_empty() {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            }
+            (None, None) => break,
+        }
+    }
+
+    std::cmp::Ordering::Equal
+}
 
 /// 扫描 pip 包管理器缓存
 fn scan_pip_caches() -> Vec<ScanItem> {
@@ -1289,7 +1365,9 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
             let path_str = path.to_string_lossy().to_string();
 
             // 检查是否是安装包扩展名
-            let is_installer = installer_exts.iter().any(|ext| filename_lower.ends_with(ext));
+            let is_installer = installer_exts
+                .iter()
+                .any(|ext| filename_lower.ends_with(ext));
             if !is_installer {
                 continue;
             }
@@ -1416,7 +1494,10 @@ fn check_app_installed_macos(installer_filename: &str) -> bool {
 
     // 模糊匹配：/Applications 下是否有包含关键词的 .app
     let app_lower = app_name.to_lowercase();
-    for search_dir in &["/Applications", &home_dir().join("Applications").to_string_lossy()] {
+    for search_dir in &[
+        "/Applications",
+        &home_dir().join("Applications").to_string_lossy(),
+    ] {
         if let Ok(entries) = std::fs::read_dir(search_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 if let Some(name) = entry.file_name().to_str() {
@@ -1718,8 +1799,9 @@ fn scan_docker_caches() -> Vec<ScanItem> {
                 batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
                 description: format!(
-                    "执行 docker system prune -a --volumes 清理未使用镜像/容器/卷/网络\n\
-                     可回收约 {} 空间，清理后需重新拉取镜像",
+                    "执行 docker system prune -a 清理未使用镜像/容器/网络与构建缓存\n\
+                     可回收约 {} 空间，清理后需重新拉取镜像\n\
+                     不会清理数据卷（卷可能含数据库等不可重建的数据）",
                     crate::scanner::format_size(reclaimable)
                 ),
             });
@@ -2611,4 +2693,42 @@ fn scan_docker_windows() -> Vec<ScanItem> {
     }
 
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_compare_is_numeric_not_lexical() {
+        // 字典序下 "1.10" < "1.9"，会把新版本误判成旧版本删掉
+        assert_eq!(compare_versions("1.9", "1.10"), std::cmp::Ordering::Less);
+        assert_eq!(compare_versions("1.10", "1.9"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_versions("2.0", "1.99"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0"),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn version_compare_handles_prerelease() {
+        // 预发布版本应低于正式版：1.0.0-beta < 1.0.0
+        assert_eq!(
+            compare_versions("1.0.0-beta", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.0.0-alpha", "1.0.0-beta"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn version_sort_keeps_newest_last() {
+        let mut versions = vec!["1.9", "1.10", "2.0", "1.2"];
+        versions.sort_by(|a, b| compare_versions(a, b));
+        assert_eq!(versions.last().copied(), Some("2.0"));
+        assert_eq!(versions.first().copied(), Some("1.2"));
+    }
 }

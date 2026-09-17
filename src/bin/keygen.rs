@@ -112,7 +112,10 @@ fn main() {
     match cli.command {
         Commands::Init => {
             if secret_path().exists() {
-                eprintln!("错误: 私钥已存在于 {:?}，如需重新生成请先手动删除", secret_path());
+                eprintln!(
+                    "错误: 私钥已存在于 {:?}，如需重新生成请先手动删除",
+                    secret_path()
+                );
                 std::process::exit(1);
             }
             load_or_create_signing_key(true);

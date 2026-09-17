@@ -87,8 +87,12 @@ fn scan_local_snapshots() -> Vec<ScanItem> {
                 deletable: true,
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
-                recommend: Recommend::Safe,
-                description: "Time Machine 本地快照，可安全删除".to_string(),
+                // P2 修复：Time Machine 本地快照删除后不可恢复，且 size 未知（显示 0），
+                // 标成 Safe 会被"智能选择"默认勾选，用户在不知道删了什么的情况下失去快照。
+                // 降为 Caution：不默认勾选，UI 上明确提示不可恢复。
+                recommend: Recommend::Caution,
+                description: "Time Machine 本地快照，删除后不可恢复（大小未知，系统未报告）"
+                    .to_string(),
             });
         }
     }

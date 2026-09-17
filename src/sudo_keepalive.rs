@@ -14,7 +14,10 @@ struct KeepaliveState {
 }
 
 /// 全局保活状态（线程安全）
-static mut KEEPALIVE_STATE: Option<KeepaliveState> = None;
+///
+/// 2026-09 之前这里是 `static mut`，读写要 `unsafe`；现在直接放进 `Mutex`，
+/// 与下面的 `KEEPALIVE_INIT` 合并成一个锁保护的 `Option`，借用检查器兜底。
+static KEEPALIVE_STATE: Mutex<Option<KeepaliveState>> = Mutex::new(None);
 static KEEPALIVE_INIT: Mutex<()> = Mutex::new(());
 
 /// 启动 sudo 会话
@@ -95,9 +98,10 @@ pub fn start_sudo_session(password: &str) -> Result<bool, String> {
     });
 
     // 保存全局状态
-    unsafe {
-        KEEPALIVE_STATE = Some(KeepaliveState { stop_flag });
-    }
+    KEEPALIVE_STATE
+        .lock()
+        .unwrap()
+        .replace(KeepaliveState { stop_flag });
 
     Ok(true)
 }
@@ -129,10 +133,8 @@ pub fn end_sudo_session() {
 /// 停止保活线程（内部函数）
 fn stop_keepalive_thread() {
     let _guard = KEEPALIVE_INIT.lock().unwrap();
-    unsafe {
-        if let Some(state) = KEEPALIVE_STATE.take() {
-            state.stop_flag.store(true, Ordering::Relaxed);
-        }
+    if let Some(state) = KEEPALIVE_STATE.lock().unwrap().take() {
+        state.stop_flag.store(true, Ordering::Relaxed);
     }
 }
 

@@ -49,6 +49,10 @@ pub struct AppConfig {
     pub settings_prevent_lid_close: bool,
     /// 操作前自动创建系统还原点（Windows）
     pub settings_auto_restore_point: bool,
+    /// 深色模式（false = 浅色）
+    ///
+    /// 首次启动时若 config.json 不存在，会用系统偏好初始化；之后以这里为准。
+    pub dark_mode: bool,
 }
 
 impl Default for AppConfig {
@@ -61,8 +65,14 @@ impl Default for AppConfig {
             settings_confirm_advanced: true,
             settings_prevent_lid_close: true,
             settings_auto_restore_point: true,
+            dark_mode: false,
         }
     }
+}
+
+/// config.json 是否已存在（用于判断「首次启动」）
+pub fn config_exists() -> bool {
+    config_json_path().exists()
 }
 
 /// 从 config.json 加载用户设置

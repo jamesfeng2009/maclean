@@ -193,3 +193,38 @@ pub fn dir_size(path: &Path) -> u64 {
 pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_size_units() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(512), "512B");
+        assert_eq!(format_size(1024), "1.0K");
+        assert_eq!(format_size(1024 * 1024), "1.0M");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0G");
+        // 边界：不因浮点误差串位
+        assert_eq!(format_size(1536 * 1024 * 1024), "1.5G");
+    }
+
+    #[test]
+    fn recommend_default_selected_only_safe_levels() {
+        // 只有 Safe / CacheOnly 会被"智能选择"默认勾选，
+        // Caution / Advanced 必须保持未选（这是默认安全策略的核心）
+        assert!(Recommend::Safe.default_selected());
+        assert!(Recommend::CacheOnly.default_selected());
+        assert!(!Recommend::Caution.default_selected());
+        assert!(!Recommend::Advanced.default_selected());
+    }
+
+    #[test]
+    fn recommend_labels_are_stable() {
+        // UI 徽标直接依赖这些文案，改动需同步 maclean-ui-design-v2.html
+        assert_eq!(Recommend::Safe.label(), "推荐");
+        assert_eq!(Recommend::CacheOnly.label(), "仅缓存");
+        assert_eq!(Recommend::Caution.label(), "谨慎");
+        assert_eq!(Recommend::Advanced.label(), "高级");
+    }
+}

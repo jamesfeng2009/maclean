@@ -250,6 +250,8 @@ pub struct App {
     pub settings_prevent_lid_close: bool,
     /// 操作前自动创建系统还原点（Windows only）
     pub settings_auto_restore_point: bool,
+    /// 深色模式（持久化在 config.json 的 dark_mode）
+    pub dark_mode: bool,
     /// "还原上次修改"操作的执行结果（设置页显示）
     pub last_restore_result: Option<String>,
     /// "配置导入/导出"操作的执行结果（设置页显示）
@@ -335,7 +337,13 @@ impl App {
     /// 创建新 App 状态
     pub fn new() -> Self {
         let (disk_total, disk_free) = get_disk_info();
-        let user_config = crate::config::load_config();
+        let mut user_config = crate::config::load_config();
+
+        // 首次启动（还没有 config.json）：主题跟随系统，之后以配置为准
+        if !crate::config::config_exists() {
+            user_config.dark_mode = crate::platform::system_prefers_dark();
+            crate::config::save_config(&user_config);
+        }
 
         // 后台线程检查更新（阻塞网络调用，结果经 channel 回传，失败静默）
         let (update_tx, update_rx) = std::sync::mpsc::channel();
@@ -385,6 +393,7 @@ impl App {
             settings_confirm_advanced: user_config.settings_confirm_advanced,
             settings_prevent_lid_close: user_config.settings_prevent_lid_close,
             settings_auto_restore_point: user_config.settings_auto_restore_point,
+            dark_mode: user_config.dark_mode,
             last_restore_result: None,
             config_manage_result: None,
             user_config,
@@ -933,8 +942,7 @@ impl App {
     /// 只收集当前 Tab 的选中项。
     pub fn prepare_delete(&mut self) {
         let idx = self.tab_index();
-        let selected: Vec<(usize, usize)> = self
-            .results[idx]
+        let selected: Vec<(usize, usize)> = self.results[idx]
             .iter()
             .enumerate()
             .filter(|(_, item)| item.selected)
@@ -1121,7 +1129,11 @@ impl App {
 
         for (tab_idx, item_idx) in &self.pending_delete {
             affected_tabs.insert(*tab_idx);
-            if let Some(item) = self.results.get_mut(*tab_idx).and_then(|v| v.get_mut(*item_idx)) {
+            if let Some(item) = self
+                .results
+                .get_mut(*tab_idx)
+                .and_then(|v| v.get_mut(*item_idx))
+            {
                 item.selected = false;
                 if deleted.contains(&item.path) {
                     freed_bytes = freed_bytes.saturating_add(item.size_bytes);
@@ -1132,12 +1144,7 @@ impl App {
         }
 
         // 免费版记录额度消耗（已激活用户无需记录）
-        if freed_bytes > 0
-            && matches!(
-                self.license_status,
-                crate::license::LicenseStatus::Free
-            )
-        {
+        if freed_bytes > 0 && matches!(self.license_status, crate::license::LicenseStatus::Free) {
             crate::license::quota_add(freed_bytes);
         }
 
@@ -1248,6 +1255,19 @@ impl App {
         self.user_config.settings_confirm_advanced = self.settings_confirm_advanced;
         self.user_config.settings_prevent_lid_close = self.settings_prevent_lid_close;
         self.user_config.settings_auto_restore_point = self.settings_auto_restore_point;
+        self.user_config.dark_mode = self.dark_mode;
+        crate::config::save_config(&self.user_config);
+    }
+
+    /// 当前配色模式
+    pub fn theme_mode(&self) -> crate::theme::Mode {
+        crate::theme::Mode::from_dark_flag(self.dark_mode)
+    }
+
+    /// 切换深色模式并落盘
+    pub fn toggle_dark_mode(&mut self) {
+        self.dark_mode = !self.dark_mode;
+        self.user_config.dark_mode = self.dark_mode;
         crate::config::save_config(&self.user_config);
     }
 
@@ -1273,6 +1293,9 @@ impl App {
                 "tab_system_optimize" => "Optimize",
                 "tab_apfs" => "APFS Snapshots",
                 "tab_settings" => "Settings",
+                "settings_appearance" => "Appearance",
+                "setting_dark_mode" => "Dark mode",
+                "setting_dark_mode_desc" => "Switch the whole UI between light and dark",
                 "settings_general" => "General",
                 "settings_safety" => "Safety",
                 "settings_language" => "Language",
@@ -1365,6 +1388,14 @@ impl App {
                 "unknown" => "unknown",
                 "no_items_hint" => "No items yet - click Scan to find cleanable files",
                 "click_to_start" => "Click to start",
+                // 状态页（设计稿 5.7：未扫描 与 扫描完成为空 是两种不同情绪）
+                "empty_never_scanned" => "Not scanned yet",
+                "empty_never_scanned_desc" => {
+                    "Scanning only reads cache sizes — nothing is modified or deleted"
+                }
+                "empty_all_clean" => "This machine is clean",
+                "empty_all_clean_desc" => "No cleanable items found",
+                "empty_view_log" => "View scan log",
                 "app_subitems_detail" => "Sub-items: {0}",
                 "select_app_from_list" => "Please select an app from the left",
                 // 概览
@@ -1568,6 +1599,10 @@ impl App {
                 "log_need_sudo" => "{} items need administrator privileges",
                 "log_sudo_phase" => "Deleting with administrator privileges...",
                 "log_password_wrong" => "Administrator password incorrect, please re-enter",
+                "log_trash_failed" => "Could not move to Trash (grant Automation permission in System Settings), kept as-is: {}",
+                "log_sudo_rejected" => "Blocked by safety check before sudo deletion: {} — {}",
+                "log_sudo_symlink_rejected" => "Blocked before sudo deletion (path became a symlink): {}",
+                "log_sudo_unsafe_path" => "Blocked before sudo deletion (path contains unsafe characters): {}",
                 "log_exit_code" => "sudo exit code {}",
                 "log_no_sim_runtimes" => "No installed simulator runtimes found",
                 "log_mount_in_use" => "Simulator runtime is mounted in use, skipping",
@@ -1627,6 +1662,9 @@ impl App {
                 "tab_system_optimize" => "系统优化",
                 "tab_apfs" => "APFS快照",
                 "tab_settings" => "设置",
+                "settings_appearance" => "外观",
+                "setting_dark_mode" => "深色模式",
+                "setting_dark_mode_desc" => "切换整套界面的浅色 / 深色配色",
                 "settings_general" => "通用",
                 "settings_safety" => "安全",
                 "settings_language" => "语言",
@@ -1715,6 +1753,12 @@ impl App {
                 "unknown" => "未知",
                 "no_items_hint" => "暂无数据 - 点击「扫描」查找可清理文件",
                 "click_to_start" => "点击开始",
+                // 状态页（设计稿 5.7：未扫描 与 扫描完成为空 是两种不同情绪）
+                "empty_never_scanned" => "还没有扫描过",
+                "empty_never_scanned_desc" => "扫描只会读取缓存目录大小，不会修改或删除任何文件",
+                "empty_all_clean" => "这台机器很干净",
+                "empty_all_clean_desc" => "未发现可清理的项目",
+                "empty_view_log" => "查看扫描日志",
                 "app_subitems_detail" => "子项详情：{0}",
                 "select_app_from_list" => "请从左侧选择一个应用",
                 // 概览
@@ -1918,6 +1962,10 @@ impl App {
                 "log_need_sudo" => "{} 项需要管理员权限",
                 "log_sudo_phase" => "正在使用管理员权限删除...",
                 "log_password_wrong" => "管理员密码错误，请重新输入",
+                "log_trash_failed" => "无法移入废纸篓（请在系统设置中授予「自动化」权限），已保留原文件：{}",
+                "log_sudo_rejected" => "sudo 删除前被安全校验拦截：{} — {}",
+                "log_sudo_symlink_rejected" => "sudo 删除前被拦截（路径已变为符号链接）：{}",
+                "log_sudo_unsafe_path" => "sudo 删除前被拦截（路径含不安全字符）：{}",
                 "log_exit_code" => "sudo 退出码 {}",
                 "log_no_sim_runtimes" => "没有找到已安装的模拟器运行时",
                 "log_mount_in_use" => "模拟器运行时正在被挂载使用，跳过删除",

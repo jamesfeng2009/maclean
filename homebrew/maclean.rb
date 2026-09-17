@@ -1,11 +1,20 @@
 cask "maclean" do
+  # version / sha256 由 scripts/update-homebrew.sh 在发布 GitHub Release 后自动回填。
+  # 手动修改容易漏，别手写。
   version "0.2.0"
-  sha256 arm:   "0000000000000000000000000000000000000000000000000000000000000000",
-         intel: "0000000000000000000000000000000000000000000000000000000000000000"
 
-  url "https://github.com/jamesfeng2009/maclean/releases/download/v#{version}/maclean-#{version}-universal.dmg"
+  on_arm do
+    url "https://github.com/jamesfeng2009/maclean/releases/download/v#{version}/maclean-#{version}-arm64.dmg"
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  end
+
+  on_intel do
+    url "https://github.com/jamesfeng2009/maclean/releases/download/v#{version}/maclean-#{version}-x86_64.dmg"
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  end
+
   name "Maclean"
-  desc "macOS disk cleaning tool built with Rust — covers 40+ dev caches, APFS snapshots, app uninstall"
+  desc "macOS disk cleaning tool built with Rust — covers dev caches, APFS snapshots, app uninstall"
   homepage "https://github.com/jamesfeng2009/maclean"
 
   livecheck do

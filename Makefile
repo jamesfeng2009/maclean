@@ -2,7 +2,8 @@
 
 # maclean Makefile
 
-VERSION := 0.1.0
+# 版本号单一来源：Cargo.toml（不要在 Makefile 里再写一份，否则三处不一致）
+VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 
 ## 编译 debug 版本
 build:
@@ -70,6 +71,18 @@ clean:
 check:
 	cargo check
 
+## 运行测试
+test:
+	cargo test --bin maclean
+
+## 代码格式检查
+fmt:
+	cargo fmt --all -- --check
+
+## Clippy 静态检查
+lint:
+	cargo clippy --all-targets -- -D warnings
+
 ## 帮助
 help:
 	@echo "maclean Makefile"
@@ -86,3 +99,7 @@ help:
 	@echo "  make uninstall   - 卸载"
 	@echo "  make clean       - 清理构建产物"
 	@echo "  make check       - 检查编译"
+	@echo "  make test        - 运行单元测试"
+	@echo "  make fmt         - 检查代码格式"
+	@echo "  make lint        - Clippy 静态检查（-D warnings）"
+	@echo "  当前版本: $(VERSION)"

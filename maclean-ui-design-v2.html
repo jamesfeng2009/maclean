@@ -1,0 +1,1680 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>maclean UI 设计稿 v2.0 — 简洁版</title>
+<style>
+:root{
+  color-scheme: light;
+  /* 中性 */
+  --bg:#FAFAFA; --surface:#FFFFFF; --surface-2:#F5F5F7; --surface-3:#EFEFF2; --surface-4:#E9E9EE;
+  --line:#E8E8EC; --line-2:#DCDCE2; --line-3:#C9C9D1;
+  --text:#1B1B1F; --text-2:#5C5C66; --text-3:#8A8A94; --text-4:#AFAFB8;
+  /* 品牌 */
+  --brand:#4B3FE3; --brand-600:#3D32C4; --brand-50:#F1F0FE; --brand-100:#E5E3FD;
+  /* 语义 */
+  --safe:#1F9D5B; --safe-50:#E9F7EF;
+  --caution:#C97C06; --caution-50:#FDF3E2;
+  --danger:#DC4B3E; --danger-50:#FDEDEB;
+  --info:#2F6FD0; --info-50:#EAF2FD;
+  /* 圆角 */
+  --r-xs:4px; --r-sm:6px; --r:8px; --r-md:10px; --r-lg:14px; --r-full:999px;
+  /* 阴影 */
+  --sh-1:0 1px 2px rgba(17,17,26,.05);
+  --sh-2:0 2px 8px rgba(17,17,26,.06), 0 1px 2px rgba(17,17,26,.04);
+  --sh-3:0 8px 28px rgba(17,17,26,.10), 0 2px 6px rgba(17,17,26,.05);
+  --sh-modal:0 24px 64px rgba(17,17,26,.20);
+  /* 字体 */
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:"SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:var(--font); font-size:14px; line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.page{max-width:1120px; margin:0 auto; padding:48px 32px 96px}
+h1{font-size:30px; line-height:1.25; letter-spacing:-.02em; margin:0 0 10px}
+h2{font-size:20px; letter-spacing:-.01em; margin:56px 0 4px; padding-top:24px; border-top:1px solid var(--line)}
+h3{font-size:15px; margin:32px 0 12px}
+h4{font-size:13px; margin:20px 0 8px; color:var(--text-2)}
+p{margin:0 0 12px; color:var(--text-2)}
+a{color:var(--brand); text-decoration:none}
+code{font-family:var(--mono); font-size:12px; background:var(--surface-3); padding:2px 6px; border-radius:var(--r-xs); color:var(--text)}
+.lead{font-size:15px; color:var(--text-2); max-width:760px}
+.muted{color:var(--text-3)}
+.small{font-size:12px}
+.mono{font-family:var(--mono)}
+
+/* 页头 */
+.hero{margin-bottom:8px}
+.badge-ver{display:inline-flex; align-items:center; gap:6px; background:var(--brand-50); color:var(--brand-600);
+  font-size:12px; font-weight:600; padding:4px 10px; border-radius:var(--r-full); margin-bottom:14px}
+.meta-row{display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0}
+.chip{display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text-2);
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r-full); padding:4px 12px}
+
+/* 目录 */
+.toc{display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:8px; margin:24px 0 0; padding:0; list-style:none}
+.toc li a{display:flex; gap:8px; align-items:baseline; font-size:13px; color:var(--text-2);
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:8px 12px; transition:.15s}
+.toc li a:hover{border-color:var(--brand); color:var(--brand)}
+.toc .n{font-family:var(--mono); font-size:11px; color:var(--text-4)}
+
+/* 卡片 / 网格 */
+.grid{display:grid; gap:12px}
+.g2{grid-template-columns:repeat(2,1fr)}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+.card{background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md); padding:16px}
+.card h4{margin-top:0}
+.note{background:var(--brand-50); border:1px solid var(--brand-100); border-radius:var(--r); padding:12px 14px; font-size:13px; color:#2A2560}
+.note.warn{background:var(--caution-50); border-color:#F3DFB8; color:#6B4408}
+.note.danger{background:var(--danger-50); border-color:#F7D4D0; color:#7A2419}
+
+/* 色板 */
+.swatches{display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px}
+.sw{border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:var(--surface)}
+.sw .top{height:56px}
+.sw .bot{padding:8px 10px; font-size:11px; line-height:1.4}
+.sw .nm{font-weight:600; color:var(--text)}
+.sw .hex{font-family:var(--mono); color:var(--text-3)}
+
+/* 表格 */
+table{width:100%; border-collapse:collapse; font-size:13px; margin:8px 0 4px; background:var(--surface);
+  border:1px solid var(--line); border-radius:var(--r); overflow:hidden}
+th,td{padding:8px 12px; text-align:left; border-bottom:1px solid var(--line)}
+th{background:var(--surface-2); font-weight:600; font-size:12px; color:var(--text-2)}
+tr:last-child td{border-bottom:none}
+td.mono{font-family:var(--mono); font-size:12px}
+
+/* 图标 */
+.ic{width:16px; height:16px; flex:none; stroke:currentColor; fill:none; stroke-width:1.6;
+  stroke-linecap:round; stroke-linejoin:round; vertical-align:-2px}
+.ic-20{width:20px; height:20px}
+.ic-24{width:24px; height:24px}
+.icon-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:10px}
+.icon-cell{display:flex; flex-direction:column; align-items:center; gap:6px; padding:12px 6px;
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r); font-size:11px; color:var(--text-3)}
+
+/* 组件演示 */
+.demo{border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); overflow:hidden; margin:12px 0}
+.demo-hd{padding:8px 14px; border-bottom:1px solid var(--line); background:var(--surface-2);
+  font-size:12px; font-weight:600; color:var(--text-2); display:flex; justify-content:space-between; align-items:center}
+.demo-bd{padding:20px; display:flex; flex-wrap:wrap; gap:12px; align-items:center}
+.demo-bd.col{flex-direction:column; align-items:stretch}
+.spec{font-size:11px; color:var(--text-3); font-family:var(--mono)}
+
+/* ========== 应用内 UI 原子（用于图稿） ========== */
+.btn{display:inline-flex; align-items:center; justify-content:center; gap:6px; height:30px; padding:0 14px;
+  border-radius:var(--r); font-size:13px; font-weight:500; border:1px solid transparent; cursor:default; white-space:nowrap}
+.btn-primary{background:var(--brand); color:#fff}
+.btn-primary:hover{background:var(--brand-600)}
+.btn-secondary{background:var(--surface); color:var(--text); border-color:var(--line-2)}
+.btn-ghost{background:transparent; color:var(--text-2)}
+.btn-ghost:hover{background:var(--surface-3)}
+.btn-danger{background:var(--danger); color:#fff}
+.btn-danger-soft{background:var(--danger-50); color:var(--danger); border-color:#F7D4D0}
+.btn-sm{height:26px; padding:0 10px; font-size:12px; border-radius:var(--r-sm)}
+.btn-lg{height:36px; padding:0 18px; font-size:14px}
+.btn[disabled],.btn.is-disabled{background:var(--surface-3); color:var(--text-4); border-color:transparent}
+.btn-icon{width:30px; padding:0}
+
+.input{display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; background:var(--surface);
+  border:1px solid var(--line-2); border-radius:var(--r); font-size:13px; color:var(--text-2)}
+.input.focus{border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-50)}
+.chk{width:16px; height:16px; border-radius:var(--r-xs); border:1.5px solid var(--line-3); background:var(--surface);
+  display:flex; align-items:center; justify-content:center; color:#fff; flex:none}
+.chk.on{background:var(--brand); border-color:var(--brand)}
+.chk.part{background:var(--brand); border-color:var(--brand)}
+.chk.off{background:var(--surface-3); border-color:var(--line-3)}
+.sw-tg{width:36px; height:22px; border-radius:var(--r-full); background:var(--line-3); position:relative; flex:none}
+.sw-tg.on{background:var(--brand)}
+.sw-tg i{position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; box-shadow:var(--sh-1)}
+.sw-tg.on i{left:16px}
+.badge{display:inline-flex; align-items:center; gap:5px; height:20px; padding:0 8px; border-radius:var(--r-xs);
+  font-size:11px; font-weight:600; letter-spacing:.01em}
+.b-safe{background:var(--safe-50); color:var(--safe)}
+.b-cache{background:var(--info-50); color:var(--info)}
+.b-caution{background:var(--caution-50); color:var(--caution)}
+.b-adv{background:var(--danger-50); color:var(--danger)}
+.b-neutral{background:var(--surface-3); color:var(--text-2)}
+.b-brand{background:var(--brand-50); color:var(--brand-600)}
+.dot{width:6px; height:6px; border-radius:50%; background:currentColor}
+.pill{display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 12px; border-radius:var(--r-full);
+  font-size:12px; color:var(--text-2); background:var(--surface); border:1px solid var(--line)}
+.pill.on{background:var(--text); color:#fff; border-color:var(--text)}
+.pill.on:hover{background:#000}
+
+/* 窗口外壳 */
+.screen-wrap{margin:20px 0 28px}
+.screen-label{font-size:13px; font-weight:600; margin-bottom:8px; display:flex; align-items:center; gap:8px}
+.screen-label .tag{font-size:11px; font-weight:500; color:var(--text-3); background:var(--surface-3);
+  padding:2px 8px; border-radius:var(--r-full)}
+.screen{width:960px; background:var(--surface); border:1px solid var(--line-2); border-radius:12px;
+  overflow:hidden; box-shadow:var(--sh-3); font-size:13px}
+.titlebar{height:36px; background:var(--surface-2); border-bottom:1px solid var(--line);
+  display:flex; align-items:center; padding:0 14px; gap:8px; position:relative}
+.dots{display:flex; gap:6px}
+.dots span{width:11px; height:11px; border-radius:50%; display:block}
+.dots .r{background:#FF5F57}.dots .y{background:#FEBC2E}.dots .g{background:#28C840}
+.tb-title{position:absolute; left:0; right:0; text-align:center; font-size:12px; font-weight:600; color:var(--text-2); pointer-events:none}
+.tb-right{margin-left:auto; display:flex; gap:4px; color:var(--text-3)}
+.win-body{display:flex; min-height:560px}
+.sidebar{width:220px; flex:none; background:var(--surface-2); border-right:1px solid var(--line); padding:14px 12px}
+.content{flex:1; min-width:0; padding:18px 20px; display:flex; flex-direction:column}
+.brandrow{display:flex; align-items:center; gap:10px; margin-bottom:16px; padding:0 4px}
+.logo{width:28px; height:28px; border-radius:8px; background:var(--brand); color:#fff;
+  display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px}
+.brandrow .nm{font-size:14px; font-weight:600; letter-spacing:-.01em}
+.brandrow .vr{font-size:11px; color:var(--text-3)}
+.navitem{display:flex; align-items:center; gap:9px; height:32px; padding:0 10px; border-radius:var(--r);
+  font-size:13px; color:var(--text-2); margin-bottom:2px}
+.navitem.on{background:var(--brand-50); color:var(--brand-600); font-weight:600}
+.navitem .cnt{margin-left:auto; font-size:11px; color:var(--text-4); font-variant-numeric:tabular-nums}
+.navitem.on .cnt{color:var(--brand)}
+.nav-sep{height:1px; background:var(--line); margin:10px 4px}
+.nav-hd{font-size:11px; font-weight:600; color:var(--text-4); padding:0 10px; margin:12px 0 6px; letter-spacing:.04em}
+
+/* 内容区通用 */
+.page-hd{display:flex; align-items:flex-start; gap:12px; margin-bottom:16px}
+.page-hd h3{margin:0; font-size:18px; letter-spacing:-.01em}
+.page-hd .sub{font-size:12px; color:var(--text-3); margin-top:2px}
+.page-hd .actions{margin-left:auto; display:flex; gap:8px}
+.toolbar{display:flex; align-items:center; gap:8px; margin-bottom:12px}
+.toolbar .grow{flex:1}
+.list{border:1px solid var(--line); border-radius:var(--r-md); overflow:hidden; background:var(--surface)}
+.row{display:flex; align-items:center; gap:12px; padding:10px 14px; border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:none}
+.row.on{background:var(--brand-50)}
+.row .t{font-size:13px; color:var(--text)}
+.row .d{font-size:11px; color:var(--text-3); font-family:var(--mono); margin-top:2px}
+.row .sz{margin-left:auto; font-size:13px; font-variant-numeric:tabular-nums; color:var(--text)}
+.row .grab{width:80px; flex:none}
+.bar{height:6px; border-radius:3px; background:var(--surface-3); overflow:hidden}
+.bar i{display:block; height:100%; border-radius:3px; background:var(--brand)}
+.bar.safe i{background:var(--safe)} .bar.caution i{background:var(--caution)} .bar.adv i{background:var(--danger)}
+.kv{display:flex; justify-content:space-between; font-size:12px; padding:6px 0; border-bottom:1px dashed var(--line)}
+.kv:last-child{border-bottom:none}
+.kv b{font-weight:600; font-variant-numeric:tabular-nums}
+.footer-bar{display:flex; align-items:center; gap:12px; padding:10px 20px; border-top:1px solid var(--line);
+  background:var(--surface); min-height:52px}
+.footer-bar .sp{flex:1}
+.empty{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;
+  color:var(--text-3); padding:60px 0}
+.empty .big{width:48px; height:48px; border-radius:14px; background:var(--surface-3);
+  display:flex; align-items:center; justify-content:center; color:var(--text-4)}
+.banner{display:flex; align-items:center; gap:8px; padding:8px 14px; font-size:12px; border-bottom:1px solid var(--line)}
+.banner.info{background:var(--info-50); color:#1B4E8C}
+.banner.warn{background:var(--caution-50); color:#6B4408}
+.banner.crit{background:var(--danger-50); color:#7A2419}
+.banner .sp{flex:1}
+.cardbox{background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md); padding:14px}
+.statbox{background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md); padding:12px 14px}
+.statbox .lab{font-size:11px; color:var(--text-3)}
+.statbox .val{font-size:20px; font-weight:600; letter-spacing:-.02em; font-variant-numeric:tabular-nums; margin-top:2px}
+.statbox.safe{border-color:#BFE6D0; background:var(--safe-50)}
+.statbox.caution{border-color:#F0DDB6; background:var(--caution-50)}
+.statbox.adv{border-color:#F5CCC6; background:var(--danger-50)}
+/* 模态 */
+.modal-stage{position:relative; background:var(--surface-3); display:flex; align-items:center; justify-content:center; min-height:520px}
+.modal-stage::after{content:""; position:absolute; inset:0; background:rgba(27,27,31,.28)}
+.modal{position:relative; z-index:2; width:480px; background:var(--surface); border-radius:var(--r-lg);
+  box-shadow:var(--sh-modal); overflow:hidden}
+.modal .mh{padding:16px 20px 8px; display:flex; gap:12px; align-items:flex-start}
+.modal .mh .ic-wrap{width:36px; height:36px; border-radius:10px; display:flex; align-items:center; justify-content:center; flex:none}
+.modal .mh h4{margin:0; font-size:15px; color:var(--text)}
+.modal .mh p{margin:2px 0 0; font-size:12px}
+.modal .mb{padding:8px 20px 16px}
+.modal .mf{padding:12px 20px; background:var(--surface-2); border-top:1px solid var(--line);
+  display:flex; gap:8px; justify-content:flex-end}
+.stage-sm{min-height:300px}
+@media (max-width:1080px){
+  .screen{transform-origin:top left}
+  .scroll-x{overflow-x:auto}
+}
+.scroll-x{overflow-x:auto; padding-bottom:8px}
+ul.plain{margin:8px 0; padding-left:20px; color:var(--text-2)} ul.plain li{margin:4px 0}
+.flow{display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; margin:10px 0}
+.flow .st{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:6px 10px}
+.flow .ar{color:var(--text-4)}
+.kbd{font-family:var(--mono); font-size:11px; background:var(--surface); border:1px solid var(--line-2);
+  border-bottom-width:2px; border-radius:5px; padding:1px 5px; color:var(--text-2)}
+</style>
+</head>
+<body>
+
+<!-- ============ 图标符号库 ============ -->
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/><path d="M9.5 20v-6h5v6"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 8.5 12 3 3 8.5v7L12 21l9-5.5z"/><path d="M3 8.5 12 14l9-5.5"/><path d="M12 14v7"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-broom" viewBox="0 0 24 24"><path d="M14 4 9 9"/><path d="m11.5 6.5 6 6"/><path d="M17.5 12.5 21 16a3 3 0 0 1-4.2 4.2l-6.3-6.3"/><path d="m7.5 10.5-4 4 3 3 4-4"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-puzzle" viewBox="0 0 24 24"><path d="M10 4h4v2.5a1.5 1.5 0 1 0 3 0V4h2v4h-2.5a1.5 1.5 0 1 0 0 3H20v4h-2.5a1.5 1.5 0 1 0 0 3H20v2h-4v-2.5a1.5 1.5 0 1 0-3 0V20H9v-2.5a1.5 1.5 0 1 0-3 0V20H4v-4h2.5a1.5 1.5 0 1 0 0-3H4V9h2.5a1.5 1.5 0 1 0 0-3H8V4h2z"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
+  <symbol id="i-disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m19.4 15-.9-.5a7 7 0 0 0 0-5l.9-.5a1.6 1.6 0 0 0 .6-2.2l-1-1.7a1.6 1.6 0 0 0-2.2-.6l-.9.5a7 7 0 0 0-4.3-2V2.6A1.6 1.6 0 0 0 10.9 1H9a1.6 1.6 0 0 0-1.6 1.6v1a7 7 0 0 0-4.3 2l-.9-.5a1.6 1.6 0 0 0-2.2.6l-1 1.7a1.6 1.6 0 0 0 .6 2.2l.9.5a7 7 0 0 0 0 5l-.9.5a1.6 1.6 0 0 0-.6 2.2l1 1.7a1.6 1.6 0 0 0 2.2.6l.9-.5a7 7 0 0 0 4.3 2v1a1.6 1.6 0 0 0 1.6 1.6h1.9a1.6 1.6 0 0 0 1.6-1.6v-1a7 7 0 0 0 4.3-2l.9.5a1.6 1.6 0 0 0 2.2-.6l1-1.7a1.6 1.6 0 0 0-.6-2.2z" transform="scale(.85) translate(2,2)"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 4h4"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v6c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 3 20h18z"/><path d="M12 10v4M12 17h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 2 2-3 3-2-2-2 2"/></symbol>
+  <symbol id="i-fingerprint" viewBox="0 0 24 24"><path d="M12 4a8 8 0 0 0-8 8v3"/><path d="M20 15v-3a8 8 0 0 0-4-6.9"/><path d="M12 8a4 4 0 0 0-4 4v5"/><path d="M16 17v-5a4 4 0 0 0-2-3.5"/><path d="M12 12v6"/></symbol>
+  <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m5 9 7 7 7-7"/></symbol>
+  <symbol id="i-chev-u" viewBox="0 0 24 24"><path d="m5 15 7-7 7 7"/></symbol>
+  <symbol id="i-arrow-l" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="m11 6-6 6 6 6"/></symbol>
+  <symbol id="i-arrow-u" viewBox="0 0 24 24"><path d="M12 19V5"/><path d="m6 11 6-6 6 6"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol>
+  <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3v5M12 16v5M3 12h5M16 12h5"/><path d="m6 6 3 3M15 15l3 3M18 6l-3 3M9 15l-3 3"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M4 8h9a5 5 0 0 1 0 10H8"/><path d="m8 4-4 4 4 4"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M4 19h16"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V5"/><path d="m7 9 5-5 5 5"/><path d="M4 19h16"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-app" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M9 9h6v6H9z"/></symbol>
+  <symbol id="i-hd" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h4M17 15h.01"/></symbol>
+</svg>
+
+<div class="page">
+
+<div class="hero">
+  <div class="badge-ver"><svg class="ic"><use href="#i-sparkle"/></svg> v2.0 · 简洁版</div>
+  <h1>maclean UI 设计稿</h1>
+  <p class="lead">
+    面向 macOS / Windows 双端的磁盘清理工具。v2 的目标只有一个：<strong>把"删东西"这件事做得可判断、可后悔、不吓人</strong>。
+    视觉上收敛到中性灰 + 单一品牌色 + 三档语义色，去掉装饰性渐变与 emoji 图标，用留白和层级替代分割线。
+    窗口基准 <span class="mono">960 × 680</span>（最小 760 × 540），所有图稿按 1:1 逻辑像素绘制，可直接对着写 egui。
+  </p>
+  <div class="meta-row">
+    <span class="chip"><svg class="ic"><use href="#i-hd"/></svg> 窗口 960×680</span>
+    <span class="chip"><svg class="ic"><use href="#i-layers"/></svg> 9 个主页面 + 8 类弹窗 + 1 个 HUD</span>
+    <span class="chip"><svg class="ic"><use href="#i-sun"/></svg> 浅色优先，深色为二等公民</span>
+    <span class="chip"><svg class="ic"><use href="#i-terminal"/></svg> 落地栈：egui 0.29 / eframe 0.29</span>
+  </div>
+
+  <ul class="toc">
+    <li><a href="#s1"><span class="n">01</span> 设计原则</a></li>
+    <li><a href="#s2"><span class="n">02</span> 设计系统</a></li>
+    <li><a href="#s3"><span class="n">03</span> 组件库</a></li>
+    <li><a href="#s4"><span class="n">04</span> 应用框架</a></li>
+    <li><a href="#s5"><span class="n">05</span> 界面图稿</a></li>
+    <li><a href="#s6"><span class="n">06</span> 状态与流程</a></li>
+    <li><a href="#s7"><span class="n">07</span> 深色模式</a></li>
+    <li><a href="#s8"><span class="n">08</span> egui 落地要点</a></li>
+    <li><a href="#s9"><span class="n">09</span> 与 v1 的差异</a></li>
+  </ul>
+</div>
+
+<!-- ================= 01 设计原则 ================= -->
+<h2 id="s1">01 · 设计原则</h2>
+<div class="grid g2">
+  <div class="card">
+    <h4>1. 决策优先于展示</h4>
+    <p class="small">清理工具的每一次交互都是一次"要不要删"的决策。界面必须优先回答三个问题：<strong>这是什么、多大、删了会怎样</strong>。任何不能帮助这三个问题的元素（装饰、动效、冗余分隔线）都删掉。</p>
+  </div>
+  <div class="card">
+    <h4>2. 风险可视化，而不是风险警示化</h4>
+    <p class="small">不要用弹窗轰炸用户。把风险做成<strong>常驻的、可扫读的</strong>色标（安全 / 仅缓存 / 谨慎 / 高级）与数字，危险动作只在真正不可逆时才打断。</p>
+  </div>
+  <div class="card">
+    <h4>3. 默认安全</h4>
+    <p class="small">默认勾选 = 只勾 <span class="badge b-safe">安全</span> 与 <span class="badge b-cache">仅缓存</span>；"高级"项默认不选且需二次确认；删除按钮在选中为空时禁用，不是点了才报错。</p>
+  </div>
+  <div class="card">
+    <h4>4. 一屏一任务</h4>
+    <p class="small">侧栏 9 项已经够多，主区不再塞二级导航。分类筛选用一行 pill，搜索常驻右上角，扫描结果只允许一个主列表。</p>
+  </div>
+  <div class="card">
+    <h4>5. 双端同构，各自克制</h4>
+    <p class="small">结构、栅格、组件完全一致；平台差异只体现在<strong>内容</strong>（APFS 快照只在 macOS、还原点只在 Windows），不做两套视觉语言。</p>
+  </div>
+  <div class="card">
+    <h4>6. 无 emoji</h4>
+    <p class="small">v1 的 🏠📦🧹 等 emoji 在 egui 里依赖系统 emoji 字体，Windows 与 macOS 字形、基线、宽度都不一致，会让导航条错位。<strong>全部换成 1.6px 线性 SVG 图标</strong>（第 2.5 节给出图标集）。</p>
+  </div>
+</div>
+
+<!-- ================= 02 设计系统 ================= -->
+<h2 id="s2">02 · 设计系统</h2>
+
+<h3>2.1 色彩</h3>
+<p>中性色承担 90% 的界面，品牌色只出现在"当前位置 / 主行动 / 选中态"，语义色严格对应四档推荐等级，不做装饰性用色。</p>
+<h4>中性</h4>
+<div class="swatches">
+  <div class="sw"><div class="top" style="background:#FAFAFA"></div><div class="bot"><div class="nm">背景</div><div class="hex">#FAFAFA</div></div></div>
+  <div class="sw"><div class="top" style="background:#FFFFFF;border-bottom:1px solid #E8E8EC"></div><div class="bot"><div class="nm">表面 / 卡片</div><div class="hex">#FFFFFF</div></div></div>
+  <div class="sw"><div class="top" style="background:#F5F5F7"></div><div class="bot"><div class="nm">侧栏 / 表头</div><div class="hex">#F5F5F7</div></div></div>
+  <div class="sw"><div class="top" style="background:#EFEFF2"></div><div class="bot"><div class="nm">轨道 / 禁用</div><div class="hex">#EFEFF2</div></div></div>
+  <div class="sw"><div class="top" style="background:#E8E8EC"></div><div class="bot"><div class="nm">描边 line</div><div class="hex">#E8E8EC</div></div></div>
+  <div class="sw"><div class="top" style="background:#DCDCE2"></div><div class="bot"><div class="nm">描边 strong</div><div class="hex">#DCDCE2</div></div></div>
+  <div class="sw"><div class="top" style="background:#1B1B1F"></div><div class="bot"><div class="nm">主文本</div><div class="hex">#1B1B1F</div></div></div>
+  <div class="sw"><div class="top" style="background:#5C5C66"></div><div class="bot"><div class="nm">次文本</div><div class="hex">#5C5C66</div></div></div>
+  <div class="sw"><div class="top" style="background:#8A8A94"></div><div class="bot"><div class="nm">辅助文本</div><div class="hex">#8A8A94</div></div></div>
+</div>
+<h4>品牌与语义</h4>
+<div class="swatches">
+  <div class="sw"><div class="top" style="background:#4B3FE3"></div><div class="bot"><div class="nm">品牌 brand</div><div class="hex">#4B3FE3</div></div></div>
+  <div class="sw"><div class="top" style="background:#3D32C4"></div><div class="bot"><div class="nm">品牌 hover</div><div class="hex">#3D32C4</div></div></div>
+  <div class="sw"><div class="top" style="background:#F1F0FE"></div><div class="bot"><div class="nm">品牌底 brand-50</div><div class="hex">#F1F0FE</div></div></div>
+  <div class="sw"><div class="top" style="background:#1F9D5B"></div><div class="bot"><div class="nm">安全 Safe</div><div class="hex">#1F9D5B</div></div></div>
+  <div class="sw"><div class="top" style="background:#2F6FD0"></div><div class="bot"><div class="nm">仅缓存 CacheOnly</div><div class="hex">#2F6FD0</div></div></div>
+  <div class="sw"><div class="top" style="background:#C97C06"></div><div class="bot"><div class="nm">谨慎 Caution</div><div class="hex">#C97C06</div></div></div>
+  <div class="sw"><div class="top" style="background:#DC4B3E"></div><div class="bot"><div class="nm">高级 / 危险</div><div class="hex">#DC4B3E</div></div></div>
+</div>
+<table>
+  <tr><th>等级</th><th>色值</th><th>底纹</th><th>含义</th><th>默认勾选</th><th>删除方式</th></tr>
+  <tr><td><span class="badge b-safe"><i class="dot"></i>安全</span></td><td class="mono">#1F9D5B</td><td class="mono">#E9F7EF</td><td>删除后自动重建，无感</td><td>是</td><td>直接删除</td></tr>
+  <tr><td><span class="badge b-cache"><i class="dot"></i>仅缓存</span></td><td class="mono">#2F6FD0</td><td class="mono">#EAF2FD</td><td>只含缓存/日志，不影响使用</td><td>是</td><td>直接删除</td></tr>
+  <tr><td><span class="badge b-caution"><i class="dot"></i>谨慎</span></td><td class="mono">#C97C06</td><td class="mono">#FDF3E2</td><td>删除后需重新下载或配置</td><td>否</td><td>直接删除 + 汇总提示</td></tr>
+  <tr><td><span class="badge b-adv"><i class="dot"></i>高级</span></td><td class="mono">#DC4B3E</td><td class="mono">#FDEDEB</td><td>可能含用户数据，需自行判断</td><td>否</td><td><strong>移入废纸篓</strong> + 二次确认</td></tr>
+</table>
+<div class="note">四档等级直接对应 <code>scanner::Recommend</code> 枚举，UI 不要另起一套叫法。颜色只做<strong>底色 + 文字</strong>，不要给整行上色——列表里超过 3 行彩色会立刻变廉价。</div>
+
+<h3>2.2 字体与字号</h3>
+<table>
+  <tr><th>用途</th><th>字号 / 行高</th><th>字重</th><th>示例</th></tr>
+  <tr><td>页面标题</td><td class="mono">18 / 24</td><td>600</td><td><span style="font-size:18px;font-weight:600">开发者缓存</span></td></tr>
+  <tr><td>区块标题</td><td class="mono">14 / 20</td><td>600</td><td><span style="font-size:14px;font-weight:600">推荐清理</span></td></tr>
+  <tr><td>正文 / 列表主文案</td><td class="mono">13 / 20</td><td>400</td><td><span style="font-size:13px">~/Library/Caches/Homebrew</span></td></tr>
+  <tr><td>辅助说明</td><td class="mono">12 / 18</td><td>400</td><td><span style="font-size:12px;color:#8A8A94">安全可删，下次构建自动恢复</span></td></tr>
+  <tr><td>数字 / 容量</td><td class="mono">13 / 20（表格数字 等宽）</td><td>500</td><td><span style="font-size:13px;font-variant-numeric:tabular-nums">128.4 GB</span></td></tr>
+  <tr><td>大数字（概览）</td><td class="mono">28 / 34</td><td>600</td><td><span style="font-size:28px;font-weight:600;letter-spacing:-.02em">42.7 GB</span></td></tr>
+  <tr><td>路径 / 代码</td><td class="mono">11–12，SF Mono</td><td>400</td><td><span class="mono" style="font-size:12px">~/.gradle/caches/modules-2</span></td></tr>
+</table>
+<p class="small muted">字体栈：<code>-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei"</code>。所有容量数字必须开启 <code>tabular-nums</code>，否则列表滚动时数字会跳动。</p>
+
+<h3>2.3 间距与栅格</h3>
+<p>8pt 基准栅格。列表行高 48px（两行文本）/ 56px（带进度条），控件高 30px，小控件 26px。</p>
+<table>
+  <tr><th>Token</th><th>值</th><th>用在哪</th></tr>
+  <tr><td class="mono">space-1</td><td class="mono">4px</td><td>图标与文字间隙、徽标内边距</td></tr>
+  <tr><td class="mono">space-2</td><td class="mono">8px</td><td>控件之间、卡片内边距（紧凑）</td></tr>
+  <tr><td class="mono">space-3</td><td class="mono">12px</td><td>侧栏项内边距、 pill 之间</td></tr>
+  <tr><td class="mono">space-4</td><td class="mono">16px</td><td>卡片内边距、列表行左右留白</td></tr>
+  <tr><td class="mono">space-5</td><td class="mono">20px</td><td>内容区左右留白</td></tr>
+  <tr><td class="mono">space-6</td><td class="mono">24px</td><td>区块之间</td></tr>
+  <tr><td class="mono">space-8</td><td class="mono">32px</td><td>页面级分隔</td></tr>
+</table>
+
+<h3>2.4 圆角、描边、阴影</h3>
+<div class="grid g3">
+  <div class="card"><h4>圆角</h4><p class="small mono">控件 8 · 小控件 6 · 卡片 10 · 弹窗 14 · pill 全圆</p>
+    <p class="small muted">同一层级保持一致，卡片不要超过 12，否则显得软。</p></div>
+  <div class="card"><h4>描边</h4><p class="small mono">1px #E8E8EC（默认） / #DCDCE2（输入框、悬浮）</p>
+    <p class="small muted">输入框聚焦：<code>1px #4B3FE3 + 3px #F1F0FE</code> 外环，不用发光。</p></div>
+  <div class="card"><h4>阴影</h4><p class="small mono">卡片 0 1px 2px / 悬浮 0 2px 8px / 弹窗 0 24px 64px</p>
+    <p class="small muted">卡片优先用「1px 描边 + 无阴影」，阴影只留给浮层。</p></div>
+</div>
+
+<h3>2.5 图标</h3>
+<p>1.6px 线性图标，24px 网格，<code>stroke-linecap/linejoin: round</code>，无填充。渲染尺寸 16px（行内）/ 20px（导航）/ 24px（空状态）。</p>
+<div class="icon-grid">
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-home"/></svg>home</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-box"/></svg>box</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-file"/></svg>file</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-broom"/></svg>broom</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-folder"/></svg>folder</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-puzzle"/></svg>puzzle</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-sliders"/></svg>sliders</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-disk"/></svg>disk</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-gear"/></svg>gear</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-search"/></svg>search</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-trash"/></svg>trash</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-refresh"/></svg>refresh</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-shield"/></svg>shield</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-alert"/></svg>alert</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-info"/></svg>info</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-lock"/></svg>lock</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-key"/></svg>key</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-fingerprint"/></svg>fingerprint</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-terminal"/></svg>terminal</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-clock"/></svg>clock</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-layers"/></svg>layers</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-sparkle"/></svg>sparkle</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-filter"/></svg>filter</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-undo"/></svg>undo</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-download"/></svg>download</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-upload"/></svg>upload</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-eye"/></svg>eye</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-chev-r"/></svg>chev-right</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-chev-d"/></svg>chev-down</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-arrow-u"/></svg>arrow-up</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-ext"/></svg>external</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-sun"/></svg>sun</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-moon"/></svg>moon</div>
+  <div class="icon-cell"><svg class="ic ic-24"><use href="#i-app"/></svg>app</div>
+</div>
+<div class="note">egui 落地：图标用 <code>egui::Image::new(ImageSource::Bytes)</code> 加载内嵌 PNG，或用 <code>egui_phosphor</code> / 自己写 <code>painter.add(PathShape)</code>。<strong>不要用 emoji</strong>——跨平台字形不一致且无法控制描边粗细。</div>
+
+<h3>2.6 动效</h3>
+<table>
+  <tr><th>场景</th><th>时长</th><th>曲线</th><th>说明</th></tr>
+  <tr><td>按钮 / 导航 hover</td><td class="mono">120ms</td><td>ease-out</td><td>只变背景色，不位移</td></tr>
+  <tr><td>弹窗进入</td><td class="mono">160ms</td><td>ease-out</td><td>scale 0.98→1 + 遮罩淡入</td></tr>
+  <tr><td>进度条推进</td><td class="mono">200ms</td><td>linear</td><td>数字用 tabular-nums，避免抖动</td></tr>
+  <tr><td>列表项展开/收起</td><td class="mono">160ms</td><td>ease-out</td><td>高度插值，内容淡入</td></tr>
+  <tr><td>Toast</td><td class="mono">200ms 进 / 2.4s 停留</td><td>ease-out</td><td>右下角，最多同时 2 条</td></tr>
+</table>
+<p class="small muted">egui 是立即模式 GUI，没有内建补间。hover 用 <code>ctx.animate_bool</code>，弹窗用 <code>ctx.animate_value_with_time</code>；<strong>不要为了动效把帧率拉满</strong>——扫描时保持 <code>ctx.request_repaint()</code>，空闲时用 <code>RepaintMode::Reactive</code>。</p>
+
+<!-- ================= 03 组件库 ================= -->
+<h2 id="s3">03 · 组件库</h2>
+
+<h3>3.1 按钮</h3>
+<div class="demo">
+  <div class="demo-hd"><span>变体</span><span class="spec">height 30 · radius 8 · padding-x 14 · font 13/500</span></div>
+  <div class="demo-bd">
+    <span class="btn btn-primary"><svg class="ic"><use href="#i-refresh"/></svg>开始扫描</span>
+    <span class="btn btn-secondary">仅选安全项</span>
+    <span class="btn btn-ghost">取消</span>
+    <span class="btn btn-danger"><svg class="ic"><use href="#i-trash"/></svg>删除 42.7 GB</span>
+    <span class="btn btn-danger-soft"><svg class="ic"><use href="#i-trash"/></svg>移入废纸篓</span>
+    <span class="btn is-disabled">删除</span>
+  </div>
+</div>
+<div class="grid g2">
+  <div class="card"><h4>尺寸</h4>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="btn btn-sm btn-secondary">小 26px</span>
+      <span class="btn btn-secondary">中 30px</span>
+      <span class="btn btn-lg btn-primary">大 36px</span>
+    </div>
+    <p class="small muted" style="margin-top:10px">小尺寸用在列表行内与工具栏；大尺寸只用在弹窗主行动。</p></div>
+  <div class="card"><h4>规则</h4>
+    <ul class="plain small">
+      <li>一屏最多 <strong>1 个实心主按钮</strong>，其余全部次级/幽灵。</li>
+      <li>危险按钮必须带图标 + 明确宾语（"删除 42.7 GB"，不是"确定"）。</li>
+      <li>禁用态用 <code>#EFEFF2</code> 底 + <code>#AFAFB8</code> 字，不要只降透明度。</li>
+      <li>图标按钮 30×30，仅在工具栏使用。</li>
+    </ul></div>
+</div>
+
+<h3>3.2 输入与选择</h3>
+<div class="demo">
+  <div class="demo-hd"><span>搜索框 / 复选框 / 开关 / 分段 pill</span><span class="spec">30px 统一高度</span></div>
+  <div class="demo-bd">
+    <span class="input"><svg class="ic"><use href="#i-search"/></svg>搜索路径或应用名…</span>
+    <span class="input focus" style="width:220px"><svg class="ic"><use href="#i-search"/></svg>node_modules</span>
+    <span style="display:flex;gap:14px;align-items:center;margin-left:8px">
+      <span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+      <span class="chk part"><svg class="ic" style="width:12px;height:12px"><use href="#i-minus"/></svg></span>
+      <span class="chk"></span>
+      <span class="chk off"></span>
+    </span>
+    <span style="display:flex;gap:10px;align-items:center;margin-left:8px">
+      <span class="sw-tg on"><i></i></span><span class="sw-tg"><i></i></span>
+    </span>
+  </div>
+  <div class="demo-bd" style="border-top:1px solid var(--line)">
+    <span class="pill on">全部 128</span><span class="pill">Rust 12</span><span class="pill">Node 34</span>
+    <span class="pill">Xcode 8</span><span class="pill">Docker 3</span>
+  </div>
+</div>
+<div class="grid g2">
+  <div class="card"><h4>三态复选框</h4>
+    <p class="small">分组卡片用三态：<strong>全选</strong>（勾）/ <strong>部分选中</strong>（横杠）/ <strong>未选</strong>。禁用项用灰底，<strong>不要隐藏复选框</strong>——要让用户看见"有东西不能选"，并在悬浮时给出原因 tooltip。</p></div>
+  <div class="card"><h4>分类 pill</h4>
+    <p class="small">选中态是<strong>反色</strong>（深底白字），不是品牌色底——品牌色留给主行动按钮。pill 高度 28，圆角全圆，最多一行，超出用"更多"下拉。</p></div>
+</div>
+
+<h3>3.3 徽标与状态</h3>
+<div class="demo">
+  <div class="demo-hd"><span>推荐等级徽标</span><span class="spec">height 20 · radius 4 · font 11/600</span></div>
+  <div class="demo-bd">
+    <span class="badge b-safe"><i class="dot"></i>安全</span>
+    <span class="badge b-cache"><i class="dot"></i>仅缓存</span>
+    <span class="badge b-caution"><i class="dot"></i>谨慎</span>
+    <span class="badge b-adv"><i class="dot"></i>高级</span>
+    <span class="badge b-neutral"><i class="dot"></i>受保护</span>
+    <span class="badge b-brand"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>需授权</span>
+    <span class="badge b-neutral"><svg class="ic" style="width:11px;height:11px"><use href="#i-shield"/></svg>SIP 保护</span>
+  </div>
+</div>
+<p class="small muted">不可删除项必须有可见原因徽标（受保护 / SIP / 需要完全磁盘访问权限 / 正在被使用）。<strong>静默禁用是清理工具最糟糕的做法</strong>——用户会以为软件坏了。</p>
+
+<h3>3.4 列表行</h3>
+<div class="demo">
+  <div class="demo-hd"><span>标准结果行（48px）</span><span class="spec">padding 10/14 · gap 12</span></div>
+  <div class="demo-bd col" style="padding:0">
+    <div class="row">
+      <span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+      <span style="flex:1;min-width:0">
+        <div class="t">Rust 编译缓存 <span class="badge b-safe" style="margin-left:6px"><i class="dot"></i>安全</span></div>
+        <div class="d">~/.cargo/registry · target/</div>
+      </span>
+      <span class="grab"><span class="bar safe"><i style="width:62%"></i></span></span>
+      <span class="sz">18.4 GB</span>
+      <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-r"/></svg></span>
+    </div>
+    <div class="row">
+      <span class="chk"></span>
+      <span style="flex:1;min-width:0">
+        <div class="t">Xcode DerivedData <span class="badge b-caution" style="margin-left:6px"><i class="dot"></i>谨慎</span></div>
+        <div class="d">~/Library/Developer/Xcode/DerivedData</div>
+      </span>
+      <span class="grab"><span class="bar caution"><i style="width:34%"></i></span></span>
+      <span class="sz">9.8 GB</span>
+      <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-r"/></svg></span>
+    </div>
+    <div class="row" style="opacity:.62">
+      <span class="chk off"></span>
+      <span style="flex:1;min-width:0">
+        <div class="t">iCloud 云端优化文件 <span class="badge b-neutral" style="margin-left:6px"><svg class="ic" style="width:11px;height:11px"><use href="#i-shield"/></svg>SIP 保护</span></div>
+        <div class="d">~/Library/Mobile Documents · 系统保护，需先在「系统设置」中授权</div>
+      </span>
+      <span class="grab"></span>
+      <span class="sz">3.1 GB</span>
+      <span class="btn btn-ghost btn-icon btn-sm" style="visibility:hidden"><svg class="ic"><use href="#i-chev-r"/></svg></span>
+    </div>
+  </div>
+</div>
+<div class="grid g2">
+  <div class="card"><h4>行内信息密度</h4><p class="small">一行只放：<strong>复选框 · 名称+等级徽标 · 路径 · 占比条 · 容量 · 展开</strong>。说明文字（删了会怎样）放进展开区或 tooltip，不要挤在主行。</p></div>
+  <div class="card"><h4>占比条</h4><p class="small">80px 宽、6px 高，颜色跟随等级，表示<strong>该项占当前列表总量的比例</strong>。没有它，用户无法快速判断"哪个大"。</p></div>
+</div>
+
+<h3>3.5 弹窗</h3>
+<div class="demo">
+  <div class="demo-hd"><span>构成</span><span class="spec">width 480（内容型）/ 420（确认型）· radius 14 · shadow-3</span></div>
+  <div class="demo-bd col" style="padding:0">
+    <div class="modal" style="box-shadow:none;border:1px solid var(--line-2)">
+      <div class="mh">
+        <span class="ic-wrap" style="background:var(--danger-50);color:var(--danger)"><svg class="ic ic-20"><use href="#i-alert"/></svg></span>
+        <span style="flex:1"><h4>确认删除 18 项？</h4><p class="muted">共 42.7 GB · 其中 3 项为「高级」风险</p></span>
+      </div>
+      <div class="mb">
+        <div class="cardbox" style="background:var(--surface-2)">
+          <div class="kv"><span class="muted">安全 / 仅缓存（直接删除）</span><b>12 项 · 24.1 GB</b></div>
+          <div class="kv"><span class="muted">谨慎（直接删除，需重新下载）</span><b>3 项 · 6.2 GB</b></div>
+          <div class="kv"><span class="muted">高级（移入废纸篓，可恢复）</span><b>3 项 · 12.4 GB</b></div>
+        </div>
+      </div>
+      <div class="mf"><span class="btn btn-secondary">取消</span><span class="btn btn-danger"><svg class="ic"><use href="#i-trash"/></svg>确认删除</span></div>
+    </div>
+  </div>
+</div>
+<p class="small muted">弹窗规则：遮罩 <code>rgba(27,27,31,.28)</code>；<strong>主行动在右</strong>，取消在左；Esc 关闭等于取消；标题必须包含具体数字，不能是"确定要继续吗"。</p>
+
+<!-- ================= 04 应用框架 ================= -->
+<h2 id="s4">04 · 应用框架</h2>
+<div class="grid g2">
+  <div class="card">
+    <h4>骨架（固定三区）</h4>
+    <table style="margin-top:8px">
+      <tr><th>区域</th><th>尺寸</th><th>说明</th></tr>
+      <tr><td>顶部横幅</td><td class="mono">36px（出现时）</td><td>更新提示 / 磁盘告警，最多 2 条，可关闭</td></tr>
+      <tr><td>侧栏</td><td class="mono">220px 固定</td><td>品牌 + 磁盘卡片 + 9 项导航 + 底部工具</td></tr>
+      <tr><td>内容区</td><td class="mono">740px（padding 20）</td><td>页头 → 工具栏 → 列表/网格 → 底部操作栏</td></tr>
+      <tr><td>底部操作栏</td><td class="mono">52px（常驻）</td><td>选中计数 + 容量 + 删除按钮</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>为什么操作栏常驻</h4>
+    <p class="small">清理工具的核心动作是"勾选 → 删除"。把删除按钮放在底部常驻栏，用户随时能看到<strong>当前选中多少</strong>，避免"选了半天找不到按钮"，也避免误触。只有概览与应用卸载页自带聚合栏，其余页复用同一个组件。</p>
+    <h4>响应式</h4>
+    <p class="small mono">≥1040px 960 宽 · 760–1040 侧栏压到 180px · &lt;760 不允许（窗口最小 760×540）</p>
+  </div>
+</div>
+
+<h3>4.1 侧栏</h3>
+<div class="demo">
+  <div class="demo-hd"><span>结构</span><span class="spec">220px · bg #F5F5F7 · 右描边 1px</span></div>
+  <div class="demo-bd" style="padding:0; align-items:stretch">
+    <div class="sidebar" style="border-right:1px solid var(--line); border-radius:0 0 0 0">
+      <div class="brandrow">
+        <span class="logo">M</span>
+        <span><div class="nm">Maclean</div><div class="vr">v0.2.0</div></span>
+      </div>
+      <div class="cardbox" style="margin-bottom:14px">
+        <div class="lab" style="font-size:11px;color:var(--text-3)">可用空间</div>
+        <div style="display:flex;align-items:baseline;gap:4px;margin-top:2px">
+          <span style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">128.4 GB</span>
+          <span style="font-size:11px;color:var(--text-3)">/ 512 GB</span>
+        </div>
+        <div class="bar" style="margin-top:8px"><i style="width:25%"></i></div>
+      </div>
+      <div class="navitem on"><svg class="ic"><use href="#i-home"/></svg>概览</div>
+      <div class="navitem"><svg class="ic"><use href="#i-box"/></svg>开发者缓存<span class="cnt">128</span></div>
+      <div class="navitem"><svg class="ic"><use href="#i-file"/></svg>大文件<span class="cnt">64</span></div>
+      <div class="navitem"><svg class="ic"><use href="#i-broom"/></svg>App 缓存<span class="cnt">42</span></div>
+      <div class="navitem"><svg class="ic"><use href="#i-folder"/></svg>App 数据<span class="cnt">31</span></div>
+      <div class="navitem"><svg class="ic"><use href="#i-puzzle"/></svg>应用卸载<span class="cnt">18</span></div>
+      <div class="navitem"><svg class="ic"><use href="#i-sliders"/></svg>系统优化</div>
+      <div class="navitem"><svg class="ic"><use href="#i-disk"/></svg>APFS 快照<span class="cnt">5</span></div>
+      <div class="nav-sep"></div>
+      <div class="navitem"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+      <div style="margin-top:auto; padding:12px 10px 0; display:flex; gap:6px; color:var(--text-3)">
+        <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-moon"/></svg></span>
+        <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-terminal"/></svg></span>
+        <span style="flex:1"></span>
+        <span class="badge b-brand" style="align-self:center">免费版</span>
+      </div>
+    </div>
+  </div>
+</div>
+<ul class="plain small">
+  <li>导航项高 32px，间距 2px；选中态 = <code>#F1F0FE</code> 底 + 品牌色文字 + 600 字重，<strong>不要左侧色条</strong>（会跟进度条抢视觉）。</li>
+  <li>右侧计数徽标显示<strong>可清理项数</strong>，为 0 时不显示；扫描中的 Tab 用 spinner 替换数字。</li>
+  <li>磁盘卡片在侧栏顶部常驻，即使在设置页也能看到——这是用户判断"要不要继续清理"的唯一依据。</li>
+  <li>底部放 深色模式切换 / 打开日志 / License 状态，不占用主导航。</li>
+</ul>
+
+<!-- ================= 05 界面图稿 ================= -->
+<h2 id="s5">05 · 界面图稿</h2>
+<p>以下 12 屏按真实窗口尺寸 1:1 绘制。数据为示意值。</p>
+
+<!-- 5.1 概览 -->
+<div class="screen-wrap">
+  <div class="screen-label">5.1 概览 Overview <span class="tag">默认首页</span></div>
+  <div class="scroll-x">
+  <div class="screen">
+    <div class="titlebar"><span class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></span>
+      <span class="tb-title">Maclean</span>
+      <span class="tb-right"><svg class="ic"><use href="#i-moon"/></svg></span>
+    </div>
+    <div class="banner warn"><svg class="ic"><use href="#i-alert"/></svg>磁盘可用空间不足 12% · 仅剩 61.4 GB<span class="sp"></span><span class="btn btn-sm btn-secondary">一键清理</span></div>
+    <div class="win-body" style="min-height:520px">
+      <div class="sidebar">
+        <div class="brandrow"><span class="logo">M</span><span><div class="nm">Maclean</div><div class="vr">v0.2.0</div></span></div>
+        <div class="cardbox" style="margin-bottom:14px">
+          <div style="font-size:11px;color:var(--text-3)">可用空间</div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-top:2px">
+            <span style="font-size:16px;font-weight:600">61.4 GB</span><span style="font-size:11px;color:var(--text-3)">/ 512 GB</span></div>
+          <div class="bar" style="margin-top:8px;background:#F5DCC6"><i style="width:12%;background:var(--caution)"></i></div>
+        </div>
+        <div class="navitem on"><svg class="ic"><use href="#i-home"/></svg>概览</div>
+        <div class="navitem"><svg class="ic"><use href="#i-box"/></svg>开发者缓存<span class="cnt">128</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-file"/></svg>大文件<span class="cnt">64</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-broom"/></svg>App 缓存<span class="cnt">42</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-folder"/></svg>App 数据<span class="cnt">31</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-puzzle"/></svg>应用卸载<span class="cnt">18</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-sliders"/></svg>系统优化</div>
+        <div class="navitem"><svg class="ic"><use href="#i-disk"/></svg>APFS 快照<span class="cnt">5</span></div>
+        <div class="nav-sep"></div>
+        <div class="navitem"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+      </div>
+      <div class="content">
+        <div class="page-hd">
+          <span style="flex:1">
+            <h3>概览</h3>
+            <div class="sub">上次扫描：3 分钟前 · 共扫描 288 项 · 耗时 12.4s</div>
+          </span>
+          <span class="actions">
+            <span class="btn btn-secondary"><svg class="ic"><use href="#i-undo"/></svg>还原上次清理</span>
+            <span class="btn btn-primary"><svg class="ic"><use href="#i-refresh"/></svg>重新扫描</span>
+          </span>
+        </div>
+
+        <div class="grid g3" style="margin-bottom:20px">
+          <div class="statbox safe">
+            <div class="lab"><svg class="ic" style="width:12px;height:12px;color:var(--safe)"><use href="#i-shield"/></svg> 可安全释放</div>
+            <div class="val" style="color:var(--safe)">42.7 GB</div>
+            <div class="small muted">86 项 · 默认已勾选</div>
+          </div>
+          <div class="statbox caution">
+            <div class="lab"><svg class="ic" style="width:12px;height:12px;color:var(--caution)"><use href="#i-alert"/></svg> 谨慎清理</div>
+            <div class="val" style="color:var(--caution)">18.2 GB</div>
+            <div class="small muted">24 项 · 需重新下载</div>
+          </div>
+          <div class="statbox adv">
+            <div class="lab"><svg class="ic" style="width:12px;height:12px;color:var(--danger)"><use href="#i-info"/></svg> 高级（需确认）</div>
+            <div class="val" style="color:var(--danger)">9.6 GB</div>
+            <div class="small muted">11 项 · 移入废纸篓</div>
+          </div>
+        </div>
+
+        <h4 style="display:flex;align-items:center;gap:6px;margin:0 0 8px">
+          分类构成
+          <span class="badge b-neutral" style="margin-left:4px">点击跳转</span>
+        </h4>
+        <div class="cardbox" style="margin-bottom:20px">
+          <div style="display:flex;height:14px;border-radius:4px;overflow:hidden;margin-bottom:12px">
+            <i style="width:38%;background:var(--brand)"></i>
+            <i style="width:22%;background:#7C74EA"></i>
+            <i style="width:16%;background:var(--info)"></i>
+            <i style="width:12%;background:var(--caution)"></i>
+            <i style="width:12%;background:var(--danger)"></i>
+          </div>
+          <div class="kv"><span><i class="dot" style="background:var(--brand);display:inline-block;margin-right:6px"></i>开发者缓存</span><b>26.3 GB</b></div>
+          <div class="kv"><span><i class="dot" style="background:#7C74EA;display:inline-block;margin-right:6px"></i>大文件</span><b>15.1 GB</b></div>
+          <div class="kv"><span><i class="dot" style="background:var(--info);display:inline-block;margin-right:6px"></i>App 缓存</span><b>11.2 GB</b></div>
+          <div class="kv"><span><i class="dot" style="background:var(--caution);display:inline-block;margin-right:6px"></i>应用卸载残留</span><b>8.4 GB</b></div>
+          <div class="kv"><span><i class="dot" style="background:var(--danger);display:inline-block;margin-right:6px"></i>APFS 快照</span><b>7.9 GB</b></div>
+        </div>
+
+        <h4 style="margin:0 0 8px">最大的 6 项</h4>
+        <div class="list" style="margin-bottom:16px">
+          <div class="row"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t">Xcode DerivedData <span class="badge b-safe" style="margin-left:6px"><i class="dot"></i>安全</span></div>
+            <div class="d">~/Library/Developer/Xcode/DerivedData</div></span>
+            <span class="grab"><span class="bar safe"><i style="width:92%"></i></span></span><span class="sz">18.4 GB</span></div>
+          <div class="row"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t">Docker 镜像与卷 <span class="badge b-caution" style="margin-left:6px"><i class="dot"></i>谨慎</span></div>
+            <div class="d">~/Library/Containers/com.docker.docker</div></span>
+            <span class="grab"><span class="bar caution"><i style="width:64%"></i></span></span><span class="sz">12.8 GB</span></div>
+          <div class="row"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t">Rust 编译缓存 <span class="badge b-safe" style="margin-left:6px"><i class="dot"></i>安全</span></div>
+            <div class="d">~/.cargo/registry · */target</div></span>
+            <span class="grab"><span class="bar safe"><i style="width:46%"></i></span></span><span class="sz">9.1 GB</span></div>
+          <div class="row"><span class="chk"></span>
+            <span style="flex:1"><div class="t">时间机器本地快照 <span class="badge b-adv" style="margin-left:6px"><i class="dot"></i>高级</span></div>
+            <div class="d">com.apple.TimeMachine.2026-09-11-203045</div></span>
+            <span class="grab"><span class="bar adv"><i style="width:40%"></i></span></span><span class="sz">7.9 GB</span></div>
+        </div>
+        <div class="small muted">共 288 项可清理 · <a href="#">查看全部</a></div>
+      </div>
+    </div>
+    <div class="footer-bar">
+      <span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+      <span class="small">已选 <b>86</b> 项 · 可释放 <b>42.7 GB</b></span>
+      <span class="sp"></span>
+      <span class="btn btn-secondary btn-sm">仅选安全项</span>
+      <span class="btn btn-danger"><svg class="ic"><use href="#i-trash"/></svg>清理 42.7 GB</span>
+    </div>
+  </div>
+  </div>
+</div>
+<div class="grid g2">
+  <div class="card"><h4>设计要点</h4><ul class="plain small">
+    <li>顶部三张卡只给<strong>三个数字</strong>：能安全拿回多少、要谨慎的多少、危险的多少。这是概览存在的唯一理由。</li>
+    <li>分类构成用<strong>堆叠条 + 图例列表</strong>，点击图例跳转对应 Tab。</li>
+    <li>"最大的 6 项"是可操作列表，不是排行榜——直接带复选框，用户在这里就能完成 80% 的清理。</li>
+  </ul></div>
+  <div class="card"><h4>egui 注意</h4><ul class="plain small">
+    <li>堆叠条用 <code>painter.rect_filled</code> 分段绘制，别用多个 Frame 拼（会有 1px 缝隙）。</li>
+    <li>三张卡片用 <code>ui.columns(3)</code> 或 <code>horizontal(|ui| ui.add_sized())</code>，保证等宽。</li>
+    <li>概览数据来自各 Tab 聚合（<code>app.results[1..]</code>），扫描未完成时显示上一次缓存值并标注时间。</li>
+  </ul></div>
+</div>
+
+<!-- 5.2 开发者缓存 -->
+<div class="screen-wrap">
+  <div class="screen-label">5.2 开发者缓存 DevCache <span class="tag">列表页模板 · 大文件/App缓存/App数据/APFS 复用</span></div>
+  <div class="scroll-x">
+  <div class="screen">
+    <div class="titlebar"><span class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></span><span class="tb-title">Maclean — 开发者缓存</span><span class="tb-right"><svg class="ic"><use href="#i-moon"/></svg></span></div>
+    <div class="win-body" style="min-height:520px">
+      <div class="sidebar">
+        <div class="brandrow"><span class="logo">M</span><span><div class="nm">Maclean</div><div class="vr">v0.2.0</div></span></div>
+        <div class="cardbox" style="margin-bottom:14px">
+          <div style="font-size:11px;color:var(--text-3)">可用空间</div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-top:2px"><span style="font-size:16px;font-weight:600">61.4 GB</span><span style="font-size:11px;color:var(--text-3)">/ 512 GB</span></div>
+          <div class="bar" style="margin-top:8px;background:#F5DCC6"><i style="width:12%;background:var(--caution)"></i></div>
+        </div>
+        <div class="navitem"><svg class="ic"><use href="#i-home"/></svg>概览</div>
+        <div class="navitem on"><svg class="ic"><use href="#i-box"/></svg>开发者缓存<span class="cnt">128</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-file"/></svg>大文件<span class="cnt">64</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-broom"/></svg>App 缓存<span class="cnt">42</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-folder"/></svg>App 数据<span class="cnt">31</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-puzzle"/></svg>应用卸载<span class="cnt">18</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-sliders"/></svg>系统优化</div>
+        <div class="navitem"><svg class="ic"><use href="#i-disk"/></svg>APFS 快照<span class="cnt">5</span></div>
+        <div class="nav-sep"></div>
+        <div class="navitem"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+      </div>
+      <div class="content">
+        <div class="page-hd">
+          <span style="flex:1"><h3>开发者缓存</h3><div class="sub">128 项 · 共 26.3 GB · 扫描耗时 8.2s</div></span>
+          <span class="actions">
+            <span class="input" style="width:200px"><svg class="ic"><use href="#i-search"/></svg>搜索路径…</span>
+            <span class="btn btn-secondary"><svg class="ic"><use href="#i-refresh"/></svg>重新扫描</span>
+          </span>
+        </div>
+        <div class="toolbar">
+          <span class="pill on">全部 128</span><span class="pill">Rust 8</span><span class="pill">Node 34</span>
+          <span class="pill">Xcode 6</span><span class="pill">Python 21</span><span class="pill">Docker 3</span>
+          <span class="pill">Gradle 4</span><span class="pill">Homebrew 12</span>
+          <span class="pill"><svg class="ic" style="width:12px;height:12px"><use href="#i-plus"/></svg> 更多 40</span>
+        </div>
+        <div class="toolbar" style="margin-bottom:8px">
+          <span class="chk part"><svg class="ic" style="width:12px;height:12px"><use href="#i-minus"/></svg></span>
+          <span class="small muted">全选</span>
+          <span style="width:16px"></span>
+          <span class="badge b-neutral"><svg class="ic" style="width:11px;height:11px"><use href="#i-filter"/></svg>按大小排序</span>
+          <span class="grow"></span>
+          <span class="small muted">已选 12 项 · 18.4 GB</span>
+        </div>
+        <div class="list" style="flex:1">
+          <div class="row"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t">Xcode DerivedData <span class="badge b-safe" style="margin-left:6px"><i class="dot"></i>安全</span></div>
+            <div class="d">~/Library/Developer/Xcode/DerivedData · 删除后下次编译会重建</div></span>
+            <span class="grab"><span class="bar safe"><i style="width:92%"></i></span></span><span class="sz">18.4 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-d"/></svg></span></div>
+          <div class="row" style="background:var(--brand-50)">
+            <span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t">Xcode DerivedData <span class="badge b-safe" style="margin-left:6px"><i class="dot"></i>安全</span></div>
+            <div class="d" style="color:var(--text-2)">展开明细：共 6 个子项目</div></span>
+            <span class="sz">18.4 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-u"/></svg></span></div>
+          <div class="row" style="padding-left:42px;background:var(--surface-2)">
+            <span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t small">MyApp-abcdefghijklmnop</div><div class="d">Build/Products/Debug-iphonesimulator</div></span>
+            <span class="sz small">6.2 GB</span></div>
+          <div class="row" style="padding-left:42px;background:var(--surface-2)">
+            <span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t small">MyApp-abcdefghijklmnop</div><div class="d">Index.noindex/Build/Intermediates</div></span>
+            <span class="sz small">4.8 GB</span></div>
+          <div class="row" style="padding-left:42px;background:var(--surface-2)">
+            <span class="chk"></span>
+            <span style="flex:1"><div class="t small">LegacyProject-xyz</div><div class="d">Build/Products/Release</div></span>
+            <span class="sz small">3.1 GB</span></div>
+          <div class="row"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t">Homebrew 下载缓存 <span class="badge b-safe" style="margin-left:6px"><i class="dot"></i>安全</span></div>
+            <div class="d">~/Library/Caches/Homebrew/downloads</div></span>
+            <span class="grab"><span class="bar safe"><i style="width:38%"></i></span></span><span class="sz">7.6 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-d"/></svg></span></div>
+          <div class="row"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            <span style="flex:1"><div class="t">npm 缓存 <span class="badge b-cache" style="margin-left:6px"><i class="dot"></i>仅缓存</span></div>
+            <div class="d">~/.npm/_cacache</div></span>
+            <span class="grab"><span class="bar"><i style="width:26%"></i></span></span><span class="sz">5.2 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-d"/></svg></span></div>
+          <div class="row"><span class="chk"></span>
+            <span style="flex:1"><div class="t">Gradle 依赖缓存 <span class="badge b-caution" style="margin-left:6px"><i class="dot"></i>谨慎</span></div>
+            <div class="d">~/.gradle/caches/modules-2 · 删除后需重新下载依赖</div></span>
+            <span class="grab"><span class="bar caution"><i style="width:21%"></i></span></span><span class="sz">4.3 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-d"/></svg></span></div>
+          <div class="row" style="opacity:.62"><span class="chk off"></span>
+            <span style="flex:1"><div class="t">iOS 模拟器运行时 <span class="badge b-adv" style="margin-left:6px"><i class="dot"></i>高级</span>
+              <span class="badge b-brand" style="margin-left:4px"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>需授权</span></div>
+            <div class="d">/Library/Developer/CoreSimulator · 需完全磁盘访问权限</div></span>
+            <span class="grab"><span class="bar adv"><i style="width:16%"></i></span></span><span class="sz">3.2 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-info"/></svg></span></div>
+        </div>
+        <div style="height:12px"></div>
+      </div>
+    </div>
+    <div class="footer-bar">
+      <span class="chk part"><svg class="ic" style="width:12px;height:12px"><use href="#i-minus"/></svg></span>
+      <span class="small">已选 <b>12</b> 项 · 可释放 <b>18.4 GB</b></span>
+      <span class="sp"></span>
+      <span class="small muted">1 项因缺少权限被跳过</span>
+      <span class="btn btn-secondary btn-sm">仅选安全项</span>
+      <span class="btn btn-secondary btn-sm">全部不选</span>
+      <span class="btn btn-danger"><svg class="ic"><use href="#i-trash"/></svg>清理 18.4 GB</span>
+    </div>
+  </div>
+  </div>
+</div>
+<div class="note">这是<strong>列表页模板</strong>：开发者缓存 / 大文件 / App 缓存 / App 数据 / APFS 快照 五个 Tab 共用同一套骨架，只换 pill 分类、行内文案与徽标。差异点：大文件页把"路径"列换成"文件类型 + 修改时间"；APFS 快照页把路径换成"快照名称 + 创建时间"，且全部为 <span class="badge b-adv"><i class="dot"></i>高级</span>。</div>
+
+<!-- 5.3 应用卸载 -->
+<div class="screen-wrap">
+  <div class="screen-label">5.3 应用卸载 AppUninstall <span class="tag">分组卡片 · 唯一使用卡片列表的页面</span></div>
+  <div class="scroll-x">
+  <div class="screen">
+    <div class="titlebar"><span class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></span><span class="tb-title">Maclean — 应用卸载</span><span class="tb-right"><svg class="ic"><use href="#i-moon"/></svg></span></div>
+    <div class="win-body" style="min-height:520px">
+      <div class="sidebar">
+        <div class="brandrow"><span class="logo">M</span><span><div class="nm">Maclean</div><div class="vr">v0.2.0</div></span></div>
+        <div class="cardbox" style="margin-bottom:14px"><div style="font-size:11px;color:var(--text-3)">可用空间</div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-top:2px"><span style="font-size:16px;font-weight:600">61.4 GB</span><span style="font-size:11px;color:var(--text-3)">/ 512 GB</span></div>
+          <div class="bar" style="margin-top:8px;background:#F5DCC6"><i style="width:12%;background:var(--caution)"></i></div></div>
+        <div class="navitem"><svg class="ic"><use href="#i-home"/></svg>概览</div>
+        <div class="navitem"><svg class="ic"><use href="#i-box"/></svg>开发者缓存<span class="cnt">128</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-file"/></svg>大文件<span class="cnt">64</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-broom"/></svg>App 缓存<span class="cnt">42</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-folder"/></svg>App 数据<span class="cnt">31</span></div>
+        <div class="navitem on"><svg class="ic"><use href="#i-puzzle"/></svg>应用卸载<span class="cnt">18</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-sliders"/></svg>系统优化</div>
+        <div class="navitem"><svg class="ic"><use href="#i-disk"/></svg>APFS 快照<span class="cnt">5</span></div>
+        <div class="nav-sep"></div>
+        <div class="navitem"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+      </div>
+      <div class="content">
+        <div class="page-hd">
+          <span style="flex:1"><h3>应用卸载</h3><div class="sub">18 个应用 · 完全卸载可释放 8.4 GB（含残留）</div></span>
+          <span class="actions"><span class="input" style="width:200px"><svg class="ic"><use href="#i-search"/></svg>搜索应用…</span>
+          <span class="btn btn-secondary"><svg class="ic"><use href="#i-refresh"/></svg>重新扫描</span></span>
+        </div>
+        <div class="toolbar">
+          <span class="pill on">全部 18</span><span class="pill"><i class="dot" style="color:var(--safe)"></i>安全 9</span>
+          <span class="pill"><i class="dot" style="color:var(--caution)"></i>谨慎 6</span>
+          <span class="pill"><i class="dot" style="color:var(--danger)"></i>高级 3</span>
+          <span class="grow"></span><span class="badge b-neutral"><svg class="ic" style="width:11px;height:11px"><use href="#i-info"/></svg>按占用排序</span>
+        </div>
+
+        <div class="cardbox" style="margin-bottom:10px; border-color:var(--brand-100); background:var(--brand-50)">
+          <div style="display:flex; align-items:center; gap:12px">
+            <span class="chk part"><svg class="ic" style="width:12px;height:12px"><use href="#i-minus"/></svg></span>
+            <span class="ic-wrap" style="width:36px;height:36px;border-radius:9px;background:#fff;display:flex;align-items:center;justify-content:center;border:1px solid var(--line)"><svg class="ic ic-20" style="color:var(--brand)"><use href="#i-app"/></svg></span>
+            <span style="flex:1">
+              <div style="font-size:14px;font-weight:600">Figma <span class="badge b-safe" style="margin-left:6px"><i class="dot"></i>安全</span></div>
+              <div class="small muted">/Applications/Figma.app · 已卸载，仅剩残留 4 项</div>
+            </span>
+            <span style="text-align:right"><div style="font-size:14px;font-weight:600;font-variant-numeric:tabular-nums">2.4 GB</div><div class="small muted">4 项</div></span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-u"/></svg></span>
+          </div>
+          <div style="margin:12px 0 0 48px; padding-top:10px; border-top:1px dashed var(--brand-100)">
+            <div class="row" style="padding:6px 0;border:none"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+              <span style="flex:1"><div class="t small">应用程序本体</div><div class="d">/Applications/Figma.app</div></span>
+              <span class="badge b-safe" style="margin-right:8px"><i class="dot"></i>安全</span><span class="sz small">512 MB</span></div>
+            <div class="row" style="padding:6px 0;border:none"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+              <span style="flex:1"><div class="t small">偏好设置</div><div class="d">~/Library/Preferences/com.figma.Desktop.plist</div></span>
+              <span class="badge b-safe" style="margin-right:8px"><i class="dot"></i>安全</span><span class="sz small">12 KB</span></div>
+            <div class="row" style="padding:6px 0;border:none"><span class="chk on"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+              <span style="flex:1"><div class="t small">应用支持文件</div><div class="d">~/Library/Application Support/Figma</div></span>
+              <span class="badge b-caution" style="margin-right:8px"><i class="dot"></i>谨慎</span><span class="sz small">1.8 GB</span></div>
+            <div class="row" style="padding:6px 0;border:none"><span class="chk"></span>
+              <span style="flex:1"><div class="t small">用户文档与项目</div><div class="d">~/Documents/Figma</div></span>
+              <span class="badge b-adv" style="margin-right:8px"><i class="dot"></i>高级</span><span class="sz small">96 MB</span></div>
+          </div>
+        </div>
+
+        <div class="cardbox" style="margin-bottom:10px">
+          <div style="display:flex; align-items:center; gap:12px">
+            <span class="chk"></span>
+            <span class="ic-wrap" style="width:36px;height:36px;border-radius:9px;background:var(--surface-3);display:flex;align-items:center;justify-content:center"><svg class="ic ic-20" style="color:var(--text-3)"><use href="#i-app"/></svg></span>
+            <span style="flex:1"><div style="font-size:14px;font-weight:600">Adobe Photoshop 2021 <span class="badge b-caution" style="margin-left:6px"><i class="dot"></i>谨慎</span></div>
+              <div class="small muted">/Applications/Adobe Photoshop 2021.app · 应用仍在，卸载将移除 6 项</div></span>
+            <span style="text-align:right"><div style="font-size:14px;font-weight:600;font-variant-numeric:tabular-nums">3.1 GB</div><div class="small muted">6 项</div></span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-d"/></svg></span>
+          </div>
+        </div>
+
+        <div class="cardbox" style="margin-bottom:10px">
+          <div style="display:flex; align-items:center; gap:12px">
+            <span class="chk"></span>
+            <span class="ic-wrap" style="width:36px;height:36px;border-radius:9px;background:var(--surface-3);display:flex;align-items:center;justify-content:center"><svg class="ic ic-20" style="color:var(--text-3)"><use href="#i-app"/></svg></span>
+            <span style="flex:1"><div style="font-size:14px;font-weight:600">Parallels Desktop <span class="badge b-adv" style="margin-left:6px"><i class="dot"></i>高级</span></div>
+              <div class="small muted">/Applications/Parallels Desktop.app · 含虚拟机磁盘（不可恢复）</div></span>
+            <span style="text-align:right"><div style="font-size:14px;font-weight:600;font-variant-numeric:tabular-nums">28.6 GB</div><div class="small muted">9 项</div></span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-d"/></svg></span>
+          </div>
+        </div>
+        <div style="flex:1"></div>
+      </div>
+    </div>
+    <div class="footer-bar">
+      <span class="chk part"><svg class="ic" style="width:12px;height:12px"><use href="#i-minus"/></svg></span>
+      <span class="small">已选 <b>1</b> 个应用 · <b>3</b> 项 · 可释放 <b>2.3 GB</b></span>
+      <span class="sp"></span>
+      <span class="btn btn-secondary btn-sm">仅选安全项</span>
+      <span class="btn btn-danger"><svg class="ic"><use href="#i-trash"/></svg>卸载并清理 2.3 GB</span>
+    </div>
+  </div>
+  </div>
+</div>
+<div class="grid g2">
+  <div class="card"><h4>为什么用分组卡片</h4><p class="small">卸载是<strong>一个对象带多个位置</strong>的结构（本体 + 偏好 + 支持文件 + 容器 + 日志）。扁平列表会让用户看到 5 行 Figma 却不知道它们是一件事。分组卡片把"应用"作为决策单位，明细折叠在里面。</p>
+    <p class="small">分组复选框是<strong>三态</strong>；明细里某一项不可选时显示原因徽标，不静默禁用。</p></div>
+  <div class="card"><h4>风险表达</h4><ul class="plain small">
+    <li>卡片标题右侧的等级徽标 = 该组<strong>最高风险项</strong>的等级，不是平均值。</li>
+    <li>"应用仍在"与"仅剩残留"必须在副标题里写清楚——这两者的用户意图完全不同。</li>
+    <li>含用户数据的组（~/Documents、虚拟机）标 <span class="badge b-adv"><i class="dot"></i>高级</span>，且默认<strong>不勾选</strong>。</li>
+  </ul></div>
+</div>
+
+<!-- 5.4 系统优化 -->
+<div class="screen-wrap">
+  <div class="screen-label">5.4 系统优化 SystemOptimize <span class="tag">任务卡片 · 非文件删除</span></div>
+  <div class="scroll-x">
+  <div class="screen">
+    <div class="titlebar"><span class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></span><span class="tb-title">Maclean — 系统优化</span><span class="tb-right"><svg class="ic"><use href="#i-moon"/></svg></span></div>
+    <div class="win-body" style="min-height:520px">
+      <div class="sidebar">
+        <div class="brandrow"><span class="logo">M</span><span><div class="nm">Maclean</div><div class="vr">v0.2.0</div></span></div>
+        <div class="cardbox" style="margin-bottom:14px"><div style="font-size:11px;color:var(--text-3)">可用空间</div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-top:2px"><span style="font-size:16px;font-weight:600">61.4 GB</span><span style="font-size:11px;color:var(--text-3)">/ 512 GB</span></div>
+          <div class="bar" style="margin-top:8px;background:#F5DCC6"><i style="width:12%;background:var(--caution)"></i></div></div>
+        <div class="navitem"><svg class="ic"><use href="#i-home"/></svg>概览</div>
+        <div class="navitem"><svg class="ic"><use href="#i-box"/></svg>开发者缓存<span class="cnt">128</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-file"/></svg>大文件<span class="cnt">64</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-broom"/></svg>App 缓存<span class="cnt">42</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-folder"/></svg>App 数据<span class="cnt">31</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-puzzle"/></svg>应用卸载<span class="cnt">18</span></div>
+        <div class="navitem on"><svg class="ic"><use href="#i-sliders"/></svg>系统优化</div>
+        <div class="navitem"><svg class="ic"><use href="#i-disk"/></svg>APFS 快照<span class="cnt">5</span></div>
+        <div class="nav-sep"></div>
+        <div class="navitem"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+      </div>
+      <div class="content">
+        <div class="page-hd"><span style="flex:1"><h3>系统优化</h3><div class="sub">执行系统级维护任务 · macOS 部分任务需要管理员权限</div></span></div>
+        <div class="banner info" style="border:1px solid #CFE1F7; border-radius:var(--r-md); margin-bottom:14px">
+          <svg class="ic"><use href="#i-info"/></svg>这些任务不删除个人文件，只触发系统自身的维护流程。执行期间请勿合盖或休眠。
+        </div>
+        <div class="grid g2" style="gap:10px">
+          <div class="cardbox">
+            <div style="display:flex;gap:10px;align-items:flex-start">
+              <span class="ic-wrap" style="width:32px;height:32px;border-radius:8px;background:var(--brand-50);color:var(--brand);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic"><use href="#i-sparkle"/></svg></span>
+              <span style="flex:1"><div style="font-size:13px;font-weight:600">重建 Spotlight 索引</div>
+                <div class="small muted">修复搜索结果缺失 / 搜索变慢</div></span>
+              <span class="badge b-safe"><i class="dot"></i>安全</span>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+              <span class="btn btn-sm btn-secondary">执行</span><span class="small muted">上次执行：从未</span>
+            </div>
+          </div>
+          <div class="cardbox">
+            <div style="display:flex;gap:10px;align-items:flex-start">
+              <span class="ic-wrap" style="width:32px;height:32px;border-radius:8px;background:var(--caution-50);color:var(--caution);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic"><use href="#i-terminal"/></svg></span>
+              <span style="flex:1"><div style="font-size:13px;font-weight:600">清理 DNS 缓存</div>
+                <div class="small muted">解决域名解析异常 / 网页面打不开</div></span>
+              <span class="badge b-caution"><i class="dot"></i>谨慎</span>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+              <span class="btn btn-sm btn-secondary">执行</span><span class="small muted">上次执行：2 天前</span>
+            </div>
+          </div>
+          <div class="cardbox">
+            <div style="display:flex;gap:10px;align-items:flex-start">
+              <span class="ic-wrap" style="width:32px;height:32px;border-radius:8px;background:var(--danger-50);color:var(--danger);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic"><use href="#i-box"/></svg></span>
+              <span style="flex:1"><div style="font-size:13px;font-weight:600">Docker 清理未使用镜像与构建缓存</div>
+                <div class="small muted">docker system prune -a · <strong>不清理数据卷</strong>（卷可能含数据库等不可重建数据）</div></span>
+              <span class="badge b-adv"><i class="dot"></i>高级</span>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+              <span class="btn btn-sm btn-danger-soft">执行</span><span class="small muted">预计释放 12.8 GB</span>
+            </div>
+          </div>
+          <div class="cardbox">
+            <div style="display:flex;gap:10px;align-items:flex-start">
+              <span class="ic-wrap" style="width:32px;height:32px;border-radius:8px;background:var(--surface-3);color:var(--text-3);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic"><use href="#i-clock"/></svg></span>
+              <span style="flex:1"><div style="font-size:13px;font-weight:600">清理系统日志文件</div>
+                <div class="small muted">/private/var/log · 需管理员权限</div></span>
+              <span class="badge b-brand"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>需授权</span>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+              <span class="btn btn-sm btn-secondary">执行</span><span class="small muted">预计释放 420 MB</span>
+            </div>
+          </div>
+        </div>
+        <div style="flex:1"></div>
+        <div class="cardbox" style="background:var(--surface-2);border-style:dashed">
+          <div style="display:flex;align-items:center;gap:8px"><svg class="ic" style="color:var(--text-3)"><use href="#i-terminal"/></svg>
+          <span class="small muted" style="flex:1">执行日志</span><span class="btn btn-ghost btn-sm">清空</span></div>
+          <div class="mono small muted" style="margin-top:8px;line-height:1.7">
+            [10:42:01] 重建 Spotlight 索引 → 已提交（后台执行中）<br>
+            [10:41:22] 清理 DNS 缓存 → 完成（用时 0.4s）<br>
+            [10:40:58] Docker prune → 失败：Docker 未运行
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bar"><span class="small muted">4 项任务可用 · 其中 1 项需要管理员权限</span><span class="sp"></span>
+      <span class="btn btn-secondary">查看日志目录</span></div>
+  </div>
+  </div>
+</div>
+<div class="note warn"><strong>工程提醒：</strong>当前代码里「系统优化」Tab 在 Windows 上返回空（<code>mod.rs</code> 用 <code>cfg(target_os="macos")</code> 把 optimize 模块整个关掉，<code>windows_optimize_tasks()</code> 成了死代码）。UI 稿假定双端都有任务列表——要么补齐 Windows 任务，要么在 Windows 上<strong>隐藏整个 Tab</strong>，不要留一个空页面。</div>
+
+<!-- 5.5 设置 -->
+<div class="screen-wrap">
+  <div class="screen-label">5.5 设置 Settings <span class="tag">分组表单</span></div>
+  <div class="scroll-x">
+  <div class="screen">
+    <div class="titlebar"><span class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></span><span class="tb-title">Maclean — 设置</span><span class="tb-right"><svg class="ic"><use href="#i-moon"/></svg></span></div>
+    <div class="win-body" style="min-height:520px">
+      <div class="sidebar">
+        <div class="brandrow"><span class="logo">M</span><span><div class="nm">Maclean</div><div class="vr">v0.2.0</div></span></div>
+        <div class="cardbox" style="margin-bottom:14px"><div style="font-size:11px;color:var(--text-3)">可用空间</div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-top:2px"><span style="font-size:16px;font-weight:600">61.4 GB</span><span style="font-size:11px;color:var(--text-3)">/ 512 GB</span></div>
+          <div class="bar" style="margin-top:8px;background:#F5DCC6"><i style="width:12%;background:var(--caution)"></i></div></div>
+        <div class="navitem"><svg class="ic"><use href="#i-home"/></svg>概览</div>
+        <div class="navitem"><svg class="ic"><use href="#i-box"/></svg>开发者缓存<span class="cnt">128</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-file"/></svg>大文件<span class="cnt">64</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-broom"/></svg>App 缓存<span class="cnt">42</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-folder"/></svg>App 数据<span class="cnt">31</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-puzzle"/></svg>应用卸载<span class="cnt">18</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-sliders"/></svg>系统优化</div>
+        <div class="navitem"><svg class="ic"><use href="#i-disk"/></svg>APFS 快照<span class="cnt">5</span></div>
+        <div class="nav-sep"></div>
+        <div class="navitem on"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+      </div>
+      <div class="content" style="overflow:auto">
+        <div class="page-hd"><span style="flex:1"><h3>设置</h3><div class="sub">修改后立即生效并写入 ~/.maclean/config.json</div></span></div>
+
+        <div class="cardbox" style="margin-bottom:12px">
+          <h4 style="margin:0 0 4px">通用</h4>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">显示菜单栏图标</div><div class="small muted">在菜单栏显示磁盘可用空间，点击展开快捷面板</div></span>
+            <span class="sw-tg on"><i></i></span></div>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">开机启动</div><div class="small muted">登录时自动在后台运行</div></span>
+            <span class="sw-tg"><i></i></span></div>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">界面语言</div><div class="small muted">切换后立即刷新全部文案</div></span>
+            <span class="pill on">简体中文</span><span class="pill">English</span></div>
+          <div class="row" style="padding:10px 0">
+            <span style="flex:1"><div class="t">外观</div><div class="small muted">跟随系统 / 浅色 / 深色</div></span>
+            <span class="pill on">跟随系统</span><span class="pill">浅色</span><span class="pill">深色</span></div>
+        </div>
+
+        <div class="cardbox" style="margin-bottom:12px">
+          <h4 style="margin:0 0 4px">安全</h4>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">删除「高级」项前二次确认</div><div class="small muted">建议保持开启</div></span>
+            <span class="sw-tg on"><i></i></span></div>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">自动保持管理员会话</div><div class="small muted">需要授权时不再重复输入密码（会话最长 30 分钟）</div></span>
+            <span class="sw-tg on"><i></i></span></div>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">合盖时禁止执行删除</div><div class="small muted">macOS 专用 · 避免休眠中断导致文件半删</div></span>
+            <span class="sw-tg on"><i></i></span></div>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">执行前创建系统还原点</div><div class="small muted">Windows 专用</div></span>
+            <span class="sw-tg"><i></i></span></div>
+          <div class="row" style="padding:10px 0">
+            <span style="flex:1"><div class="t">还原上次清理</div><div class="small muted">仅对移入废纸篓的项目有效</div></span>
+            <span class="btn btn-sm btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-undo"/></svg>还原</span></div>
+        </div>
+
+        <div class="cardbox" style="margin-bottom:12px">
+          <h4 style="margin:0 0 4px">数据与日志</h4>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">缓存扫描结果</div><div class="small muted">启动时直接展示上次结果，避免每次全盘扫描</div></span>
+            <span class="sw-tg on"><i></i></span></div>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">清理日志</div><div class="small muted">~/.maclean/logs/maclean.log · 当前 2.4 MB</div></span>
+            <span class="btn btn-sm btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-eye"/></svg>查看</span></div>
+          <div class="row" style="padding:10px 0">
+            <span style="flex:1"><div class="t">配置导入 / 导出</div><div class="small muted">导出为 JSON，便于在多台机器间同步</div></span>
+            <span class="btn btn-sm btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-download"/></svg>导出</span>
+            <span class="btn btn-sm btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-upload"/></svg>导入</span></div>
+        </div>
+
+        <div class="cardbox">
+          <h4 style="margin:0 0 4px">许可与更新</h4>
+          <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+            <span style="flex:1"><div class="t">免费版 <span class="badge b-neutral" style="margin-left:6px">已用 3 / 5 次</span></div>
+              <div class="small muted">升级专业版解锁无限清理与跨 Tab 一键清理</div></span>
+            <span class="btn btn-sm btn-primary"><svg class="ic" style="width:12px;height:12px"><use href="#i-key"/></svg>激活</span></div>
+          <div class="row" style="padding:10px 0">
+            <span style="flex:1"><div class="t">版本 v0.2.0</div><div class="small muted">已是最新版本 · 最后检查 2026-09-13</div></span>
+            <span class="btn btn-sm btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-refresh"/></svg>检查更新</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bar"><span class="small muted">所有设置保存在 ~/.maclean/config.json</span><span class="sp"></span>
+      <span class="btn btn-secondary btn-sm">恢复默认</span></div>
+  </div>
+  </div>
+</div>
+
+<!-- 5.6 磁盘分析器 -->
+<div class="screen-wrap">
+  <div class="screen-label">5.6 磁盘分析器 Disk Analyzer <span class="tag">从「大文件」页进入 · 可下钻</span></div>
+  <div class="scroll-x">
+  <div class="screen">
+    <div class="titlebar"><span class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></span><span class="tb-title">Maclean — 磁盘分析器</span><span class="tb-right"><svg class="ic"><use href="#i-moon"/></svg></span></div>
+    <div class="win-body" style="min-height:520px">
+      <div class="sidebar">
+        <div class="brandrow"><span class="logo">M</span><span><div class="nm">Maclean</div><div class="vr">v0.2.0</div></span></div>
+        <div class="cardbox" style="margin-bottom:14px"><div style="font-size:11px;color:var(--text-3)">可用空间</div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-top:2px"><span style="font-size:16px;font-weight:600">61.4 GB</span><span style="font-size:11px;color:var(--text-3)">/ 512 GB</span></div>
+          <div class="bar" style="margin-top:8px;background:#F5DCC6"><i style="width:12%;background:var(--caution)"></i></div></div>
+        <div class="navitem"><svg class="ic"><use href="#i-home"/></svg>概览</div>
+        <div class="navitem"><svg class="ic"><use href="#i-box"/></svg>开发者缓存<span class="cnt">128</span></div>
+        <div class="navitem on"><svg class="ic"><use href="#i-file"/></svg>大文件<span class="cnt">64</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-broom"/></svg>App 缓存<span class="cnt">42</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-folder"/></svg>App 数据<span class="cnt">31</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-puzzle"/></svg>应用卸载<span class="cnt">18</span></div>
+        <div class="navitem"><svg class="ic"><use href="#i-sliders"/></svg>系统优化</div>
+        <div class="navitem"><svg class="ic"><use href="#i-disk"/></svg>APFS 快照<span class="cnt">5</span></div>
+        <div class="nav-sep"></div>
+        <div class="navitem"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+      </div>
+      <div class="content">
+        <div class="toolbar" style="margin-bottom:14px">
+          <span class="btn btn-secondary btn-sm"><svg class="ic" style="width:12px;height:12px"><use href="#i-arrow-u"/></svg>返回</span>
+          <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-home"/></svg></span>
+          <span class="mono small" style="color:var(--brand);font-size:12px">~ / Library / Developer / Xcode</span>
+          <span class="grow"></span>
+          <span class="badge b-neutral"><svg class="ic" style="width:11px;height:11px"><use href="#i-clock"/></svg>扫描于 12 秒前</span>
+        </div>
+        <div class="grid g2" style="gap:12px; margin-bottom:14px">
+          <div class="cardbox">
+            <div class="small muted" style="margin-bottom:8px">当前目录占用</div>
+            <div style="font-size:28px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums">18.4 GB</div>
+            <div class="small muted">6 个子项 · 最大项占 34%</div>
+          </div>
+          <div class="cardbox">
+            <div class="small muted" style="margin-bottom:8px">占比分布</div>
+            <div style="display:flex;height:12px;border-radius:4px;overflow:hidden">
+              <i style="width:34%;background:var(--brand)"></i><i style="width:26%;background:#7C74EA"></i>
+              <i style="width:18%;background:#A79FF2"></i><i style="width:12%;background:var(--info)"></i>
+              <i style="width:10%;background:var(--line-2)"></i></div>
+            <div class="small muted" style="margin-top:8px">悬浮查看具体目录名</div>
+          </div>
+        </div>
+        <div class="list">
+          <div class="row"><span class="chk"></span>
+            <span class="ic-wrap" style="width:28px;height:28px;border-radius:7px;background:var(--surface-3);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic" style="width:14px;height:14px;color:var(--text-3)"><use href="#i-folder"/></svg></span>
+            <span style="flex:1"><div class="t">DerivedData</div><div class="d">点击下钻</div></span>
+            <span class="grab"><span class="bar"><i style="width:100%"></i></span></span><span class="sz">18.4 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-r"/></svg></span></div>
+          <div class="row"><span class="chk"></span>
+            <span class="ic-wrap" style="width:28px;height:28px;border-radius:7px;background:var(--surface-3);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic" style="width:14px;height:14px;color:var(--text-3)"><use href="#i-folder"/></svg></span>
+            <span style="flex:1"><div class="t">CoreSimulator</div><div class="d">点击下钻</div></span>
+            <span class="grab"><span class="bar"><i style="width:76%"></i></span></span><span class="sz">14.0 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-r"/></svg></span></div>
+          <div class="row"><span class="chk"></span>
+            <span class="ic-wrap" style="width:28px;height:28px;border-radius:7px;background:var(--surface-3);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic" style="width:14px;height:14px;color:var(--text-3)"><use href="#i-folder"/></svg></span>
+            <span style="flex:1"><div class="t">XCPGDevices</div><div class="d">点击下钻</div></span>
+            <span class="grab"><span class="bar"><i style="width:52%"></i></span></span><span class="sz">9.6 GB</span>
+            <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-chev-r"/></svg></span></div>
+          <div class="row"><span class="chk"></span>
+            <span class="ic-wrap" style="width:28px;height:28px;border-radius:7px;background:var(--surface-3);display:flex;align-items:center;justify-content:center;flex:none"><svg class="ic" style="width:14px;height:14px;color:var(--text-3)"><use href="#i-file"/></svg></span>
+            <span style="flex:1"><div class="t">com.apple.dt.Xcode.plist</div><div class="d">文件 · 修改于 3 天前</div></span>
+            <span class="grab"></span><span class="sz">2.1 MB</span></div>
+        </div>
+        <div style="flex:1"></div>
+      </div>
+    </div>
+    <div class="footer-bar"><span class="small muted">下钻分析不会删除任何内容 · 选中后可加入清理列表</span><span class="sp"></span>
+      <span class="btn btn-secondary btn-sm">在 Finder 中显示</span></div>
+  </div>
+  </div>
+</div>
+
+<!-- 5.7 状态页 -->
+<h3>5.7 扫描中 / 空状态 / 无结果</h3>
+<div class="grid g3">
+  <div>
+    <div class="screen-label" style="font-size:12px">扫描中</div>
+    <div class="card" style="padding:24px; min-height:280px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; text-align:center">
+      <div style="width:40px;height:40px;border-radius:50%;border:3px solid var(--brand-100);border-top-color:var(--brand);"></div>
+      <div style="font-size:14px;font-weight:600">正在扫描开发者缓存…</div>
+      <div class="mono small muted">~/Library/Developer/Xcode/DerivedData</div>
+      <div style="width:100%;height:6px;border-radius:3px;background:var(--surface-3);overflow:hidden"><i style="display:block;width:62%;height:100%;background:var(--brand)"></i></div>
+      <div class="small muted">62% · 已完成 79 / 128 项 · 用时 5.1s</div>
+      <span class="btn btn-secondary btn-sm">取消</span>
+    </div>
+  </div>
+  <div>
+    <div class="screen-label" style="font-size:12px">首次进入（未扫描）</div>
+    <div class="card" style="padding:24px; min-height:280px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; text-align:center">
+      <span class="big" style="width:48px;height:48px;border-radius:14px;background:var(--surface-3);display:flex;align-items:center;justify-content:center"><svg class="ic ic-24" style="color:var(--text-4)"><use href="#i-box"/></svg></span>
+      <div style="font-size:14px;font-weight:600">还没有扫描过</div>
+      <div class="small muted" style="max-width:220px">扫描会读取缓存目录大小，不会修改或删除任何文件</div>
+      <span class="btn btn-primary btn-sm" style="margin-top:4px"><svg class="ic" style="width:12px;height:12px"><use href="#i-refresh"/></svg>开始扫描</span>
+      <div class="small muted" style="margin-top:6px">快捷键 <span class="kbd">⌘R</span></div>
+    </div>
+  </div>
+  <div>
+    <div class="screen-label" style="font-size:12px">扫描完成但无可清理项</div>
+    <div class="card" style="padding:24px; min-height:280px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; text-align:center">
+      <span class="big" style="width:48px;height:48px;border-radius:14px;background:var(--safe-50);display:flex;align-items:center;justify-content:center"><svg class="ic ic-24" style="color:var(--safe)"><use href="#i-check"/></svg></span>
+      <div style="font-size:14px;font-weight:600">这台机器很干净</div>
+      <div class="small muted" style="max-width:220px">未发现可清理的缓存 · 共检查 128 个位置 · 用时 8.2s</div>
+      <span class="btn btn-secondary btn-sm" style="margin-top:4px">查看扫描日志</span>
+    </div>
+  </div>
+</div>
+<div class="note">三个状态页必须都存在。<strong>"扫描完成但为空"和"从未扫描"是两种完全不同的情绪</strong>：前者要给用户正反馈（你的机器很干净），后者要降低启动门槛（一句话说明不会删文件 + 主按钮）。合并成一句"暂无数据"是偷懒。</div>
+
+<!-- 5.8 弹窗集 -->
+<h3>5.8 弹窗与浮层</h3>
+<div class="grid g2">
+  <div>
+    <div class="screen-label" style="font-size:12px">删除确认</div>
+    <div class="modal-stage stage-sm" style="min-height:340px">
+      <div class="modal">
+        <div class="mh">
+          <span class="ic-wrap" style="background:var(--danger-50);color:var(--danger)"><svg class="ic ic-20"><use href="#i-alert"/></svg></span>
+          <span style="flex:1"><h4>确认删除 18 项？</h4><p class="muted">共 42.7 GB · 其中 3 项为「高级」风险</p></span>
+        </div>
+        <div class="mb">
+          <div class="cardbox" style="background:var(--surface-2)">
+            <div class="kv"><span><span class="badge b-safe"><i class="dot"></i>安全</span> 直接删除</span><b>12 项 · 24.1 GB</b></div>
+            <div class="kv"><span><span class="badge b-caution"><i class="dot"></i>谨慎</span> 直接删除</span><b>3 项 · 6.2 GB</b></div>
+            <div class="kv"><span><span class="badge b-adv"><i class="dot"></i>高级</span> 移入废纸篓</span><b>3 项 · 12.4 GB</b></div>
+          </div>
+          <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:12px;color:var(--text-2)">
+            <span class="chk on" style="margin-top:2px"><svg class="ic" style="width:12px;height:12px"><use href="#i-check"/></svg></span>
+            我已确认这些项目不再需要（本次会话内不再提示）
+          </label>
+        </div>
+        <div class="mf"><span class="btn btn-secondary">取消</span><span class="btn btn-danger"><svg class="ic"><use href="#i-trash"/></svg>删除 42.7 GB</span></div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <div class="screen-label" style="font-size:12px">删除进度</div>
+    <div class="modal-stage stage-sm" style="min-height:340px">
+      <div class="modal">
+        <div class="mh">
+          <span class="ic-wrap" style="background:var(--brand-50);color:var(--brand)"><svg class="ic ic-20"><use href="#i-trash"/></svg></span>
+          <span style="flex:1"><h4>正在清理…</h4><p class="muted">已完成 7 / 18 项 · 已释放 18.2 GB</p></span>
+        </div>
+        <div class="mb">
+          <div style="height:6px;border-radius:3px;background:var(--surface-3);overflow:hidden"><i style="display:block;width:39%;height:100%;background:var(--brand)"></i></div>
+          <div class="mono small muted" style="margin-top:12px;line-height:1.8;max-height:120px;overflow:hidden">
+            ✓ ~/Library/Caches/Homebrew/downloads<br>
+            ✓ ~/.npm/_cacache<br>
+            ✓ ~/Library/Developer/Xcode/DerivedData/MyApp<br>
+            ⟳ ~/.gradle/caches/modules-2 …<br>
+            <span style="color:var(--text-4)">· 剩余 11 项等待处理</span>
+          </div>
+        </div>
+        <div class="mf"><span class="btn btn-secondary">后台运行</span><span class="btn is-disabled">取消（剩余项需收尾）</span></div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <div class="screen-label" style="font-size:12px">需要管理员权限（sudo 密码）</div>
+    <div class="modal-stage stage-sm" style="min-height:340px">
+      <div class="modal">
+        <div class="mh">
+          <span class="ic-wrap" style="background:var(--caution-50);color:var(--caution)"><svg class="ic ic-20"><use href="#i-lock"/></svg></span>
+          <span style="flex:1"><h4>需要管理员权限</h4><p class="muted">3 项位于系统目录，需验证身份后继续</p></span>
+        </div>
+        <div class="mb">
+          <div class="cardbox" style="background:var(--surface-2);font-size:12px">
+            /Library/Developer/CoreSimulator/Caches<br>
+            /private/var/log/system.log<br>
+            /Library/Caches/com.apple.desktoppictures
+          </div>
+          <div class="small muted" style="margin:12px 0 6px">输入登录密码（不会保存，也不会写入日志）</div>
+          <span class="input focus" style="width:100%"><svg class="ic"><use href="#i-key"/></svg>••••••••••••</span>
+        </div>
+        <div class="mf">
+          <span class="btn btn-ghost btn-sm" style="align-self:center;margin-right:auto"><svg class="ic" style="width:12px;height:12px"><use href="#i-fingerprint"/></svg>改用 Touch ID</span>
+          <span class="btn btn-secondary">跳过这 3 项</span><span class="btn btn-primary">验证并继续</span></div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <div class="screen-label" style="font-size:12px">清理完成 / 汇总</div>
+    <div class="modal-stage stage-sm" style="min-height:340px">
+      <div class="modal">
+        <div class="mh">
+          <span class="ic-wrap" style="background:var(--safe-50);color:var(--safe)"><svg class="ic ic-20"><use href="#i-check"/></svg></span>
+          <span style="flex:1"><h4>清理完成</h4><p class="muted">释放 42.7 GB · 用时 24.6s</p></span>
+        </div>
+        <div class="mb">
+          <div class="grid g3" style="gap:8px">
+            <div class="statbox" style="padding:10px"><div class="lab">成功</div><div class="val" style="font-size:18px;color:var(--safe)">15</div></div>
+            <div class="statbox" style="padding:10px"><div class="lab">跳过</div><div class="val" style="font-size:18px">2</div></div>
+            <div class="statbox" style="padding:10px"><div class="lab">失败</div><div class="val" style="font-size:18px;color:var(--danger)">1</div></div>
+          </div>
+          <div class="cardbox" style="margin-top:12px">
+            <div class="kv"><span class="small">✓ 已释放磁盘空间</span><b>42.7 GB</b></div>
+            <div class="kv"><span class="small"><svg class="ic" style="width:11px;height:11px;color:var(--caution)"><use href="#i-alert"/></svg> 受系统保护（SIP）已跳过</span><b>2 项 · 1.4 GB</b></div>
+            <div class="kv"><span class="small"><svg class="ic" style="width:11px;height:11px;color:var(--danger)"><use href="#i-x"/></svg> 删除失败：文件被占用</span><b>1 项 · 320 MB</b></div>
+          </div>
+        </div>
+        <div class="mf"><span class="btn btn-secondary">查看日志</span><span class="btn btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-undo"/></svg>还原（废纸篓）</span><span class="btn btn-primary">完成</span></div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <div class="screen-label" style="font-size:12px">首次授权引导（完全磁盘访问权限）</div>
+    <div class="modal-stage stage-sm" style="min-height:340px">
+      <div class="modal">
+        <div class="mh">
+          <span class="ic-wrap" style="background:var(--info-50);color:var(--info)"><svg class="ic ic-20"><use href="#i-shield"/></svg></span>
+          <span style="flex:1"><h4>需要完全磁盘访问权限</h4><p class="muted">否则部分系统缓存无法扫描和删除</p></span>
+        </div>
+        <div class="mb">
+          <ol class="small" style="padding-left:18px;color:var(--text-2);margin:0;line-height:1.9">
+            <li>点击「打开系统设置」</li>
+            <li>进入 隐私与安全性 → 完全磁盘访问权限</li>
+            <li>在列表中找到 Maclean 并开启</li>
+            <li>回到本窗口，点击「我已开启」</li>
+          </ol>
+          <div class="cardbox" style="margin-top:12px;background:var(--surface-2);font-size:12px">
+            未授权时：可扫描 78% 的缓存位置 · 授权后 100%
+          </div>
+        </div>
+        <div class="mf"><span class="btn btn-secondary">稍后</span><span class="btn btn-primary"><svg class="ic" style="width:12px;height:12px"><use href="#i-ext"/></svg>打开系统设置</span></div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <div class="screen-label" style="font-size:12px">额度用尽 / 激活</div>
+    <div class="modal-stage stage-sm" style="min-height:340px">
+      <div class="modal">
+        <div class="mh">
+          <span class="ic-wrap" style="background:var(--brand-50);color:var(--brand)"><svg class="ic ic-20"><use href="#i-key"/></svg></span>
+          <span style="flex:1"><h4>免费版额度已用尽</h4><p class="muted">本次已清理 5 / 5 次 · 激活专业版解锁无限清理</p></span>
+        </div>
+        <div class="mb">
+          <div class="cardbox" style="background:var(--surface-2)">
+            <div class="kv"><span class="small">无限次清理</span><b>专业版</b></div>
+            <div class="kv"><span class="small">跨分类一键清理</span><b>专业版</b></div>
+            <div class="kv"><span class="small">系统优化任务</span><b>专业版</b></div>
+          </div>
+          <div class="small muted" style="margin:12px 0 6px">输入许可证密钥</div>
+          <span class="input focus" style="width:100%"><svg class="ic"><use href="#i-key"/></svg>MC24-XXXX-XXXX-XXXX</span>
+        </div>
+        <div class="mf"><span class="btn btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-ext"/></svg>前往购买</span><span class="btn btn-primary">激活</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h4>Touch ID 授权（macOS 专属）</h4>
+<div class="grid g2">
+  <div class="card">
+    <div class="screen-label" style="font-size:12px">建议启用 Touch ID</div>
+    <div class="modal-stage" style="min-height:260px">
+      <div class="modal" style="width:420px">
+        <div class="mh"><span class="ic-wrap" style="background:var(--brand-50);color:var(--brand)"><svg class="ic ic-20"><use href="#i-fingerprint"/></svg></span>
+          <span style="flex:1"><h4>用 Touch ID 代替密码</h4><p class="muted">启用后删除系统缓存时只需按一下指纹</p></span></div>
+        <div class="mb"><div class="cardbox" style="background:var(--surface-2);font-size:12px">
+          将写入 /etc/pam.d/sudo_local（需要一次密码验证），之后可随时在系统设置中关闭。</div></div>
+        <div class="mf"><span class="btn btn-secondary">仍用密码</span><span class="btn btn-primary">启用 Touch ID</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="screen-label" style="font-size:12px">等待系统弹窗验证</div>
+    <div class="modal-stage" style="min-height:260px">
+      <div class="modal" style="width:420px">
+        <div class="mh"><span class="ic-wrap" style="background:var(--brand-50);color:var(--brand)"><svg class="ic ic-20"><use href="#i-fingerprint"/></svg></span>
+          <span style="flex:1"><h4>请在弹出的窗口中验证</h4><p class="muted">macOS 会请求 Touch ID 或密码 · 30 秒后自动取消</p></span></div>
+        <div class="mb"><div style="height:6px;border-radius:3px;background:var(--surface-3);overflow:hidden"><i style="display:block;width:45%;height:100%;background:var(--brand)"></i></div>
+          <div class="small muted" style="margin-top:10px">倒计时 17s</div></div>
+        <div class="mf"><span class="btn btn-secondary">取消</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 5.9 菜单栏 HUD -->
+<div class="screen-wrap">
+  <div class="screen-label">5.9 菜单栏 HUD <span class="tag"> macOS 菜单栏 · 320×420</span></div>
+  <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
+    <div style="width:320px;background:var(--surface);border:1px solid var(--line-2);border-radius:12px;box-shadow:var(--sh-3);overflow:hidden">
+      <div style="padding:12px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)">
+        <span class="logo" style="width:24px;height:24px;font-size:12px">M</span>
+        <span style="flex:1"><div style="font-size:13px;font-weight:600">Maclean</div><div class="small muted">可用 61.4 GB / 512 GB</div></span>
+        <span class="btn btn-ghost btn-icon btn-sm"><svg class="ic"><use href="#i-gear"/></svg></span>
+      </div>
+      <div style="padding:12px 14px">
+        <div class="bar" style="background:#F5DCC6"><i style="width:12%;background:var(--caution)"></i></div>
+        <div class="small muted" style="margin-top:8px">可清理 42.7 GB · 128 项</div>
+        <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+          <span style="flex:1"><div class="t small">开发者缓存</div></span><span class="sz small">26.3 GB</span>
+          <span class="btn btn-sm btn-secondary">清理</span></div>
+        <div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)">
+          <span style="flex:1"><div class="t small">App 缓存</div></span><span class="sz small">11.2 GB</span>
+          <span class="btn btn-sm btn-secondary">清理</span></div>
+        <div class="row" style="padding:10px 0">
+          <span style="flex:1"><div class="t small">APFS 快照</div></span><span class="sz small">7.9 GB</span>
+          <span class="btn btn-sm btn-secondary">清理</span></div>
+      </div>
+      <div style="padding:10px 14px;border-top:1px solid var(--line);background:var(--surface-2);display:flex;gap:8px">
+        <span class="btn btn-sm btn-primary" style="flex:1">打开主窗口</span>
+        <span class="btn btn-sm btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-refresh"/></svg></span>
+        <span class="btn btn-sm btn-secondary"><svg class="ic" style="width:12px;height:12px"><use href="#i-x"/></svg></span>
+      </div>
+    </div>
+    <div style="flex:1;min-width:280px">
+      <div class="card"><h4>规则</h4><ul class="plain small">
+        <li>宽度固定 320，高度自适应（≤ 480），超出滚动。</li>
+        <li>只放<strong>三个最大分类 + 各自的一键清理</strong>，不做完整列表——HUD 的定位是"顺手清一下"，不是第二个主窗口。</li>
+        <li>点击清理只执行<strong>该分类下的「安全」项</strong>，不弹二次确认，完成后用 Toast 反馈"已释放 X GB"。危险项必须回主窗口。</li>
+        <li>底部常驻：打开主窗口 / 重新扫描 / 退出。</li>
+      </ul></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 06 状态与流程 ================= -->
+<h2 id="s6">06 · 状态与流程</h2>
+
+<h3>6.1 扫描状态机</h3>
+<div class="flow">
+  <span class="st">Idle 未扫描</span><span class="ar">→</span>
+  <span class="st">Scanning 扫描中（进度 + 当前路径 + 可取消）</span><span class="ar">→</span>
+  <span class="st">Done 完成</span><span class="ar">→</span>
+  <span class="st">Idle（切 Tab 保留结果）</span>
+</div>
+<ul class="plain small">
+  <li>扫描期间<strong>禁止</strong>切换删除按钮状态、禁止勾选——但<strong>允许切换 Tab</strong>（后台继续，回来能看到进度）。</li>
+  <li>任一 Tab 正在扫描时，概览页顶部显示"正在扫描 N 个分类"，聚合数字标注为<strong>上一次结果 + 时间</strong>，不要显示半截数据。</li>
+  <li>失败要可重试：扫描出错时列表区显示错误态卡片（错误原因 + 重试按钮），不要静默显示空列表。</li>
+</ul>
+
+<h3>6.2 删除流程（对应 <code>ConfirmState</code>）</h3>
+<div class="flow">
+  <span class="st">None</span><span class="ar">→ 点击清理</span>
+  <span class="st">Pending 确认</span><span class="ar">→ 确认</span>
+  <span class="st">Deleting 删除中</span><span class="ar">→ 部分失败</span>
+  <span class="st">NeedSudoPassword</span><span class="ar">→ 或</span>
+  <span class="st">OfferTouchIdSetup → WaitForTouchIdSetup → SudoWithTouchId</span><span class="ar">→</span>
+  <span class="st">汇总弹窗 → None</span>
+</div>
+<table>
+  <tr><th>状态</th><th>UI 表现</th><th>必须可退出</th></tr>
+  <tr><td class="mono">Pending</td><td>确认弹窗（列出三档分级与数量）</td><td>取消 / Esc</td></tr>
+  <tr><td class="mono">Deleting</td><td>进度弹窗 + 实时日志流（最近 5 行）</td><td>后台运行（其余不提供，见下）</td></tr>
+  <tr><td class="mono">NeedSudoPassword</td><td>密码弹窗 + 「跳过这几项」</td><td>跳过 / 取消</td></tr>
+  <tr><td class="mono">WaitForTouchIdSetup</td><td>等待弹窗 + 30s 倒计时</td><td>取消（必须能回到密码方案）</td></tr>
+  <tr><td class="mono">汇总</td><td>成功/跳过/失败三段 + 还原入口</td><td>完成</td></tr>
+</table>
+<div class="note danger"><strong>当前代码的一个真实缺陷：</strong>删除线程里用了 <code>failed_items.lock().unwrap()</code>，任一 worker panic 会毒化 mutex 并连锁 panic；发送端被 drop 后 UI 在 <code>Err(_) =&gt; break</code> 处直接退出轮询，<strong>没有把 <code>confirm</code> 复位回 <code>None</code></strong>，弹窗会卡在 Deleting 态只剩"后台运行"一条路。改法：锁用 <code>unwrap_or_else(|e| e.into_inner())</code>；通道 <code>Disconnected</code> 时强制 <code>finish_delete()</code>。</div>
+
+<h3>6.3 不可逆操作的分级</h3>
+<table>
+  <tr><th>动作</th><th>可逆性</th><th>UI 要求</th></tr>
+  <tr><td>删除「安全 / 仅缓存」项</td><td>系统级可重建</td><td>一次确认，汇总可查</td></tr>
+  <tr><td>删除「谨慎」项</td><td>需重新下载</td><td>确认弹窗中单独成行，标明"需重新下载"</td></tr>
+  <tr><td>删除「高级」项</td><td><strong>需可恢复</strong></td><td>默认走废纸篓；设置项「二次确认」开启时再弹一次</td></tr>
+  <tr><td>卸载应用</td><td>应用需重装</td><td>分组卡片级确认，列出将被删除的位置</td></tr>
+  <tr><td>Docker system prune（<strong>不含卷</strong>）</td><td>镜像需重新拉取</td><td>独立确认；<strong>已移除 <code>--volumes</code></strong>，清卷请引导用户到 Docker Desktop / <code>docker volume prune</code>（会交互式列出卷名）</td></tr>
+  <tr><td>删除 APFS / 时间机器快照</td><td><strong>不可逆</strong></td><td>独立确认 + 显示快照日期，默认不勾选</td></tr>
+</table>
+
+<!-- ================= 07 深色模式 ================= -->
+<h2 id="s7">07 · 深色模式</h2>
+<p>深色不是把颜色取反，是重新定一套表面层级。<strong>原则：表面越靠前越亮，文字对比度不低于 4.5:1，语义色降饱和但不改色相。</strong></p>
+<div class="swatches">
+  <div class="sw"><div class="top" style="background:#111114"></div><div class="bot"><div class="nm">背景</div><div class="hex">#111114</div></div></div>
+  <div class="sw"><div class="top" style="background:#1A1A1F"></div><div class="bot"><div class="nm">表面 / 卡片</div><div class="hex">#1A1A1F</div></div></div>
+  <div class="sw"><div class="top" style="background:#22222A"></div><div class="bot"><div class="nm">侧栏 / 表头</div><div class="hex">#22222A</div></div></div>
+  <div class="sw"><div class="top" style="background:#2C2C35"></div><div class="bot"><div class="nm">轨道 / 悬浮</div><div class="hex">#2C2C35</div></div></div>
+  <div class="sw"><div class="top" style="background:#33333D"></div><div class="bot"><div class="nm">描边</div><div class="hex">#33333D</div></div></div>
+  <div class="sw"><div class="top" style="background:#F2F2F5"></div><div class="bot"><div class="nm">主文本</div><div class="hex">#F2F2F5</div></div></div>
+  <div class="sw"><div class="top" style="background:#A6A6B0"></div><div class="bot"><div class="nm">次文本</div><div class="hex">#A6A6B0</div></div></div>
+  <div class="sw"><div class="top" style="background:#7B7B86"></div><div class="bot"><div class="nm">辅助文本</div><div class="hex">#7B7B86</div></div></div>
+  <div class="sw"><div class="top" style="background:#8B82F0"></div><div class="bot"><div class="nm">品牌（提亮）</div><div class="hex">#8B82F0</div></div></div>
+  <div class="sw"><div class="top" style="background:#2F2A1F;color:#E8B44A;display:flex;align-items:center;justify-content:center;font-size:11px">safe/caution/danger 同规则降饱和</div><div class="bot"><div class="nm">语义色</div><div class="hex">#4CBF85 / #E0A63B / #F0705F</div></div></div>
+</div>
+<ul class="plain small">
+  <li>描边在深色下要比浅色<strong>更亮才能被看见</strong>（#33333D 而非 #22222A）。</li>
+  <li>浅色下用阴影表达层级，深色下<strong>改用表面亮度</strong>——深色里加阴影基本无效。</li>
+  <li>egui 侧：<code>ctx.set_visuals(Visuals::dark())</code> 之后必须重设 <code>widgets.noninteractive.bg_fill</code>、<code>selection.bg_fill</code>，否则选中态会变成默认蓝。</li>
+</ul>
+
+<!-- ================= 08 egui 落地 ================= -->
+<h2 id="s8">08 · egui 落地要点</h2>
+
+<h3>8.1 必改项（对照当前代码）</h3>
+<table>
+  <tr><th>现状</th><th>建议</th><th>优先级</th></tr>
+  <tr><td>导航图标用 emoji（<code>nav_icons = ["🏠","📦",…]</code>）</td><td>换成 1.6px 线性图标（内嵌 PNG 或 <code>PathShape</code>），否则 Windows/macOS 基线错位</td><td><strong>P0</strong></td></tr>
+  <tr><td>列表行内 emoji（✓ ✗ ⟳ 🔒）</td><td>换图标；日志前缀保留文本符号可接受</td><td>P1</td></tr>
+  <tr><td>7 个 <code>static mut</code> 全局 + 裸 unsafe</td><td>改为 <code>impl eframe::App</code> 持有状态，或 <code>Mutex&lt;T&gt;</code> / <code>OnceLock</code></td><td><strong>P0</strong></td></tr>
+  <tr><td>main.rs 8508 行混 UI / 删除 / 常量</td><td>拆 <code>ui/</code>（overview / list / settings / modals）、<code>ops/delete.rs</code>、<code>theme.rs</code></td><td>P1</td></tr>
+  <tr><td>按钮高度不统一（28 / 30 / 32 混用）</td><td>统一 30（小 26 / 大 36），写进 <code>theme.rs</code> 常量</td><td>P2</td></tr>
+  <tr><td>颜色常量散落在 main.rs 顶部</td><td>抽 <code>theme.rs</code>，浅/深两套 <code>Visuals</code></td><td>P1</td></tr>
+  <tr><td>概览页数字用 <code>format_size</code>（1 位小数）</td><td>开启等宽数字（egui 需嵌入支持 tabular-nums 的字体）</td><td>P2</td></tr>
+</table>
+
+<h3>8.2 渲染与性能</h3>
+<ul class="plain small">
+  <li>空闲时用 <code>eframe::RenderState</code> 的响应式重绘；扫描/删除中再 <code>ctx.request_repaint()</code>。不要全局 <code>RepaintMode::Continuous</code>——清理工具可能开几小时。</li>
+  <li>长列表必须 <code>egui::ScrollArea::show_rows()</code> 做<strong>虚拟滚动</strong>：大文件页可能有上千项，一次性 <code>ui.label()</code> 会掉帧。</li>
+  <li>扫描结果通过 <code>mpsc</code> 分批回传（当前已做 <code>send_items_in_batches</code>，保留），每批 ≤ 50 项，避免 UI 卡顿。</li>
+  <li><code>dir_size</code> 在后台线程算；当前 <code>mod.rs</code> / <code>large_files.rs</code> / <code>dev_cache.rs</code> 有<strong>三份不同实现</strong>，跳过规则不一致（一份会遍历 .photoslibrary）。统一成一份并加 rayon。</li>
+</ul>
+
+<h3>8.3 做不到的 / 别做的</h3>
+<div class="grid g2">
+  <div class="card"><h4>别做</h4><ul class="plain small">
+    <li>毛玻璃 / 背景模糊 —— egui 没有，别用半透明假造。</li>
+    <li>复杂补间动画 —— 立即模式里成本高，用 <code>animate_bool</code> 就够。</li>
+    <li>自定义滚动条皮肤 —— 平台差异大，用默认。</li>
+    <li>内嵌网页视图（更新日志、支付页）—— 直接 <code>open::that(url)</code> 打开浏览器。</li>
+  </ul></div>
+  <div class="card"><h4>要做</h4><ul class="plain small">
+    <li>中文字体通过 <code>setup_fonts</code> 显式加载，Windows 上必须指定 PingFang/Microsoft YaHei 回退。</li>
+    <li>键盘：<span class="kbd">⌘R</span> 重新扫描 · <span class="kbd">⌘F</span> 搜索 · <span class="kbd">Space</span> 切换选中 · <span class="kbd">Esc</span> 关弹窗 · <span class="kbd">⌘1–9</span> 切 Tab。</li>
+    <li>所有容量数字用同一个 <code>format_size</code>，UI 不要自己再格式化一遍。</li>
+    <li>配置项与 <code>AppConfig</code> 单一来源，别在 App 上再镜像一份 <code>settings_*</code> 字段（当前有 7 个，靠手工同步）。</li>
+  </ul></div>
+</div>
+
+<!-- ================= 09 差异与落地 ================= -->
+<h2 id="s9">09 · 与 v1 的差异 &amp; 落地清单</h2>
+<table>
+  <tr><th>项</th><th>v1</th><th>v2</th></tr>
+  <tr><td>图标</td><td>emoji</td><td>36 枚线性 SVG（含命名与网格规范）</td></tr>
+  <tr><td>色彩</td><td>多套强调色（teal / coral / amber 都上）</td><td>中性为主 + 单一品牌色 + 四档语义色</td></tr>
+  <tr><td>页面覆盖</td><td>8 屏（缺 APFS / 大文件 / 磁盘分析器 / License / 权限引导）</td><td>12 屏 + 8 类弹窗 + HUD，覆盖全部 9 个 Tab</td></tr>
+  <tr><td>风险表达</td><td>弹窗提示为主</td><td>常驻徽标 + 分级删除策略（直接删 / 废纸篓 / 独立确认）</td></tr>
+  <tr><td>深色模式</td><td>未定义</td><td>给出完整色板与 egui Visuals 注意事项</td></tr>
+  <tr><td>与代码的对应</td><td>偏视觉稿</td><td>每条都标注对应模块（<code>Recommend</code> / <code>ConfirmState</code> / <code>ScanState</code>）</td></tr>
+</table>
+
+<h3>落地顺序建议</h3>
+<div class="grid g2">
+  <div class="card"><h4>第一批（1–2 天，纯视觉）</h4><ul class="plain small">
+    <li>抽 <code>theme.rs</code>：颜色 / 圆角 / 间距 / 按钮尺寸常量</li>
+    <li>字体与图标：加载中文字体，emoji → 线性图标</li>
+    <li>统一控件高度（30 / 26 / 36）</li>
+  </ul></div>
+  <div class="card"><h4>第二批（3–5 天，结构）</h4><ul class="plain small">
+    <li>列表页抽成 <code>render_item_list()</code>，五个 Tab 复用</li>
+    <li>底部操作栏统一为一个组件</li>
+    <li>三个状态页（未扫描 / 扫描中 / 空结果）补全</li>
+  </ul></div>
+  <div class="card"><h4>第三批（1 周，架构）</h4><ul class="plain small">
+    <li>拆 <code>ui/</code> 与 <code>ops/</code>，main.rs 降到 1500 行内</li>
+    <li>消除 <code>static mut</code>，状态进 <code>App</code></li>
+    <li>设置项单一来源（<code>AppConfig</code>）</li>
+  </ul></div>
+  <div class="card"><h4>同步修的 bug（不属于 UI 但挡路）</h4><ul class="plain small">
+    <li>删除线程 mutex 毒化 → 弹窗卡死</li>
+    <li>sudo 阶段绕过 safety 二次校验</li>
+    <li>废纸篓失败静默降级为 rm</li>
+    <li>Docker prune 无确认</li>
+  </ul></div>
+</div>
+
+<div class="note" style="margin-top:32px">
+  这份稿只定义<strong>长什么样、为什么这样</strong>。所有尺寸为逻辑像素，egui 在高 DPI 下由 <code>pixels_per_point</code> 自动缩放，不需要写死 2x。
+  图稿中的示意数据（容量、项数）仅用于验证布局在极端值下不破版：请至少用 <code>999 项</code>、<code>1.2 TB</code>、<code>超长路径 200 字符</code> 三种情况各测一次。
+</div>
+
+</div>
+</body>
+</html>

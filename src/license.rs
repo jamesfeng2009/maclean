@@ -54,10 +54,7 @@ pub struct LicensePayload {
 #[derive(Debug, Clone)]
 pub enum LicenseStatus {
     /// 已激活（合法 License）
-    Activated {
-        email: String,
-        plan: String,
-    },
+    Activated { email: String, plan: String },
     /// 免费版（未激活或 License 无效）
     Free,
 }
@@ -121,13 +118,13 @@ pub fn verify_license(key: &str) -> Result<LicensePayload, String> {
         .decode(sig_b64)
         .map_err(|_| "License 签名解码失败".to_string())?;
 
-    let pubkey_bytes = hex_decode(PUBLIC_KEY_HEX)
-        .map_err(|_| "内置公钥未配置，请联系作者".to_string())?;
+    let pubkey_bytes =
+        hex_decode(PUBLIC_KEY_HEX).map_err(|_| "内置公钥未配置，请联系作者".to_string())?;
     let pubkey_array: [u8; 32] = pubkey_bytes
         .try_into()
         .map_err(|_| "内置公钥格式错误".to_string())?;
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_array)
-        .map_err(|_| "内置公钥解析失败".to_string())?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&pubkey_array).map_err(|_| "内置公钥解析失败".to_string())?;
 
     let sig_array: [u8; 64] = sig_bytes
         .try_into()
@@ -138,16 +135,14 @@ pub fn verify_license(key: &str) -> Result<LicensePayload, String> {
         .verify(&payload_bytes, &signature)
         .map_err(|_| "License 签名验证失败，请确认输入完整且来自官方渠道".to_string())?;
 
-    let payload: LicensePayload = serde_json::from_slice(&payload_bytes)
-        .map_err(|_| "License 内容解析失败".to_string())?;
+    let payload: LicensePayload =
+        serde_json::from_slice(&payload_bytes).map_err(|_| "License 内容解析失败".to_string())?;
 
     // 机器绑定校验
     if !payload.mid.is_empty() {
         let local = machine_hash();
         if payload.mid != local {
-            return Err(
-                "此 License 已绑定其他设备，请在原设备上解绑或联系支持".to_string(),
-            );
+            return Err("此 License 已绑定其他设备，请在原设备上解绑或联系支持".to_string());
         }
     }
 
@@ -312,10 +307,9 @@ pub fn activate(key: &str) -> Result<LicensePayload, String> {
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return Err(format!("创建配置目录失败: {}", e));
     }
-    let text = serde_json::to_string_pretty(&record)
-        .map_err(|e| format!("序列化激活记录失败: {}", e))?;
-    std::fs::write(activation_path(), text)
-        .map_err(|e| format!("写入激活记录失败: {}", e))?;
+    let text =
+        serde_json::to_string_pretty(&record).map_err(|e| format!("序列化激活记录失败: {}", e))?;
+    std::fs::write(activation_path(), text).map_err(|e| format!("写入激活记录失败: {}", e))?;
 
     logger::info(&format!("License 激活成功: {}", payload.email));
     Ok(payload)

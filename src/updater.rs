@@ -7,8 +7,7 @@
 use serde::Deserialize;
 
 /// GitHub Releases API（latest 端点只返回正式版，不含 pre-release）
-const RELEASES_API: &str =
-    "https://api.github.com/repos/jamesfeng2009/maclean/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/jamesfeng2009/maclean/releases/latest";
 
 /// 检测到的新版本信息
 #[derive(Debug, Clone)]
@@ -59,12 +58,7 @@ pub fn check_latest() -> Option<UpdateInfo> {
     Some(UpdateInfo {
         version: latest.to_string(),
         url: release.html_url,
-        notes: release
-            .body
-            .lines()
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        notes: release.body.lines().take(3).collect::<Vec<_>>().join("\n"),
     })
 }
 

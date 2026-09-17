@@ -257,6 +257,11 @@ pub fn last_backup_summary() -> Option<(String, String, usize)> {
 /// 注意：reg import 只能恢复被覆盖的旧值；备份时不存在、后被新增的键值
 /// 不会被移除（这是 .reg 格式的固有限制，UI 需向用户说明）。
 ///
+/// 安全防范：
+/// - .reg 文件必须位于本工具的备份目录内（canonicalize 后判定，挡 `..` 与软链）
+/// - 文件内容声明的键必须全部落在该项记录的 reg_key 子树内
+/// - reg_key 的根 hive 必须在预期集合里，避免子树检查被退化成恒真
+///
 /// 返回 (success, message)
 pub fn restore_last_backup() -> (bool, String) {
     let manifest = load_manifest();
@@ -271,14 +276,48 @@ pub fn restore_last_backup() -> (bool, String) {
         .filter(|e| e.source == last_source)
         .collect();
 
+    let registry_dir = registry_backup_dir();
+    // canonicalize 一次作为比较基准；取不到就直接放弃本次还原，
+    // 而不是退回"按原始字符串比较"那种可被 ../ 绕过的判断。
+    let Ok(canonical_root) = registry_dir.canonicalize() else {
+        crate::logger::warn("备份目录不可用，放弃还原");
+        return (false, "backup_dir_missing".to_string());
+    };
+
     let mut success_count = 0;
     let mut fail_count = 0;
     for entry in &batch {
-        // 检查备份文件仍存在
-        if !std::path::Path::new(&entry.reg_file).exists() {
+        let file = std::path::Path::new(&entry.reg_file);
+
+        // ① .reg 文件必须躺在我们的备份目录里，且 canonicalize 后仍在（挡 ../ 与软链）
+        let Ok(canonical_file) = file.canonicalize() else {
+            fail_count += 1;
+            continue;
+        };
+        if !super::reg_safety::file_is_within_backup_dir(&canonical_file, &canonical_root) {
+            crate::logger::warn(&format!(
+                "备份文件不在备份目录内，拒绝导入: {}",
+                entry.reg_file
+            ));
             fail_count += 1;
             continue;
         }
+
+        // ② 文件内容必须只触碰 entry 声明的那棵子树。
+        //    manifest.json 在用户可写的 %APPDATA% 下，不校验的话改写它或换掉
+        //    .reg 文件就能借"还原"往任意注册表位置写东西。
+        let Ok(content) = std::fs::read_to_string(&canonical_file) else {
+            fail_count += 1;
+            continue;
+        };
+        if let Err(reason) =
+            super::reg_safety::validate_backup_entry_content(&entry.reg_key, &content)
+        {
+            crate::logger::warn(&format!("拒绝导入不安全的备份 {}: {}", entry.reg_file, reason));
+            fail_count += 1;
+            continue;
+        }
+
         let output = Command::new("reg")
             .args(["import", &entry.reg_file])
             .output();

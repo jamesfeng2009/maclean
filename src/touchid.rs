@@ -102,6 +102,30 @@ pub fn sudo_touch_id_enabled() -> bool {
     false
 }
 
+/// 生成安装 sudo_local 的 shell 命令（内容内联，不产生临时文件）
+///
+/// 安全说明（P0-2）：旧实现把内容写死在 `/tmp/maclean_sudo_local.tmp`，
+/// 再用 `sudo cp` 复制到 /etc/pam.d/sudo_local。写入与复制之间存在时间窗：
+/// 本地任意进程都可以抢先创建或在写完后替换该文件，从而以 root 写入任意
+/// PAM 配置 —— 这是标准的本地提权路径。
+///
+/// 现在内容直接内联进 `sh -c`，中间不落任何可被替换的文件。
+fn install_sudo_local_script() -> String {
+    let content = prepare_sudo_local_content();
+    let mut parts: Vec<String> = Vec::new();
+    for line in content.lines() {
+        // 内容固定且不含单引号；去掉单引号只是防御性处理
+        parts.push(format!("printf '%s\\n' '{}'", line.replace('\'', "")));
+    }
+    format!(
+        "{{ {} ; }} > {} && /usr/sbin/chown root:wheel {} && /bin/chmod 444 {}",
+        parts.join(" ; "),
+        SUDO_LOCAL_PATH,
+        SUDO_LOCAL_PATH,
+        SUDO_LOCAL_PATH
+    )
+}
+
 /// 准备 sudo_local 临时文件内容
 fn prepare_sudo_local_content() -> String {
     "# sudo_local: local config file which survives system update and is included for sudo\n\
@@ -158,17 +182,10 @@ pub fn enable_touch_id_with_password(password: &str) -> Result<bool, String> {
         return Err("密码错误".to_string());
     }
 
-    // 2. 准备 sudo_local 内容到临时文件
-    let tmp_path = "/tmp/maclean_sudo_local.tmp";
-    let content = prepare_sudo_local_content();
-    std::fs::write(tmp_path, &content).map_err(|e| format!("无法写入临时文件: {}", e))?;
+    // 2. 生成安装脚本（内容内联，不写临时文件，见 install_sudo_local_script 注释）
+    let script = install_sudo_local_script();
 
-    // 3. 使用 sudo -S 复制临时文件到 /etc/pam.d/sudo_local
-    let script = format!(
-        "cp \"{}\" \"{}\" && chmod 444 \"{}\" && rm -f \"{}\"",
-        tmp_path, SUDO_LOCAL_PATH, SUDO_LOCAL_PATH, tmp_path
-    );
-
+    // 3. 使用 sudo -S 写入 /etc/pam.d/sudo_local（不存在可被替换的中间文件）
     let mut child = Command::new("/usr/bin/sudo")
         .args(["-S", "-p", "", "/bin/sh", "-c", &script])
         .stdin(std::process::Stdio::piped())

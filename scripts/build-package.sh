@@ -9,12 +9,71 @@ set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="maclean"
-VERSION="0.2.0"
+# 版本号单一来源：Cargo.toml
+# 不要在这里手写版本号——Cargo.toml / Makefile / 本脚本曾出现 0.2.0 / 0.1.0 / 0.2.0 三处不一致
+VERSION=$(grep -m1 '^version' "$PROJECT_DIR/Cargo.toml" | cut -d'"' -f2)
+if [ -z "$VERSION" ]; then
+    echo "错误：无法从 Cargo.toml 读取版本号" >&2
+    exit 1
+fi
 BUILD_DIR="$PROJECT_DIR/target/release"
 PKG_DIR="$PROJECT_DIR/target/package"
 APP_BUNDLE="$PKG_DIR/maclean.app"
 PAYLOAD_DIR="$PKG_DIR/payload"
 DMG_DIR="$PKG_DIR/dmg"
+
+# ============================================================
+#  代码签名与公证
+# ============================================================
+# 未配置证书时退化为 ad-hoc 签名（本机可用，但 Gatekeeper 会拦截分发）。
+# 正式发布请设置以下环境变量：
+#   MACLEAN_SIGN_IDENTITY   Developer ID Application 证书名
+#                           例: "Developer ID Application: Foo (TEAMID12345)"
+#   MACLEAN_NOTARY_PROFILE  notarytool 的 keychain profile（推荐）
+#   APPLE_ID / TEAM_ID / APP_PASSWORD   未配置 profile 时使用
+notarize_app() {
+    local app="$1"
+
+    if [ -z "${MACLEAN_SIGN_IDENTITY:-}" ]; then
+        echo "  ⚠ 未设置 MACLEAN_SIGN_IDENTITY，仅做 ad-hoc 签名"
+        echo "    （分发给用户时 Gatekeeper 会拦截；正式发布需 Developer ID 签名 + 公证）"
+        codesign --force --deep --sign - "$app" 2>/dev/null || true
+        return 0
+    fi
+
+    echo "  签名: $MACLEAN_SIGN_IDENTITY"
+    codesign --force --deep --options runtime --timestamp \
+        --sign "$MACLEAN_SIGN_IDENTITY" "$app"
+
+    if [ -z "${MACLEAN_NOTARY_PROFILE:-}" ] && { [ -z "${APPLE_ID:-}" ] || [ -z "${TEAM_ID:-}" ] || [ -z "${APP_PASSWORD:-}" ]; }; then
+        echo "  ⚠ 未提供公证凭据（MACLEAN_NOTARY_PROFILE 或 APPLE_ID+TEAM_ID+APP_PASSWORD），跳过公证"
+        return 0
+    fi
+
+    local zip_path submit_rc=0
+    zip_path="$(mktemp -t maclean_notarize).zip"
+    echo "  提交公证..."
+    ditto -c -k --keepParent "$app" "$zip_path"
+
+    if [ -n "${MACLEAN_NOTARY_PROFILE:-}" ]; then
+        xcrun notarytool submit "$zip_path" \
+            --keychain-profile "$MACLEAN_NOTARY_PROFILE" --wait || submit_rc=$?
+    else
+        xcrun notarytool submit "$zip_path" \
+            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" \
+            --wait || submit_rc=$?
+    fi
+
+    if [ "$submit_rc" -eq 0 ]; then
+        xcrun stapler staple "$app" || true
+        echo "  ✅ 公证完成并已 staple"
+    else
+        echo "  ⚠ 公证失败（退出码 $submit_rc），产物未经公证，Gatekeeper 会拦截" >&2
+    fi
+
+    rm -f "$zip_path"
+    return 0
+}
 
 echo "=========================================="
 echo "  maclean v$VERSION GUI 打包脚本"
@@ -170,8 +229,8 @@ build_for_arch() {
     cp "$binary_path" "$APP_BUNDLE/Contents/MacOS/maclean"
     chmod +x "$APP_BUNDLE/Contents/MacOS/maclean"
 
-    # Ad-hoc 代码签名
-    codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
+    # 代码签名 + 公证（见脚本顶部 notarize_app 说明）
+    notarize_app "$APP_BUNDLE"
 
     # .pkg
     rm -rf "$PAYLOAD_DIR/Applications/maclean.app"
@@ -198,7 +257,7 @@ build_for_arch() {
     mkdir -p "$dmg_content"
     cp -R "$APP_BUNDLE" "$dmg_content/maclean.app"
 
-    cat > "$dmg_content/安装说明.txt" << 'EOF'
+    cat > "$dmg_content/安装说明.txt" << EOF
 maclean 安装说明
 ================
 
@@ -207,7 +266,7 @@ maclean 安装说明
   在 Launchpad 或 Applications 中打开 maclean
 
 方法二: 双击 .pkg 安装
-  双击 maclean-0.2.0.pkg 按提示安装
+  双击 maclean-$VERSION.pkg 按提示安装
 
 卸载:
   将 maclean.app 从 Applications 拖到废纸篓
@@ -280,3 +339,15 @@ echo "  安装方式:"
 echo "    .pkg: 双击安装"
 echo "    .dmg: 挂载后拖拽 maclean.app 到 Applications"
 echo ""
+
+# 输出各产物的 sha256 —— 发布 GitHub Release 后需填入 homebrew/maclean.rb
+echo "  产物 sha256（发布后填入 homebrew/maclean.rb）:"
+for f in "$PKG_DIR"/*.pkg "$PKG_DIR"/*.dmg; do
+    [ -f "$f" ] || continue
+    echo "    $(shasum -a 256 "$f" | awk '{print $1}')  $(basename "$f")"
+done
+echo ""
+if [ -z "${MACLEAN_SIGN_IDENTITY:-}" ]; then
+    echo "  ⚠ 本次为 ad-hoc 签名，未公证；正式发布请设置 MACLEAN_SIGN_IDENTITY 与公证凭据"
+    echo ""
+fi

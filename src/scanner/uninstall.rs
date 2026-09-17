@@ -1383,9 +1383,7 @@ fn get_installed_app_names() -> std::collections::HashSet<String> {
     }
 
     // Homebrew 检测
-    if Path::new("/opt/homebrew/bin/brew").exists()
-        || Path::new("/usr/local/bin/brew").exists()
-    {
+    if Path::new("/opt/homebrew/bin/brew").exists() || Path::new("/usr/local/bin/brew").exists() {
         apps.insert("Homebrew".to_string());
         apps.insert("homebrew".to_string());
     }
