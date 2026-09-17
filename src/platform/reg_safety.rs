@@ -15,7 +15,7 @@ use std::path::Path;
 /// 同时认 `\` 和 `/`：`reg import` 两种分隔符都吃得下，
 /// 只用其中一种切分就等于留了个能绕过子树判断的后门。
 fn key_components(key: &str) -> Vec<String> {
-    key.split(|c| c == '\\' || c == '/')
+    key.split(['\\', '/'])
         .filter(|s| !s.is_empty())
         .map(|s| s.trim().to_lowercase())
         .collect()

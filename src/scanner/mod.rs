@@ -45,27 +45,11 @@ pub enum Recommend {
     Advanced,
 }
 
+// 2026-09-18 删除了 `Recommend::label` / `Recommend::description`：
+// 与 `i18n::translate_recommend` 重复且全仓零引用，UI 上的等级徽标统一走
+// `theme::recommend_label`（文案按设计稿 02 节）。留两套会各自漂移。
+
 impl Recommend {
-    /// 返回等级的中文描述
-    pub fn label(self) -> &'static str {
-        match self {
-            Recommend::Safe => "推荐",
-            Recommend::CacheOnly => "仅缓存",
-            Recommend::Caution => "谨慎",
-            Recommend::Advanced => "高级",
-        }
-    }
-
-    /// 返回详细说明
-    pub fn description(self) -> &'static str {
-        match self {
-            Recommend::Safe => "安全可删，自动恢复",
-            Recommend::CacheOnly => "仅清理缓存/日志，不影响使用",
-            Recommend::Caution => "删除后需重新下载或配置",
-            Recommend::Advanced => "请确认后再删除",
-        }
-    }
-
     /// 是否默认被"智能选择"勾选
     pub fn default_selected(self) -> bool {
         matches!(self, Recommend::Safe | Recommend::CacheOnly)
@@ -157,10 +141,8 @@ pub fn dir_size(path: &Path) -> u64 {
         .into_iter()
         .filter_entry(|e| {
             if e.depth() > 0 {
-                if e.file_type().is_dir() {
-                    if std::fs::metadata(e.path()).is_err() {
-                        return false;
-                    }
+                if e.file_type().is_dir() && std::fs::metadata(e.path()).is_err() {
+                    return false;
                 }
                 // 跳过 Photos Library 等问题 bundle
                 if let Some(name) = e.file_name().to_str() {
@@ -233,10 +215,59 @@ mod tests {
 
     #[test]
     fn recommend_labels_are_stable() {
-        // UI 徽标直接依赖这些文案，改动需同步 maclean-ui-design-v2.html
-        assert_eq!(Recommend::Safe.label(), "推荐");
-        assert_eq!(Recommend::CacheOnly.label(), "仅缓存");
-        assert_eq!(Recommend::Caution.label(), "谨慎");
-        assert_eq!(Recommend::Advanced.label(), "高级");
+        // 锁的是 `theme::recommend_label` —— UI 徽标真正调用的那个。
+        // 此前这条用例锁的是 `Recommend::label()`（已删），后者零生产调用：
+        // 锁在一个没人用的副本上，UI 文案改了这条用例照样绿。
+        // 改动需同步 maclean-ui-design-v2.html。
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::Safe, false),
+            "安全"
+        );
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::CacheOnly, false),
+            "仅缓存"
+        );
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::Caution, false),
+            "谨慎"
+        );
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::Advanced, false),
+            "高级"
+        );
+        // 英文侧
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::Safe, true),
+            "Safe"
+        );
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::Advanced, true),
+            "Advanced"
+        );
+    }
+
+    #[test]
+    fn recommend_label_has_two_diverging_copies() {
+        // 同一套等级，仓里还剩两份文案源，且**不一致**：
+        //   theme::recommend_label   → UI 徽标：安全 / 仅缓存 / 谨慎 / 高级
+        //   i18n::translate_recommend → 日志等纯文本：推荐 / 仅缓存 / 谨慎 / 需确认
+        // Safe 与 Advanced 两档对不上。不强行统一（改哪边都是产品决策），
+        // 但把差异钉住：以后有人改其中一份，这条会红，逼他确认另一份。
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::Safe, false),
+            "安全"
+        );
+        assert_eq!(
+            crate::i18n::translate_recommend(&Recommend::Safe, false),
+            "推荐"
+        );
+        assert_eq!(
+            crate::theme::recommend_label(&Recommend::Advanced, false),
+            "高级"
+        );
+        assert_eq!(
+            crate::i18n::translate_recommend(&Recommend::Advanced, false),
+            "需确认"
+        );
     }
 }

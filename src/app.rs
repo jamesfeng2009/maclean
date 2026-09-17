@@ -3,7 +3,7 @@
 //! 管理 egui GUI 应用的全部状态，包括当前 Tab、扫描结果、选中状态等。
 
 use crate::safety;
-use crate::scanner::{self, ScanItem, Scanner};
+use crate::scanner::{self, ScanItem};
 
 /// 跨平台 Touch ID 可用性检查（macOS 专属，其他平台返回 false）
 fn touch_id_available_cross() -> bool {
@@ -52,22 +52,12 @@ pub enum Tab {
     Settings,
 }
 
-impl Tab {
-    /// 获取 Tab 的标题（直接返回中文 &'static str）
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Overview => "概览",
-            Tab::DevCache => "开发者缓存",
-            Tab::LargeFiles => "大文件",
-            Tab::AppCache => "App缓存",
-            Tab::AppData => "App数据",
-            Tab::AppUninstall => "应用卸载",
-            Tab::SystemOptimize => "系统优化",
-            Tab::Apfs => "APFS快照",
-            Tab::Settings => "设置",
-        }
-    }
+// 2026-09-18 删除了 `Tab::title` 与 `Tab::prev`：
+// - `title` 硬编码返回中文，而 UI 走 `ui::tab_title(tab, app)`（经 app.t() 中英切换）。
+//   留着它，就总有一天被人顺手用上，"切成英文 Tab 标题还是中文"就回来了。
+// - `prev` 与 `prev_tab()` 一并零引用（Tab 切换只往前，没有反向快捷键）。
 
+impl Tab {
     /// 所有 Tab
     pub fn all() -> [Tab; 9] {
         [
@@ -97,21 +87,6 @@ impl Tab {
             Tab::Settings => Tab::Overview,
         }
     }
-
-    /// 上一个 Tab
-    pub fn prev(self) -> Self {
-        match self {
-            Tab::Overview => Tab::Settings,
-            Tab::DevCache => Tab::Overview,
-            Tab::LargeFiles => Tab::DevCache,
-            Tab::AppCache => Tab::LargeFiles,
-            Tab::AppData => Tab::AppCache,
-            Tab::AppUninstall => Tab::AppData,
-            Tab::SystemOptimize => Tab::AppUninstall,
-            Tab::Apfs => Tab::SystemOptimize,
-            Tab::Settings => Tab::Apfs,
-        }
-    }
 }
 
 /// 扫描状态
@@ -139,6 +114,11 @@ pub enum ConfirmState {
     /// 提示用户是否启用 Touch ID
     OfferTouchIdSetup,
     /// 等待用户在 Terminal 中完成 Touch ID 启用（轮询中）
+    ///
+    /// 注意：当前**没有任何地方把这个变体置位**，ui 里的等待窗口
+    /// （`show_touch_id_waiting_window`）因此永远不可达。这不是死代码，
+    /// 是未接线的功能 —— 启用 Touch ID 的按钮没有把状态推进到这里。见 task #45。
+    #[allow(dead_code)]
     WaitForTouchIdSetup,
     /// 正在通过 Touch ID 删除（sudo 已配置 pam_tid.so）
     SudoWithTouchId,
@@ -154,8 +134,8 @@ pub struct App {
     pub scan_states: [ScanState; 9],
     /// 列表选中索引
     pub list_index: usize,
-    /// App 卸载 Tab 当前选中的应用分组索引
-    pub selected_uninstall_app_index: Option<usize>,
+    // 2026-09-18 删除了 `selected_uninstall_app_index`：零引用，卸载 Tab 的
+    // 选中态实际记在 `list_index` 上。
     /// 磁盘总空间（字节）
     pub disk_total: u64,
     /// 磁盘可用空间（字节）
@@ -167,8 +147,8 @@ pub struct App {
     /// 待删除的项索引列表，每项为 (tab_index, item_index)
     /// 支持跨 Tab 删除（如概览一键清理）
     pub pending_delete: Vec<(usize, usize)>,
-    /// 是否应该退出
-    pub should_quit: bool,
+    // 2026-09-18 删除了 `should_quit`：零引用。退出走 `App::quit()` /
+    // `std::process::exit`，没人轮询这个标志。
     /// 扫描耗时（毫秒）
     pub scan_time_ms: [u64; 9],
     /// 语言切换（true=英文, false=中文）
@@ -237,6 +217,10 @@ pub struct App {
     /// App卸载 Tab 当前按推荐等级过滤（Safe / Caution / Advanced）
     pub app_uninstall_recommend_filter: Option<crate::scanner::Recommend>,
     /// 是否显示残留清理弹窗（卸载后检测到残留时弹出）
+    // 这四个字段只在 ui 的 `#[cfg(target_os = "windows")]` 分支里读写
+    // （残留清理弹窗 / 还原点结果）。在 macOS 上编译时那段代码整块不存在，
+    // dead_code 会误报 —— 按平台压制，不要删（删了 Windows 侧功能就没了）。
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub show_residual_dialog: bool,
     /// 启动时显示菜单栏图标
     pub settings_menubar_icon: bool,
@@ -253,6 +237,7 @@ pub struct App {
     /// 深色模式（持久化在 config.json 的 dark_mode）
     pub dark_mode: bool,
     /// "还原上次修改"操作的执行结果（设置页显示）
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub last_restore_result: Option<String>,
     /// "配置导入/导出"操作的执行结果（设置页显示）
     pub config_manage_result: Option<String>,
@@ -261,8 +246,10 @@ pub struct App {
     /// 上次点击托盘图标的位置（逻辑像素），用于 HUD 窗口定位
     pub last_hud_click_pos: Option<(f32, f32)>,
     /// 残留项选中状态（与残留列表一一对应，true=选中清理）
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub residual_selected: Vec<bool>,
     /// 残留清理中（正在执行清理操作）
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub residual_cleaning: bool,
     /// License 激活状态（启动时加载）
     pub license_status: crate::license::LicenseStatus,
@@ -378,13 +365,11 @@ impl App {
                 ScanState::Idle,
             ],
             list_index: 0,
-            selected_uninstall_app_index: None,
             disk_total,
             disk_free,
             logs: Vec::new(),
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
-            should_quit: false,
             scan_time_ms: [0; 9],
             lang_en: user_config.lang_en,
             settings_menubar_icon: user_config.settings_menubar_icon,
@@ -408,7 +393,7 @@ impl App {
             deleted_paths: Vec::new(),
             delete_summary: None,
             failed_paths: Vec::new(),
-            show_permission_guide: Self::check_full_disk_access() == false,
+            show_permission_guide: !Self::check_full_disk_access(),
             show_preview: false,
             sudo_password_input: String::new(),
             sudo_password: None,
@@ -467,14 +452,7 @@ impl App {
         self.list_index = 0;
     }
 
-    /// 切换到上一个 Tab
-    pub fn prev_tab(&mut self) {
-        if !matches!(self.confirm, ConfirmState::None) {
-            return;
-        }
-        self.tab = self.tab.prev();
-        self.list_index = 0;
-    }
+    // 2026-09-18 删除了 `prev_tab()`：随 `Tab::prev` 一起零引用。
 
     /// 获取当前 Tab 的扫描结果
     pub fn current_items(&self) -> &Vec<ScanItem> {
@@ -498,9 +476,9 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, item)| {
-                let prefix_ok = cat_prefix.as_ref().map_or(true, |prefix| {
-                    item.category.to_lowercase().starts_with(prefix)
-                });
+                let prefix_ok = cat_prefix
+                    .as_ref()
+                    .is_none_or(|prefix| item.category.to_lowercase().starts_with(prefix));
                 if !prefix_ok {
                     return false;
                 }
@@ -560,10 +538,9 @@ impl App {
         }
     }
 
-    /// 获取当前 Tab 的扫描状态
-    pub fn current_scan_state(&self) -> &ScanState {
-        &self.scan_states[self.tab_index()]
-    }
+    // 2026-09-18 删除了 `current_scan_state()`：与 `any_scanning()` 的语义
+    // 冲突正是 P1-8 的根因（概览页按钮扫描中不置灰）。约定见 `any_scanning`
+    // 上方注释：按钮态用 `tab_scanning(idx)`，全局态只能用 `any_scanning()`。
 
     /// 当前 Tab 是否在扫描中
     ///
@@ -687,7 +664,7 @@ impl App {
     pub fn disk_analyzer_current_path(&self) -> std::path::PathBuf {
         self.disk_analyzer_path
             .clone()
-            .unwrap_or_else(|| scanner::home_dir())
+            .unwrap_or_else(scanner::home_dir)
     }
 
     /// 统计当前 Tab 中推荐清理（Safe + CacheOnly）的项数
@@ -707,22 +684,8 @@ impl App {
             .sum()
     }
 
-    /// 统计当前 Tab 中仅缓存（CacheOnly）的项数
-    pub fn cache_only_count(&self) -> usize {
-        self.current_items()
-            .iter()
-            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::CacheOnly)
-            .count()
-    }
-
-    /// 统计当前 Tab 中仅缓存（CacheOnly）的总大小
-    pub fn cache_only_size(&self) -> u64 {
-        self.current_items()
-            .iter()
-            .filter(|i| i.deletable && i.recommend == crate::scanner::Recommend::CacheOnly)
-            .map(|i| i.size_bytes)
-            .sum()
-    }
+    // 2026-09-18 删除了 `cache_only_count` / `cache_only_size`：零引用，
+    // 概览页的「仅缓存」统计走的是别的聚合路径。
 
     /// 统计当前 Tab 中需谨慎（Caution）的项数
     pub fn caution_count(&self) -> usize {
@@ -758,116 +721,11 @@ impl App {
             .sum()
     }
 
-    /// 执行扫描（当前 Tab）
-    pub fn scan_current(&mut self) {
-        let idx = self.tab_index();
-        self.scan_states[idx] = ScanState::Scanning;
-
-        let result = match self.tab {
-            Tab::Overview | Tab::Settings => scanner::ScanResult {
-                items: Vec::new(),
-                total_size: 0,
-                scan_time_ms: 0,
-            },
-            Tab::DevCache => scanner::dev_cache::DevCacheScanner::new().scan(),
-            Tab::LargeFiles => scanner::large_files::LargeFileScanner::new().scan(),
-            #[cfg(target_os = "macos")]
-            Tab::AppCache => scanner::app_cache::AppCacheScanner::new().scan(),
-            #[cfg(target_os = "macos")]
-            Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
-            #[cfg(target_os = "macos")]
-            Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
-            #[cfg(target_os = "macos")]
-            Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
-            #[cfg(target_os = "macos")]
-            Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
-            // Windows/Linux: 这些 Tab 返回空结果
-            #[cfg(not(target_os = "macos"))]
-            Tab::AppCache => {
-                #[cfg(target_os = "windows")]
-                {
-                    scanner::windows_apps::WindowsAppCacheScanner::new().scan()
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    scanner::ScanResult {
-                        items: Vec::new(),
-                        total_size: 0,
-                        scan_time_ms: 0,
-                    }
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            Tab::AppData => {
-                #[cfg(target_os = "windows")]
-                {
-                    scanner::windows_apps::WindowsAppDataScanner::new().scan()
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    scanner::ScanResult {
-                        items: Vec::new(),
-                        total_size: 0,
-                        scan_time_ms: 0,
-                    }
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            Tab::AppUninstall => {
-                #[cfg(target_os = "windows")]
-                {
-                    scanner::windows_apps::WindowsUninstallScanner::new().scan()
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    scanner::ScanResult {
-                        items: Vec::new(),
-                        total_size: 0,
-                        scan_time_ms: 0,
-                    }
-                }
-            }
-            // 系统优化：Windows 有专属任务清单（Win11Debloat 风格），正常可用
-            #[cfg(not(target_os = "macos"))]
-            Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
-            // APFS 是 macOS 文件系统专属，其它平台恒定为空
-            #[cfg(not(target_os = "macos"))]
-            Tab::Apfs => scanner::ScanResult {
-                items: Vec::new(),
-                total_size: 0,
-                scan_time_ms: 0,
-            },
-        };
-
-        let item_count = result.items.len();
-        let total_size = result.total_size;
-        let scan_time = result.scan_time_ms;
-        self.scan_time_ms[idx] = result.scan_time_ms;
-        self.results[idx] = result.items;
-        crate::logger::info(&format!(
-            "扫描完成 [{}]: {} 项, {}, 耗时 {}ms",
-            idx,
-            item_count,
-            crate::scanner::format_size(total_size),
-            scan_time
-        ));
-        self.scan_states[idx] = ScanState::Done;
-        self.list_index = 0;
-
-        // 扫描后预检查可删除性：对每项运行安全检查，
-        // 不可删除的标记 deletable=false，UI 会灰色显示且不可选中
-        self.precheck_deletability();
-
-        // App卸载 tab：计算关联文件明细，供 UI 展开
-        if self.tab == Tab::AppUninstall {
-            self.populate_associated_details();
-        }
-
-        // 刷新磁盘信息
-        let (total, free) = get_disk_info();
-        self.disk_total = total;
-        self.disk_free = free;
-    }
+    // 2026-09-18 删除了 `App::scan_current()`：实时扫描由 ui 侧的
+    // `start_scan` 起线程、经 ScanMessage::Done 回传后直接落库，这个方法
+    // 从未被调用。它里面唯一有价值的两个动作 —— 扫描后的安全预检
+    // （precheck_deletability）和卸载 Tab 的关联明细（populate_associated_details）
+    // —— 已挪到 ui/mod.rs 的真实落库点，此前在生产路径上从未执行过。
 
     /// 扫描后预检查可删除性
     ///
@@ -877,8 +735,7 @@ impl App {
     /// - Safe → 不变
     ///
     /// 这样在扫描阶段就屏蔽掉确定无法删除的项，避免用户选中后删除失败。
-    fn precheck_deletability(&mut self) {
-        let idx = self.tab_index();
+    pub(crate) fn precheck_deletability(&mut self, idx: usize) {
         let items = &mut self.results[idx];
         for item in items.iter_mut() {
             if !item.deletable {
@@ -905,9 +762,9 @@ impl App {
     /// 遍历 batch_paths 中每个路径，计算大小并生成标签。
     /// 对于大于 100MB 的目录，进一步枚举其直接子目录并作为子明细展示，
     /// 让用户清楚看到空间被什么占用（如 Documents、Caches 等）。
-    fn populate_associated_details(&mut self) {
+    pub(crate) fn populate_associated_details(&mut self, idx: usize) {
         self.associated_details.clear();
-        let items = self.results[self.tab_index()].clone();
+        let items = self.results[idx].clone();
         for item in &items {
             if item.batch_paths.is_empty() {
                 continue;
@@ -1307,10 +1164,8 @@ impl App {
         self.confirm = ConfirmState::None;
     }
 
-    /// 退出
-    pub fn quit(&mut self) {
-        self.should_quit = true;
-    }
+    // 2026-09-18 删除了 `App::quit()`：它只置一个零引用的 `should_quit`
+    // 标志，退出实际由 ui 侧的 `std::process::exit` / 视口关闭完成。
 
     /// 切换中英文语言
     pub fn toggle_lang(&mut self) {

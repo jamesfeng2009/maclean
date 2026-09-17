@@ -225,10 +225,8 @@ fn dir_size_with_timeout(path: &Path) -> u64 {
         .into_iter()
         .filter_entry(|e| {
             if e.depth() > 0 {
-                if e.file_type().is_dir() {
-                    if std::fs::metadata(e.path()).is_err() {
-                        return false;
-                    }
+                if e.file_type().is_dir() && std::fs::metadata(e.path()).is_err() {
+                    return false;
                 }
                 if let Some(name) = e.file_name().to_str() {
                     if is_problematic_path(name) {

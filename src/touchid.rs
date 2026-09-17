@@ -223,6 +223,10 @@ pub fn enable_touch_id_with_password(password: &str) -> Result<bool, String> {
 ///
 /// 保留此函数以便兼容旧调用点，但实际逻辑改为返回提示信息，
 /// 调用者应改用 `enable_touch_id_with_password`。
+// 注意：当前无人调用，且它本身已废弃（直接返回 Err 提示改用
+// `enable_touch_id_with_password`）。Touch ID 启用流程走不通的真正原因是
+// `ConfirmState::WaitForTouchIdSetup` 从未被置位，见 task #45。
+#[allow(dead_code)]
 pub fn trigger_enable_touch_id() -> Result<(), String> {
     Err("请使用 enable_touch_id_with_password 并提供管理员密码".to_string())
 }

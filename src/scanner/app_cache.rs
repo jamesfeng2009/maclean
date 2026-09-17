@@ -15,8 +15,8 @@ use super::{dir_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scann
 const CONTAINER_MIN: u64 = 50 * 1024 * 1024;
 /// 100MB 阈值
 const CACHE_MIN: u64 = 100 * 1024 * 1024;
-/// 500MB 阈值（Application Support）
-const APP_SUPPORT_MIN: u64 = 500 * 1024 * 1024;
+// 2026-09-18 删除了 APP_SUPPORT_MIN（500MB）：Application Support 的筛选
+// 实际走 app_data.rs，这里没有引用。
 
 /// App 缓存扫描器
 #[derive(Debug, Default)]
@@ -193,7 +193,11 @@ fn scan_containers() -> Vec<ScanItem> {
 /// 通用方案：取 bundle ID 最后一段作为名称（如 com.tencent.xinWeChat → xinWeChat）。
 /// 不硬编码任何特定 App 名称，适用于所有应用。
 fn bundle_id_to_display_name(bundle_id: &str) -> String {
-    bundle_id.split('.').last().unwrap_or(bundle_id).to_string()
+    bundle_id
+        .split('.')
+        .next_back()
+        .unwrap_or(bundle_id)
+        .to_string()
 }
 
 // =========================================================================

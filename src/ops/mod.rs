@@ -691,7 +691,6 @@ pub(crate) fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<Stri
     if safety::is_simulator_running() {
         return Err(App::t_lang(lang_en, "log_skip_running")
             .replace("[{}]", "")
-            .replace("Xcode/Simulator", "Xcode/Simulator")
             .trim()
             .to_string());
     }
@@ -1042,7 +1041,7 @@ pub(crate) fn start_delete(
                                 if safety::is_simulator_running() {
                                     let _ = tx.send(DeleteMessage::Log(
                                         format!("⏭️ {}", App::tf_lang(lang_en, "log_skip_running", &[&path])), path.clone(), category.clone(), false));
-                                    safety::log_deletion(&path, &category, false, Some(&App::t_lang(lang_en, "log_skip_running").replace("[{}]", "").trim().to_string()));
+                                    safety::log_deletion(&path, &category, false, Some(App::t_lang(lang_en, "log_skip_running").replace("[{}]", "").trim()));
                                     continue;
                                 }
                             }
@@ -1069,7 +1068,7 @@ pub(crate) fn start_delete(
                         // 普通文件/目录删除 - 尽力删除模式
                         let p = std::path::Path::new(path.as_str());
 
-                        if !p.exists() && !p.symlink_metadata().is_ok() {
+                        if !p.exists() && p.symlink_metadata().is_err() {
                             // 路径已不存在：视为删除成功（幂等性）。
                             // 用户想要的结果就是该路径消失，现在目标已经达成，
                             // 无需因缓存过期或外部已删除而报错。
@@ -1085,7 +1084,7 @@ pub(crate) fn start_delete(
                             if meta.file_type().is_symlink() {
                                 let _ = tx.send(DeleteMessage::Log(
                                     format!("⛔ {}", App::tf_lang(lang_en, "log_symlink_rejected", &[&path])), path.clone(), category.clone(), false));
-                                safety::log_deletion(&path, &category, false, Some(&App::t_lang(lang_en, "log_symlink_rejected").replace("{}", "").trim().to_string()));
+                                safety::log_deletion(&path, &category, false, Some(App::t_lang(lang_en, "log_symlink_rejected").replace("{}", "").trim()));
                                 continue;
                             }
                         }
@@ -1108,7 +1107,7 @@ pub(crate) fn start_delete(
                             // 废纸篓失败：保留文件 + 明确告知，不进 sudo 重试列表
                             let _ = tx.send(DeleteMessage::Log(
                                 format!("✗ {}", App::tf_lang(lang_en, "log_trash_failed", &[&path])), path.clone(), category.clone(), false));
-                            safety::log_deletion(&path, &category, false, Some(&App::t_lang(lang_en, "log_trash_failed").replace("{}", "").trim().to_string()));
+                            safety::log_deletion(&path, &category, false, Some(App::t_lang(lang_en, "log_trash_failed").replace("{}", "").trim()));
                         } else {
                             // 普通删除失败，加入待 sudo 列表
                             failed_items.lock().unwrap_or_else(|e| e.into_inner()).push((path, category));
@@ -1270,14 +1269,18 @@ pub(crate) fn write_private_temp_file(
 /// 为什么必须复做：扫描时做过 `safety` 校验，但到真正删除之间有时间差，
 /// 路径可能已被替换成别的东西（TOCTOU），也可能被换成了符号链接。
 /// 这一层的删除一旦放行不可恢复，所以必须逐项重做。
-///
+/// 待删除项：(路径, 分类)
+pub(crate) type DeleteItem = (String, String);
+/// 被拦截项：(路径, 分类, 拦截原因)
+pub(crate) type RejectedItem = (String, String, String);
+
 /// 返回：`(允许放行的项, 被拦截的项及原因)`
 pub(crate) fn sanitize_before_delete(
-    items: Vec<(String, String)>,
+    items: Vec<DeleteItem>,
     lang_en: bool,
-) -> (Vec<(String, String)>, Vec<(String, String, String)>) {
-    let mut allowed: Vec<(String, String)> = Vec::with_capacity(items.len());
-    let mut rejected: Vec<(String, String, String)> = Vec::new();
+) -> (Vec<DeleteItem>, Vec<RejectedItem>) {
+    let mut allowed: Vec<DeleteItem> = Vec::with_capacity(items.len());
+    let mut rejected: Vec<RejectedItem> = Vec::new();
 
     for (path, category) in items {
         // 1. 重做安全校验（与阶段一相同规则）
@@ -1822,10 +1825,9 @@ pub(crate) fn start_sudo_delete_touchid(
             return;
         }
 
-        let _ = tx.send(DeleteMessage::Info(format!(
-            "{}",
-            App::t_lang(lang_en, "log_touchid_verifying")
-        )));
+        let _ = tx.send(DeleteMessage::Info(
+            App::t_lang(lang_en, "log_touchid_verifying").to_string(),
+        ));
 
         let sudo_debug_log: Option<std::path::PathBuf> =
             write_private_temp_file("maclean_sudo_tid_dbg", "log", "");
@@ -1864,7 +1866,7 @@ exit 0
 "#;
                 // P0-2：固定路径脚本可被本地进程预先占位或替换 → sudo 以 root 执行任意内容。
                 // 改用不可预测文件名 + O_EXCL + 0600；脚本交给 /bin/bash 执行，不需要 +x。
-                let Some(xcrun_script) = write_private_temp_file("maclean_xcrun", "sh", &script)
+                let Some(xcrun_script) = write_private_temp_file("maclean_xcrun", "sh", script)
                 else {
                     crate::logger::error("无法安全创建临时脚本，跳过 xcrun 删除");
                     remaining_items.push((path.clone(), category.clone()));

@@ -20,10 +20,8 @@ pub enum SafetyCheck {
     Warning(String),
 }
 
-/// 检查路径是否安全可删除（通用版本，兼容旧调用）
-pub fn check_path_safety(path: &str) -> SafetyCheck {
-    check_path_safety_with_category(path, "")
-}
+// 2026-09-18 删除了 `check_path_safety`（无 category 的兼容版本）：全仓零调用点，
+// 留着只会让人以为"不传 category 也行"。所有入口必须显式传分类。
 
 /// 取当前用户的**真实** home 目录（读 passwd 库，不受 `$HOME` 影响）
 ///
@@ -319,7 +317,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // 必须**同时**按 `/` 与 `\` 切分：Windows 路径用反斜杠，只按 `/` 切时
     // `C:\Users\x\..\..\Windows` 会整体落成一个组件，`..` 检测被完全绕过。
     // canonicalize 失败时会回退到原始字符串继续检查，这一层不能失守。
-    let has_traversal = path.split(|c| c == '/' || c == '\\').any(|c| c == "..");
+    let has_traversal = path.split(['/', '\\']).any(|c| c == "..");
     if has_traversal {
         return SafetyCheck::Danger("路径包含目录遍历 (..)".to_string());
     }
@@ -503,12 +501,12 @@ fn sensitive_name_hit(canonical_str: &str, file_name: &str) -> Option<&'static s
     // 直接用原串 contains 在 Windows 的 `\` 路径上永远匹配不上。
     let normalized = canonical_str.replace('\\', "/");
 
-    for sensitive in SENSITIVE_NAMES {
-        if file_name.eq_ignore_ascii_case(sensitive) || normalized.contains(sensitive) {
-            return Some(sensitive);
-        }
-    }
-    None
+    SENSITIVE_NAMES
+        .iter()
+        .find(|&sensitive| {
+            file_name.eq_ignore_ascii_case(sensitive) || normalized.contains(sensitive)
+        })
+        .map(|v| v as _)
 }
 
 /// 检查模拟器相关服务是否正在运行
@@ -1428,7 +1426,7 @@ mod tests {
     fn backslash_traversal_is_rejected() {
         // 旧实现只 split('/')，下面这条在 Windows 上全会成了一个普通组件
         let dangerous = r"C:\Users\Bob\AppData\..\..\..\Windows";
-        match check_path_safety(dangerous) {
+        match check_path_safety_with_category(dangerous, "") {
             SafetyCheck::Danger(reason) => {
                 assert!(
                     reason.contains("目录遍历"),
@@ -1446,7 +1444,7 @@ mod tests {
     #[test]
     fn posix_traversal_still_rejected() {
         assert!(matches!(
-            check_path_safety("/Users/Bob/../../System"),
+            check_path_safety_with_category("/Users/Bob/../../System", ""),
             SafetyCheck::Danger(_)
         ));
     }
@@ -1459,7 +1457,7 @@ mod tests {
             r"C:\Users\Bob\AppData\Roaming\Mozilla\foo..files",
             "/Users/Bob/Library/Caches/foo..files",
         ] {
-            if let SafetyCheck::Danger(reason) = check_path_safety(p) {
+            if let SafetyCheck::Danger(reason) = check_path_safety_with_category(p, "") {
                 assert!(
                     !reason.contains("目录遍历"),
                     "含 .. 的合法文件名被误判为目录遍历: {} -> {}",

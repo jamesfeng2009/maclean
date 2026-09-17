@@ -34,6 +34,12 @@ const NONE: Def = Def {
     ellipses: &[],
 };
 
+/// 图标集。
+///
+/// 刻意保留未使用的变体：这是一套**线性图标调色板**，不是按需定义的枚举 ——
+/// 删掉"暂时没用到"的图标，下次想用就得重新画路径数据。代价是 dead_code
+/// 会报"never constructed"，用 allow 压掉比删掉更划算。
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     // —— 导航 ——
@@ -542,26 +548,5 @@ pub fn show(ui: &mut egui::Ui, ic: Icon, size: f32, color: egui::Color32) -> egu
     response
 }
 
-/// 图标按钮（正方形，用于工具栏）
-pub fn icon_button(
-    ui: &mut egui::Ui,
-    ic: Icon,
-    size: f32,
-    color: egui::Color32,
-    id: impl std::hash::Hash,
-) -> egui::Response {
-    let padding = 7.0;
-    let desired = egui::vec2(size + padding * 2.0, size + padding * 2.0);
-    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let hovered = response.hovered();
-        if hovered {
-            ui.painter()
-                .rect_filled(rect, egui::Rounding::same(8.0), crate::theme::surface_3());
-        }
-        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(size, size));
-        paint(ui.painter(), icon_rect, ic, color);
-    }
-    let _ = id;
-    response
-}
+// 2026-09-18 删除了 `icons::icon_button`：与 `widgets::icon_button` 重复，
+// 且零引用。图标绘制归 icons，按钮交互归 widgets，不要再往 icons 里加按钮。

@@ -510,12 +510,10 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     }
 
     // "{} 旧版调试符号，可安全删除" or "iOS {} 旧版调试符号，可安全删除"
-    if desc.ends_with(" 旧版调试符号，可安全删除") {
-        let version = &desc[..desc.len() - " 旧版调试符号，可安全删除".len()];
+    if let Some(version) = desc.strip_suffix(" 旧版调试符号，可安全删除") {
         return Some(format!("{} legacy debug symbols, safe to delete", version));
     }
-    if desc.ends_with(" 设备调试符号（最新版，建议保留）") {
-        let version = &desc[..desc.len() - " 设备调试符号（最新版，建议保留）".len()];
+    if let Some(version) = desc.strip_suffix(" 设备调试符号（最新版，建议保留）") {
         return Some(format!(
             "{} device debug symbols (latest, recommended to keep)",
             version
@@ -785,8 +783,7 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     // ===== 应用保护列表相关描述 =====
 
     // "系统关键应用 | 应用大小 {size}"
-    if desc.starts_with("系统关键应用 | 应用大小 ") {
-        let size = &desc["系统关键应用 | 应用大小 ".len()..];
+    if let Some(size) = desc.strip_prefix("系统关键应用 | 应用大小 ") {
         return Some(format!("System critical app | App size: {}", size));
     }
 
@@ -796,8 +793,7 @@ fn pattern_description_en(desc: &str) -> Option<String> {
     }
 
     // "含敏感数据，卸载前请备份 | 应用大小 {size}，关联文件 {n} 项"
-    if desc.starts_with("含敏感数据，卸载前请备份 | ") {
-        let rest = &desc["含敏感数据，卸载前请备份 | ".len()..];
+    if let Some(rest) = desc.strip_prefix("含敏感数据，卸载前请备份 | ") {
         return Some(format!(
             "Contains sensitive data, back up before uninstalling | {}",
             rest.replace("应用大小 ", "App size: ")

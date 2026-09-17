@@ -122,6 +122,9 @@ pub fn is_sudo_active() -> bool {
 /// 结束 sudo 会话
 ///
 /// 停止保活线程并清除 sudo 票据。
+#[allow(dead_code)]
+// 注意：当前无人调用 —— 退出时没有显式结束 sudo 会话。
+// 保留函数本身，退出路径接线见 task #45。
 pub fn end_sudo_session() {
     stop_keepalive_thread();
     // 清除 sudo 票据

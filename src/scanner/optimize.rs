@@ -150,9 +150,6 @@ fn scan_login_items_description() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut user_login = 0usize;
     // 延迟初始化：这三个变量在下面无条件赋值，给初值反而会被编译器判定为"写入未读"
-    let user_agents: usize;
-    let system_agents: usize;
-    let system_daemons: usize;
 
     // 用户登录项（Login Items plist）
     let loginitems_plist = format!("{}/Library/Preferences/com.apple.loginitems.plist", home);
@@ -170,13 +167,13 @@ fn scan_login_items_description() -> String {
 
     // 用户 LaunchAgent
     let user_agents_dir = format!("{}/Library/LaunchAgents", home);
-    user_agents = count_plist_files(&user_agents_dir);
+    let user_agents: usize = count_plist_files(&user_agents_dir);
 
     // 系统 LaunchAgent
-    system_agents = count_plist_files("/Library/LaunchAgents");
+    let system_agents: usize = count_plist_files("/Library/LaunchAgents");
 
     // 系统 LaunchDaemon
-    system_daemons = count_plist_files("/Library/LaunchDaemons");
+    let system_daemons: usize = count_plist_files("/Library/LaunchDaemons");
 
     let total = user_login + user_agents + system_agents + system_daemons;
     format!(

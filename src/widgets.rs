@@ -24,8 +24,8 @@ pub enum Btn {
     Ghost,
     /// 危险实心
     Danger,
-    /// 危险描边（软）
-    DangerSoft,
+    // 2026-09-18 删除了 `DangerSoft`（危险描边）：设计稿里没有这一档，
+    // 全仓零构造，留着只会让人以为"删除按钮还有个软变体可选"。
 }
 
 impl Btn {
@@ -51,12 +51,6 @@ impl Btn {
                 C::WHITE,
                 C::TRANSPARENT,
                 theme::danger_600(),
-            ),
-            Btn::DangerSoft => (
-                theme::danger_50(),
-                theme::danger(),
-                theme::danger_100(),
-                theme::danger_100(),
             ),
         }
     }
@@ -358,20 +352,7 @@ pub fn ratio_bar(ui: &mut egui::Ui, ratio: f32, color: egui::Color32) {
     }
 }
 
-/// 通用进度条（用于扫描 / 删除进度）
-pub fn progress_bar(ui: &mut egui::Ui, width: f32, ratio: f32, color: egui::Color32) {
-    let (rect, _resp) =
-        ui.allocate_exact_size(egui::vec2(width, theme::BAR_H), egui::Sense::hover());
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        painter.rect_filled(rect, theme::r(3.0), theme::surface_3());
-        let w = rect.width() * ratio.clamp(0.0, 1.0);
-        if w > 0.5 {
-            let fill = egui::Rect::from_min_size(rect.min, egui::vec2(w, theme::BAR_H));
-            painter.rect_filled(fill, theme::r(3.0), color);
-        }
-    }
-}
+// 2026-09-18 删除了 `progress_bar`：零引用，扫描进度条在 ui 里另有实现。
 
 // =========================================================================
 //  弹窗外壳

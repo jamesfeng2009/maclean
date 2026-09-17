@@ -39,9 +39,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy 静态检查
-        # 暂不阻塞：仓库仍有 ~76 处 `static mut` 引用产生的存量告警（见 CODE_REVIEW.md P2），
-        # 需要把 7 个 static mut 全局迁入 Mutex / App 状态后才能开启 -D warnings。
-        continue-on-error: true
+        # 2026-09-18 起阻塞：7 个 static mut 已迁入 GuiState，102 条存量告警
+        # 已清零（含删除 aewp.rs 等整块死代码）。现在 `-D warnings` 能过，
+        # 门禁应当真正生效 —— 否则新告警会一直被静默放行。
         run: cargo clippy --all-targets -- -D warnings
 
       - name: 单元测试

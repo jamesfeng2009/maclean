@@ -175,19 +175,7 @@ pub fn latest_log_file() -> Option<PathBuf> {
     Some(logs[0].1.clone())
 }
 
-/// 获取日志目录下所有日志文件的总大小（字节）
-pub fn total_log_size() -> u64 {
-    let dir = log_dir();
-    let mut total = 0;
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                total += meta.len();
-            }
-        }
-    }
-    total
-}
+// 2026-09-18 删除了 `total_log_size`：零引用。
 
 /// 清理过期日志（保留 7 天）
 fn clean_old_logs(log_dir: &PathBuf) {

@@ -61,43 +61,9 @@ pub fn app_data_dir() -> PathBuf {
     }
 }
 
-/// 展开路径中的 ~ 和环境变量
-///
-/// macOS: ~/Library/Caches → /Users/xxx/Library/Caches
-/// Windows: %LOCALAPPDATA%\Foo → C:\Users\xxx\AppData\Local\Foo
-pub fn expand_path(path: &str) -> PathBuf {
-    let mut result = path.to_string();
-
-    // 展开 ~ (macOS/Linux)
-    if result.starts_with('~') {
-        let home = home_dir();
-        result = format!("{}{}", home.display(), &result[1..]);
-    }
-
-    // 展开 Windows 环境变量 %VAR%
-    #[cfg(target_os = "windows")]
-    {
-        loop {
-            let start = match result.find('%') {
-                Some(s) => s,
-                None => break,
-            };
-            let end = match result[start + 1..].find('%') {
-                Some(e) => start + 1 + e,
-                None => break,
-            };
-            let var_name = &result[start + 1..end];
-            if let Ok(val) = std::env::var(var_name) {
-                result = format!("{}{}{}", &result[..start], val, &result[end + 1..]);
-            } else {
-                // 找不到变量，跳过避免死循环
-                break;
-            }
-        }
-    }
-
-    PathBuf::from(result)
-}
+// 2026-09-18 删除了 `platform::expand_path`：全仓零引用，且与
+// `scanner::cache_registry::expand_path`（两参数、真正被 scan() 调用的那个）
+// 重复。两份实现并存时，"改哪份才算生效"是个陷阱。
 
 /// 检测路径是否可删除（跨平台）
 ///
@@ -147,7 +113,7 @@ pub fn check_deletable(path: &str) -> (bool, String) {
 /// Windows: 调用 SHFileOperation FO_DELETE + FOF_ALLOWUNDO
 pub fn move_to_trash(path: &str) -> bool {
     let p = Path::new(path);
-    if !p.exists() && !p.symlink_metadata().is_ok() {
+    if !p.exists() && p.symlink_metadata().is_err() {
         return false;
     }
 

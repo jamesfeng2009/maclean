@@ -179,7 +179,7 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
 
     for (tab_key, tab_label) in &tabs {
         println!("\n╔══════════════════════════════════════════╗");
-        println!("║  {} — {} ({})", "扫描", tab_label, tab_key);
+        println!("║  扫描 — {} ({})", tab_label, tab_key);
         println!("╚══════════════════════════════════════════╝");
 
         let start = std::time::Instant::now();

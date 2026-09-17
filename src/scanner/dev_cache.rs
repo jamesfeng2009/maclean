@@ -1622,18 +1622,8 @@ fn check_app_installed_windows(installer_filename: &str) -> bool {
     false
 }
 
-/// 格式化文件大小（本地辅助函数）
-fn format_size_local(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    } else if bytes >= 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else {
-        format!("{}B", bytes)
-    }
-}
+// 2026-09-18 删除了本文件的 `format_size_local`：与 `scanner::uninstall`
+// 里的同名函数重复，且只有 uninstall 那份在用。
 
 // =========================================================================
 //  K8s / Helm 配置缓存扫描
@@ -2481,8 +2471,7 @@ fn extract_quoted_value(line: &str) -> Option<String> {
     let after_arrow = after_arrow.trim();
 
     // 匹配 "..." 格式
-    if after_arrow.starts_with('"') {
-        let rest = &after_arrow[1..];
+    if let Some(rest) = after_arrow.strip_prefix('"') {
         if let Some(end) = rest.find('"') {
             return Some(rest[..end].to_string());
         }
@@ -3107,7 +3096,7 @@ mod tests {
 
     #[test]
     fn version_sort_keeps_newest_last() {
-        let mut versions = vec!["1.9", "1.10", "2.0", "1.2"];
+        let mut versions = ["1.9", "1.10", "2.0", "1.2"];
         versions.sort_by(|a, b| compare_versions(a, b));
         assert_eq!(versions.last().copied(), Some("2.0"));
         assert_eq!(versions.first().copied(), Some("1.2"));

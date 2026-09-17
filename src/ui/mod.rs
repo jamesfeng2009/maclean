@@ -258,53 +258,8 @@ impl Gui {
     fn poll_menubar(&mut self, ctx: &egui::Context) {
         // 轮询菜单栏事件
         let mut hud_click: Option<menubar::ClickInfo> = None;
-        let actions = self.menubar.poll_events();
-        if !actions.is_empty() {
-            let lang_en = self.app.lang_en;
-            log_scan_step(&App::tf_lang(
-                lang_en,
-                "log_menu_event",
-                &[&format!("{:?}", actions)],
-            ));
-        }
-        for action in actions {
-            match action {
-                menubar::TrayAction::ShowWindow => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                menubar::TrayAction::QuickScan => {
-                    // 快速扫描：只扫描不删除
-                    self.auto_clean_after_scan = false;
-                    if let Some(app) = Some(&mut self.app) {
-                        if !app.any_scanning() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            start_scan(app, &mut self.scan_rx);
-                        }
-                    }
-                }
-                menubar::TrayAction::QuickClean => {
-                    // 一键清理：扫描 + 自动删除所有 Safe 项
-                    // 1. 显示并聚焦主窗口
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-
-                    // 2. 切换到开发者缓存 Tab 并开始扫描
-                    if let Some(app) = Some(&mut self.app) {
-                        app.tab = Tab::DevCache;
-                        if !app.any_scanning() {
-                            // 设置标志：扫描完成后自动选择 Safe 项并删除
-                            self.auto_clean_after_scan = true;
-                            start_scan(app, &mut self.scan_rx);
-                        }
-                    }
-                }
-                menubar::TrayAction::Quit => {
-                    std::process::exit(0);
-                }
-            }
-        }
+        // 2026-09-18 删除了 menubar::poll_events 的整段消费逻辑：它恒返回空，
+        // TrayAction 从未被构造。托盘动作由 HUD 窗口自己处理（见 hud_action 分支）。
 
         // 点击托盘图标：展开/收起 HUD
         if let Some(click_info) = self.menubar.poll_click() {
@@ -340,12 +295,17 @@ impl Gui {
             .unwrap_or(0.0);
         if now - self.last_disk_update > 60.0 || self.last_disk_update == 0.0 {
             self.last_disk_update = now;
-            if let Some(app) = Some(&self.app) {
-                let releasable = app.total_releasable_size();
-                let lang_en = app.lang_en;
-                if let Some(mb) = Some(&mut self.menubar) {
-                    mb.update_releasable(releasable, lang_en);
-                }
+            let releasable = self.app.total_releasable_size();
+            let lang_en = self.app.lang_en;
+            self.menubar.update_releasable(releasable, lang_en);
+
+            // 托盘图标的磁盘占用环：此前 update_disk_usage 从未被调用，图标
+            // 一直停在 init() 时的 create_icon(0.0)，70%/85% 的变黄/变红阈值
+            // 永远触发不了。这里随周期一起刷新。
+            let (total, free) = crate::platform::disk_info();
+            if total > 0 {
+                let used_pct = (total.saturating_sub(free)) as f32 / total as f32 * 100.0;
+                self.menubar.update_disk_usage(used_pct);
             }
         }
     }
@@ -393,10 +353,20 @@ impl Gui {
                     }
                     Ok(ScanMessage::Done(items, time_ms, tab_idx)) => {
                         if let Some(app) = Some(&mut self.app) {
-                            app.results[tab_idx as usize] = items;
-                            app.scan_states[tab_idx as usize] = ScanState::Done;
-                            app.scan_time_ms[tab_idx as usize] = time_ms;
+                            let idx = tab_idx as usize;
+                            app.results[idx] = items;
+                            app.scan_states[idx] = ScanState::Done;
+                            app.scan_time_ms[idx] = time_ms;
                             app.scan_progress = 1.0;
+
+                            // 扫描落库后的两步后处理。此前这两步只存在于
+                            // 从未被调用的 `App::scan_current()` 里，生产路径
+                            // 上从没执行过 —— 结果就是：safety 判定为 Danger 的
+                            // 项在 UI 上仍然可勾选，点了才在删除时被拒。
+                            app.precheck_deletability(idx);
+                            if app.tab == Tab::AppUninstall {
+                                app.populate_associated_details(idx);
+                            }
                             let (total, free) = get_disk_info();
                             app.disk_total = total;
                             app.disk_free = free;
@@ -765,10 +735,9 @@ pub(crate) fn setup_fonts(ctx: &egui::Context) {
 
     for path in &font_paths {
         if let Ok(font_data) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "CJK".to_owned(),
-                egui::FontData::from_owned(font_data.into()),
-            );
+            fonts
+                .font_data
+                .insert("CJK".to_owned(), egui::FontData::from_owned(font_data));
             fonts
                 .families
                 .entry(egui::FontFamily::Proportional)
@@ -1011,9 +980,8 @@ pub(crate) fn render_app_uninstall_panel(
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             ui.set_min_height(content_height - 2.0);
-            for group_idx in 0..groups.len() {
-                let indices = groups[group_idx].1.clone();
-                render_app_uninstall_group_card(ui, app, &groups[group_idx].0, &indices);
+            for (group_name, indices) in &groups {
+                render_app_uninstall_group_card(ui, app, group_name, &indices.clone());
                 ui.add_space(12.0);
             }
         });
@@ -2146,11 +2114,18 @@ pub(crate) fn render_gui(
     if !app.update_dismissed {
         if let Some(info) = app.update_available.clone() {
             egui::TopBottomPanel::top("update_banner").show(ctx, |ui| {
-                let msg = if app.lang_en {
+                let mut msg = if app.lang_en {
                     format!("New version v{} is available", info.version)
                 } else {
                     format!("发现新版本 v{}", info.version)
                 };
+                // updater 抓了 Release 摘要前 3 行，此前字段从未被读取 ——
+                // 横幅只有一行空间，这里带第一行，避免抓了不用。
+                if let Some(first) = info.notes.lines().next() {
+                    if !first.trim().is_empty() {
+                        msg.push_str(&format!(" · {}", first.trim()));
+                    }
+                }
                 widgets::banner(
                     ui,
                     widgets::BannerKind::Info,
@@ -2192,8 +2167,8 @@ pub(crate) fn render_gui(
             );
 
             widgets::banner(ui, kind, icons::Icon::Alert, &msg, |ui| {
-                if alert_level >= 2 {
-                    if widgets::button(
+                if alert_level >= 2
+                    && widgets::button(
                         ui,
                         None,
                         app.t("disk_alert_clean_now"),
@@ -2201,16 +2176,15 @@ pub(crate) fn render_gui(
                         BTN_H_SM,
                     )
                     .clicked()
-                    {
-                        // 跳转到开发者缓存 Tab（通常回收空间最大）
-                        //
-                        // 必须有守卫：确认框弹出或删除进行中时切 Tab，会让
-                        // 确认框的统计（依赖当前 Tab）与 pending_delete 错位。
-                        // 导航栏点击是带这个守卫的，这里之前漏了。
-                        if matches!(app.confirm, ConfirmState::None) && !app.any_scanning() {
-                            app.tab = crate::app::Tab::DevCache;
-                            app.list_index = 0;
-                        }
+                {
+                    // 跳转到开发者缓存 Tab（通常回收空间最大）
+                    //
+                    // 必须有守卫：确认框弹出或删除进行中时切 Tab，会让
+                    // 确认框的统计（依赖当前 Tab）与 pending_delete 错位。
+                    // 导航栏点击是带这个守卫的，这里之前漏了。
+                    if matches!(app.confirm, ConfirmState::None) && !app.any_scanning() {
+                        app.tab = crate::app::Tab::DevCache;
+                        app.list_index = 0;
                     }
                 }
             });
@@ -2729,7 +2703,6 @@ pub(crate) fn render_gui(
 
             if is_scanning {
                 ui_scanning(ui, app);
-                return;
             } else if items.is_empty() {
                 render_empty_state(ui, app, scan_rx);
             } else {
@@ -2850,10 +2823,10 @@ pub(crate) fn render_gui(
                             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                                 app.clear_filter();
                             }
-                            if !app.filter_query.is_empty() {
-                                if widgets::icon_button(ui, icons::Icon::X, BTN_H_SM).clicked() {
-                                    app.clear_filter();
-                                }
+                            if !app.filter_query.is_empty()
+                                && widgets::icon_button(ui, icons::Icon::X, BTN_H_SM).clicked()
+                            {
+                                app.clear_filter();
                             }
                             app.filter_active = resp.has_focus();
                         });
@@ -4771,13 +4744,10 @@ pub(crate) fn render_disk_analyzer(
         ui.separator();
 
         // 主目录按钮（快速回到 home）
-        if has_history && !is_scanning {
-            if ui.button(app.t("home")).clicked() {
-                app.disk_analyzer_path = None;
-                app.disk_analyzer_history.clear();
-                start_scan(app, scan_rx);
-                return;
-            }
+        if has_history && !is_scanning && ui.button(app.t("home")).clicked() {
+            app.disk_analyzer_path = None;
+            app.disk_analyzer_history.clear();
+            start_scan(app, scan_rx);
         }
     });
 

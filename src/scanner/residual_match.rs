@@ -254,10 +254,10 @@ pub(crate) fn install_dir_version_token(location: &str) -> Option<String> {
     let leaf = location
         .trim()
         .trim_matches('"')
-        .split(|c| c == '/' || c == '\\')
+        .split(['/', '\\'])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .last()?;
+        .next_back()?;
 
     let digit_at = leaf.char_indices().find(|(_, c)| c.is_ascii_digit())?.0;
     if digit_at < 2 {
@@ -270,7 +270,7 @@ pub(crate) fn install_dir_version_token(location: &str) -> Option<String> {
         return None;
     }
 
-    let version = leaf[digit_at..].trim_end_matches(|c| c == '/' || c == '\\');
+    let version = leaf[digit_at..].trim_end_matches(['/', '\\']);
     if version.is_empty() || (!version.contains('.') && !version.contains('_')) {
         return None;
     }
@@ -743,7 +743,10 @@ mod tests {
             Some("HKLM/SOFTWARE/JavaSoft/Java Runtime Environment/1.8.0_291".to_string())
         );
         // 0 个命中 → 漏报好过猜
-        assert_eq!(version_scoped_subkey(&[other.clone()], "1.8.0_291"), None);
+        assert_eq!(
+            version_scoped_subkey(std::slice::from_ref(&other), "1.8.0_291"),
+            None
+        );
         // 版本号为空直接进入拒绝分支
         assert_eq!(version_scoped_subkey(&[full], ""), None);
     }

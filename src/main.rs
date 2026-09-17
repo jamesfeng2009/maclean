@@ -2,8 +2,10 @@
 //!
 //! 使用 egui 构建，专注开发者缓存与深度清理。
 
-#[cfg(target_os = "macos")]
-mod aewp;
+// 已删除 mod aewp（2026-09-18）：AuthorizationExecuteWithPrivileges 的 FFI 封装，
+// 全仓零引用。提权删除现已统一走 touchid.rs 的
+// `osascript do shell script ... with administrator privileges`（macOS 14+ 官方推荐）。
+// AEWP 自 macOS 10.7 起被 Apple 标记为 deprecated，恢复请从 git 历史取回。
 mod app;
 mod app_protection;
 mod cli;

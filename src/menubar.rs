@@ -6,18 +6,9 @@
 use std::time::Instant;
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-/// 菜单栏操作事件
-#[derive(Debug, Clone)]
-pub enum TrayAction {
-    /// 打开主窗口
-    ShowWindow,
-    /// 快速扫描
-    QuickScan,
-    /// 一键清理安全项
-    QuickClean,
-    /// 退出应用
-    Quit,
-}
+// 2026-09-18 删除了 `TrayAction` 枚举：与 `ui::HudAction` 重复，且全仓从未构造。
+// 托盘交互刻意不用原生菜单（见 init() 注释），全部由 egui 绘制的 HUD 窗口处理，
+// 动作枚举以 `ui::HudAction` 为准。
 
 /// 托盘图标点击信息
 #[derive(Debug, Clone, Copy)]
@@ -122,10 +113,8 @@ impl MenuBarHud {
         }
     }
 
-    /// 轮询菜单事件（保留兼容，当前已不再依赖菜单触发）
-    pub fn poll_events(&self) -> Vec<TrayAction> {
-        Vec::new()
-    }
+    // 2026-09-18 删除了 `poll_events`：它恒返回空 Vec，配套的 `TrayAction`
+    // 枚举从未被构造。托盘交互现在只走 `poll_click()`（点击位置 → egui HUD 窗口）。
 
     /// 轮询托盘图标点击事件
     ///

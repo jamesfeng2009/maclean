@@ -307,9 +307,12 @@ impl Scanner for UninstallScanner {
         let app_paths = collect_app_paths();
 
         // 并行扫描每个应用，每个应用可能拆出多个 ScanItem
+        // `.map(|p| p.as_path())` 不是多余的：clippy::ptr_arg 要求 `scan_app`
+        // 收 `&Path` 而不是 `&PathBuf`，而 par_iter 产出的是 `&PathBuf`。
         let mut items: Vec<ScanItem> = app_paths
             .par_iter()
-            .flat_map(|app_path| scan_app(app_path))
+            .map(|p| p.as_path())
+            .flat_map(scan_app)
             .collect();
 
         // 扫描废纸篓和 Downloads 中的 .app 残留
@@ -359,7 +362,7 @@ fn collect_app_paths() -> Vec<PathBuf> {
 }
 
 /// 判断路径是否为 .app 包
-fn is_app_bundle(path: &PathBuf) -> bool {
+fn is_app_bundle(path: &Path) -> bool {
     if !path.is_dir() {
         return false;
     }
@@ -504,7 +507,7 @@ fn collect_installed_app_names() -> std::collections::HashSet<String> {
 /// - 数据保护应用（1Password、输入法等）：可删除但描述包含警告
 /// - 可卸载的 Apple 应用（Xcode、Final Cut Pro 等）：正常显示
 /// - 普通第三方应用：正常显示
-fn scan_app(app_path: &PathBuf) -> Vec<ScanItem> {
+fn scan_app(app_path: &Path) -> Vec<ScanItem> {
     let mut items = Vec::new();
     let path_str = app_path.to_string_lossy();
 
@@ -680,7 +683,7 @@ fn path_size(path: &str) -> u64 {
 /// 从 Info.plist 读取 bundle ID
 ///
 /// 优先使用 `defaults read`，失败时回退到 `plutil`。
-fn get_bundle_id(app_path: &PathBuf) -> Option<String> {
+fn get_bundle_id(app_path: &Path) -> Option<String> {
     let plist = app_path.join("Contents/Info.plist");
     if !plist.exists() {
         return None;
@@ -726,7 +729,7 @@ fn get_bundle_id(app_path: &PathBuf) -> Option<String> {
 ///
 /// 优先读取 CFBundleDisplayName，回退到 CFBundleName。
 /// macOS `defaults read` 对中文字符会输出 \uXXXX 转义序列，这里做解码。
-fn get_app_display_name(app_path: &PathBuf) -> Option<String> {
+fn get_app_display_name(app_path: &Path) -> Option<String> {
     let plist = app_path.join("Contents/Info.plist");
     if !plist.exists() {
         return None;
@@ -1535,7 +1538,7 @@ fn is_app_installed(name: &str, installed_apps: &std::collections::HashSet<Strin
     }
 
     // 去掉常见前缀（如 com.example.）
-    if let Some(stripped) = name.split('.').last() {
+    if let Some(stripped) = name.split('.').next_back() {
         if !stripped.is_empty()
             && (installed_apps.contains(stripped)
                 || installed_apps.contains(&stripped.to_lowercase()))
@@ -1554,10 +1557,11 @@ fn is_app_installed(name: &str, installed_apps: &std::collections::HashSet<Strin
         }
         // 去除空格和标点后比较前缀（如 "AndroidStudio2025" vs "Android Studio"）
         let app_alnum: String = app_lower.chars().filter(|c| c.is_alphanumeric()).collect();
-        if !name_alnum.is_empty() && !app_alnum.is_empty() {
-            if name_alnum.starts_with(&app_alnum) || app_alnum.starts_with(&name_alnum) {
-                return true;
-            }
+        if !name_alnum.is_empty()
+            && !app_alnum.is_empty()
+            && (name_alnum.starts_with(&app_alnum) || app_alnum.starts_with(&name_alnum))
+        {
+            return true;
         }
     }
 

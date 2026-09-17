@@ -18,12 +18,21 @@ pub struct CacheDef {
     /// macOS 路径（~ 代表主目录）
     pub macos_path: &'static str,
     /// Windows 路径（%USERPROFILE% 等环境变量）
+    ///
+    /// 只有 `scan()` 里的 `#[cfg(target_os = "windows")]` 分支会读它。
+    /// 在 macOS 上编译时该分支整段不存在，dead_code 会误报 —— 这里按平台压制，
+    /// 而不是删字段（删了 Windows 侧 37 条缓存定义就全空了）。
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub windows_path: &'static str,
     /// 推荐等级
     pub recommend: Recommend,
     /// 中文描述
     pub desc_zh: &'static str,
     /// 英文描述
+    ///
+    /// 37 条定义的英文文案都已写好，但渲染层目前只读 `desc_zh`。
+    /// 接入英文界面时在这里取（见 README 的「界面国际化」待办）。
+    #[allow(dead_code)]
     pub desc_en: &'static str,
 }
 
@@ -438,10 +447,7 @@ fn expand_path(path: &str, home: &std::path::Path) -> String {
     result
 }
 
-/// 获取注册表条目数（用于 CLI/website 统计）
-pub fn registry_count() -> usize {
-    CACHE_REGISTRY.len()
-}
+// 2026-09-18 删除了 `registry_count`：零引用。
 
 #[cfg(test)]
 mod tests {
