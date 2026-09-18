@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+    type="win32"
+    name="men.sunge.maclean"
+    version="0.2.0.0"
+    processorArchitecture="*"
+  />
+
+  <!--
+    UAC 执行级别：asInvoked（默认不提权）。
+
+    刻意不用 requireAdministrator —— 那会让每次双击启动都弹 UAC，
+    而 maclean 绝大多数清理项（用户缓存、dev 缓存）根本不需要管理员权限。
+    真正需要提权的操作（受保护目录、注册表 HKLM 残留）在代码里按需申请。
+    uiAccess=false：本程序不是无障碍/远程桌面类工具，不该有绕过 UIPI 的能力。
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoked" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <!--
+        长路径感知：对磁盘清理工具是刚需，不是锦上添花。
+
+        Windows 默认 MAX_PATH = 260。npm / node_modules 的嵌套依赖、Java 的
+        深层包目录、构建产物目录，随便一叠就超过 260 字符。没有这一项，
+        扫描器会在这些目录上静默失败或报 ERROR_PATH_NOT_FOUND —— 用户看到
+        的就是"这个缓存扫不出来/删不掉"，而不是"路径太长"。
+
+        开启后需同时满足：OS >= Win10 1607 + 注册表 LongPathsEnabled。
+        manifest 只负责声明，注册表那一项由安装器/文档提示用户开启；
+        即使没开，声明本身也不会让程序变差。
+      -->
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+
+      <!--
+        DPI 感知：permonitorv2（Win10 1703+）。
+        egui 自己按 scale_factor 缩放，但如果进程被系统当 DPI-unaware
+        做位图拉伸，外接显示器间拖窗口会出现模糊。声明后由我们接管缩放。
+        老系统回落到下面那条 SMI/2005 的 dpiAware。
+      -->
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+
+  <!--
+    声明支持的 OS 范围。没有这一段时，Windows 会按"最老兼容模式"给程序
+    打行为补丁（例如 GetVersionEx 撒谎）。显式列出后按真实版本行为走。
+  -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}" /> <!-- Windows Vista -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}" /> <!-- Windows 7 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}" /> <!-- Windows 8 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" /> <!-- Windows 10 / 11 -->
+    </application>
+  </compatibility>
+</assembly>

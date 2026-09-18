@@ -21,6 +21,12 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 sha2 = "0.10"
 
+[build-dependencies]
+# 把 .ico / manifest 编进 Windows exe。选它而不是 winres，是因为它支持
+# 从 macOS 交叉编译到 Windows（winres 只能在 Windows 宿主上跑）。
+# 找不到资源编译器时的行为见 build.rs 里的说明。
+embed-resource = "2"
+
 [features]
 # 开发模式：跳过全部 License / 额度限制，仅用于本地开发调试。
 #
