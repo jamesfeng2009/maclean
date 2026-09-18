@@ -200,14 +200,30 @@ fn static_category_en(cat: &str) -> Option<&'static str> {
 
 /// 翻译描述文本
 ///
-/// 对于含动态参数的描述，使用模式匹配提取静态部分进行翻译。
+/// 查找顺序：**缓存注册表 → 精确匹配表 → 模式匹配**。
+/// 注册表优先是因为它才是每条缓存定义的"唯一真相" —— 中文 `desc_zh`
+/// 与英文 `desc_en` 写在同一个 `CacheDef` 里，加新缓存时必然成对出现。
+///
+/// 2026-09-19 之前的实际状态：注册表里 38 条 `desc_en` 写好了却没人读，
+/// 渲染层只走 i18n 这张手写表，而手写表把那 38 条**又抄了一份**（共 92 条
+/// 里占 38 条）。两份副本当时已经出现 1 处措辞不一致（rbenv：注册表写
+/// "Ruby versions installed by rbenv, confirm before deletion"，手写表写
+/// "rbenv installed Ruby versions, confirm before deleting"）—— 这种漂移
+/// 没有任何编译期保护，改一处忘一处就是线上文案错乱。
+/// 现在注册表优先，手写表里那 38 条重复项已全部删除（92 → 68）。
+///
 /// 未知描述原样返回。
 pub fn translate_description(desc: &str, lang_en: bool) -> String {
     if !lang_en {
         return desc.to_string();
     }
 
-    // 尝试精确匹配
+    // 1. 缓存注册表（唯一真相，覆盖 38 条固定缓存定义）
+    if let Some(en) = registry_description_en(desc) {
+        return en.to_string();
+    }
+
+    // 2. 精确匹配（注册表之外的固定文案：dev_cache / apfs / 系统项等）
     if let Some(en) = exact_description_en(desc) {
         return en.to_string();
     }
@@ -221,7 +237,23 @@ pub fn translate_description(desc: &str, lang_en: bool) -> String {
     desc.to_string()
 }
 
+/// 从缓存注册表查英文描述
+///
+/// 扫描项的描述文本就是 `CacheDef::desc_zh`（见 cache_registry 的扫描循环），
+/// 所以按中文原文反查定义，取同一条定义里写好的 `desc_en`。
+fn registry_description_en(desc: &str) -> Option<&'static str> {
+    crate::scanner::cache_registry::CACHE_REGISTRY
+        .iter()
+        .find(|def| def.desc_zh == desc)
+        .map(|def| def.desc_en)
+}
+
 /// 精确匹配的描述翻译
+///
+/// 这里只放**注册表之外**的文案（dev_cache / apfs / 系统项等固定描述）。
+/// 属于 CACHE_REGISTRY 的描述不要往这里加 —— 2026-09-19 已清掉全部 38 条
+/// 重复项（92 → 68），测试 `registry_descriptions_are_not_duplicated_here`
+/// 会拦住再次重复。
 fn exact_description_en(desc: &str) -> Option<&'static str> {
     match desc {
         "Rust 编译产物，cargo build 会自动重新生成" => {
@@ -285,30 +317,6 @@ fn exact_description_en(desc: &str) -> Option<&'static str> {
         "Python 字节码缓存，运行时自动重建" => {
             Some("Python bytecode cache, auto-rebuilt at runtime")
         }
-        "Ruby Gem 缓存，删除后安装时需重新下载" => {
-            Some("Ruby Gem cache, needs re-download after deletion")
-        }
-        "Ruby Bundler 缓存，可安全删除" => Some("Ruby Bundler cache, safe to delete"),
-        "rbenv 安装的 Ruby 版本，请确认后删除" => {
-            Some("rbenv installed Ruby versions, confirm before deleting")
-        }
-        "PHP Composer 下载缓存，可安全删除" => {
-            Some("PHP Composer download cache, safe to delete")
-        }
-        "Dart/Flutter 包缓存，删除后需重新下载" => {
-            Some("Dart/Flutter package cache, needs re-download after deletion")
-        }
-        "Swift Package Manager 缓存，可安全删除" => {
-            Some("Swift Package Manager cache, safe to delete")
-        }
-        "CocoaPods 缓存，可安全删除" => Some("CocoaPods cache, safe to delete"),
-        "CMake 缓存，可安全删除" => Some("CMake cache, safe to delete"),
-        "Android 模拟器系统镜像，删除后需重新下载" => {
-            Some("Android emulator system images, needs re-download after deletion")
-        }
-        "Yarn 包缓存，可安全删除" => Some("Yarn package cache, safe to delete"),
-        "Deno 缓存，可安全删除" => Some("Deno cache, safe to delete"),
-        "Bun 包缓存，可安全删除" => Some("Bun package cache, safe to delete"),
         "前端构建产物，npm run build 会重新生成" => {
             Some("Frontend build artifacts, npm run build will regenerate")
         }
@@ -431,68 +439,6 @@ fn exact_description_en(desc: &str) -> Option<&'static str> {
             Some("Run TRIM optimization for SSDs, defragmentation for HDDs")
         }
         // === 注册表新增缓存描述 ===
-        "Carthage 依赖构建缓存，可安全删除" => {
-            Some("Carthage dependency build cache, safe to delete")
-        }
-        ".NET NuGet 包缓存，删除后需重新还原" => {
-            Some(".NET NuGet package cache, needs restore after deletion")
-        }
-        "Zig 编译缓存，可安全删除" => Some("Zig build cache, safe to delete"),
-        "Elixir Mix 构建缓存，删除后需重新编译" => {
-            Some("Elixir Mix build cache, needs recompile after deletion")
-        }
-        "Elixir Hex 包缓存，可安全删除" => {
-            Some("Elixir Hex package cache, safe to delete")
-        }
-        "Haskell Stack 编译缓存和工具链，删除后需重新安装" => {
-            Some("Haskell Stack build cache and toolchain, needs reinstall after deletion")
-        }
-        "Nix 包管理器数据库，建议用 nix-collect-garbage 清理" => {
-            Some("Nix package manager database, use nix-collect-garbage to clean")
-        }
-        "Crystal shards 缓存，可安全删除" => Some("Crystal shards cache, safe to delete"),
-        "Julia 包构件缓存，删除后需重新下载" => {
-            Some("Julia package artifacts cache, needs re-download after deletion")
-        }
-        "Nimble 包缓存，删除后需重新下载" => {
-            Some("Nimble package cache, needs re-download after deletion")
-        }
-        "LuaRocks 包缓存，删除后需重新安装" => {
-            Some("LuaRocks package cache, needs reinstall after deletion")
-        }
-        "R 语言包缓存，可安全删除" => Some("R language package cache, safe to delete"),
-        "Bazel 构建缓存，删除后需重新构建" => {
-            Some("Bazel build cache, needs rebuild after deletion")
-        }
-        "Fastlane lane 缓存，可安全删除" => Some("Fastlane lane cache, safe to delete"),
-        "React Native 依赖缓存，可安全删除" => {
-            Some("React Native dependency cache, safe to delete")
-        }
-        "Expo CLI 缓存，可安全删除" => Some("Expo CLI cache, safe to delete"),
-        "VSCode 编辑器缓存，可安全删除" => Some("VSCode editor cache, safe to delete"),
-        "VSCode 缓存的 V8 字节码，可安全删除" => {
-            Some("VSCode cached V8 bytecode, safe to delete")
-        }
-        "Cursor 编辑器缓存，可安全删除" => Some("Cursor editor cache, safe to delete"),
-        "Postman API 工具缓存，可能包含请求历史" => {
-            Some("Postman API tool cache, may contain request history")
-        }
-        "Unity 编辑器缓存，删除后首次打开项目会变慢" => {
-            Some("Unity editor cache, first project open will be slower after deletion")
-        }
-        "Unreal Engine DerivedDataCache，删除后需重新编译着色器" => {
-            Some("Unreal Engine DerivedDataCache, needs shader recompile after deletion")
-        }
-        "Godot 编辑器缓存，可安全删除" => Some("Godot editor cache, safe to delete"),
-        "Terraform 插件缓存，可安全删除" => {
-            Some("Terraform plugin cache, safe to delete")
-        }
-        "Vagrant box 镜像，删除后需重新下载" => {
-            Some("Vagrant box images, needs re-download after deletion")
-        }
-        "Electron 二进制缓存，可安全删除" => {
-            Some("Electron binary cache, safe to delete")
-        }
         _ => None,
     }
 }
@@ -900,6 +846,55 @@ mod tests {
             translate_description("Rust 编译产物，cargo build 会自动重新生成", false),
             "Rust 编译产物，cargo build 会自动重新生成"
         );
+    }
+
+    // ---------- 注册表英文文案（2026-09-19 修的漏翻 bug） ----------
+
+    /// 英文界面下，缓存注册表里的每一条都必须翻成英文。
+    ///
+    /// 修之前注册表根本不参与翻译，全靠手写表里那份副本；那条路径一旦被
+    /// 人改坏（或加新缓存时只写了 desc_zh 忘了同步手写表），英文界面就会
+    /// 静默漏出中文。这条用例钉死"注册表是唯一来源且必须生效"。
+    #[test]
+    fn every_registry_description_translates_to_english() {
+        for def in crate::scanner::cache_registry::CACHE_REGISTRY {
+            let out = translate_description(def.desc_zh, true);
+            assert_eq!(
+                out, def.desc_en,
+                "注册表条目 {} 的英文文案没生效（拿到的是 {:?}）",
+                def.name, out
+            );
+            // 漏翻的典型症状就是结果里还带着中文字符
+            assert!(
+                !out.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "注册表条目 {} 的英文文案里混进了中文: {:?}",
+                def.name,
+                out
+            );
+        }
+    }
+
+    /// 中文模式下必须原样返回，不能被英文污染
+    #[test]
+    fn registry_descriptions_stay_chinese_when_lang_is_zh() {
+        for def in crate::scanner::cache_registry::CACHE_REGISTRY {
+            assert_eq!(translate_description(def.desc_zh, false), def.desc_zh);
+        }
+    }
+
+    /// 单一真相：属于注册表的描述不许再抄一份进 i18n 手写表。
+    ///
+    /// 两份副本内容一致时看不出问题，但改了一处、另一处没跟着改就是乱码级
+    /// 的体验问题，而且没有任何编译期保护 —— 只能靠这条用例拦。
+    #[test]
+    fn registry_descriptions_are_not_duplicated_here() {
+        for def in crate::scanner::cache_registry::CACHE_REGISTRY {
+            assert!(
+                exact_description_en(def.desc_zh).is_none(),
+                "{} 的英文文案在注册表和 i18n 手写表里各有一份，删掉手写表那条",
+                def.name
+            );
+        }
     }
 
     #[test]

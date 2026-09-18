@@ -21,7 +21,7 @@ pub struct CacheDef {
     ///
     /// 只有 `scan()` 里的 `#[cfg(target_os = "windows")]` 分支会读它。
     /// 在 macOS 上编译时该分支整段不存在，dead_code 会误报 —— 这里按平台压制，
-    /// 而不是删字段（删了 Windows 侧 37 条缓存定义就全空了）。
+    /// 而不是删字段（删了 Windows 侧 38 条缓存定义就全空了）。
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub windows_path: &'static str,
     /// 推荐等级
@@ -30,13 +30,15 @@ pub struct CacheDef {
     pub desc_zh: &'static str,
     /// 英文描述
     ///
-    /// 37 条定义的英文文案都已写好，但渲染层目前只读 `desc_zh`。
-    /// 接入英文界面时在这里取（见 README 的「界面国际化」待办）。
-    #[allow(dead_code)]
+    /// 这是英文文案的**唯一来源**：`i18n::registry_description_en` 按 `desc_zh`
+    /// 反查本条定义取这里的 `desc_en`。2026-09-19 之前它无人读取，英文界面
+    /// 全靠 i18n 手写表里那份副本，两份已经漂出 1 处措辞差异。
+    ///
+    /// 加新缓存时 `desc_zh` / `desc_en` 必须成对写。
     pub desc_en: &'static str,
 }
 
-/// 统一缓存注册表：37 个固定路径缓存
+/// 统一缓存注册表：38 个固定路径缓存
 ///
 /// 另有 ~15 个复杂扫描器（Xcode/Docker/AI 模型等）在 dev_cache.rs 中单独实现，
 /// 加上 8 种构建产物递归扫描，总计 60+ 类别。
@@ -455,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_registry_has_50_plus_entries() {
-        // 注册表本身 37 条 + 复杂扫描器 ~15 + 构建产物 8 = 60+
+        // 注册表本身 38 条 + 复杂扫描器 ~15 + 构建产物 8 = 60+
         assert!(
             CACHE_REGISTRY.len() >= 30,
             "注册表至少 30 条，当前 {}",
