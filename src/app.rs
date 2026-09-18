@@ -29,6 +29,29 @@ fn filter_deletable(
         .collect()
 }
 
+/// 把「扫描全部磁盘」设置推给 Windows 扫描器
+///
+/// 非 Windows 上是 no-op：该设置只影响 Program Files 的盘符枚举，macOS 没有
+/// 多盘符概念。抽成函数是为了让"设置 → 扫描器"这条线只存在一个地方，
+/// 不要在每个调用点各写一遍 cfg。
+fn apply_scan_all_disks(enabled: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        crate::scanner::windows_apps::set_scan_all_disks(enabled);
+        if enabled {
+            let disks: Vec<String> = crate::scanner::windows_apps::list_available_disks()
+                .iter()
+                .map(|c| format!("{}:", c))
+                .collect();
+            crate::logger::info(&format!(
+                "多磁盘扫描已开启，检测到盘符: {}",
+                disks.join(" ")
+            ));
+        }
+    }
+    let _ = enabled;
+}
+
 fn touch_id_available_cross() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -292,6 +315,11 @@ pub struct App {
     pub settings_keep_sudo: bool,
     /// 扫描结果本地缓存
     pub settings_scan_cache: bool,
+    /// 扫描全部磁盘（仅 Windows 生效）
+    ///
+    /// 影响 Program Files 目录扫描：默认只扫 C 盘，开启后同时扫 D/E/... 盘符。
+    /// 注册表扫描不受影响（UninstallString 本来就含完整路径）。
+    pub settings_scan_all_disks: bool,
     /// 删除前二次确认（Advanced 项目）
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS only）
@@ -404,7 +432,7 @@ impl App {
             }
         });
 
-        Self {
+        let app = Self {
             tab: Tab::Overview,
             results: [
                 Vec::new(),
@@ -440,6 +468,7 @@ impl App {
             settings_menubar_icon: user_config.settings_menubar_icon,
             settings_keep_sudo: user_config.settings_keep_sudo,
             settings_scan_cache: user_config.settings_scan_cache,
+            settings_scan_all_disks: user_config.settings_scan_all_disks,
             settings_confirm_advanced: user_config.settings_confirm_advanced,
             settings_prevent_lid_close: user_config.settings_prevent_lid_close,
             settings_auto_restore_point: user_config.settings_auto_restore_point,
@@ -489,7 +518,12 @@ impl App {
             update_dismissed: false,
             #[cfg(target_os = "windows")]
             uninstall_residual: None,
-        }
+        };
+
+        // 启动即把持久化的设置推给扫描器：静态量默认是"仅 C 盘"，
+        // 不推的话用户上一次开的开关在这次启动里是失效的。
+        apply_scan_all_disks(app.settings_scan_all_disks);
+        app
     }
 
     /// 获取当前 Tab 索引
@@ -1250,11 +1284,14 @@ impl App {
         self.user_config.settings_menubar_icon = self.settings_menubar_icon;
         self.user_config.settings_keep_sudo = self.settings_keep_sudo;
         self.user_config.settings_scan_cache = self.settings_scan_cache;
+        self.user_config.settings_scan_all_disks = self.settings_scan_all_disks;
         self.user_config.settings_confirm_advanced = self.settings_confirm_advanced;
         self.user_config.settings_prevent_lid_close = self.settings_prevent_lid_close;
         self.user_config.settings_auto_restore_point = self.settings_auto_restore_point;
         self.user_config.dark_mode = self.dark_mode;
         crate::config::save_config(&self.user_config);
+        // 设置必须立刻推给扫描器，否则要等下次启动才生效
+        apply_scan_all_disks(self.settings_scan_all_disks);
     }
 
     /// 当前配色模式
@@ -1303,6 +1340,10 @@ impl App {
                 "setting_keep_sudo_desc" => "Avoid repeated administrator password prompts",
                 "setting_scan_cache" => "Cache scan results locally",
                 "setting_scan_cache_desc" => "Avoid re-scanning within 7 days for faster startup",
+                "setting_scan_all_disks" => "Scan all disks",
+                "setting_scan_all_disks_desc" => {
+                    "C: only by default. Enabling also scans Program Files on D:/E:/etc."
+                },
                 "setting_confirm_advanced" => "Double-check before deleting Advanced items",
                 "setting_confirm_advanced_desc" => "Advanced items require manual confirmation",
                 "setting_prevent_lid_close" => "Prevent deletion while lid is closed",
@@ -1673,6 +1714,8 @@ impl App {
                 "setting_keep_sudo_desc" => "避免重复输入管理员密码",
                 "setting_scan_cache" => "扫描结果本地缓存",
                 "setting_scan_cache_desc" => "7 天内避免重复扫描，加速启动",
+                "setting_scan_all_disks" => "扫描全部磁盘",
+                "setting_scan_all_disks_desc" => "默认只扫 C 盘；开启后同时扫描 D/E 等盘符的 Program Files",
                 "setting_confirm_advanced" => "删除前二次确认",
                 "setting_confirm_advanced_desc" => "Advanced 项目必须手动确认",
                 "setting_prevent_lid_close" => "合盖时禁止删除",
@@ -2188,6 +2231,61 @@ mod tests {
             .next()
             .unwrap();
         assert!(region.contains("is_supported()"), "侧栏没有按平台过滤 Tab");
+    }
+
+    // -----------------------------------------------------------------
+    //  多磁盘扫描设置（W-2）
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn scan_all_disks_defaults_to_c_drive_only() {
+        // 默认只扫 C 盘。开全盘会更慢，也会把其它系统盘的 Program Files
+        // 一起算进来 —— 属于"用户明确要求才开"的开关。
+        assert!(!crate::config::AppConfig::default().settings_scan_all_disks);
+    }
+
+    #[test]
+    fn scan_all_disks_setting_reaches_the_scanner() {
+        // 之前 set_scan_all_disks / list_available_disks 就是"写了但没人调"：
+        // 扫描器内部确实读 should_scan_all_disks()，可没有任何地方去 set，
+        // 于是静态量永远是 false。光在 UI 上加开关不够，必须真的推过去。
+        let src = include_str!("app.rs");
+        let new_body = src[src.find("pub fn new() -> Self {").expect("App::new")..]
+            .split("\n    /// 获取当前 Tab 索引")
+            .next()
+            .unwrap();
+        assert!(
+            new_body.contains("apply_scan_all_disks("),
+            "App::new 没有把设置推给扫描器，上次的选择会失效"
+        );
+        let save_body = src[src.find("pub fn save_settings(").expect("save_settings")..]
+            .split("\n    pub fn theme_mode(")
+            .next()
+            .unwrap();
+        assert!(
+            save_body.contains("apply_scan_all_disks("),
+            "save_settings 没有把设置推给扫描器，要等重启才生效"
+        );
+    }
+
+    #[test]
+    fn scan_all_disks_change_is_written_back_to_disk() {
+        // 设置页的"变更自动保存"靠对比两个快照元组（入口 + 离开设置页时）。
+        // 两处都得带上新字段，漏一处开关就写不回盘。
+        let src = include_str!("ui/mod.rs");
+        // 1 处渲染 + 2 处快照元组
+        assert_eq!(
+            src.matches("app.settings_scan_all_disks,").count(),
+            3,
+            "设置项或快照元组漏了 settings_scan_all_disks"
+        );
+    }
+
+    #[test]
+    fn applying_scan_all_disks_outside_windows_is_a_noop() {
+        // 非 Windows 上该设置无意义，但调用不得 panic（cfg 分支里已处理）
+        apply_scan_all_disks(true);
+        apply_scan_all_disks(false);
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub struct AppConfig {
     pub settings_keep_sudo: bool,
     /// 扫描结果本地缓存
     pub settings_scan_cache: bool,
+    /// 扫描全部磁盘（仅 Windows 生效，默认只扫 C 盘）
+    pub settings_scan_all_disks: bool,
     /// 删除前二次确认（Advanced 项目）
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS）
@@ -62,6 +64,7 @@ impl Default for AppConfig {
             settings_menubar_icon: true,
             settings_keep_sudo: true,
             settings_scan_cache: true,
+            settings_scan_all_disks: false,
             settings_confirm_advanced: true,
             settings_prevent_lid_close: true,
             settings_auto_restore_point: true,

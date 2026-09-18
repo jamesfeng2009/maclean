@@ -5506,6 +5506,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_menubar_icon,
         app.settings_keep_sudo,
         app.settings_scan_cache,
+        app.settings_scan_all_disks,
         app.settings_confirm_advanced,
         app.settings_prevent_lid_close,
         app.settings_auto_restore_point,
@@ -5572,6 +5573,15 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                             app.t("setting_scan_cache"),
                             app.t("setting_scan_cache_desc"),
                             &mut app.settings_scan_cache,
+                            true,
+                        );
+                        // 只在 Windows 显示：macOS 没有盘符概念，显示了是噪音
+                        #[cfg(target_os = "windows")]
+                        render_settings_item(
+                            ui,
+                            app.t("setting_scan_all_disks"),
+                            app.t("setting_scan_all_disks_desc"),
+                            &mut app.settings_scan_all_disks,
                             true,
                         );
                     });
@@ -5969,6 +5979,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_menubar_icon,
         app.settings_keep_sudo,
         app.settings_scan_cache,
+        app.settings_scan_all_disks,
         app.settings_confirm_advanced,
         app.settings_prevent_lid_close,
         app.settings_auto_restore_point,
