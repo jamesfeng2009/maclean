@@ -96,9 +96,35 @@ impl Tab {
         ]
     }
 
-    /// 下一个 Tab
-    pub fn next(self) -> Self {
+    /// 该 Tab 在当前平台是否有内容
+    ///
+    /// APFS 快照是 macOS 专有（`tmutil` / `xcrun simctl`）。之前 `Tab::all()`
+    /// 不按平台过滤，Windows 上照样显示这个页签，扫描分发又直接返回空结果，
+    /// 用户看到的是"扫过了、什么都没有"，而不是"这个平台没这功能"。
+    ///
+    /// 索引**不能**因为过滤而前移：`results` 是 `[Vec<ScanItem>; 9]`，按
+    /// Tab 在 `all()` 里的下标寻址。所以这里只做"显示/跳过"，不改 `all()`。
+    pub fn is_supported(self) -> bool {
         match self {
+            Tab::Apfs => cfg!(target_os = "macos"),
+            _ => true,
+        }
+    }
+
+    /// 参与扫描的 Tab 及其在 `all()` 中的下标（跳过 Overview，按平台过滤）
+    pub fn scannable() -> Vec<(Tab, usize)> {
+        Tab::all()
+            .iter()
+            .enumerate()
+            .skip(1) // Overview 不单独扫描
+            .filter(|(_, tab)| tab.is_supported())
+            .map(|(idx, tab)| (*tab, idx))
+            .collect()
+    }
+
+    /// 下一个 Tab（自动跳过当前平台不支持的）
+    pub fn next(self) -> Self {
+        let raw_next = |t: Tab| match t {
             Tab::Overview => Tab::DevCache,
             Tab::DevCache => Tab::LargeFiles,
             Tab::LargeFiles => Tab::AppCache,
@@ -108,7 +134,17 @@ impl Tab {
             Tab::SystemOptimize => Tab::Apfs,
             Tab::Apfs => Tab::Settings,
             Tab::Settings => Tab::Overview,
+        };
+        let mut t = raw_next(self);
+        // 上限是 Tab 总数：最坏情况绕一圈也必然停；写死上限防止将来
+        // is_supported 改动时变成死循环。
+        for _ in 0..Tab::all().len() {
+            if t.is_supported() {
+                break;
+            }
+            t = raw_next(t);
         }
+        t
     }
 }
 
@@ -2080,6 +2116,78 @@ mod tests {
             description: String::new(),
             batch_paths: Vec::new(),
         }
+    }
+
+    // -----------------------------------------------------------------
+    //  Tab 平台可用性（W-3）
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn apfs_tab_exists_only_on_macos() {
+        assert_eq!(Tab::Apfs.is_supported(), cfg!(target_os = "macos"));
+        // 其它 Tab 必须两平台都可用，否则 Windows 会多出第二个空页签
+        for t in [
+            Tab::Overview,
+            Tab::DevCache,
+            Tab::LargeFiles,
+            Tab::AppCache,
+            Tab::AppData,
+            Tab::AppUninstall,
+            Tab::SystemOptimize,
+            Tab::Settings,
+        ] {
+            assert!(t.is_supported(), "{:?} 不应被平台过滤", t);
+        }
+    }
+
+    #[test]
+    fn tab_indices_stay_aligned_with_results() {
+        // results 是 [Vec<ScanItem>; 9]，按 Tab::all() 的下标寻址。
+        // 平台过滤只能"跳过显示"，绝不能改变 all() 的长度或顺序，
+        // 否则会删错 Tab 的数据。
+        assert_eq!(Tab::all().len(), 9);
+        // results 是定长数组，长度写死在类型里；用源码钉住两者必须一致。
+        // 一旦有人往 Tab 加变体却忘了扩 results，下标就会静默错位。
+        assert!(
+            include_str!("app.rs").contains("pub results: [Vec<ScanItem>; 9],"),
+            "results 数组长度变了，必须同步 Tab::all()"
+        );
+    }
+
+    #[test]
+    fn next_tab_never_lands_on_an_unsupported_tab() {
+        let mut t = Tab::Overview;
+        for _ in 0..Tab::all().len() {
+            t = t.next();
+            assert!(t.is_supported(), "next() 落在了不支持的 Tab: {:?}", t);
+        }
+        // 绕一圈必须回到起点：证明跳过逻辑没有把环走死
+        assert_eq!(t, Tab::Overview);
+    }
+
+    #[test]
+    fn scannable_tabs_exclude_unsupported_and_overview() {
+        let scannable = Tab::scannable();
+        assert!(scannable.iter().all(|(t, _)| t.is_supported()));
+        assert!(!scannable.iter().any(|(t, _)| *t == Tab::Overview));
+        // all() 9 个里跳过 Overview，剩 8 个；非 macOS 再去掉 Apfs → 7 个
+        let expected = if cfg!(target_os = "macos") { 8 } else { 7 };
+        assert_eq!(scannable.len(), expected, "实际: {:?}", scannable);
+        // 下标必须是 all() 里的真实下标，不能是过滤后重排的序号
+        for (t, idx) in &scannable {
+            assert_eq!(Tab::all()[*idx], *t);
+        }
+    }
+
+    #[test]
+    fn sidebar_skips_unsupported_tabs() {
+        // 源码级：侧栏必须过滤，否则 Windows 上会渲染一个永远为空的页签。
+        let src = include_str!("ui/mod.rs");
+        let region = src[src.find("导航项列表").expect("找不到侧栏")..]
+            .split("\n                }\n")
+            .next()
+            .unwrap();
+        assert!(region.contains("is_supported()"), "侧栏没有按平台过滤 Tab");
     }
 
     #[test]

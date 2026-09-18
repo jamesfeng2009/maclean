@@ -167,7 +167,9 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
                 Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
                 #[cfg(target_os = "macos")]
                 Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
-                #[cfg(target_os = "macos")]
+                // OptimizeScanner 内部已按平台分流（macOS 8 项 / Windows 10 项），
+                // 这里绝不能加 cfg(macos)：加了之后 Windows 上这个 Tab 恒为空，
+                // 而 windows_optimize_tasks() 那 10 项永远跑不到。
                 Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
                 #[cfg(target_os = "macos")]
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
@@ -218,7 +220,7 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
                     }
                 }
                 #[cfg(not(target_os = "macos"))]
-                Tab::SystemOptimize | Tab::Apfs => scanner::ScanResult {
+                Tab::Apfs => scanner::ScanResult {
                     items: Vec::new(),
                     total_size: 0,
                     scan_time_ms: 0,
@@ -296,11 +298,9 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
     });
 
     std::thread::spawn(move || {
-        let tabs_to_scan: Vec<(Tab, u64)> = Tab::all()
-            .iter()
-            .enumerate()
-            .skip(1) // 跳过 Overview
-            .map(|(idx, tab)| (*tab, idx as u64))
+        let tabs_to_scan: Vec<(Tab, u64)> = Tab::scannable()
+            .into_iter()
+            .map(|(tab, idx)| (tab, idx as u64))
             .collect();
 
         for (tab, tab_idx) in tabs_to_scan {
@@ -346,7 +346,9 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                 Tab::AppData => scanner::app_data::AppDataScanner::new().scan(),
                 #[cfg(target_os = "macos")]
                 Tab::AppUninstall => scanner::uninstall::UninstallScanner::new().scan(),
-                #[cfg(target_os = "macos")]
+                // OptimizeScanner 内部已按平台分流（macOS 8 项 / Windows 10 项），
+                // 这里绝不能加 cfg(macos)：加了之后 Windows 上这个 Tab 恒为空，
+                // 而 windows_optimize_tasks() 那 10 项永远跑不到。
                 Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
                 #[cfg(target_os = "macos")]
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
@@ -396,7 +398,7 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                     }
                 }
                 #[cfg(not(target_os = "macos"))]
-                Tab::SystemOptimize | Tab::Apfs => scanner::ScanResult {
+                Tab::Apfs => scanner::ScanResult {
                     items: Vec::new(),
                     total_size: 0,
                     scan_time_ms: 0,

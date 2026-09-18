@@ -115,6 +115,18 @@ const ALL_TABS: &[(&str, &str)] = &[
     ("apfs", "APFS快照"),
 ];
 
+/// 该扫描类别在当前平台是否有对应扫描器
+///
+/// `scan_tab` 里 "apfs" 只有 `#[cfg(target_os = "macos")]` 分支，其它平台
+/// 落到 `_ => Vec::new()`。`--deep` 和 `list` 若不过滤，Windows 上会打印一个
+/// 恒为 0 项的「APFS快照」—— 用户以为扫过了没东西，其实是这个平台没有。
+fn tab_supported(name: &str) -> bool {
+    match name {
+        "apfs" => cfg!(target_os = "macos"),
+        _ => true,
+    }
+}
+
 fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
     match tab_name {
         "dev-cache" => DevCacheScanner::new().scan().items,
@@ -159,6 +171,7 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
     let tabs: Vec<(String, String)> = if deep {
         ALL_TABS
             .iter()
+            .filter(|(k, _)| tab_supported(k))
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
     } else if let Some(t) = &tab {
@@ -411,7 +424,7 @@ fn cmd_check_disk() {
 
 fn cmd_list() {
     println!("\nmaclean 可用扫描类别：\n");
-    for (key, label) in ALL_TABS {
+    for (key, label) in ALL_TABS.iter().filter(|(k, _)| tab_supported(k)) {
         println!("  {:<16}  {}", format!("--tab {}", key), label);
     }
     println!("\n用法示例：");

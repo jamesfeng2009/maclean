@@ -2376,6 +2376,12 @@ pub(crate) fn render_gui(
                 // --- 导航项列表 ---
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (i, tab) in Tab::all().iter().enumerate() {
+                    // APFS 在 Windows 上不存在，页签必须整个隐藏；只是让它空着，
+                    // 用户会以为"扫过了没东西"。下标 i 仍按 all() 走，
+                    // 与 results[9] 的寻址保持一致。
+                    if !tab.is_supported() {
+                        continue;
+                    }
                     let count = app.results[i].len();
                     let is_selected = *tab == app.tab;
                     let title = tab_title(tab, app);
