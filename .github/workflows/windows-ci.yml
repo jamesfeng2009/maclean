@@ -61,8 +61,61 @@ jobs:
         # 注意：release 构建不得启用 dev-mode feature，否则打出的 exe 人人免费用
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      - name: 校验资源已嵌入 exe
+        # 光"构建成功"不能说明图标/manifest 进去了 —— 从 macOS 交叉编译时
+        # embed-resource 找不到编译器是**静默跳过**的（build.rs 只打 warning）。
+        #
+        # 这里直接查 exe 本体，而不是查中间产物 maclean.lib：
+        # 中间产物可能被 actions/cache 恢复的旧 target/ 污染（假阳性），
+        # 而 exe 路径是唯一的，查它才是真的在验"要发出去的那个文件"。
+        #
+        # 用 pwsh 而不是 bash grep，因为两种资源在文件里的编码不同：
+        #   - manifest（RT_MANIFEST）按原文件字节存，XML 是 UTF-8/ASCII
+        #   - VERSIONINFO 的字符串是 **UTF-16LE**
+        # 拿 ASCII 去 grep "sunge.men" 永远命中不了（实测确认过），
+        # 那样只会得到一个永远红的 CI。所以分别按两种编码解码后再查。
+        shell: pwsh
+        run: |
+          $exe = "target/x86_64-pc-windows-msvc/release/maclean.exe"
+          if (-not (Test-Path $exe)) { throw "未找到 $exe" }
+
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $utf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
+
+          if (-not $ascii.Contains("longPathAware")) { throw "manifest 未嵌入：缺 longPathAware" }
+          if (-not $ascii.Contains("permonitorv2"))  { throw "manifest 未嵌入：缺 dpiAwareness" }
+          if (-not $utf16.Contains("sunge.men"))     { throw "VERSIONINFO 未嵌入：缺 CompanyName" }
+
+          Write-Host "资源已嵌入 exe：manifest（长路径 + DPI）+ 版本信息"
+
+      - name: 打包发布产物
+        # 之前只上传裸 exe，用户下载后没有校验手段、也没有版本标识。
+        # 这里产出带版本号的 zip + SHA256，版本号从 Cargo.toml 取（唯一来源）。
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "版本: $VERSION"
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/maclean.exe dist/
+          cp README.md dist/ 2>/dev/null || echo "（无 README，跳过）"
+          cd dist
+          # sha256 只覆盖 exe：README 会随文档改动而变，不该让校验和漂移。
+          # certutil 会输出标题行和状态行，只取 64 位十六进制那一行。
+          if command -v certutil >/dev/null 2>&1; then
+            certutil -hashfile maclean.exe SHA256 | grep -E '^[0-9a-fA-F]{64}$' > maclean.exe.sha256
+          else
+            sha256sum maclean.exe | cut -d' ' -f1 > maclean.exe.sha256
+          fi
+          # 拿不到就红 —— 宁可没产物，也不要发一个无法校验的包
+          grep -qE '^[0-9a-fA-F]{64}$' maclean.exe.sha256 || {
+            echo "错误：未能生成 SHA256 校验和" >&2; exit 1; }
+          cat maclean.exe.sha256
+          cd ..
+          mv dist "maclean-windows-x86_64-$VERSION"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: maclean-windows-x86_64
-          path: target/x86_64-pc-windows-msvc/release/maclean.exe
+          path: maclean-windows-x86_64-*
