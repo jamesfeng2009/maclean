@@ -7,7 +7,13 @@
 //!
 //! License Key 格式:
 //!   MACL-<base64url(payload_json)>-<base64url(signature)>
-//! payload: { "email": "...", "plan": "lifetime", "iat": 1735689600, "mid": "<机器指纹哈希,可选>" }
+//! payload: { "email": "...", "plan": "lifetime", "iat": 1735689600, "mid": "<机器指纹哈希,可选>",
+//!            "v": 2, "exp": 0, "jti": "<key id>" }
+//!
+//! payload 自 v2 起的三个字段（全部 `#[serde(default)]`，老 key 不受影响）：
+//! - `v`    schema 版本，缺省视为 1
+//! - `exp`  过期时间（Unix 秒），0 = 永不过期。yearly 由 keygen 写 `iat + 365d`
+//! - `jti`  key id，吊销用。签出时必须记进销售台账，否则将来无从吊销
 //!
 //! 免费额度策略（Freemium）：
 //! - 扫描功能永久免费
@@ -52,6 +58,22 @@ pub struct LicensePayload {
     /// 绑定的机器指纹哈希（可选，空表示不绑定）
     #[serde(default)]
     pub mid: String,
+    /// schema 版本（缺省 1 = 只有上面四个字段）
+    #[serde(default = "default_schema_version")]
+    pub v: u8,
+    /// 过期时间（Unix 秒），0 = 永不过期
+    #[serde(default)]
+    pub exp: u64,
+    /// key id：吊销用。签发时由 keygen 生成，需记进销售台账
+    #[serde(default)]
+    pub jti: String,
+}
+
+/// 当前支持的 payload schema 版本
+pub const LICENSE_SCHEMA_VERSION: u8 = 2;
+
+fn default_schema_version() -> u8 {
+    1
 }
 
 /// License 验证结果
@@ -95,12 +117,27 @@ const PUBLIC_KEY_HEX: &str = "76016327957f69e12fafca74e154b0654718b11763c3109429
 
 /// 验证 License Key 是否合法
 ///
+/// 校验流程见 [`verify_license_inner`]。这里只负责取当前时间。
+pub fn verify_license(key: &str) -> Result<LicensePayload, String> {
+    verify_license_inner(key, PUBLIC_KEY_HEX, monotone_now())
+}
+
+/// 验证的全部逻辑，时间与公钥都由入参给出
+///
+/// 拆成这个签名是为了可测：exp 判定依赖"当前时间"，而单调时钟要读文件。
+/// 让调用方传 now，测试就能直接构造"过去/未来"而不用去改系统时钟。
+///
 /// 校验流程：
 /// 1. 格式拆分（MACL-<payload>-<sig>）
 /// 2. base64url 解码 payload 和签名
 /// 3. Ed25519 公钥验证签名
 /// 4. 若 payload 绑定了机器指纹，校验本机是否匹配
-pub fn verify_license(key: &str) -> Result<LicensePayload, String> {
+/// 5. 若 payload 带 exp，校验是否过期
+pub(crate) fn verify_license_inner(
+    key: &str,
+    pubkey_hex: &str,
+    now: u64,
+) -> Result<LicensePayload, String> {
     let key = key.trim();
     if !key.starts_with("MACL-") {
         return Err("无效的 License 格式（应以 MACL- 开头）".to_string());
@@ -123,7 +160,7 @@ pub fn verify_license(key: &str) -> Result<LicensePayload, String> {
         .map_err(|_| "License 签名解码失败".to_string())?;
 
     let pubkey_bytes =
-        hex_decode(PUBLIC_KEY_HEX).map_err(|_| "内置公钥未配置，请联系作者".to_string())?;
+        hex_decode(pubkey_hex).map_err(|_| "内置公钥未配置，请联系作者".to_string())?;
     let pubkey_array: [u8; 32] = pubkey_bytes
         .try_into()
         .map_err(|_| "内置公钥格式错误".to_string())?;
@@ -142,6 +179,11 @@ pub fn verify_license(key: &str) -> Result<LicensePayload, String> {
     let payload: LicensePayload =
         serde_json::from_slice(&payload_bytes).map_err(|_| "License 内容解析失败".to_string())?;
 
+    // schema 版本：高于本程序支持的版本说明协议变了，按未知字段硬解会误判
+    if payload.v > LICENSE_SCHEMA_VERSION {
+        return Err("License 版本高于本程序支持的范围，请升级 maclean".to_string());
+    }
+
     // 机器绑定校验
     if !payload.mid.is_empty() {
         let local = machine_hash();
@@ -150,7 +192,64 @@ pub fn verify_license(key: &str) -> Result<LicensePayload, String> {
         }
     }
 
+    // 过期校验（exp = 0 表示永不过期）
+    if is_expired(payload.exp, now) {
+        return Err("License 已过期，请续期".to_string());
+    }
+
     Ok(payload)
+}
+
+/// 过期判定（纯函数）
+///
+/// `exp == 0` 约定为永不过期（lifetime）。
+pub(crate) fn is_expired(exp: u64, now: u64) -> bool {
+    exp != 0 && now > exp
+}
+
+/// 单调时钟的推进规则（纯函数）
+///
+/// 取「系统时间」与「上次观测到的时间」的较大值：用户把系统时间调回过去
+/// 不会让 exp 变远，只会让 last_seen 停住。这是防"改日期续命"的关键。
+pub(crate) fn next_monotonic(sys_now: u64, last_seen: u64) -> u64 {
+    sys_now.max(last_seen)
+}
+
+/// 单调时钟：读 clock.json → 推进 → 写回
+///
+/// 任何读写失败都退回系统时间，绝不因为读不到文件就把用户踢成免费版。
+fn monotone_now() -> u64 {
+    let sys_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let path = clock_path();
+    let last_seen = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<ClockRecord>(&t).ok())
+        .map(|r| r.last_seen)
+        .unwrap_or(0);
+
+    let now = next_monotonic(sys_now, last_seen);
+    if now > last_seen {
+        if let Ok(text) = serde_json::to_string(&ClockRecord { last_seen: now }) {
+            let _ = std::fs::create_dir_all(config_dir());
+            let _ = std::fs::write(&path, text);
+        }
+    }
+    now
+}
+
+/// 单调时钟的持久化记录
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ClockRecord {
+    last_seen: u64,
+}
+
+/// 时钟记录存储路径
+fn clock_path() -> PathBuf {
+    config_dir().join("clock.json")
 }
 
 // =========================================================================
@@ -451,6 +550,124 @@ mod tests {
         assert_eq!(payload.email, "test@example.com");
         assert_eq!(payload.plan, "pro");
         assert!(payload.mid.is_empty());
+    }
+
+    // ---------- L1: exp / jti / 单调时钟 ----------
+    //
+    // 上面那条端到端用例用的是 vendor 私钥签发的固定 key，改不了 exp。
+    // 要覆盖过期分支就得自己签 —— 测试里生成一把固定种子的密钥对，
+    // 走 `verify_license_inner` 的 pubkey 入参，不碰内置公钥。
+
+    /// 固定种子的测试密钥对（种子写死，签名可复现）
+    fn test_pubkey_hex() -> String {
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        hex_encode(&signing.verifying_key().to_bytes())
+    }
+
+    /// 用测试私钥签一份 payload
+    fn sign_test(payload_json: &str) -> String {
+        use ed25519_dalek::Signer;
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let sig = signing.sign(payload_json.as_bytes());
+        format!(
+            "MACL-{}.{}",
+            URL_SAFE_NO_PAD.encode(payload_json.as_bytes()),
+            URL_SAFE_NO_PAD.encode(sig.to_bytes())
+        )
+    }
+
+    /// mid 留空（不绑机器），否则测试机上指纹对不上
+    fn payload_json_with(exp: u64) -> String {
+        format!(
+            r#"{{"email":"a@b.com","plan":"yearly","iat":1700000000,"mid":"","v":2,"exp":{},"jti":"test-jti"}}"#,
+            exp
+        )
+    }
+
+    #[test]
+    fn expired_license_is_rejected() {
+        let key = sign_test(&payload_json_with(1700000001));
+        let err = verify_license_inner(&key, &test_pubkey_hex(), 1700000002)
+            .expect_err("过期的 key 必须被拒");
+        assert!(err.contains("过期"), "错误信息应说明过期，实际: {}", err);
+    }
+
+    #[test]
+    fn unexpired_license_is_accepted() {
+        let key = sign_test(&payload_json_with(1700000001));
+        let payload = verify_license_inner(&key, &test_pubkey_hex(), 1700000001)
+            .expect("有效期内的 key 必须通过");
+        assert_eq!(payload.exp, 1700000001);
+        assert_eq!(payload.jti, "test-jti");
+    }
+
+    #[test]
+    fn exp_zero_never_expires() {
+        // lifetime：exp = 0，即使 now 很远也必须通过
+        let key = sign_test(&payload_json_with(0));
+        verify_license_inner(&key, &test_pubkey_hex(), u64::MAX / 2).expect("exp=0 表示永不过期");
+    }
+
+    #[test]
+    fn old_v1_payload_still_verifies() {
+        // 老 key 没有 v/exp/jti 三个字段，靠 #[serde(default)] 兼容：
+        // v 视为 1、exp 视为 0（永不过期）、jti 为空
+        let key = sign_test(r#"{"email":"old@b.com","plan":"lifetime","iat":1600000000,"mid":""}"#);
+        let payload =
+            verify_license_inner(&key, &test_pubkey_hex(), 1800000000).expect("v1 key 仍须通过");
+        assert_eq!(payload.v, 1);
+        assert_eq!(payload.exp, 0);
+        assert!(payload.jti.is_empty());
+    }
+
+    #[test]
+    fn future_schema_version_is_rejected() {
+        let key =
+            sign_test(r#"{"email":"a@b.com","plan":"x","iat":1,"mid":"","v":9,"exp":0,"jti":""}"#);
+        let err = verify_license_inner(&key, &test_pubkey_hex(), 1800000000)
+            .expect_err("高于本程序支持的 schema 应被拒");
+        assert!(err.contains("版本"), "实际: {}", err);
+    }
+
+    #[test]
+    fn monotone_clock_does_not_go_backwards() {
+        // 用户把系统时间调回过去：now 停在 last_seen，exp 不会跟着变远
+        assert_eq!(next_monotonic(1000, 2000), 2000);
+        assert_eq!(next_monotonic(3000, 2000), 3000);
+        assert_eq!(next_monotonic(2000, 2000), 2000);
+        // 首次运行（无记录）
+        assert_eq!(next_monotonic(1234, 0), 1234);
+    }
+
+    #[test]
+    fn rolling_back_the_clock_does_not_revive_an_expired_license() {
+        // 这是最容易踩的坑：光用 SystemTime 比较，改一下系统日期就能续命。
+        // 单调时钟保证 now 不会低于上次观测值。
+        let exp = 1700000001;
+        let key = sign_test(&payload_json_with(exp));
+
+        // 上次观测到 1700000002（已过期），用户把系统时间调回 1600000000
+        let now = next_monotonic(1600000000, 1700000002);
+        assert_eq!(now, 1700000002, "时钟不得回退");
+        verify_license_inner(&key, &test_pubkey_hex(), now)
+            .expect_err("把系统时间调回过去不应让过期的 key 复活");
+    }
+
+    #[test]
+    fn expired_key_does_not_pass_through_the_public_entrypoint() {
+        // 上面测的都是 inner。这里钉住"公开入口也传了 now"这件事 ——
+        // 否则 verify_license 忘记传时间、过期校验就成了死代码。
+        let src = include_str!("license.rs");
+        let body = src[src
+            .find("pub fn verify_license(")
+            .expect("找不到 verify_license")..]
+            .split("\npub(crate) fn verify_license_inner")
+            .next()
+            .unwrap();
+        assert!(
+            body.contains("monotone_now()"),
+            "verify_license 没有把当前时间传给校验逻辑，exp 校验不会生效"
+        );
     }
 
     #[test]

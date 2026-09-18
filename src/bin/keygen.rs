@@ -4,6 +4,10 @@
 //!   maclean-keygen init                          生成密钥对（一次性，打印公钥用于内置 App）
 //!   maclean-keygen sign --email a@b.com          签发 License（不绑定机器）
 //!   maclean-keygen sign --email a@b.com --mid <hash>  签发并绑定机器指纹
+//!   maclean-keygen sign --email a@b.com --plan yearly  一年期（自动写 exp = iat + 365d）
+//!
+//! 每把签出的 key 都会带一个 jti（key id），**必须记进销售台账** ——
+//! 将来要吊销某一把 key（退款、漏发）时，吊销表只能按 jti 匹配。
 //!
 //! 私钥存储在 ~/.maclean-vendor/secret.key（权限 0600），请勿提交到仓库。
 
@@ -12,6 +16,7 @@ use std::path::PathBuf;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use rand_core::RngCore;
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -36,15 +41,38 @@ enum Commands {
         /// 绑定机器指纹哈希（可选，购买者可提供 App 内显示的机器码）
         #[arg(long)]
         mid: Option<String>,
+        /// 过期时间（Unix 秒）。不传时：plan=yearly 自动取 iat + 365 天，
+        /// 其余（lifetime）写 0 = 永不过期
+        #[arg(long)]
+        exp: Option<u64>,
+        /// 有效期天数，等价于 `iat + days`（与 --exp 二选一）
+        #[arg(long)]
+        days: Option<u64>,
     },
 }
 
+/// 与 app 端 `license::LicensePayload` 对齐。
+///
+/// 字段顺序即 JSON 顺序，也是被签名的字节序列 —— 改动顺序会让**所有已签发
+/// 的 key 验签失败**。新增字段只能加在末尾。
 #[derive(Serialize)]
 struct LicensePayload<'a> {
     email: &'a str,
     plan: &'a str,
     iat: u64,
     mid: &'a str,
+    v: u8,
+    exp: u64,
+    jti: &'a str,
+}
+
+const SCHEMA_VERSION: u8 = 2;
+
+/// 生成 key id（16 字节随机 → hex）
+fn new_jti() -> String {
+    let mut buf = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut buf);
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn vendor_dir() -> PathBuf {
@@ -120,17 +148,39 @@ fn main() {
             }
             load_or_create_signing_key(true);
         }
-        Commands::Sign { email, plan, mid } => {
+        Commands::Sign {
+            email,
+            plan,
+            mid,
+            exp,
+            days,
+        } => {
             let signing_key = load_or_create_signing_key(false);
 
+            let iat = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            // 过期时间优先级：--exp > --days > plan==yearly 的默认 365 天 > 0
+            let exp = match (exp, days) {
+                (Some(e), _) => e,
+                (None, Some(d)) => iat.saturating_add(d.saturating_mul(86_400)),
+                (None, None) if plan.eq_ignore_ascii_case("yearly") => {
+                    iat.saturating_add(365 * 86_400)
+                }
+                (None, None) => 0,
+            };
+
+            let jti = new_jti();
             let payload = LicensePayload {
                 email: &email,
                 plan: &plan,
-                iat: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
+                iat,
                 mid: mid.as_deref().unwrap_or(""),
+                v: SCHEMA_VERSION,
+                exp,
+                jti: &jti,
             };
 
             let payload_json = serde_json::to_vec(&payload).expect("序列化失败");
@@ -149,9 +199,17 @@ fn main() {
             if let Some(m) = &mid {
                 println!("绑定机器: {}", m);
             }
+            if exp == 0 {
+                println!("有效期: 永久");
+            } else {
+                println!("有效期至: {} (Unix 秒)", exp);
+            }
             println!();
             println!("License Key（发送给购买者）:");
             println!("{}", key);
+            println!();
+            println!("jti（key id，**务必记进销售台账**，吊销时只能按它匹配）:");
+            println!("{}", jti);
         }
     }
 }
