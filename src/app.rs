@@ -6,6 +6,29 @@ use crate::safety;
 use crate::scanner::{self, ScanItem};
 
 /// 跨平台 Touch ID 可用性检查（macOS 专属，其他平台返回 false）
+/// 删除队列的唯一过滤器：只放行 `deletable`
+///
+/// 抽成自由函数是因为 `App` 需要 eframe 上下文才能构造，测不了；而这正是
+/// "保护有没有真的接上"的判定点，必须有测试。两个 prepare_delete* 出口都走它，
+/// 避免再次出现"一个出口过滤、另一个不过滤"的规则漂移。
+fn filter_deletable(
+    results: &[Vec<crate::scanner::ScanItem>],
+    items: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    items
+        .iter()
+        .filter(|(tab_idx, item_idx)| {
+            results
+                .get(*tab_idx)
+                .and_then(|v| v.get(*item_idx))
+                .map(|item| item.deletable)
+                // 索引越界 = 结果已过期（扫描后列表被换掉）。宁可不删。
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect()
+}
+
 fn touch_id_available_cross() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -148,6 +171,12 @@ pub struct App {
     /// 待删除的项索引列表，每项为 (tab_index, item_index)
     /// 支持跨 Tab 删除（如概览一键清理）
     pub pending_delete: Vec<(usize, usize)>,
+    /// 上一次 `prepare_delete*` 被保护规则挡掉的项数
+    ///
+    /// 只用于提示，不参与任何判定。UI 正常路径下应为 0（复选框已按 deletable
+    /// 禁用），非 0 说明有程序化入口或某处 UI 漏判 —— 值得显式告诉用户，
+    /// 而不是静默少删几项让他以为是清理没生效。
+    pub protection_blocked: usize,
     // 2026-09-18 删除了 `should_quit`：零引用。退出走 `App::quit()` /
     // `std::process::exit`，没人轮询这个标志。
     /// 扫描耗时（毫秒）
@@ -369,6 +398,7 @@ impl App {
             logs: Vec::new(),
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
+            protection_blocked: 0,
             scan_time_ms: [0; 9],
             lang_en: user_config.lang_en,
             settings_menubar_icon: user_config.settings_menubar_icon,
@@ -880,6 +910,20 @@ impl App {
             return;
         }
 
+        // 闸门：只放行 deletable。之前这里只过滤 selected，而
+        // prepare_delete_cross_tab 才过滤 deletable —— 两个出口规则不一致，
+        // 等于保护判定（Critical / RequiresOfficialUninstaller / DataProtected）
+        // 在最常用那条路径上根本没接。UI 的复选框大多按 deletable 禁用了，
+        // 但那不是闸门：程序化入口（one_click_clean 无条件置 selected = true）
+        // 或任何一处 UI 漏判，受保护项就会直接进入删除队列。
+        let deletable = filter_deletable(&self.results, &selected);
+        self.protection_blocked = selected.len() - deletable.len();
+        let selected = deletable;
+
+        if selected.is_empty() {
+            return;
+        }
+
         if !self.quota_gate_for(&selected) {
             return;
         }
@@ -890,16 +934,9 @@ impl App {
 
     /// 准备跨 Tab 删除（概览一键清理使用）
     pub fn prepare_delete_cross_tab(&mut self, items: Vec<(usize, usize)>) {
-        let selected: Vec<(usize, usize)> = items
-            .into_iter()
-            .filter(|(tab_idx, item_idx)| {
-                self.results
-                    .get(*tab_idx)
-                    .and_then(|v| v.get(*item_idx))
-                    .map(|item| item.deletable)
-                    .unwrap_or(false)
-            })
-            .collect();
+        let before = items.len();
+        let selected: Vec<(usize, usize)> = filter_deletable(&self.results, &items);
+        self.protection_blocked = before - selected.len();
 
         if selected.is_empty() {
             return;
@@ -1356,6 +1393,7 @@ impl App {
                 "irreversible" => "This operation is irreversible!",
                 "confirm_subtitle" => "Deleted files cannot be recovered. Please confirm.",
                 "confirm_selected_items" => "Selected items",
+                "confirm_protection_skipped" => "Protected items skipped (system / security / app data)",
                 "confirm_releasable" => "Releasable space",
                 "confirm_safe" => "Safe",
                 "confirm_caution" => "Caution",
@@ -1719,6 +1757,7 @@ impl App {
                 "irreversible" => "此操作不可逆！",
                 "confirm_subtitle" => "删除后文件将不可恢复，请确认。",
                 "confirm_selected_items" => "选中项目",
+                "confirm_protection_skipped" => "已跳过受保护项（系统 / 安全软件 / 应用数据）",
                 "confirm_releasable" => "预计释放",
                 "confirm_safe" => "Safe",
                 "confirm_caution" => "Caution",
@@ -2022,4 +2061,71 @@ fn classify_associated_path(path: &str, lang_en: bool) -> String {
         "assoc_other"
     };
     App::t_lang(lang_en, key).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::{Recommend, ScanItem};
+
+    fn item(deletable: bool) -> ScanItem {
+        ScanItem {
+            path: "/tmp/x".to_string(),
+            size_bytes: 1024,
+            category: "test".to_string(),
+            selected: true,
+            deletable,
+            undeletable_reason: String::new(),
+            recommend: Recommend::Safe,
+            description: String::new(),
+            batch_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn delete_gate_drops_protected_items() {
+        // 这是核心断言：受保护项即使 selected = true 也不得进入删除队列。
+        // UI 复选框大多按 deletable 禁用，但那不是闸门 —— 程序化入口
+        // （one_click_clean 无条件置 selected = true）不经过复选框。
+        let results = vec![vec![item(true), item(false), item(true)]];
+        let out = filter_deletable(&results, &[(0, 0), (0, 1), (0, 2)]);
+        assert_eq!(out, vec![(0, 0), (0, 2)]);
+    }
+
+    #[test]
+    fn delete_gate_rejects_stale_indices() {
+        // 扫描结果被换掉后，旧的 (tab, item) 索引可能越界或指向另一项。
+        // 宁可不删，也不能删到重新扫描后同一位置上的别的东西。
+        let results = vec![vec![item(true)]];
+        assert!(filter_deletable(&results, &[(0, 9)]).is_empty());
+        assert!(filter_deletable(&results, &[(7, 0)]).is_empty());
+    }
+
+    #[test]
+    fn delete_gate_allows_everything_when_unprotected() {
+        let results = vec![vec![item(true), item(true)]];
+        assert_eq!(
+            filter_deletable(&results, &[(0, 0), (0, 1)]),
+            vec![(0, 0), (0, 1)]
+        );
+    }
+
+    #[test]
+    fn both_delete_entrypoints_share_one_gate() {
+        // 两个出口曾经规则不一致（prepare_delete 不过滤 deletable，
+        // prepare_delete_cross_tab 才过滤）。用源码钉住：现在都必须调用
+        // filter_deletable，否则保护在最常用那条路径上就是没接。
+        let src = include_str!("app.rs");
+        for entry in ["fn prepare_delete(", "fn prepare_delete_cross_tab("] {
+            let body = src[src.find(entry).expect(entry)..]
+                .split("\n    pub fn ")
+                .next()
+                .unwrap();
+            assert!(
+                body.contains("filter_deletable("),
+                "{} 没有走统一闸门，规则会与另一个出口漂移",
+                entry
+            );
+        }
+    }
 }

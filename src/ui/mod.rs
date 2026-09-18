@@ -3199,6 +3199,16 @@ pub(crate) fn show_confirm_window(
                         &format_size(size),
                         theme::brand(),
                     );
+                    // 保护闸门挡掉的项数。正常路径应为 0；非 0 说明有程序化入口
+                    // 或某处 UI 漏判，必须显式告诉用户，否则他会以为清理没生效。
+                    if app.protection_blocked > 0 {
+                        render_confirm_row(
+                            ui,
+                            app.t("confirm_protection_skipped"),
+                            &app.protection_blocked.to_string(),
+                            theme::caution(),
+                        );
+                    }
                     if safe_cnt > 0 {
                         render_confirm_row(
                             ui,
