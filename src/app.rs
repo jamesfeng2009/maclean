@@ -113,14 +113,15 @@ pub enum ConfirmState {
     NeedSudoPassword,
     /// 提示用户是否启用 Touch ID
     OfferTouchIdSetup,
-    /// 等待用户在 Terminal 中完成 Touch ID 启用（轮询中）
-    ///
-    /// 注意：当前**没有任何地方把这个变体置位**，ui 里的等待窗口
-    /// （`show_touch_id_waiting_window`）因此永远不可达。这不是死代码，
-    /// 是未接线的功能 —— 启用 Touch ID 的按钮没有把状态推进到这里。见 task #45。
-    #[allow(dead_code)]
-    WaitForTouchIdSetup,
     /// 正在通过 Touch ID 删除（sudo 已配置 pam_tid.so）
+    ///
+    /// 从 `OfferTouchIdSetup` 点「启用」会先转到 `NeedSudoPassword`，
+    /// 用密码调 `touchid::enable_touch_id_with_password` 写 sudo_local，
+    /// 成功后再回到这个状态走 Touch ID 删除 —— 这条路径是通的。
+    ///
+    /// 2026-09-19 删掉了 `WaitForTouchIdSetup`（早期"开 Terminal 让用户自己授权、
+    /// 应用轮询等待"那套设计）。它从未被置位，而密码路径已经能完成同样的事，
+    /// 留着只会让人以为启用流程坏了。
     SudoWithTouchId,
 }
 
@@ -187,8 +188,6 @@ pub struct App {
     pub touch_id_setup_mode: bool,
     /// Touch ID 设置/执行中的错误提示
     pub touch_id_error: Option<String>,
-    /// Touch ID 启用等待开始时间（用于超时检测）
-    pub touch_id_wait_start: Option<std::time::Instant>,
     /// 关联文件明细：key = ScanItem.path，value = [(路径, 大小, 标签)]
     /// 用于 App卸载 tab 展开显示每个关联文件的大小和路径
     pub associated_details: std::collections::HashMap<String, Vec<(String, u64, String)>>,
@@ -403,7 +402,6 @@ impl App {
             touch_id_enabled: touch_id_enabled_cross(),
             touch_id_setup_mode: false,
             touch_id_error: None,
-            touch_id_wait_start: None,
             associated_details: std::collections::HashMap::new(),
             expanded_items: std::collections::HashSet::new(),
             disk_analyzer_path: None,

@@ -219,18 +219,6 @@ pub fn enable_touch_id_with_password(password: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 触发启用 Touch ID 流程（旧版 osascript 方式，已废弃）
-///
-/// 保留此函数以便兼容旧调用点，但实际逻辑改为返回提示信息，
-/// 调用者应改用 `enable_touch_id_with_password`。
-// 注意：当前无人调用，且它本身已废弃（直接返回 Err 提示改用
-// `enable_touch_id_with_password`）。Touch ID 启用流程走不通的真正原因是
-// `ConfirmState::WaitForTouchIdSetup` 从未被置位，见 task #45。
-#[allow(dead_code)]
-pub fn trigger_enable_touch_id() -> Result<(), String> {
-    Err("请使用 enable_touch_id_with_password 并提供管理员密码".to_string())
-}
-
 /// 使用密码通过 sudo -S 禁用 Touch ID
 #[allow(dead_code)]
 pub fn disable_touch_id_with_password(password: &str) -> Result<bool, String> {
@@ -265,10 +253,4 @@ pub fn disable_touch_id_with_password(password: &str) -> Result<bool, String> {
     }
 
     Ok(true)
-}
-
-/// 异步触发禁用 Touch ID（非阻塞）
-#[allow(dead_code)]
-pub fn trigger_disable_touch_id() -> Result<(), String> {
-    Err("请使用 disable_touch_id_with_password 并提供管理员密码".to_string())
 }

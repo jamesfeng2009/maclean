@@ -2950,31 +2950,6 @@ pub(crate) fn render_gui(
         show_touch_id_setup_window(ctx, app, delete_rx);
     }
 
-    // Touch ID 启用等待中（轮询检测 Terminal 中用户是否已完成授权）(macOS 专属)
-    #[cfg(target_os = "macos")]
-    if matches!(app.confirm, ConfirmState::WaitForTouchIdSetup) {
-        show_touch_id_waiting_window(ctx, app);
-
-        // 检查是否已启用成功
-        if touchid::sudo_touch_id_enabled() {
-            // Touch ID 已启用，开始 sudo 删除
-            app.touch_id_enabled = true;
-            app.touch_id_wait_start = None;
-            app.confirm = ConfirmState::SudoWithTouchId;
-            let items = app.sudo_failed_items.clone();
-            app.delete_done = 0;
-            app.delete_total = items.len();
-            start_sudo_delete_touchid(items, app.lang_en, delete_rx);
-        } else if let Some(start) = app.touch_id_wait_start {
-            // 检查超时（120 秒）
-            if start.elapsed().as_secs() > 120 {
-                app.touch_id_wait_start = None;
-                app.touch_id_error = Some(app.t("touchid_timeout_error").to_string());
-                app.confirm = ConfirmState::OfferTouchIdSetup;
-            }
-        }
-    }
-
     // Touch ID 删除中弹窗
     if matches!(app.confirm, ConfirmState::SudoWithTouchId) {
         show_touch_id_deleting_window(ctx, app);
@@ -3716,77 +3691,6 @@ pub(crate) fn show_touch_id_setup_window(
 }
 
 /// Touch ID 启用等待中弹窗（用户需要在 Terminal 中输入密码）
-pub(crate) fn show_touch_id_waiting_window(ctx: &egui::Context, app: &mut App) {
-    widgets::scrim(ctx);
-    egui::Window::new(app.t("touchid_wait_title"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(widgets::modal_frame())
-        .show(ctx, |ui| {
-            ui.set_min_width(440.0);
-            ui.set_max_width(500.0);
-            ui.add_space(10.0);
-
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(0, 122, 255),
-                        egui::RichText::new("⏳").size(28.0),
-                    );
-                    ui.label(
-                        egui::RichText::new(app.t("touchid_wait_headline"))
-                            .size(15.0)
-                            .strong(),
-                    );
-                });
-
-                ui.add_space(8.0);
-                ui.colored_label(
-                    theme::text_2(),
-                    egui::RichText::new(app.t("touchid_wait_desc")).size(13.0),
-                );
-
-                // 显示已等待时间
-                if let Some(start) = app.touch_id_wait_start {
-                    let elapsed = start.elapsed().as_secs();
-                    ui.add_space(6.0);
-                    ui.colored_label(
-                        theme::text_3(),
-                        egui::RichText::new(App::tf_lang(
-                            app.lang_en,
-                            "touchid_wait_time",
-                            &[&elapsed.to_string()],
-                        ))
-                        .size(12.0),
-                    );
-
-                    // 进度条
-                    let progress = (elapsed as f32) / 120.0;
-                    ui.add_space(4.0);
-                    ui.add(egui::ProgressBar::new(progress.min(1.0)));
-                }
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                // 取消按钮
-                if ui
-                    .button(egui::RichText::new(app.t("touchid_wait_cancel")).size(14.0))
-                    .clicked()
-                {
-                    app.touch_id_wait_start = None;
-                    app.touch_id_error = None;
-                    app.confirm = ConfirmState::NeedSudoPassword;
-                }
-            });
-        });
-
-    // 请求持续重绘以更新计时器
-    ctx.request_repaint_after(std::time::Duration::from_secs(1));
-}
-
 /// Touch ID 删除中弹窗
 pub(crate) fn show_touch_id_deleting_window(ctx: &egui::Context, app: &mut App) {
     widgets::scrim(ctx);

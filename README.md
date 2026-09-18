@@ -41,6 +41,11 @@ New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
 
 **清理** —— 按推荐等级分档，缓存永久删除、大文件移入废纸篓。
 
+**提权** —— macOS 上支持密码提权与 Touch ID 提权（写 sudo_local 启用
+`pam_tid.so`）。Touch ID 的启用路径是：提示 → 输入密码 → 写 sudo_local →
+Touch ID 删除。早期还有一套"开 Terminal 让用户自己授权、应用轮询等待"的设计，
+2026-09-19 已删除：它从未被接线，而密码路径已经能完成同样的事。
+
 **菜单栏常驻** —— 托盘显示磁盘占用，60 秒周期刷新。
 
 **界面国际化** —— 中 / 英切换。缓存类目的英文文案唯一来源是
@@ -134,8 +139,6 @@ Payload 结构：`email` / `plan` / `iat` / `mid`（机器指纹）/ `v`（schem
 
 - **Windows 真机冒烟** —— UAC 提权删除、还原点创建/还原、废纸篓是否真进
   Recycle Bin、深色模式跟随。本机只能验编译，验不了这些。
-- **Touch ID 提权流程** —— `ConfirmState::OfferTouchIdSetup` 目前从未被置位，
-  Touch ID 启用这条路走不通（clippy 清死代码时发现的）。
 - **Windows 侧应用保护** —— `app_protection.rs` 是按 macOS bundle id 做的，
   在 Windows 目标上整块是死代码。Windows 目前没有等价的分级保护。
 
