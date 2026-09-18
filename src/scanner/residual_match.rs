@@ -827,7 +827,10 @@ mod tests {
     fn protective_entrypoint_does_not_reuse_the_strict_matcher() {
         // is_residual_dir 导向删除， resembles_app_dir 导向保护。两者若被合并，
         // 只要有人为了召回放宽规则，风险方向就会一侧爆掉。用源码钉住分工。
-        let src = include_str!("windows_apps.rs");
+        // has_large_user_data 已随保护判定整体搬到 win_protection.rs（无 cfg，
+        // 本机可编译可测）。源码断言跟着走，否则这条用例只会因为"找不到函数"
+        // 而红 —— 那是搬迁信号，不是规则被破坏。
+        let src = include_str!("win_protection.rs");
         let guard = src[src
             .find("fn has_large_user_data")
             .expect("has_large_user_data 不见了")..]

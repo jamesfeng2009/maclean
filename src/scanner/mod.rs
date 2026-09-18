@@ -28,9 +28,14 @@ pub mod optimize;
 mod residual_match;
 #[cfg(target_os = "macos")]
 pub mod uninstall;
-// Windows 专属模块
+// Windows 专属模块（采集层：读注册表 / 枚举 UWP / 执行卸载）
 #[cfg(target_os = "windows")]
 pub mod windows_apps;
+// Windows 应用保护**判定**：刻意不加 cfg。它原本在 windows_apps.rs 里，
+// 结果在开发机上整段不编译、一行测试都跑不到 —— 而这是卸载前的最后一道
+// 保护。判定只依赖 String/bool 和跨平台文件系统调用，必须本机可测。
+// 详见 win_protection.rs 模块顶部注释。
+pub mod win_protection;
 
 /// 推荐等级 - 帮助用户判断是否应该清理
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
