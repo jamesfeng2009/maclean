@@ -26,6 +26,13 @@ pub struct Cli {
     /// 子命令（无子命令时启动 GUI）
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// 以 JSON 输出（供脚本/监控系统消费）
+    ///
+    /// 结构化输出是稳定契约：字段名与语义不随文案翻译改变。人类可读的表格
+    /// 输出不受影响（有测试锁住）。
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -81,23 +88,45 @@ pub fn run_cli() -> bool {
     match cli.command {
         None => false, // 无子命令，启动 GUI
         Some(cmd) => {
-            run_command(cmd);
+            run_command(cmd, cli.json);
             true
         }
     }
 }
 
-fn run_command(cmd: Commands) {
+fn run_command(cmd: Commands, json: bool) {
     match cmd {
-        Commands::Scan { tab, deep } => cmd_scan(tab, deep),
+        Commands::Scan { tab, deep } => cmd_scan(tab, deep, json),
         Commands::Clean {
             tab,
             safe_only,
             dry_run,
-        } => cmd_clean(tab, safe_only, dry_run),
-        Commands::CheckDisk => cmd_check_disk(),
-        Commands::List => cmd_list(),
+        } => cmd_clean(tab, safe_only, dry_run, json),
+        Commands::CheckDisk => cmd_check_disk(json),
+        Commands::List => cmd_list(json),
+        // 日志是给人看的，不做 JSON
         Commands::Log { tail, open } => cmd_log(tail, open),
+    }
+}
+
+// =========================================================================
+//  结构化输出（--json）
+//
+//  所有命令共用这一层：先算出数据，再决定渲染成表格还是 JSON。
+//  绝不能"表格和 JSON 各扫一遍" —— 那两份结果可能对不上。
+// =========================================================================
+
+fn print_json<T: serde::Serialize>(value: &T) {
+    match serde_json::to_string_pretty(value) {
+        Ok(s) => println!("{}", s),
+        Err(e) => {
+            // 序列化失败不能静默：调用方拿不到任何输出会以为"没有可清理项"
+            eprintln!(
+                "{{\"error\": \"json serialization failed\", \"detail\": \"{}\"}}",
+                e
+            );
+            std::process::exit(2);
+        }
     }
 }
 
@@ -167,7 +196,38 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
 //  子命令实现
 // =========================================================================
 
-fn cmd_scan(tab: Option<String>, deep: bool) {
+#[derive(serde::Serialize)]
+struct JsonItem {
+    path: String,
+    size_bytes: u64,
+    category: String,
+    description: String,
+    deletable: bool,
+    undeletable_reason: String,
+    recommend: Recommend,
+}
+
+#[derive(serde::Serialize)]
+struct JsonTab {
+    key: String,
+    label: String,
+    count: usize,
+    total_size: u64,
+    safe_count: usize,
+    safe_size: u64,
+    elapsed_ms: u64,
+    items: Vec<JsonItem>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonScan {
+    command: &'static str,
+    tabs: Vec<JsonTab>,
+    total_count: usize,
+    total_size: u64,
+}
+
+fn cmd_scan(tab: Option<String>, deep: bool, json: bool) {
     let tabs: Vec<(String, String)> = if deep {
         ALL_TABS
             .iter()
@@ -189,12 +249,10 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
 
     let mut total_size: u64 = 0;
     let mut total_count: usize = 0;
+    // JSON 与表格共用同一份扫描结果，绝不各扫一遍
+    let mut out_tabs: Vec<JsonTab> = Vec::new();
 
     for (tab_key, tab_label) in &tabs {
-        println!("\n╔══════════════════════════════════════════╗");
-        println!("║  扫描 — {} ({})", tab_label, tab_key);
-        println!("╚══════════════════════════════════════════╝");
-
         let start = std::time::Instant::now();
         let items = scan_tab(tab_key);
         let elapsed = start.elapsed();
@@ -209,11 +267,6 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
             crate::scanner::cache::save_cache(tab_key, &result);
         }
 
-        if items.is_empty() {
-            println!("  （无可清理项目）\n");
-            continue;
-        }
-
         let tab_total: u64 = items.iter().map(|i| i.size_bytes).sum();
         let safe_count = items
             .iter()
@@ -224,6 +277,44 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
             .filter(|i| i.recommend.default_selected() && i.deletable)
             .map(|i| i.size_bytes)
             .sum();
+
+        out_tabs.push(JsonTab {
+            key: tab_key.clone(),
+            label: tab_label.clone(),
+            count: items.len(),
+            total_size: tab_total,
+            safe_count,
+            safe_size,
+            elapsed_ms: elapsed.as_millis() as u64,
+            items: items
+                .iter()
+                .map(|i| JsonItem {
+                    path: i.path.clone(),
+                    size_bytes: i.size_bytes,
+                    category: i.category.clone(),
+                    description: i.description.clone(),
+                    deletable: i.deletable,
+                    undeletable_reason: i.undeletable_reason.clone(),
+                    recommend: i.recommend,
+                })
+                .collect(),
+        });
+
+        total_size += tab_total;
+        total_count += items.len();
+
+        if json {
+            continue;
+        }
+
+        println!("\n╔══════════════════════════════════════════╗");
+        println!("║  扫描 — {} ({})", tab_label, tab_key);
+        println!("╚══════════════════════════════════════════╝");
+
+        if items.is_empty() {
+            println!("  （无可清理项目）\n");
+            continue;
+        }
 
         println!("  发现 {} 项，总计 {}", items.len(), format_size(tab_total));
         println!(
@@ -259,9 +350,16 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
         if items.len() > display_count {
             println!("  ... 还有 {} 项未显示", items.len() - display_count);
         }
+    }
 
-        total_size += tab_total;
-        total_count += items.len();
+    if json {
+        print_json(&JsonScan {
+            command: "scan",
+            tabs: out_tabs,
+            total_count,
+            total_size,
+        });
+        return;
     }
 
     if tabs.len() > 1 {
@@ -275,12 +373,50 @@ fn cmd_scan(tab: Option<String>, deep: bool) {
     }
 }
 
-fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
+#[derive(serde::Serialize)]
+struct JsonPath {
+    path: String,
+    size_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct JsonFailure {
+    path: String,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+struct JsonCleanTab {
+    key: String,
+    label: String,
+    planned: Vec<JsonPath>,
+    deleted: Vec<String>,
+    failed: Vec<JsonFailure>,
+    rejected: Vec<JsonFailure>,
+    skipped_snapshots: usize,
+}
+
+#[derive(serde::Serialize)]
+struct JsonClean {
+    command: &'static str,
+    dry_run: bool,
+    tabs: Vec<JsonCleanTab>,
+    success: usize,
+    failed: usize,
+    rejected: usize,
+}
+
+fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, json: bool) {
     let tabs: Vec<String> = if let Some(t) = &tab {
         vec![t.clone()]
     } else {
         vec!["dev-cache".to_string()]
     };
+
+    let mut out: Vec<JsonCleanTab> = Vec::new();
+    let mut g_success = 0usize;
+    let mut g_failed = 0usize;
+    let mut g_rejected = 0usize;
 
     for tab_key in &tabs {
         let tab_label = ALL_TABS
@@ -288,7 +424,6 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
             .find(|(k, _)| *k == tab_key.as_str())
             .map(|(_, v)| *v)
             .unwrap_or(tab_key);
-        println!("\n🧹 清理 {} ({})", tab_label, tab_key);
 
         let items = scan_tab(tab_key);
 
@@ -302,18 +437,43 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
         };
 
         if to_clean.is_empty() {
-            println!("  （无可清理项目）");
+            if !json {
+                println!("  （无可清理项目）");
+            }
             continue;
         }
 
         let clean_size: u64 = to_clean.iter().map(|i| i.size_bytes).sum();
-        println!(
-            "  将清理 {} 项，释放 {}",
-            to_clean.len(),
-            format_size(clean_size)
-        );
+        let mut rec = JsonCleanTab {
+            key: tab_key.clone(),
+            label: tab_label.to_string(),
+            planned: to_clean
+                .iter()
+                .map(|i| JsonPath {
+                    path: i.path.clone(),
+                    size_bytes: i.size_bytes,
+                })
+                .collect(),
+            deleted: Vec::new(),
+            failed: Vec::new(),
+            rejected: Vec::new(),
+            skipped_snapshots: 0,
+        };
+
+        if !json {
+            println!("\n🧹 清理 {} ({})", tab_label, tab_key);
+            println!(
+                "  将清理 {} 项，释放 {}",
+                to_clean.len(),
+                format_size(clean_size)
+            );
+        }
 
         if dry_run {
+            if json {
+                out.push(rec);
+                continue;
+            }
             println!("  [dry-run] 未实际删除，以下为将被清理的项目：");
             for item in &to_clean {
                 println!("    - [{}] {}", format_size(item.size_bytes), item.path);
@@ -333,17 +493,28 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
             .map(|i| (i.path.clone(), i.category.clone()))
             .collect();
         let skipped_snapshots = to_clean.len() - pairs.len();
+        rec.skipped_snapshots = skipped_snapshots;
 
         let (allowed, rejected) = crate::ops::sanitize_before_delete(pairs, false);
+        rec.rejected = rejected
+            .iter()
+            .map(|(p, _c, r)| JsonFailure {
+                path: p.clone(),
+                reason: r.clone(),
+            })
+            .collect();
+        g_rejected += rejected.len();
 
-        for (path, _category, reason) in &rejected {
-            println!("  🛡️  已拦截 {} — {}", path, reason);
-        }
-        if skipped_snapshots > 0 {
-            println!(
-                "  ⏭️  跳过 {} 个 APFS 快照（需特殊处理）",
-                skipped_snapshots
-            );
+        if !json {
+            for (path, _category, reason) in &rejected {
+                println!("  🛡️  已拦截 {} — {}", path, reason);
+            }
+            if skipped_snapshots > 0 {
+                println!(
+                    "  ⏭️  跳过 {} 个 APFS 快照（需特殊处理）",
+                    skipped_snapshots
+                );
+            }
         }
 
         // 实际删除
@@ -358,28 +529,71 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool) {
 
             match result {
                 Ok(_) => {
-                    println!("  ✅ {}", path);
+                    rec.deleted.push(path.clone());
                     success += 1;
+                    if !json {
+                        println!("  ✅ {}", path);
+                    }
                 }
                 Err(e) => {
-                    println!("  ❌ {} — {}", path, e);
+                    rec.failed.push(JsonFailure {
+                        path: path.clone(),
+                        reason: e.to_string(),
+                    });
                     failed += 1;
+                    if !json {
+                        println!("  ❌ {} — {}", path, e);
+                    }
                 }
             }
         }
+        g_success += success;
+        g_failed += failed;
 
-        println!(
-            "\n  完成：成功 {}，失败 {}，安全拦截 {}",
-            success,
-            failed,
-            rejected.len()
-        );
+        if !json {
+            println!(
+                "\n  完成：成功 {}，失败 {}，安全拦截 {}",
+                success,
+                failed,
+                rejected.len()
+            );
+        }
+        out.push(rec);
+    }
+
+    if json {
+        print_json(&JsonClean {
+            command: "clean",
+            dry_run,
+            tabs: out,
+            success: g_success,
+            failed: g_failed,
+            rejected: g_rejected,
+        });
     }
 }
 
-fn cmd_check_disk() {
+#[derive(serde::Serialize)]
+struct JsonDisk {
+    command: &'static str,
+    total_bytes: u64,
+    used_bytes: u64,
+    free_bytes: u64,
+    used_percent: f64,
+    free_percent: f64,
+    /// 告警等级：0 正常 / 1 注意 / 2 警告 / 3 危险
+    alert_level: u8,
+}
+
+fn cmd_check_disk(json: bool) {
     let (total, free) = get_disk_info();
     if total == 0 {
+        if json {
+            // 拿不到磁盘信息时必须是**结构化的错误**，不能静默成功：
+            // 监控脚本看到 exit 0 且字段全 0 会以为"磁盘空了"
+            eprintln!("{{\"command\": \"check-disk\", \"error\": \"unable to read disk info\"}}");
+            std::process::exit(1);
+        }
         println!("❌ 无法获取磁盘信息");
         return;
     }
@@ -387,14 +601,6 @@ fn cmd_check_disk() {
     let used = total - free;
     let used_pct = used as f64 / total as f64 * 100.0;
     let free_pct = free as f64 / total as f64 * 100.0;
-
-    println!("╔══════════════════════════════════════════╗");
-    println!("║           磁盘空间检查                    ║");
-    println!("╠══════════════════════════════════════════╣");
-    println!("  总容量:  {}", format_size(total));
-    println!("  已使用:  {} ({:.1}%)", format_size(used), used_pct);
-    println!("  可用:    {} ({:.1}%)", format_size(free), free_pct);
-    println!();
 
     // 告警等级
     let (level, icon, msg) = if free_pct < 5.0 {
@@ -406,6 +612,27 @@ fn cmd_check_disk() {
     } else {
         (0, "🟢", "正常：磁盘空间充足")
     };
+
+    if json {
+        print_json(&JsonDisk {
+            command: "check-disk",
+            total_bytes: total,
+            used_bytes: used,
+            free_bytes: free,
+            used_percent: used_pct,
+            free_percent: free_pct,
+            alert_level: level,
+        });
+        return;
+    }
+
+    println!("╔══════════════════════════════════════════╗");
+    println!("║           磁盘空间检查                    ║");
+    println!("╠══════════════════════════════════════════╣");
+    println!("  总容量:  {}", format_size(total));
+    println!("  已使用:  {} ({:.1}%)", format_size(used), used_pct);
+    println!("  可用:    {} ({:.1}%)", format_size(free), free_pct);
+    println!();
 
     println!("  {} {}", icon, msg);
 
@@ -422,9 +649,38 @@ fn cmd_check_disk() {
     println!("╚══════════════════════════════════════════╝");
 }
 
-fn cmd_list() {
+#[derive(serde::Serialize)]
+struct JsonListEntry<'a> {
+    key: &'a str,
+    label: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct JsonList<'a> {
+    command: &'a str,
+    tabs: Vec<JsonListEntry<'a>>,
+}
+
+fn cmd_list(json: bool) {
+    let supported: Vec<(&str, &str)> = ALL_TABS
+        .iter()
+        .filter(|(k, _)| tab_supported(k))
+        .map(|(k, v)| (*k, *v))
+        .collect();
+
+    if json {
+        print_json(&JsonList {
+            command: "list",
+            tabs: supported
+                .iter()
+                .map(|(k, v)| JsonListEntry { key: k, label: v })
+                .collect(),
+        });
+        return;
+    }
+
     println!("\nmaclean 可用扫描类别：\n");
-    for (key, label) in ALL_TABS.iter().filter(|(k, _)| tab_supported(k)) {
+    for (key, label) in &supported {
         println!("  {:<16}  {}", format!("--tab {}", key), label);
     }
     println!("\n用法示例：");
@@ -497,6 +753,160 @@ fn cmd_log(tail: Option<usize>, open: bool) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    //  C-4 · 结构化输出（--json）
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn json_output_has_a_stable_shape() {
+        // schema 是对外契约：脚本照字段名取值，改名等于破坏集成。
+        let scan = JsonScan {
+            command: "scan",
+            tabs: vec![JsonTab {
+                key: "dev-cache".to_string(),
+                label: "开发者缓存".to_string(),
+                count: 1,
+                total_size: 10,
+                safe_count: 1,
+                safe_size: 10,
+                elapsed_ms: 3,
+                items: vec![JsonItem {
+                    path: "/tmp/a".to_string(),
+                    size_bytes: 10,
+                    category: "Rust编译".to_string(),
+                    description: String::new(),
+                    deletable: true,
+                    undeletable_reason: String::new(),
+                    recommend: Recommend::Safe,
+                }],
+            }],
+            total_count: 1,
+            total_size: 10,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&scan).expect("scan 序列化失败"))
+                .expect("scan JSON 非法");
+        let tab = &v["tabs"][0];
+        for field in [
+            "key",
+            "label",
+            "count",
+            "total_size",
+            "safe_count",
+            "safe_size",
+            "elapsed_ms",
+        ] {
+            assert!(!tab[field].is_null(), "tabs[] 缺字段 {}", field);
+        }
+        let item = &tab["items"][0];
+        for field in [
+            "path",
+            "size_bytes",
+            "category",
+            "description",
+            "deletable",
+            "undeletable_reason",
+            "recommend",
+        ] {
+            assert!(!item[field].is_null(), "items[] 缺字段 {}", field);
+        }
+    }
+
+    #[test]
+    fn clean_json_reports_rejections_and_failures() {
+        // 被安全闸门拦下的项必须出现在 JSON 里，不能只打在人类可读输出里 ——
+        // 脚本据此判断"为什么没删掉"。
+        let c = JsonClean {
+            command: "clean",
+            dry_run: true,
+            tabs: vec![JsonCleanTab {
+                key: "dev-cache".to_string(),
+                label: "开发者缓存".to_string(),
+                planned: vec![JsonPath {
+                    path: "/tmp/a".to_string(),
+                    size_bytes: 1,
+                }],
+                deleted: Vec::new(),
+                failed: Vec::new(),
+                rejected: vec![JsonFailure {
+                    path: "/tmp/b".to_string(),
+                    reason: "符号链接".to_string(),
+                }],
+                skipped_snapshots: 0,
+            }],
+            success: 0,
+            failed: 0,
+            rejected: 1,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(v["rejected"], 1);
+        assert_eq!(v["tabs"][0]["rejected"][0]["path"], "/tmp/b");
+        assert_eq!(v["dry_run"], true);
+    }
+
+    #[test]
+    fn every_command_accepts_the_json_flag() {
+        // --json 是 global arg：任何子命令上都能用，包括放在子命令之后。
+        // clap 的 global 容易漏，漏了就只有部分命令能脚本化。
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name().to_string();
+            let parsed = Cli::try_parse_from(["maclean", &name, "--json"]);
+            assert!(
+                parsed.is_ok(),
+                "子命令 {} 不接受 --json（global 没生效）",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn json_flag_is_accepted_after_the_subcommand() {
+        // 用户会写 `maclean scan --json`，也会写 `maclean --json scan`；
+        // global=true 保证两种都行。
+        let a = Cli::try_parse_from(["maclean", "scan", "--json"]);
+        assert!(a.is_ok(), "`scan --json` 解析失败");
+        let b = Cli::try_parse_from(["maclean", "--json", "scan"]);
+        assert!(b.is_ok(), "`--json scan` 解析失败");
+    }
+
+    #[test]
+    fn text_output_still_prints_the_table() {
+        // 加 JSON 不能破坏人类可读输出：--json 分支必须早于任何 println，
+        // 反之文本模式也不得混入 JSON。用源码钉住这一点。
+        let src = include_str!("cli.rs");
+        let check = src[src
+            .find("fn cmd_check_disk(json: bool) {")
+            .expect("cmd_check_disk")..]
+            .split("\nfn cmd_list(")
+            .next()
+            .unwrap();
+        let json_at = check
+            .find("if json {")
+            .expect("cmd_check_disk 没有 json 分支");
+        let first_print = check.find("println!(\"╔").expect("没有表格输出");
+        assert!(
+            json_at < first_print,
+            "JSON 分支在表格输出之后，两种输出会混在一起"
+        );
+    }
+
+    #[test]
+    fn log_command_stays_human_readable() {
+        // 日志命令刻意不做 JSON：它是给人排查用的，改成 JSON 反而更难读。
+        // 直接钉签名 —— 一旦有人给 cmd_log 加了 json 参数，这里会红，
+        // 提醒他要么真做 JSON 输出，要么回来改这条用例。
+        let src = include_str!("cli.rs");
+        assert!(
+            src.contains("fn cmd_log(tail: Option<usize>, open: bool) {"),
+            "cmd_log 签名变了：要么真的实现 JSON 输出，要么回来改这条用例"
+        );
+    }
+
     // -----------------------------------------------------------------
     //  #33 · CLI 删除路径的安全校验
     //
