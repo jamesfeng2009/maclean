@@ -115,7 +115,7 @@ pub fn button_enabled(
 
         painter.rect_filled(rect, theme::r(theme::R), bg);
         if stroke_c != egui::Color32::TRANSPARENT {
-            painter.rect_stroke(rect, theme::r(theme::R), egui::Stroke::new(1.0, stroke_c));
+            painter.rect_stroke(rect, theme::r(theme::R), egui::Stroke::new(1.0_f32, stroke_c));
         }
 
         let mut x = rect.min.x + pad_x;
@@ -232,7 +232,7 @@ pub fn checkbox(ui: &mut egui::Ui, state: Check, enabled: bool) -> egui::Respons
                     theme::surface_3()
                 },
             );
-            painter.rect_stroke(rect, rr, egui::Stroke::new(1.5, theme::line_3()));
+            painter.rect_stroke(rect, rr, egui::Stroke::new(1.5_f32, theme::line_3()));
         }
     }
 
@@ -440,7 +440,7 @@ pub fn modal_footer<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) ->
             top: theme::S4,
             bottom: -theme::S4,
         })
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -539,7 +539,7 @@ pub fn banner<R>(
     egui::Frame::none()
         .fill(bg)
         .inner_margin(egui::Margin::symmetric(theme::S5, theme::S2))
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 icons::show(ui, ic, 16.0, fg);

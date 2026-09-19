@@ -197,7 +197,7 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
     }
 
     // 按大小降序排列
-    items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
 
     crate::log_scan_step(&format!(
         "磁盘分析: 完成, {} 项, 总计 {}",

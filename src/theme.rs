@@ -538,34 +538,34 @@ pub fn apply_visuals(ctx: &egui::Context, mode: Mode) {
     visuals.window_fill = p.surface;
     visuals.faint_bg_color = p.surface_2;
     visuals.extreme_bg_color = p.surface_3;
-    visuals.window_stroke = egui::Stroke::new(1.0, p.line_2);
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, p.line_2);
     visuals.hyperlink_color = p.brand;
 
     // 非交互：卡片 / 面板
     visuals.widgets.noninteractive.bg_fill = p.surface;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, p.text);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.line);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, p.text);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, p.line);
     visuals.widgets.noninteractive.rounding = r(R);
 
     // 可交互未激活：描边 + 白底（设计稿 2.4：卡片优先「1px 描边 + 无阴影」）
     visuals.widgets.inactive.bg_fill = p.surface;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.line_2);
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text_2);
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, p.line_2);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, p.text_2);
     visuals.widgets.inactive.rounding = r(R);
 
     visuals.widgets.hovered.bg_fill = p.surface_3;
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.line_2);
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, p.text);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, p.line_2);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, p.text);
     visuals.widgets.hovered.rounding = r(R);
 
     visuals.widgets.active.bg_fill = p.surface_4;
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.line_3);
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, p.line_3);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, p.text);
     visuals.widgets.active.rounding = r(R);
 
     // 选中态：品牌底 + 品牌描边
     visuals.selection.bg_fill = p.brand_50;
-    visuals.selection.stroke = egui::Stroke::new(1.0, p.brand);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, p.brand);
 
     // 禁用态不在 egui 里配：egui 0.29 的 `Widgets` 没有 disabled 变体，
     // 禁用样式由 `widgets::button` 自己画（灰底 + 灰字，而不是降透明度）。

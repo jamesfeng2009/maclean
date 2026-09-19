@@ -1422,7 +1422,7 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
     }
 
     // 按大小降序排序
-    installers.sort_by(|a, b| b.1.cmp(&a.1));
+    installers.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     for (path, size, filename, installed) in installers {
         let (recommend, description) = if installed {

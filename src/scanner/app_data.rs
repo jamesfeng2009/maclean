@@ -46,7 +46,7 @@ impl Scanner for AppDataScanner {
         items.extend(scan_application_support());
 
         // 按大小降序排列
-        items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
