@@ -36,6 +36,10 @@ pub mod windows_apps;
 // 保护。判定只依赖 String/bool 和跨平台文件系统调用，必须本机可测。
 // 详见 win_protection.rs 模块顶部注释。
 pub mod win_protection;
+// macOS 官方卸载器**识别**：同样刻意不加 cfg（理由同 win_protection）。
+// 名字判定、搜索路径、启动命令构造全是纯逻辑，加 cfg 就等于在开发机上
+// 零测试；只有真正 spawn 进程的几行放在 cfg(macos) 里。
+pub mod official_uninstaller;
 
 /// 推荐等级 - 帮助用户判断是否应该清理
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

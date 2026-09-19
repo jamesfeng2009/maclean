@@ -326,6 +326,17 @@ pub struct App {
     /// 影响 Program Files 目录扫描：默认只扫 C 盘，开启后同时扫 D/E/... 盘符。
     /// 注册表扫描不受影响（UninstallString 本来就含完整路径）。
     pub settings_scan_all_disks: bool,
+    /// 卸载应用时优先调用官方卸载器（仅 macOS 生效，M-1）
+    ///
+    /// 开启后，删除 .app 包时若发现厂商自带的卸载器，就交给它处理，
+    /// 而不是自己 remove_dir_all —— 那些卸载器还要清 launchd 任务、
+    /// pkgutil 收据、系统扩展授权，删目录做不到。
+    pub settings_prefer_official_uninstaller: bool,
+    /// 本次删除将交给官方卸载器处理的应用：(应用路径, 卸载器路径)
+    ///
+    /// 在 confirm_delete 时算一次并缓存，确认弹窗据此告知用户；
+    /// 逐帧重算会反复读目录，没必要。
+    pub official_handoffs: Vec<(String, String)>,
     /// 删除前二次确认（Advanced 项目）
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS only）
@@ -476,6 +487,8 @@ impl App {
             settings_keep_sudo: user_config.settings_keep_sudo,
             settings_scan_cache: user_config.settings_scan_cache,
             settings_scan_all_disks: user_config.settings_scan_all_disks,
+            settings_prefer_official_uninstaller: user_config.settings_prefer_official_uninstaller,
+            official_handoffs: Vec::new(),
             settings_confirm_advanced: user_config.settings_confirm_advanced,
             settings_prevent_lid_close: user_config.settings_prevent_lid_close,
             settings_auto_restore_point: user_config.settings_auto_restore_point,
@@ -1134,6 +1147,23 @@ impl App {
             })
             .collect();
 
+        // M-1：算出哪些 .app 要交给官方卸载器，确认弹窗据此如实告知用户。
+        // 这里算一次缓存起来，避免在弹窗逐帧渲染时反复读目录。
+        // 设置关掉时一律不走这条路 —— 用户明确选了"只删目录"。
+        self.official_handoffs = if self.settings_prefer_official_uninstaller {
+            to_delete
+                .iter()
+                .filter(|(p, _, _, _, _)| p.ends_with(".app"))
+                .filter_map(|(p, _, _, _, _)| {
+                    let name = crate::scanner::official_uninstaller::app_display_name(p);
+                    crate::scanner::official_uninstaller::find_official_uninstaller(p, &name)
+                        .map(|u| (p.clone(), u.path))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         self.delete_total = to_delete.len();
         self.delete_done = 0;
         self.logs.clear();
@@ -1296,6 +1326,8 @@ impl App {
         self.user_config.settings_keep_sudo = self.settings_keep_sudo;
         self.user_config.settings_scan_cache = self.settings_scan_cache;
         self.user_config.settings_scan_all_disks = self.settings_scan_all_disks;
+        self.user_config.settings_prefer_official_uninstaller =
+            self.settings_prefer_official_uninstaller;
         self.user_config.settings_confirm_advanced = self.settings_confirm_advanced;
         self.user_config.settings_prevent_lid_close = self.settings_prevent_lid_close;
         self.user_config.settings_auto_restore_point = self.settings_auto_restore_point;
@@ -1355,6 +1387,15 @@ impl App {
                 "setting_scan_all_disks_desc" => {
                     "C: only by default. Enabling also scans Program Files on D:/E:/etc."
                 },
+                // M-1
+                "setting_official_uninstaller" => "Use the app's own uninstaller when available",
+                "setting_official_uninstaller_desc" => {
+                    "Deleting a .app bundle leaves launchd jobs and pkgutil receipts behind. The vendor uninstaller cleans those up."
+                },
+                "confirm_official_uninstaller_hint" => {
+                    "Handed to the app's own uninstaller (opens a separate window)"
+                },
+                "log_official_uninstaller" => "Handed to official uninstaller",
                 "setting_confirm_advanced" => "Double-check before deleting Advanced items",
                 "setting_confirm_advanced_desc" => "Advanced items require manual confirmation",
                 "setting_prevent_lid_close" => "Prevent deletion while lid is closed",
@@ -1731,6 +1772,11 @@ impl App {
                 "setting_scan_cache_desc" => "7 天内避免重复扫描，加速启动",
                 "setting_scan_all_disks" => "扫描全部磁盘",
                 "setting_scan_all_disks_desc" => "默认只扫 C 盘；开启后同时扫描 D/E 等盘符的 Program Files",
+                // M-1
+                "setting_official_uninstaller" => "优先使用应用自带的官方卸载器",
+                "setting_official_uninstaller_desc" => "直接删 .app 目录会留下 launchd 任务与 pkgutil 收据，官方卸载器会一并清掉",
+                "confirm_official_uninstaller_hint" => "交由应用自带官方卸载器处理（会弹出独立窗口）",
+                "log_official_uninstaller" => "已交由官方卸载器",
                 "setting_confirm_advanced" => "删除前二次确认",
                 "setting_confirm_advanced_desc" => "Advanced 项目必须手动确认",
                 "setting_prevent_lid_close" => "合盖时禁止删除",
@@ -2350,6 +2396,85 @@ mod tests {
         // 非 Windows 上该设置无意义，但调用不得 panic（cfg 分支里已处理）
         apply_scan_all_disks(true);
         apply_scan_all_disks(false);
+    }
+
+    // -----------------------------------------------------------------
+    //  M-1 · 官方卸载器（macOS）
+    // -----------------------------------------------------------------
+
+    /// 造一个自带官方卸载器的 .app 包
+    fn make_app_bundle_with_uninstaller(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("maclean-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let app_dir = base.join("Foo.app");
+        let helpers = app_dir.join("Contents").join("Helpers");
+        std::fs::create_dir_all(&helpers).unwrap();
+        let exe = helpers.join("uninstall_foo.sh");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        base
+    }
+
+    #[test]
+    fn confirm_delete_registers_apps_with_an_official_uninstaller() {
+        // 真实文件树：证明"识别 → 确认弹窗"整条链路通了，而不只是纯函数对。
+        // 这条断掉的话，用户点了确认才被弹一个陌生窗口 —— 必须提前告知。
+        let base = make_app_bundle_with_uninstaller("m1-on");
+        let mut app = App::new();
+        app.settings_prefer_official_uninstaller = true;
+        let mut it = item(true);
+        it.path = base.join("Foo.app").to_string_lossy().to_string();
+        app.results[1].push(it);
+        app.pending_delete.push((1, 0));
+        let _ = app.confirm_delete();
+        assert_eq!(
+            app.official_handoffs.len(),
+            1,
+            "识别到官方卸载器就必须登记，否则确认弹窗不会告知用户"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn turning_the_setting_off_disables_the_handoff() {
+        // 反向验证：开关关掉必须真的不走这条路，不能只改 UI 文案。
+        let base = make_app_bundle_with_uninstaller("m1-off");
+        let mut app = App::new();
+        app.settings_prefer_official_uninstaller = false;
+        let mut it = item(true);
+        it.path = base.join("Foo.app").to_string_lossy().to_string();
+        app.results[1].push(it);
+        app.pending_delete.push((1, 0));
+        let _ = app.confirm_delete();
+        assert!(app.official_handoffs.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn official_uninstaller_preference_reaches_the_delete_thread() {
+        // 设置项到位 ≠ 删除线程收到。拆掉任一个调用点，这条就红。
+        let ops = include_str!("ops/mod.rs");
+        assert!(
+            ops.contains("prefer_official_uninstaller: bool,"),
+            "start_delete 没有接收该偏好"
+        );
+        assert!(
+            ops.contains("if prefer_official_uninstaller && path.ends_with(\".app\")"),
+            "删除线程没有真的去查官方卸载器"
+        );
+        // 5 处 = 2 个删除出口 + 1 处设置开关渲染 + 2 处变更快照元组。
+        // 两个删除出口都必须传：漏一个，那条路径上的设置就是死的。
+        assert_eq!(
+            include_str!("ui/mod.rs")
+                .matches("app.settings_prefer_official_uninstaller,")
+                .count(),
+            5,
+            "删除出口 / 设置项 / 快照元组漏了 settings_prefer_official_uninstaller"
+        );
     }
 
     #[test]

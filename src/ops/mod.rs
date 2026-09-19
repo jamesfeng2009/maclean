@@ -835,6 +835,8 @@ pub(crate) fn start_delete(
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
     auto_restore: bool,
+    // 卸载 .app 时优先交给厂商自带的官方卸载器（M-1，仅 macOS 有意义）
+    prefer_official_uninstaller: bool,
 ) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
@@ -880,6 +882,40 @@ pub(crate) fn start_delete(
                         let batch_paths = batch_paths.clone();
                         let use_trash = *use_trash;
                         let size_bytes = *size_bytes;
+
+                        // M-1：应用包优先交给官方卸载器。
+                        // 删目录≠卸载软件：launchd 任务、pkgutil 收据、系统扩展
+                        // 授权都清不掉，卸载完还会每分钟拉起一个已不存在的二进制。
+                        // 启动失败不阻断 —— 回落到正常删除，用户至少还能卸掉文件。
+                        #[cfg(target_os = "macos")]
+                        if prefer_official_uninstaller && path.ends_with(".app") {
+                            let name =
+                                crate::scanner::official_uninstaller::app_display_name(&path);
+                            if let Some(u) =
+                                crate::scanner::official_uninstaller::find_official_uninstaller(
+                                    &path, &name,
+                                )
+                            {
+                                logger::info(&format!("交由官方卸载器处理: {} -> {}", path, u.path));
+                                match crate::scanner::official_uninstaller::launch(&u) {
+                                    Ok(_) => {
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("↗ {} [{}] {}",
+                                                App::t_lang(lang_en, "log_official_uninstaller"),
+                                                category, path),
+                                            path.clone(), category.clone(), true));
+                                        safety::log_deletion(&path, &category, true, None);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        logger::warn(&format!(
+                                            "官方卸载器启动失败，回落到删除目录: {} ({})",
+                                            path, e
+                                        ));
+                                    }
+                                }
+                            }
+                        }
 
                         // Windows 应用卸载特殊处理（干净卸载：卸载程序 + 扫描残留，不自动清理）
                         #[cfg(target_os = "windows")]

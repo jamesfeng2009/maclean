@@ -399,6 +399,7 @@ impl Gui {
                                         app.lang_en,
                                         &mut self.delete_rx,
                                         app.settings_auto_restore_point,
+                                        app.settings_prefer_official_uninstaller,
                                     );
                                 } else {
                                     log_scan_step(app.t("log_quickclean_none"));
@@ -3223,6 +3224,16 @@ pub(crate) fn show_confirm_window(
                             theme::caution(),
                         );
                     }
+                    // M-1：哪些应用会被交给官方卸载器。必须提前说清楚 ——
+                    // 用户点了确认之后会弹出一个不属于本工具的窗口，不说就是惊吓。
+                    if !app.official_handoffs.is_empty() {
+                        render_confirm_row(
+                            ui,
+                            app.t("confirm_official_uninstaller_hint"),
+                            &app.official_handoffs.len().to_string(),
+                            theme::caution(),
+                        );
+                    }
                     if safe_cnt > 0 {
                         render_confirm_row(
                             ui,
@@ -3357,6 +3368,7 @@ pub(crate) fn show_confirm_window(
                         app.lang_en,
                         delete_rx,
                         app.settings_auto_restore_point,
+                        app.settings_prefer_official_uninstaller,
                     );
                 }
                 let cancel_label = app.t("cancel").to_string();
@@ -5532,6 +5544,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_keep_sudo,
         app.settings_scan_cache,
         app.settings_scan_all_disks,
+        app.settings_prefer_official_uninstaller,
         app.settings_confirm_advanced,
         app.settings_prevent_lid_close,
         app.settings_auto_restore_point,
@@ -5607,6 +5620,16 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                             app.t("setting_scan_all_disks"),
                             app.t("setting_scan_all_disks_desc"),
                             &mut app.settings_scan_all_disks,
+                            true,
+                        );
+                        // M-1：只在 macOS 显示 —— 官方卸载器的识别针对 .app 包，
+                        // Windows 走 UninstallString，是另一套机制
+                        #[cfg(target_os = "macos")]
+                        render_settings_item(
+                            ui,
+                            app.t("setting_official_uninstaller"),
+                            app.t("setting_official_uninstaller_desc"),
+                            &mut app.settings_prefer_official_uninstaller,
                             true,
                         );
                     });
@@ -6005,6 +6028,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_keep_sudo,
         app.settings_scan_cache,
         app.settings_scan_all_disks,
+        app.settings_prefer_official_uninstaller,
         app.settings_confirm_advanced,
         app.settings_prevent_lid_close,
         app.settings_auto_restore_point,

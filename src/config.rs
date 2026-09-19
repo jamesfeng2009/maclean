@@ -45,6 +45,11 @@ pub struct AppConfig {
     pub settings_scan_cache: bool,
     /// 扫描全部磁盘（仅 Windows 生效，默认只扫 C 盘）
     pub settings_scan_all_disks: bool,
+    /// 卸载应用时优先调用其官方卸载器（仅 macOS 生效，M-1）
+    ///
+    /// 默认开：删目录不等于卸载软件，launchd 任务 / pkgutil 收据 /
+    /// 系统扩展授权都要靠官方卸载器才清得掉。关掉则退回只删 .app 目录。
+    pub settings_prefer_official_uninstaller: bool,
     /// 删除前二次确认（Advanced 项目）
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS）
@@ -65,6 +70,7 @@ impl Default for AppConfig {
             settings_keep_sudo: true,
             settings_scan_cache: true,
             settings_scan_all_disks: false,
+            settings_prefer_official_uninstaller: true,
             settings_confirm_advanced: true,
             settings_prevent_lid_close: true,
             settings_auto_restore_point: true,
