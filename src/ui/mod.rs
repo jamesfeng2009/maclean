@@ -5545,6 +5545,8 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_scan_cache,
         app.settings_scan_all_disks,
         app.settings_prefer_official_uninstaller,
+        app.schedule_enabled,
+        app.schedule_interval_days,
         app.settings_confirm_advanced,
         app.settings_prevent_lid_close,
         app.settings_auto_restore_point,
@@ -5736,6 +5738,81 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
 
                     ui.add_space(12.0);
 
+                    // C-3：定时清理卡片
+                    settings_card(ui, app.t("settings_schedule"), |ui| {
+                        // 等级闸门（C-1）：定时清理是付费能力
+                        let tier_ok = crate::license::current_tier().allows_scheduled_cleanup();
+                        if !tier_ok {
+                            ui.colored_label(
+                                theme::caution(),
+                                egui::RichText::new(app.t("schedule_pro_only")).size(12.0),
+                            );
+                            ui.add_space(6.0);
+                        }
+
+                        let before_enabled = app.schedule_enabled;
+                        let before_interval = app.schedule_interval_days;
+                        render_settings_item(
+                            ui,
+                            app.t("setting_schedule_enable"),
+                            app.t("setting_schedule_enable_desc"),
+                            &mut app.schedule_enabled,
+                            tier_ok,
+                        );
+
+                        ui.add_space(6.0);
+                        ui.colored_label(
+                            theme::text(),
+                            egui::RichText::new(app.t("setting_schedule_interval")).size(13.0),
+                        );
+                        ui.horizontal(|ui| {
+                            for d in crate::scheduler::INTERVAL_OPTIONS {
+                                let label = match d {
+                                    1 => app.t("schedule_every_day"),
+                                    7 => app.t("schedule_every_week"),
+                                    _ => app.t("schedule_every_month"),
+                                };
+                                if ui
+                                    .selectable_label(app.schedule_interval_days == d, label)
+                                    .clicked()
+                                    && tier_ok
+                                {
+                                    app.schedule_interval_days = d;
+                                }
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        let last_text = if app.schedule_last_run == 0 {
+                            app.t("schedule_never_run").to_string()
+                        } else {
+                            app.tf("schedule_last_run", &[&crate::cli::format_timestamp(
+                                app.schedule_last_run,
+                            )])
+                        };
+                        ui.colored_label(
+                            theme::text_2(),
+                            egui::RichText::new(last_text).size(11.0),
+                        );
+                        if let Some(ref r) = app.schedule_result {
+                            ui.colored_label(
+                                theme::text_2(),
+                                egui::RichText::new(r).size(11.0),
+                            );
+                        }
+
+                        // 开关或间隔变了才去动系统任务：每次保存都注册一遍，
+                        // launchd / schtasks 都会报"已存在"，噪音且没意义。
+                        if tier_ok
+                            && (app.schedule_enabled != before_enabled
+                                || app.schedule_interval_days != before_interval)
+                        {
+                            app.apply_schedule();
+                        }
+                    });
+
+                    ui.add_space(12.0);
+
                     // 语言设置卡片
                     settings_card(ui, app.t("settings_language"), |ui| {
                         ui.horizontal(|ui| {
@@ -5913,6 +5990,17 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                                     egui::RichText::new(format!("{} · {}", email, plan_label))
                                         .size(12.0),
                                 );
+                                // C-1：等级由 plan 推导，不是另一个硬编码布尔
+                                ui.colored_label(
+                                    theme::text_2(),
+                                    egui::RichText::new(format!(
+                                        "{} · {}",
+                                        app.t(crate::license::PlanTier::from_plan(plan)
+                                            .label_key()),
+                                        app.t("tier_capability_unlimited")
+                                    ))
+                                    .size(11.0),
+                                );
                                 ui.add_space(8.0);
                                 if ui
                                     .button(
@@ -5972,6 +6060,26 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                                 );
                                 ui.add_space(10.0);
 
+                                // C-1：把"付费能多得到什么"说出来。
+                                // 只显示一个进度条，用户根本不知道付钱买到的是什么 ——
+                                // 那不是定价模糊，是没定价。
+                                {
+                                    let caps: Vec<String> = vec![
+                                        app.t("tier_capability_unlimited").to_string(),
+                                        app.t("tier_capability_scheduled").to_string(),
+                                    ];
+                                    ui.colored_label(
+                                        theme::text_2(),
+                                        egui::RichText::new(App::tf_lang(
+                                            app.lang_en,
+                                            "tier_pro_includes",
+                                            &[&caps.join(" · ")],
+                                        ))
+                                        .size(11.0),
+                                    );
+                                }
+                                ui.add_space(10.0);
+
                                 ui.add(
                                     egui::TextEdit::singleline(&mut app.license_input)
                                         .desired_width(f32::INFINITY)
@@ -6029,6 +6137,8 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_scan_cache,
         app.settings_scan_all_disks,
         app.settings_prefer_official_uninstaller,
+        app.schedule_enabled,
+        app.schedule_interval_days,
         app.settings_confirm_advanced,
         app.settings_prevent_lid_close,
         app.settings_auto_restore_point,

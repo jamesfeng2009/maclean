@@ -50,6 +50,12 @@ pub struct AppConfig {
     /// 默认开：删目录不等于卸载软件，launchd 任务 / pkgutil 收据 /
     /// 系统扩展授权都要靠官方卸载器才清得掉。关掉则退回只删 .app 目录。
     pub settings_prefer_official_uninstaller: bool,
+    /// 定时清理（C-3）：是否开启
+    pub schedule_enabled: bool,
+    /// 定时清理间隔（天），只取 1 / 7 / 30
+    pub schedule_interval_days: u32,
+    /// 上次定时清理执行的 Unix 秒，0 = 从未执行
+    pub schedule_last_run: u64,
     /// 删除前二次确认（Advanced 项目）
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS）
@@ -71,6 +77,9 @@ impl Default for AppConfig {
             settings_scan_cache: true,
             settings_scan_all_disks: false,
             settings_prefer_official_uninstaller: true,
+            schedule_enabled: false,
+            schedule_interval_days: 7,
+            schedule_last_run: 0,
             settings_confirm_advanced: true,
             settings_prevent_lid_close: true,
             settings_auto_restore_point: true,

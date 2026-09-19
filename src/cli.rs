@@ -61,6 +61,28 @@ pub enum Commands {
         /// 试运行，只显示会清理什么，不实际删除
         #[arg(long)]
         dry_run: bool,
+
+        /// 由系统定时任务调用（C-3）：执行后把 schedule_last_run 记为当前时间
+        ///
+        /// 定时任务（launchd / 任务计划）跑的就是这条命令。带上它才知道
+        /// "上次定时清理是什么时候"，否则设置页永远显示"尚未执行过"。
+        #[arg(long)]
+        scheduled: bool,
+    },
+
+    /// 查看 / 注册 / 注销定时清理任务（C-3）
+    Schedule {
+        /// 注册系统定时任务
+        #[arg(long)]
+        install: bool,
+
+        /// 注销系统定时任务
+        #[arg(long)]
+        remove: bool,
+
+        /// 设置间隔（天）：1 / 7 / 30，其它值会被夹到最近的档位
+        #[arg(long)]
+        days: Option<u32>,
     },
 
     /// 检查磁盘空间使用情况
@@ -119,7 +141,13 @@ fn run_command(cmd: Commands, json: bool) {
             tab,
             safe_only,
             dry_run,
-        } => cmd_clean(tab, safe_only, dry_run, json),
+            scheduled,
+        } => cmd_clean(tab, safe_only, dry_run, scheduled, json),
+        Commands::Schedule {
+            install,
+            remove,
+            days,
+        } => cmd_schedule(install, remove, days, json),
         Commands::CheckDisk => cmd_check_disk(json),
         Commands::List => cmd_list(json),
         // 日志是给人看的，不做 JSON
@@ -427,7 +455,17 @@ struct JsonClean {
     rejected: usize,
 }
 
-fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, json: bool) {
+fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: bool, json: bool) {
+    // C-3：定时任务跑完就记账，设置页才显示得出"上次执行"时间
+    if scheduled {
+        let mut cfg = crate::config::load_config();
+        cfg.schedule_last_run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        crate::config::save_config(&cfg);
+    }
+
     let tabs: Vec<String> = if let Some(t) = &tab {
         vec![t.clone()]
     } else {
@@ -712,6 +750,96 @@ fn cmd_list(json: bool) {
 }
 
 // =========================================================================
+//  C-3 · 定时清理
+// =========================================================================
+
+#[derive(serde::Serialize)]
+struct JsonSchedule<'a> {
+    command: &'a str,
+    enabled: bool,
+    interval_days: u32,
+    last_run: u64,
+    due: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 查看 / 注册 / 注销定时清理任务
+fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, json: bool) {
+    let mut cfg = crate::config::load_config();
+
+    if let Some(d) = days {
+        cfg.schedule_interval_days = crate::scheduler::normalize_interval_days(d);
+        crate::config::save_config(&cfg);
+    }
+
+    let mut result: Option<String> = None;
+
+    if install {
+        cfg.schedule_enabled = true;
+        crate::config::save_config(&cfg);
+        result = Some(match crate::scheduler::install(cfg.schedule_interval_days) {
+            // 命令成功 ≠ 任务真的会跑（可能被系统策略挡下），如实回传原文
+            Ok(_) => "定时任务已注册".to_string(),
+            Err(e) => format!("注册失败：{}", e),
+        });
+    } else if remove {
+        cfg.schedule_enabled = false;
+        crate::config::save_config(&cfg);
+        let (prog, args) = crate::scheduler::uninstall_command();
+        result = Some(
+            match std::process::Command::new(prog).args(args).output() {
+                Ok(o) if o.status.success() => "定时任务已移除".to_string(),
+                Ok(o) => format!("移除失败：{}", String::from_utf8_lossy(&o.stderr).trim()),
+                Err(e) => format!("移除失败：{}", e),
+            },
+        );
+    }
+
+    if json {
+        print_json(&JsonSchedule {
+            command: "schedule",
+            enabled: cfg.schedule_enabled,
+            interval_days: cfg.schedule_interval_days,
+            last_run: cfg.schedule_last_run,
+            due: crate::scheduler::is_due(
+                cfg.schedule_enabled,
+                cfg.schedule_interval_days,
+                cfg.schedule_last_run,
+                now_secs(),
+            ),
+            result,
+        });
+        return;
+    }
+
+    println!("\n定时清理：\n");
+    println!("  状态：{}", if cfg.schedule_enabled { "已开启" } else { "未开启" });
+    println!("  间隔：每 {} 天", cfg.schedule_interval_days);
+    println!(
+        "  上次执行：{}",
+        if cfg.schedule_last_run == 0 {
+            "尚未执行过".to_string()
+        } else {
+            format_timestamp(cfg.schedule_last_run)
+        }
+    );
+    if let Some(r) = result {
+        println!("  {}", r);
+    }
+    println!("\n用法：");
+    println!("  maclean schedule --install --days 7   # 注册每 7 天执行一次的任务");
+    println!("  maclean schedule --remove             # 注销任务");
+}
+
+// =========================================================================
 //  M-2 · 删除清单与还原
 // =========================================================================
 
@@ -780,7 +908,7 @@ fn cmd_backups(restorable_only: bool, json: bool) {
             "清单 ID", "时间", "项数", "可还原", "大小"
         );
         for m in &manifests {
-            let ts = chrono_like(m.created_at);
+            let ts = format_timestamp(m.created_at);
             println!(
                 "  {:<16} {:<20} {:>6} {:>8} {:>10}",
                 m.id,
@@ -803,7 +931,7 @@ fn cmd_backups(restorable_only: bool, json: bool) {
 ///
 /// 刻意不引入 chrono：这里只需要一个人类可读的时间戳，为此拖进一个
 /// 日期库（连带时区表）不值得。格式固定为 UTC，避免不同机器显示不一致。
-fn chrono_like(secs: u64) -> String {
+pub(crate) fn format_timestamp(secs: u64) -> String {
     let days = secs / 86400;
     let rem = secs % 86400;
     let h = rem / 3600;
@@ -1123,10 +1251,10 @@ mod tests {
     #[test]
     fn timestamp_rendering_matches_utc_conventions() {
         // 基准值用系统 date（UTC）独立算出来的，不是拿本函数自证。
-        assert_eq!(chrono_like(0), "1970-01-01 00:00:00");
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00");
         // 闰年 2 月 29 日：手搓日历最容易错的就是这里
-        assert_eq!(chrono_like(1709164800), "2024-02-29 00:00:00");
-        assert_eq!(chrono_like(1789831800), "2026-09-19 15:30:00");
+        assert_eq!(format_timestamp(1709164800), "2024-02-29 00:00:00");
+        assert_eq!(format_timestamp(1789831800), "2026-09-19 15:30:00");
     }
 
     #[test]
@@ -1143,7 +1271,7 @@ mod tests {
             secs += len * 86400;
         }
         // 1970..2100 累计后落在 2100-01-01
-        assert_eq!(chrono_like(secs), "2100-01-01 00:00:00");
+        assert_eq!(format_timestamp(secs), "2100-01-01 00:00:00");
     }
 
     #[test]
@@ -1156,6 +1284,19 @@ mod tests {
         assert!(matches!(r.command, Some(Commands::Restore { id }) if id == "abc"));
         // restore 缺 id 必须报错，不能默默什么都不做
         assert!(Cli::try_parse_from(["maclean", "restore"]).is_err());
+    }
+
+    #[test]
+    fn schedule_command_is_wired_with_its_flags() {
+        // 定时清理没有命令行入口的话，"应用没开"这个主场景就完全覆盖不到。
+        assert!(Cli::try_parse_from(["maclean", "schedule"]).is_ok());
+        assert!(Cli::try_parse_from(["maclean", "schedule", "--install", "--days", "7"]).is_ok());
+        assert!(Cli::try_parse_from(["maclean", "schedule", "--remove"]).is_ok());
+        let c = Cli::try_parse_from(["maclean", "clean", "--scheduled"]).unwrap();
+        assert!(
+            matches!(c.command, Some(Commands::Clean { scheduled: true, .. })),
+            "clean 缺少 --scheduled：定时任务跑完无法记账，设置页永远显示未执行过"
+        );
     }
 
     #[test]

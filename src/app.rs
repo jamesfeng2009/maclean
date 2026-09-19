@@ -337,6 +337,17 @@ pub struct App {
     /// 在 confirm_delete 时算一次并缓存，确认弹窗据此告知用户；
     /// 逐帧重算会反复读目录，没必要。
     pub official_handoffs: Vec<(String, String)>,
+    /// 定时清理开关（C-3）
+    pub schedule_enabled: bool,
+    /// 定时清理间隔（天），取值经 `scheduler::normalize_interval_days` 归一
+    pub schedule_interval_days: u32,
+    /// 上次定时清理执行的 Unix 秒，0 = 从未执行
+    pub schedule_last_run: u64,
+    /// 注册/注销系统定时任务的结果（设置页显示）
+    ///
+    /// 存的是命令的**实际返回**，不是"已开启"的固定文案 —— 定时任务很可能
+    /// 因为权限或策略注册失败，如实显示才不会给用户虚假的安全感。
+    pub schedule_result: Option<String>,
     /// 删除前二次确认（Advanced 项目）
     pub settings_confirm_advanced: bool,
     /// 合盖时禁止删除（macOS only）
@@ -489,6 +500,12 @@ impl App {
             settings_scan_all_disks: user_config.settings_scan_all_disks,
             settings_prefer_official_uninstaller: user_config.settings_prefer_official_uninstaller,
             official_handoffs: Vec::new(),
+            schedule_enabled: user_config.schedule_enabled,
+            schedule_interval_days: crate::scheduler::normalize_interval_days(
+                user_config.schedule_interval_days,
+            ),
+            schedule_last_run: user_config.schedule_last_run,
+            schedule_result: None,
             settings_confirm_advanced: user_config.settings_confirm_advanced,
             settings_prevent_lid_close: user_config.settings_prevent_lid_close,
             settings_auto_restore_point: user_config.settings_auto_restore_point,
@@ -1108,6 +1125,38 @@ impl App {
         }
     }
 
+    /// 注册 / 注销系统级定时任务（C-3）
+    ///
+    /// 结果存的是命令的**实际返回**，不是"已开启"的固定文案：
+    /// launchd / schtasks 都可能因权限或策略失败，如实显示才不会给用户
+    /// 虚假的安全感 —— 以为设好了，其实一次都没跑过。
+    pub fn apply_schedule(&mut self) {
+        if !crate::license::current_tier().allows_scheduled_cleanup() {
+            self.schedule_result = Some(self.t("schedule_pro_only").to_string());
+            return;
+        }
+        self.schedule_interval_days =
+            crate::scheduler::normalize_interval_days(self.schedule_interval_days);
+        let text = if self.schedule_enabled {
+            match crate::scheduler::install(self.schedule_interval_days) {
+                Ok(_) => self.t("schedule_installed").to_string(),
+                Err(e) => self.tf("schedule_install_failed", &[&e]),
+            }
+        } else {
+            let (prog, args) = crate::scheduler::uninstall_command();
+            match std::process::Command::new(prog).args(args).output() {
+                Ok(o) if o.status.success() => self.t("schedule_removed").to_string(),
+                Ok(o) => self.tf(
+                    "schedule_remove_failed",
+                    &[String::from_utf8_lossy(&o.stderr).trim()],
+                ),
+                Err(e) => self.tf("schedule_remove_failed", &[&e.to_string()]),
+            }
+        };
+        self.schedule_result = Some(text);
+        self.save_settings();
+    }
+
     /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths, use_trash, size_bytes) 供后台线程使用
     /// use_trash: true 表示移至废纸篓（可恢复），false 表示永久删除
     /// size_bytes: 扫描时算出的大小，随删除任务带到备份清单里。
@@ -1328,6 +1377,9 @@ impl App {
         self.user_config.settings_scan_all_disks = self.settings_scan_all_disks;
         self.user_config.settings_prefer_official_uninstaller =
             self.settings_prefer_official_uninstaller;
+        self.user_config.schedule_enabled = self.schedule_enabled;
+        self.user_config.schedule_interval_days = self.schedule_interval_days;
+        self.user_config.schedule_last_run = self.schedule_last_run;
         self.user_config.settings_confirm_advanced = self.settings_confirm_advanced;
         self.user_config.settings_prevent_lid_close = self.settings_prevent_lid_close;
         self.user_config.settings_auto_restore_point = self.settings_auto_restore_point;
@@ -1396,6 +1448,29 @@ impl App {
                     "Handed to the app's own uninstaller (opens a separate window)"
                 },
                 "log_official_uninstaller" => "Handed to official uninstaller",
+                // C-1 · 付费分级
+                "tier_free" => "Free",
+                "tier_pro" => "Pro",
+                "tier_capability_unlimited" => "Unlimited cleanup quota",
+                "tier_capability_scheduled" => "Scheduled cleanup",
+                "tier_pro_includes" => "Pro adds: {}",
+                // C-3 · 定时清理
+                "settings_schedule" => "Scheduled cleanup",
+                "setting_schedule_enable" => "Run cleanup automatically",
+                "setting_schedule_enable_desc" => {
+                    "Registers a system job, so cleanup runs even when the app is closed"
+                },
+                "setting_schedule_interval" => "Interval",
+                "schedule_every_day" => "Daily",
+                "schedule_every_week" => "Weekly",
+                "schedule_every_month" => "Monthly",
+                "schedule_last_run" => "Last run: {}",
+                "schedule_never_run" => "Never run yet",
+                "schedule_pro_only" => "Scheduled cleanup is a Pro feature",
+                "schedule_installed" => "Scheduled job registered",
+                "schedule_install_failed" => "Could not register the job: {}",
+                "schedule_removed" => "Scheduled job removed",
+                "schedule_remove_failed" => "Could not remove the job: {}",
                 "setting_confirm_advanced" => "Double-check before deleting Advanced items",
                 "setting_confirm_advanced_desc" => "Advanced items require manual confirmation",
                 "setting_prevent_lid_close" => "Prevent deletion while lid is closed",
@@ -1777,6 +1852,27 @@ impl App {
                 "setting_official_uninstaller_desc" => "直接删 .app 目录会留下 launchd 任务与 pkgutil 收据，官方卸载器会一并清掉",
                 "confirm_official_uninstaller_hint" => "交由应用自带官方卸载器处理（会弹出独立窗口）",
                 "log_official_uninstaller" => "已交由官方卸载器",
+                // C-1 · 付费分级
+                "tier_free" => "免费版",
+                "tier_pro" => "Pro 版",
+                "tier_capability_unlimited" => "清理额度无上限",
+                "tier_capability_scheduled" => "定时清理",
+                "tier_pro_includes" => "Pro 版增加：{}",
+                // C-3 · 定时清理
+                "settings_schedule" => "定时清理",
+                "setting_schedule_enable" => "自动执行清理",
+                "setting_schedule_enable_desc" => "注册系统级任务，应用未运行时也会按时清理",
+                "setting_schedule_interval" => "执行间隔",
+                "schedule_every_day" => "每天",
+                "schedule_every_week" => "每周",
+                "schedule_every_month" => "每月",
+                "schedule_last_run" => "上次执行：{}",
+                "schedule_never_run" => "尚未执行过",
+                "schedule_pro_only" => "定时清理为 Pro 版功能",
+                "schedule_installed" => "已注册定时任务",
+                "schedule_install_failed" => "注册定时任务失败：{}",
+                "schedule_removed" => "已移除定时任务",
+                "schedule_remove_failed" => "移除定时任务失败：{}",
                 "setting_confirm_advanced" => "删除前二次确认",
                 "setting_confirm_advanced_desc" => "Advanced 项目必须手动确认",
                 "setting_prevent_lid_close" => "合盖时禁止删除",
@@ -2474,6 +2570,34 @@ mod tests {
                 .count(),
             5,
             "删除出口 / 设置项 / 快照元组漏了 settings_prefer_official_uninstaller"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    //  C-3 · 定时清理
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn scheduled_cleanup_defaults_to_off() {
+        // 默认关：没人设过的东西不该自己动用户的文件
+        let cfg = crate::config::AppConfig::default();
+        assert!(!cfg.schedule_enabled);
+        assert_eq!(cfg.schedule_interval_days, 7);
+        assert_eq!(cfg.schedule_last_run, 0);
+    }
+
+    #[test]
+    fn scheduling_is_gated_by_the_plan_tier() {
+        // C-1 定义了能力，C-3 必须真的去查它 —— 否则分级又只是一个标签。
+        // 只看非测试部分：否则这条用例自己的字面量会被 include_str 抓到，
+        // 变成永真的自我指涉断言。
+        let body = include_str!("app.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap_or("");
+        assert!(
+            body.contains("current_tier().allows_scheduled_cleanup()"),
+            "定时清理没有按等级判定，C-1 的能力形同虚设"
         );
     }
 

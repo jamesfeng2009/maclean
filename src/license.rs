@@ -76,6 +76,72 @@ fn default_schema_version() -> u8 {
     1
 }
 
+/// 功能分级（C-1）
+///
+/// # 为什么要有这个
+///
+/// 此前"付费"只等于一件事：清理额度从 500MB 变成无限。分级本身没有任何
+/// 其它含义，于是付费版与免费版在功能上完全同构 —— 用户付了钱，买的只是
+/// 一个计数器的上限。这里把"等级"变成一等概念，功能按等级开。
+///
+/// # 为什么不拆得更细（yearly / lifetime / team ...）
+///
+/// 年度版与终身版的差别只在**有效期**，而有效期已经由 `exp` 处理了
+/// （见 `is_expired`）。再拆一层等级只会得到两个能力完全相同的变体，
+/// 纯属给自己找麻烦。真正需要区分的是"付费 / 未付费"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanTier {
+    /// 免费版：500MB 累计清理额度，不含定时清理
+    Free,
+    /// 付费版：额度无上限 + 定时清理
+    Pro,
+}
+
+impl PlanTier {
+    /// 从 payload 的 plan 字段推导等级
+    ///
+    /// 判定原则：**签名负责授权，plan 只负责口味**。key 是我们自己签的，
+    /// 能过校验就说明卖出去了；此时把未知的 plan 字符串判成 Free，等于
+    /// 让一个已经付过钱的用户被拒之门外 —— 比多发一点权限糟得多。
+    pub fn from_plan(plan: &str) -> Self {
+        match plan.trim().to_ascii_lowercase().as_str() {
+            "" | "free" | "trial" => PlanTier::Free,
+            _ => PlanTier::Pro,
+        }
+    }
+
+    /// 清理额度是否无上限
+    pub fn unlimited_quota(self) -> bool {
+        matches!(self, PlanTier::Pro)
+    }
+
+    /// 是否允许定时清理（C-3 依此判定）
+    pub fn allows_scheduled_cleanup(self) -> bool {
+        matches!(self, PlanTier::Pro)
+    }
+
+    /// 等级的 i18n key
+    pub fn label_key(self) -> &'static str {
+        match self {
+            PlanTier::Free => "tier_free",
+            PlanTier::Pro => "tier_pro",
+        }
+    }
+}
+
+/// 当前生效的等级
+///
+/// 开发者模式直接给 Pro：那是我自己调试用的，不是对外分级。
+pub fn current_tier() -> PlanTier {
+    if is_dev_mode() {
+        return PlanTier::Pro;
+    }
+    match load_status() {
+        LicenseStatus::Activated { ref plan, .. } => PlanTier::from_plan(plan),
+        LicenseStatus::Free => PlanTier::Free,
+    }
+}
+
 /// License 验证结果
 #[derive(Debug, Clone)]
 pub enum LicenseStatus {
@@ -461,11 +527,10 @@ pub fn quota_remaining() -> u64 {
 /// 检查本次清理是否在免费额度内
 /// 返回 None 表示允许（已激活或额度足够），Some(剩余字节) 表示超额需拦截
 pub fn check_quota_allow(plan_bytes: u64) -> Option<u64> {
-    if is_dev_mode() {
-        return None; // 开发者模式，无限制
-    }
-    if matches!(load_status(), LicenseStatus::Activated { .. }) {
-        return None; // 已激活，无限制
+    // C-1：按等级判定而不是"有没有激活过"。以前这两件事是同一个判断，
+    // 于是"付费"这个词在代码里只等价于 500MB 这一个数字。
+    if current_tier().unlimited_quota() {
+        return None; // 开发者模式 / 付费版，无限制
     }
     let remaining = quota_remaining();
     if plan_bytes <= remaining {
@@ -517,6 +582,58 @@ mod tests {
             "MACLEAN_DEV 环境变量仍能开启开发模式 —— 发布包可被绕过"
         );
         std::env::remove_var("MACLEAN_DEV");
+    }
+
+    // -----------------------------------------------------------------
+    //  C-1 · 付费分级
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn plan_string_maps_to_a_tier() {
+        assert_eq!(PlanTier::from_plan("lifetime"), PlanTier::Pro);
+        assert_eq!(PlanTier::from_plan("yearly"), PlanTier::Pro);
+        assert_eq!(PlanTier::from_plan("monthly"), PlanTier::Pro);
+        // 大小写与空白不能影响判定：plan 是人工录入的字段
+        assert_eq!(PlanTier::from_plan("  LifeTime "), PlanTier::Pro);
+        assert_eq!(PlanTier::from_plan(""), PlanTier::Free);
+        assert_eq!(PlanTier::from_plan("free"), PlanTier::Free);
+        assert_eq!(PlanTier::from_plan("trial"), PlanTier::Free);
+    }
+
+    #[test]
+    fn an_unknown_plan_is_treated_as_paid() {
+        // 判定原则：签名负责授权，plan 只负责口味。
+        // key 是我们自己签发的，能过校验就说明卖出去了；此时判成 Free
+        // 等于把一个已付费用户拒之门外 —— 比多发一点权限糟得多。
+        assert_eq!(PlanTier::from_plan("quarterly"), PlanTier::Pro);
+        assert_eq!(PlanTier::from_plan("team-2027"), PlanTier::Pro);
+    }
+
+    #[test]
+    fn the_two_tiers_differ_in_capabilities() {
+        // 分级如果没有能力差异，就只是个标签 —— 这正是 C-1 要修的。
+        assert!(!PlanTier::Free.unlimited_quota());
+        assert!(PlanTier::Pro.unlimited_quota());
+        assert!(!PlanTier::Free.allows_scheduled_cleanup());
+        assert!(PlanTier::Pro.allows_scheduled_cleanup());
+        assert_ne!(PlanTier::Free.label_key(), PlanTier::Pro.label_key());
+    }
+
+    #[test]
+    fn quota_gate_decides_by_tier() {
+        // 钉住源码：额度判定必须走等级，不能退回"有没有激活过"的裸判断。
+        let src = include_str!("license.rs");
+        assert!(
+            src.contains("if current_tier().unlimited_quota()"),
+            "check_quota_allow 不再按等级判定，C-1 等于白做"
+        );
+        // 只看非测试部分：整份 include_str 会把这条用例自己的字面量也算进去，
+        // 那就成了永真的自我指涉断言。
+        let body = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            !body.contains("matches!(load_status(), LicenseStatus::Activated"),
+            "额度判定退回了 Activated 裸判断"
+        );
     }
 
     #[test]

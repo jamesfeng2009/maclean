@@ -20,6 +20,7 @@ mod ops;
 mod platform;
 mod safety;
 mod scanner;
+mod scheduler;
 #[cfg(target_os = "macos")]
 mod sudo_keepalive;
 mod theme;
