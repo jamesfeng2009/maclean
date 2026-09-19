@@ -617,7 +617,11 @@ impl Gui {
                         clear_delete_rx = true;
                         break;
                     }
-                    Ok(DeleteMessage::BackupRecorded { id, restorable, total }) => {
+                    Ok(DeleteMessage::BackupRecorded {
+                        id,
+                        restorable,
+                        total,
+                    }) => {
                         // M-2：记下清单位置与"真能还原"的项数。
                         // restorable 是 0 也要照样显示 —— 用户必须知道这次
                         // 删除没有后悔药，而不是看到一个含糊的"已备份"。
@@ -2169,14 +2173,9 @@ pub(crate) fn render_gui(
                         if let Some(ref r) = app.update_result {
                             ui.colored_label(theme::text_2(), egui::RichText::new(r).size(11.0));
                         }
-                        let clicked = widgets::button(
-                            ui,
-                            None,
-                            label,
-                            widgets::Btn::Primary,
-                            BTN_H_SM,
-                        )
-                        .clicked();
+                        let clicked =
+                            widgets::button(ui, None, label, widgets::Btn::Primary, BTN_H_SM)
+                                .clicked();
                         if clicked && !app.update_downloading && !app.start_update_download() {
                             open_url(&info.url);
                         }
@@ -5812,19 +5811,17 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                         let last_text = if app.schedule_last_run == 0 {
                             app.t("schedule_never_run").to_string()
                         } else {
-                            app.tf("schedule_last_run", &[&crate::cli::format_timestamp(
-                                app.schedule_last_run,
-                            )])
+                            app.tf(
+                                "schedule_last_run",
+                                &[&crate::cli::format_timestamp(app.schedule_last_run)],
+                            )
                         };
                         ui.colored_label(
                             theme::text_2(),
                             egui::RichText::new(last_text).size(11.0),
                         );
                         if let Some(ref r) = app.schedule_result {
-                            ui.colored_label(
-                                theme::text_2(),
-                                egui::RichText::new(r).size(11.0),
-                            );
+                            ui.colored_label(theme::text_2(), egui::RichText::new(r).size(11.0));
                         }
 
                         // 开关或间隔变了才去动系统任务：每次保存都注册一遍，

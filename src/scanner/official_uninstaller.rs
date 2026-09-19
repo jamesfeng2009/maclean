@@ -184,10 +184,7 @@ pub fn launch_command(u: &OfficialUninstaller) -> (String, Vec<String>) {
     match u.kind {
         // open -a 走系统 LaunchServices 启动，卸载器自己的 GUI 会弹出来，
         // 用户看得见在发生什么 —— 比后台静默跑一个二进制安全得多
-        UninstallerKind::App => (
-            "open".to_string(),
-            vec!["-a".to_string(), u.path.clone()],
-        ),
+        UninstallerKind::App => ("open".to_string(), vec!["-a".to_string(), u.path.clone()]),
         UninstallerKind::Executable => (u.path.clone(), Vec::new()),
     }
 }
@@ -322,7 +319,8 @@ mod tests {
         std::fs::create_dir_all(&app).unwrap();
 
         assert!(
-            find_official_uninstaller(&app.to_string_lossy(), "App Cleaner & Uninstaller").is_none()
+            find_official_uninstaller(&app.to_string_lossy(), "App Cleaner & Uninstaller")
+                .is_none()
         );
         let _ = std::fs::remove_dir_all(&base);
     }

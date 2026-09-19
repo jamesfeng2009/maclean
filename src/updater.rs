@@ -92,10 +92,11 @@ pub fn pick_asset<'a>(assets: &'a [UpdateAsset], target: &str) -> Option<&'a Upd
         .collect();
 
     // 架构能匹配上的优先；匹配不上就退回第一个同平台的包
-    if let Some(hit) = candidates
-        .iter()
-        .find(|a| arch_tokens.iter().any(|t| a.name.to_ascii_lowercase().contains(t)))
-    {
+    if let Some(hit) = candidates.iter().find(|a| {
+        arch_tokens
+            .iter()
+            .any(|t| a.name.to_ascii_lowercase().contains(t))
+    }) {
         return Some(*hit);
     }
     if candidates.is_empty() {
@@ -388,9 +389,15 @@ mod tests {
     fn sha256_text_parsing_tolerates_both_tools() {
         let h = "a".repeat(64);
         // sha256sum：<hash>  文件名
-        assert_eq!(parse_sha256_text(&format!("{}  maclean.exe", h)), Some(h.clone()));
+        assert_eq!(
+            parse_sha256_text(&format!("{}  maclean.exe", h)),
+            Some(h.clone())
+        );
         // certutil：带标题行，哈希单独一行
-        let certutil = format!("SHA256 hash of file:\n{}\nCertUtil: -hashfile command completed.", h);
+        let certutil = format!(
+            "SHA256 hash of file:\n{}\nCertUtil: -hashfile command completed.",
+            h
+        );
         assert_eq!(parse_sha256_text(&certutil), Some(h.clone()));
         // 垃圾输入必须返回 None，不能拿一段空字符串去比对
         assert_eq!(parse_sha256_text("not a hash"), None);

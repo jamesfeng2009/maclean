@@ -1191,8 +1191,9 @@ pub(crate) fn start_delete(
         // 否则整条删除链路连锁 panic，UI 永久卡在 Deleting 态
         let failed_items: Vec<(String, String)> =
             failed_items.into_inner().unwrap_or_else(|e| e.into_inner());
-        let backup_entries: Vec<crate::backup::BackupEntry> =
-            backup_entries.into_inner().unwrap_or_else(|e| e.into_inner());
+        let backup_entries: Vec<crate::backup::BackupEntry> = backup_entries
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
 
         logger::info(&format!("阶段1删除完成, 失败 {} 项", failed_items.len()));
 

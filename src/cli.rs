@@ -785,22 +785,22 @@ fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, json: bool) {
     if install {
         cfg.schedule_enabled = true;
         crate::config::save_config(&cfg);
-        result = Some(match crate::scheduler::install(cfg.schedule_interval_days) {
-            // 命令成功 ≠ 任务真的会跑（可能被系统策略挡下），如实回传原文
-            Ok(_) => "定时任务已注册".to_string(),
-            Err(e) => format!("注册失败：{}", e),
-        });
+        result = Some(
+            match crate::scheduler::install(cfg.schedule_interval_days) {
+                // 命令成功 ≠ 任务真的会跑（可能被系统策略挡下），如实回传原文
+                Ok(_) => "定时任务已注册".to_string(),
+                Err(e) => format!("注册失败：{}", e),
+            },
+        );
     } else if remove {
         cfg.schedule_enabled = false;
         crate::config::save_config(&cfg);
         let (prog, args) = crate::scheduler::uninstall_command();
-        result = Some(
-            match std::process::Command::new(prog).args(args).output() {
-                Ok(o) if o.status.success() => "定时任务已移除".to_string(),
-                Ok(o) => format!("移除失败：{}", String::from_utf8_lossy(&o.stderr).trim()),
-                Err(e) => format!("移除失败：{}", e),
-            },
-        );
+        result = Some(match std::process::Command::new(prog).args(args).output() {
+            Ok(o) if o.status.success() => "定时任务已移除".to_string(),
+            Ok(o) => format!("移除失败：{}", String::from_utf8_lossy(&o.stderr).trim()),
+            Err(e) => format!("移除失败：{}", e),
+        });
     }
 
     if json {
@@ -821,7 +821,14 @@ fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, json: bool) {
     }
 
     println!("\n定时清理：\n");
-    println!("  状态：{}", if cfg.schedule_enabled { "已开启" } else { "未开启" });
+    println!(
+        "  状态：{}",
+        if cfg.schedule_enabled {
+            "已开启"
+        } else {
+            "未开启"
+        }
+    );
     println!("  间隔：每 {} 天", cfg.schedule_interval_days);
     println!(
         "  上次执行：{}",
@@ -1294,7 +1301,13 @@ mod tests {
         assert!(Cli::try_parse_from(["maclean", "schedule", "--remove"]).is_ok());
         let c = Cli::try_parse_from(["maclean", "clean", "--scheduled"]).unwrap();
         assert!(
-            matches!(c.command, Some(Commands::Clean { scheduled: true, .. })),
+            matches!(
+                c.command,
+                Some(Commands::Clean {
+                    scheduled: true,
+                    ..
+                })
+            ),
             "clean 缺少 --scheduled：定时任务跑完无法记账，设置页永远显示未执行过"
         );
     }

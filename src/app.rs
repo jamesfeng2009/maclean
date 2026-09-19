@@ -390,9 +390,7 @@ pub struct App {
     /// C-2：下载/安装结果（横幅显示，成功与失败都显示原文）
     pub update_result: Option<String>,
     /// C-2：下载线程的返回通道
-    pub update_dl_rx: Option<
-        std::sync::mpsc::Receiver<Result<String, String>>,
-    >,
+    pub update_dl_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// Windows: 卸载后检测到的残留信息
     #[cfg(target_os = "windows")]
     pub uninstall_residual: Option<scanner::windows_apps::UninstallResidual>,

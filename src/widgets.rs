@@ -115,7 +115,11 @@ pub fn button_enabled(
 
         painter.rect_filled(rect, theme::r(theme::R), bg);
         if stroke_c != egui::Color32::TRANSPARENT {
-            painter.rect_stroke(rect, theme::r(theme::R), egui::Stroke::new(1.0_f32, stroke_c));
+            painter.rect_stroke(
+                rect,
+                theme::r(theme::R),
+                egui::Stroke::new(1.0_f32, stroke_c),
+            );
         }
 
         let mut x = rect.min.x + pad_x;
