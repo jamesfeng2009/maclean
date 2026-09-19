@@ -79,6 +79,24 @@ pub enum Commands {
         #[arg(long)]
         open: bool,
     },
+
+    /// 列出历史删除清单（M-2）
+    ///
+    /// 每次删除都会落一份清单，记录删了哪些路径、多大、其中多少项还救得回来。
+    Backups {
+        /// 只看还有可还原项的清单
+        #[arg(long)]
+        restorable_only: bool,
+    },
+
+    /// 按清单还原（M-2）
+    ///
+    /// 只还原当时走废纸篓的项。永久删除的缓存字节已经不在了，
+    /// 命令会明确列出它们为"不可还原"，不会假装成功。
+    Restore {
+        /// 清单 id（`maclean backups` 输出的第一列）
+        id: String,
+    },
 }
 
 /// 运行 CLI 命令，返回是否处理了 CLI（true=已处理，应退出；false=无命令，启动 GUI）
@@ -106,6 +124,9 @@ fn run_command(cmd: Commands, json: bool) {
         Commands::List => cmd_list(json),
         // 日志是给人看的，不做 JSON
         Commands::Log { tail, open } => cmd_log(tail, open),
+        Commands::Backups { restorable_only } => cmd_backups(restorable_only, json),
+        // 还原结果涉及逐个路径的成功/失败，JSON 更有用（脚本可据此重试）
+        Commands::Restore { id } => cmd_restore(&id, json),
     }
 }
 
@@ -691,6 +712,198 @@ fn cmd_list(json: bool) {
 }
 
 // =========================================================================
+//  M-2 · 删除清单与还原
+// =========================================================================
+
+#[derive(serde::Serialize)]
+struct JsonBackupEntry<'a> {
+    path: &'a str,
+    size_bytes: u64,
+    category: &'a str,
+    restorable: bool,
+}
+
+#[derive(serde::Serialize)]
+struct JsonBackup<'a> {
+    id: &'a str,
+    created_at: u64,
+    platform: &'a str,
+    total: usize,
+    restorable: usize,
+    total_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entries: Option<Vec<JsonBackupEntry<'a>>>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonBackups<'a> {
+    command: &'a str,
+    manifests: Vec<JsonBackup<'a>>,
+}
+
+/// 列出历史删除清单
+///
+/// 顺带清掉超过保留期的旧清单：路径会复用，一个月前的"还原"很可能
+/// 把旧文件搬到一个早就被新内容占掉的路径上，留着反而制造混乱。
+fn cmd_backups(restorable_only: bool, json: bool) {
+    let pruned = crate::backup::prune_old();
+    let mut manifests = crate::backup::list();
+    if restorable_only {
+        manifests.retain(|m| m.restorable_count() > 0);
+    }
+
+    if json {
+        print_json(&JsonBackups {
+            command: "backups",
+            manifests: manifests
+                .iter()
+                .map(|m| JsonBackup {
+                    id: &m.id,
+                    created_at: m.created_at,
+                    platform: &m.platform,
+                    total: m.entries.len(),
+                    restorable: m.restorable_count(),
+                    total_bytes: m.total_bytes(),
+                    entries: None,
+                })
+                .collect(),
+        });
+        return;
+    }
+
+    println!("\n历史删除清单：\n");
+    if manifests.is_empty() {
+        println!("  （暂无）");
+    } else {
+        println!(
+            "  {:<16} {:<20} {:>6} {:>8} {:>10}",
+            "清单 ID", "时间", "项数", "可还原", "大小"
+        );
+        for m in &manifests {
+            let ts = chrono_like(m.created_at);
+            println!(
+                "  {:<16} {:<20} {:>6} {:>8} {:>10}",
+                m.id,
+                ts,
+                m.entries.len(),
+                m.restorable_count(),
+                crate::scanner::format_size(m.total_bytes()),
+            );
+        }
+    }
+    if pruned > 0 {
+        println!("\n  已清理 {} 份超过保留期的旧清单", pruned);
+    }
+    println!("\n用法：");
+    println!("  maclean restore <清单 ID>    # 还原该清单中仍可还原的项");
+    println!("  maclean backups --restorable-only   # 只看还有救的清单");
+}
+
+/// 把 Unix 秒渲染成固定宽度的时间串
+///
+/// 刻意不引入 chrono：这里只需要一个人类可读的时间戳，为此拖进一个
+/// 日期库（连带时区表）不值得。格式固定为 UTC，避免不同机器显示不一致。
+fn chrono_like(secs: u64) -> String {
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    // 从 Unix 纪元推算年月日（平闰年累加，无时区概念）
+    let mut y = 1970i64;
+    let mut d = days as i64;
+    loop {
+        let len = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if d < len {
+            break;
+        }
+        d -= len;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let month_len = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut mo = 1usize;
+    for len in month_len {
+        if d < len {
+            break;
+        }
+        d -= len;
+        mo += 1;
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d + 1, h, m, s)
+}
+
+#[derive(serde::Serialize)]
+struct JsonRestore<'a> {
+    command: &'a str,
+    manifest_id: &'a str,
+    restored: &'a [String],
+    not_restorable: &'a [String],
+    failed: &'a [String],
+}
+
+/// 按清单还原
+fn cmd_restore(id: &str, json: bool) {
+    let Some(manifest) = crate::backup::load(id) else {
+        if json {
+            print_json(&serde_json::json!({
+                "command": "restore",
+                "manifest_id": id,
+                "error": "manifest not found",
+            }));
+        } else {
+            eprintln!("找不到清单 {}，用 `maclean backups` 查看可用清单", id);
+        }
+        std::process::exit(1);
+    };
+
+    let report = crate::backup::restore(id, &crate::backup::trash_dir());
+
+    if json {
+        print_json(&JsonRestore {
+            command: "restore",
+            manifest_id: id,
+            restored: &report.restored,
+            not_restorable: &report.not_restorable,
+            failed: &report.failed,
+        });
+        return;
+    }
+
+    println!("\n还原清单 {}（共 {} 项）：\n", id, manifest.entries.len());
+    for p in &report.restored {
+        println!("  ✓ 已还原  {}", p);
+    }
+    // 永久删除的项明确列出：这是事实陈述，不是失败
+    for p in &report.not_restorable {
+        println!("  ⦸ 不可还原（当时为永久删除）  {}", p);
+    }
+    for p in &report.failed {
+        println!("  ✗ 还原失败  {}", p);
+    }
+    if report.restored.is_empty() {
+        println!("\n  本次没有可还原的项。永久删除的数据无法通过清单找回。");
+    }
+}
+
+// =========================================================================
 //  磁盘信息获取（跨平台，委托给 platform 模块）
 // =========================================================================
 
@@ -855,7 +1068,15 @@ mod tests {
         let cmd = Cli::command();
         for sub in cmd.get_subcommands() {
             let name = sub.get_name().to_string();
-            let parsed = Cli::try_parse_from(["maclean", &name, "--json"]);
+            // `restore` 有必填位置参数，只给 --json 会因"缺参数"失败 ——
+            // 那是参数没给全，不是 global 失效。补占位值再断言，
+            // 否则这条用例会把新命令误判成回归。
+            let mut argv: Vec<String> = vec!["maclean".to_string(), name.clone()];
+            for _ in sub.get_arguments().filter(|a| a.is_required_set()) {
+                argv.push("x".to_string());
+            }
+            argv.push("--json".to_string());
+            let parsed = Cli::try_parse_from(argv);
             assert!(
                 parsed.is_ok(),
                 "子命令 {} 不接受 --json（global 没生效）",
@@ -893,6 +1114,48 @@ mod tests {
             json_at < first_print,
             "JSON 分支在表格输出之后，两种输出会混在一起"
         );
+    }
+
+    // -----------------------------------------------------------------
+    //  M-2 · 删除清单与还原
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn timestamp_rendering_matches_utc_conventions() {
+        // 基准值用系统 date（UTC）独立算出来的，不是拿本函数自证。
+        assert_eq!(chrono_like(0), "1970-01-01 00:00:00");
+        // 闰年 2 月 29 日：手搓日历最容易错的就是这里
+        assert_eq!(chrono_like(1709164800), "2024-02-29 00:00:00");
+        assert_eq!(chrono_like(1789831800), "2026-09-19 15:30:00");
+    }
+
+    #[test]
+    fn timestamp_rendering_survives_the_century_rule() {
+        // 2100 能被 4 整除但**不是**闰年（百年不闰、四百年再闰）。
+        // 拿 1970 + 366 天推进过去，若闰年判定漏了百年规则，这里会漂一天。
+        let mut secs: u64 = 0;
+        for y in 1970..2100i64 {
+            let len: u64 = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                366
+            } else {
+                365
+            };
+            secs += len * 86400;
+        }
+        // 1970..2100 累计后落在 2100-01-01
+        assert_eq!(chrono_like(secs), "2100-01-01 00:00:00");
+    }
+
+    #[test]
+    fn backup_commands_are_wired_into_the_cli() {
+        // 清单模块全部函数都是 pub，但 pub 不等于可达 —— 必须能从命令行走到。
+        // 拆掉 Commands::Backups / Commands::Restore 任一变体，这里立刻红。
+        assert!(Cli::try_parse_from(["maclean", "backups"]).is_ok());
+        assert!(Cli::try_parse_from(["maclean", "backups", "--restorable-only"]).is_ok());
+        let r = Cli::try_parse_from(["maclean", "restore", "abc"]).unwrap();
+        assert!(matches!(r.command, Some(Commands::Restore { id }) if id == "abc"));
+        // restore 缺 id 必须报错，不能默默什么都不做
+        assert!(Cli::try_parse_from(["maclean", "restore"]).is_err());
     }
 
     #[test]

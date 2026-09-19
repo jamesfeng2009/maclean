@@ -8,6 +8,7 @@
 // AEWP 自 macOS 10.7 起被 Apple 标记为 deprecated，恢复请从 git 历史取回。
 mod app;
 mod app_protection;
+mod backup;
 mod cli;
 mod config;
 mod i18n;

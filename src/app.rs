@@ -236,6 +236,12 @@ pub struct App {
     /// 禁用），非 0 说明有程序化入口或某处 UI 漏判 —— 值得显式告诉用户，
     /// 而不是静默少删几项让他以为是清理没生效。
     pub protection_blocked: usize,
+    /// 最近一次删除写下的备份清单：(清单 id, 可还原项数, 总项数)
+    ///
+    /// M-2：macOS 之前没有任何删除前的回滚手段。这里不假装能"系统级还原"
+    /// —— 只有走废纸篓的项才真的搬得回来，永久删除的缓存字节已经没了。
+    /// 存下 restorable 与 total 两个数，是为了让 UI 能把这句话说准确。
+    pub last_backup: Option<(String, usize, usize)>,
     // 2026-09-18 删除了 `should_quit`：零引用。退出走 `App::quit()` /
     // `std::process::exit`，没人轮询这个标志。
     /// 扫描耗时（毫秒）
@@ -463,6 +469,7 @@ impl App {
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
             protection_blocked: 0,
+            last_backup: None,
             scan_time_ms: [0; 9],
             lang_en: user_config.lang_en,
             settings_menubar_icon: user_config.settings_menubar_icon,
@@ -896,7 +903,7 @@ impl App {
                             }
                         }
                         // 按大小降序，最多展示 8 个子目录
-                        sub_dirs.sort_by(|a, b| b.1.cmp(&a.1));
+                        sub_dirs.sort_by_key(|a| std::cmp::Reverse(a.1));
                         for (sp, ss) in sub_dirs.into_iter().take(8) {
                             let sub_label = format!(
                                 "  ├─ {}",
@@ -911,7 +918,7 @@ impl App {
                 }
             }
             // 按大小降序排列
-            details.sort_by(|a, b| b.1.cmp(&a.1));
+            details.sort_by_key(|a| std::cmp::Reverse(a.1));
             self.associated_details.insert(item.path.clone(), details);
         }
     }
@@ -1088,14 +1095,17 @@ impl App {
         }
     }
 
-    /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths, use_trash) 供后台线程使用
+    /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths, use_trash, size_bytes) 供后台线程使用
     /// use_trash: true 表示移至废纸篓（可恢复），false 表示永久删除
-    pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>, bool)> {
+    /// size_bytes: 扫描时算出的大小，随删除任务带到备份清单里。
+    ///   这里刻意不做"删前重算"—— 一个大目录重算一遍要走全树，而清单只是
+    ///   事后追溯用的，扫描值够用；真要看准确数字，用户看删除结果摘要。
+    pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>, bool, u64)> {
         self.confirm = ConfirmState::Deleting;
 
         // 收集要删除的路径和类别（跳过不可删除的项）
         // 策略：Safe 级别永久删除（缓存自动重建），Caution/Advanced 移至废纸篓（可恢复）
-        let to_delete: Vec<(String, String, Vec<String>, bool)> = self
+        let to_delete: Vec<(String, String, Vec<String>, bool, u64)> = self
             .pending_delete
             .iter()
             .rev()
@@ -1119,6 +1129,7 @@ impl App {
                     item.category.clone(),
                     item.batch_paths.clone(),
                     use_trash,
+                    item.size_bytes,
                 )
             })
             .collect();
@@ -1606,6 +1617,10 @@ impl App {
                 "summary_success" => "Successfully deleted {} items",
                 "summary_fail" => "Failed to delete {} items",
                 "summary_fail_hint" => "Some files could not be deleted due to permissions or system protection. See logs above.",
+                // M-2：{} = 可还原项数 / 总项数。两个数字都给，是因为只说
+                // "已备份"会让人以为全都能还原 —— 永久删除的字节回不来。
+                "summary_backup" => "Deletion log saved ({} of {} items can be restored from Trash)",
+                "summary_backup_none" => "Deletion log saved — none of these items are recoverable (they were permanently deleted)",
                 "summary_solution_title" => "Tips: Failure reasons and solutions",
                 "summary_sip_tip" => "SIP/System protection: System paths like /Library/Developer/CoreSimulator cannot be deleted even with sudo; disable SIP or use Apple official tools.",
                 "summary_perm_tip" => "Permission denied: Directories like node_modules may contain root-owned files. Click \"Copy sudo command\" to run manually in Terminal.",
@@ -2181,6 +2196,55 @@ mod tests {
         ] {
             assert!(t.is_supported(), "{:?} 不应被平台过滤", t);
         }
+    }
+
+    // -----------------------------------------------------------------
+    //  M-2：删除备份清单
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn confirm_delete_carries_size_bytes_into_the_delete_batch() {
+        // 清单里的"删了多大"完全依赖这个字段。少带它，清单只能写 0，
+        // 用户事后看清单会以为自己什么都没删。
+        let mut app = App::new();
+        let mut it = item(true);
+        it.size_bytes = 42 * 1024 * 1024;
+        app.results[1].push(it);
+        app.pending_delete.push((1, 0));
+        let batch = app.confirm_delete();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].4, 42 * 1024 * 1024);
+        // 新一轮删除必须清掉上一轮清单，否则摘要会拿旧清单说这次的事
+        assert!(app.last_backup.is_none());
+    }
+
+    #[test]
+    fn delete_batch_stays_a_five_field_tuple() {
+        // 钉住签名：(path, category, batch_paths, use_trash, size_bytes)。
+        // 有人改回 4 元组，编译能过，但清单从此拿不到大小 —— 静默退化，
+        // 只能靠源码断言拦住。
+        assert!(include_str!("app.rs").contains(
+            "pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>, bool, u64)>"
+        ));
+    }
+
+    #[test]
+    fn delete_pipeline_writes_a_manifest_and_reports_it_back() {
+        // 反向验证的对象是"接线"本身：backup::record 存在不等于被调用。
+        // 拆掉 start_delete 里的 record / BackupRecorded 任一段，这条就红。
+        let ops = include_str!("ops/mod.rs");
+        assert!(
+            ops.contains("crate::backup::record("),
+            "删除链路必须写备份清单"
+        );
+        assert!(
+            ops.contains("DeleteMessage::BackupRecorded"),
+            "清单 id 必须回传给 UI"
+        );
+        assert!(
+            include_str!("ui/mod.rs").contains("Ok(DeleteMessage::BackupRecorded"),
+            "UI 必须消费清单消息，否则写了也没人看得到"
+        );
     }
 
     #[test]

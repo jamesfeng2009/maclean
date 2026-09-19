@@ -53,7 +53,7 @@ pub(crate) fn render_hud_window(
 
     let frame = egui::Frame::none()
         .fill(theme::surface())
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .rounding(egui::Rounding::same(12.0))
         .inner_margin(egui::Margin::same(12.0));
 
@@ -616,6 +616,14 @@ impl Gui {
                         clear_delete_rx = true;
                         break;
                     }
+                    Ok(DeleteMessage::BackupRecorded { id, restorable, total }) => {
+                        // M-2：记下清单位置与"真能还原"的项数。
+                        // restorable 是 0 也要照样显示 —— 用户必须知道这次
+                        // 删除没有后悔药，而不是看到一个含糊的"已备份"。
+                        if let Some(app) = Some(&mut self.app) {
+                            app.last_backup = Some((id, restorable, total));
+                        }
+                    }
                     #[cfg(target_os = "windows")]
                     Ok(DeleteMessage::ResidualFound(residual)) => {
                         if let Some(app) = Some(&mut self.app) {
@@ -1037,7 +1045,7 @@ pub(crate) fn render_app_uninstall_group_card(
     // 卡片外框：白底、浅灰边框、12px 圆角
     let card_frame = egui::Frame::none()
         .fill(theme::surface())
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .rounding(egui::Rounding::same(12.0))
         .inner_margin(egui::Margin::same(0.0));
 
@@ -1290,7 +1298,7 @@ pub(crate) fn render_app_uninstall_filter_pills(
                 (
                     theme::text(),
                     theme::surface(),
-                    egui::Stroke::new(1.0, theme::line()),
+                    egui::Stroke::new(1.0_f32, theme::line()),
                 )
             };
 
@@ -1394,7 +1402,7 @@ pub(crate) fn render_app_uninstall_action_bar(
                         .size(12.0)
                         .color(theme::text()),
                 )
-                .stroke(egui::Stroke::new(1.0, theme::line()))
+                .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                 .fill(theme::surface())
                 .rounding(btn_rounding)
                 .min_size([0.0, btn_height].into()),
@@ -1501,7 +1509,7 @@ pub(crate) fn render_app_uninstall_child_row(
     let child_frame = egui::Frame::none()
         .fill(theme::surface_3())
         .inner_margin(egui::Margin::symmetric(12.0, 10.0))
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .rounding(egui::Rounding::same(8.0));
 
     let row_resp = child_frame.show(ui, |ui| {
@@ -1622,7 +1630,7 @@ pub(crate) fn render_app_uninstall_footer(ui: &mut egui::Ui, app: &mut App) {
 
     egui::Frame::none()
         .fill(theme::surface())
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .inner_margin(egui::Margin::symmetric(16.0, 10.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1715,7 +1723,7 @@ pub(crate) fn render_category_tab(
         theme::text_2()
     };
     let bottom_stroke = if active {
-        egui::Stroke::new(2.0, theme::brand())
+        egui::Stroke::new(2.0_f32, theme::brand())
     } else {
         egui::Stroke::NONE
     };
@@ -1992,7 +2000,7 @@ pub(crate) fn render_scan_item_row(
             egui::pos2(row_rect.min.x, row_rect.max.y),
             egui::pos2(row_rect.max.x, row_rect.max.y),
         ],
-        egui::Stroke::new(1.0, theme::line()),
+        egui::Stroke::new(1.0_f32, theme::line()),
     );
 
     // 展开时显示关联文件明细
@@ -2213,7 +2221,7 @@ pub(crate) fn render_gui(
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             egui::Frame::none()
                 .fill(theme::surface())
-                .stroke(egui::Stroke::new(1.0, theme::line()))
+                .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                 .inner_margin(egui::Margin::symmetric(S5, (FOOTER_H - BTN_H) / 2.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -2321,7 +2329,7 @@ pub(crate) fn render_gui(
                 };
                 egui::Frame::none()
                     .fill(theme::surface())
-                    .stroke(egui::Stroke::new(1.0, theme::line()))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                     .rounding(egui::Rounding::same(8.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
@@ -3279,7 +3287,7 @@ pub(crate) fn show_confirm_window(
             if app.show_preview {
                 ui.add_space(4.0);
                 egui::Frame::none()
-                    .stroke(egui::Stroke::new(1.0, theme::line()))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                     .rounding(egui::Rounding::same(6.0))
                     .inner_margin(egui::Margin::same(8.0))
                     .show(ui, |ui| {
@@ -3908,7 +3916,7 @@ pub(crate) fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
             // 最新日志
             egui::Frame::none()
                 .fill(theme::surface_3())
-                .stroke(egui::Stroke::new(1.0, theme::line()))
+                .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(egui::Margin::same(10.0))
                 .show(ui, |ui| {
@@ -3961,7 +3969,7 @@ pub(crate) fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
                                 egui::RichText::new(app.t("progress_background_run")).size(13.0),
                             )
                             .fill(theme::surface())
-                            .stroke(egui::Stroke::new(1.0, theme::line()))
+                            .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                             .rounding(egui::Rounding::same(8.0)),
                         )
                         .clicked()
@@ -4115,6 +4123,23 @@ pub(crate) fn show_summary_window(
                     ui.label(egui::RichText::new(App::tf_lang(app.lang_en, "summary_success", &[&ok.to_string()])).size(15.0).color(theme::safe()));
                 });
 
+                // M-2：如实告知这次删除留了多少后悔药。
+                // restorable=0 时也要显示 —— 用户刚删完东西，最需要知道的
+                // 恰恰是"这批回不来了"，藏起来就是欺骗。
+                if let Some((_id, restorable, total)) = &app.last_backup {
+                    ui.add_space(5.0);
+                    let text = if *restorable > 0 {
+                        App::tf_lang(
+                            app.lang_en,
+                            "summary_backup",
+                            &[&restorable.to_string(), &total.to_string()],
+                        )
+                    } else {
+                        App::t_lang(app.lang_en, "summary_backup_none").to_string()
+                    };
+                    ui.colored_label(theme::text_2(), egui::RichText::new(text).size(12.0));
+                }
+
                 if fail > 0 {
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
@@ -4131,7 +4156,7 @@ pub(crate) fn show_summary_window(
                     ui.add_space(8.0);
                     egui::Frame::group(ui.style())
                         .fill(theme::surface())
-                        .stroke(egui::Stroke::new(1.0, theme::brand()))
+                        .stroke(egui::Stroke::new(1.0_f32, theme::brand()))
                         .inner_margin(egui::Margin::same(8.0))
                         .show(ui, |ui| {
                             ui.colored_label(
@@ -4947,7 +4972,7 @@ pub(crate) fn render_overview_footer(ui: &mut egui::Ui, app: &mut App) {
 
     egui::Frame::none()
         .fill(theme::surface())
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .inner_margin(egui::Margin::symmetric(16.0, 10.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -5049,7 +5074,7 @@ pub(crate) fn render_overview_panel(
     }
 
     // 按大小降序排列推荐项
-    recommendation_items.sort_by(|a, b| b.2.size_bytes.cmp(&a.2.size_bytes));
+    recommendation_items.sort_by_key(|a| std::cmp::Reverse(a.2.size_bytes));
 
     // 判断是否有任一 Tab 正在扫描
     let any_scanning = app
@@ -5065,7 +5090,7 @@ pub(crate) fn render_overview_panel(
         // Safe 可释放空间（主 pill）
         let safe_resp = egui::Frame::none()
             .fill(theme::safe_50())
-            .stroke(egui::Stroke::new(1.0, theme::safe()))
+            .stroke(egui::Stroke::new(1.0_f32, theme::safe()))
             .rounding(egui::Rounding::same(14.0))
             .inner_margin(egui::Margin::symmetric(16.0, 10.0))
             .show(ui, |ui| {
@@ -5103,7 +5128,7 @@ pub(crate) fn render_overview_panel(
         // Caution pill
         let caution_resp = egui::Frame::none()
             .fill(theme::caution_50())
-            .stroke(egui::Stroke::new(1.0, theme::caution()))
+            .stroke(egui::Stroke::new(1.0_f32, theme::caution()))
             .rounding(egui::Rounding::same(14.0))
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
@@ -5135,7 +5160,7 @@ pub(crate) fn render_overview_panel(
         // Advanced pill
         let advanced_resp = egui::Frame::none()
             .fill(theme::danger_50())
-            .stroke(egui::Stroke::new(1.0, theme::danger()))
+            .stroke(egui::Stroke::new(1.0_f32, theme::danger()))
             .rounding(egui::Rounding::same(14.0))
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
@@ -5246,7 +5271,7 @@ pub(crate) fn render_overview_panel(
 
                             let frame_resp = egui::Frame::none()
                                 .fill(theme::surface())
-                                .stroke(egui::Stroke::new(1.0, theme::line()))
+                                .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                                 .rounding(egui::Rounding::same(8.0))
                                 .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                                 .show(ui, |ui| {
@@ -5402,7 +5427,7 @@ pub(crate) fn render_optimize_panel(
                     for (i, item) in items.iter().enumerate() {
                         egui::Frame::group(ui.style())
                             .fill(theme::surface())
-                            .stroke(egui::Stroke::new(1.0, theme::line()))
+                            .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                             .inner_margin(12.0)
                             .outer_margin(4.0)
                             .show(ui, |ui| {
@@ -5662,7 +5687,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                                                         .size(13.0),
                                                 )
                                                 .fill(theme::surface())
-                                                .stroke(egui::Stroke::new(1.0, theme::line()))
+                                                .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                                                 .rounding(egui::Rounding::same(8.0)),
                                             )
                                             .clicked()
@@ -5718,7 +5743,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                                                 egui::RichText::new(btn_text).size(13.0),
                                             )
                                             .fill(theme::surface())
-                                            .stroke(egui::Stroke::new(1.0, theme::line()))
+                                            .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                                             .rounding(egui::Rounding::same(8.0)),
                                         )
                                         .clicked()
@@ -5997,7 +6022,7 @@ pub(crate) fn settings_card<R>(
 ) -> R {
     egui::Frame::none()
         .fill(theme::surface())
-        .stroke(egui::Stroke::new(1.0, theme::line()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::line()))
         .rounding(egui::Rounding::same(12.0))
         .inner_margin(egui::Margin::same(16.0))
         .show(ui, |ui| {
@@ -6063,7 +6088,7 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
         ui.add_space(24.0);
         egui::Frame::none()
             .fill(theme::surface())
-            .stroke(egui::Stroke::new(1.0, theme::line()))
+            .stroke(egui::Stroke::new(1.0_f32, theme::line()))
             .rounding(egui::Rounding::same(12.0))
             .inner_margin(egui::Margin::same(20.0))
             .show(ui, |ui| {
@@ -6081,7 +6106,7 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
                     let painter = ui.painter();
                     let center = rect.center();
                     let radius = spinner_size * 0.5 - 2.0;
-                    let stroke_width = 3.0;
+                    let stroke_width = 3.0_f32;
                     // 背景圆环
                     painter.circle_stroke(
                         center,
@@ -6165,7 +6190,7 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
                 ui.add_space(12.0);
                 egui::Frame::none()
                     .fill(theme::surface_3())
-                    .stroke(egui::Stroke::new(1.0, theme::line()))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::line()))
                     .rounding(egui::Rounding::same(6.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {

@@ -36,6 +36,16 @@ pub(crate) enum DeleteMessage {
     NeedPassword(Vec<(String, String)>),
     /// 全部删除完成
     Done,
+    /// 本次删除已写入备份清单（M-2）
+    ///
+    /// 携带清单 id 与"可还原 / 总数"，让 UI 能如实告诉用户有多少项真的
+    /// 有后悔药。永久删除的项不在这两个数里撒谎 —— restorable 只统计
+    /// 走废纸篓的那部分。
+    BackupRecorded {
+        id: String,
+        restorable: usize,
+        total: usize,
+    },
     /// Windows: 卸载后检测到残留，弹出残留清理弹窗
     #[cfg(target_os = "windows")]
     ResidualFound(scanner::windows_apps::UninstallResidual),
@@ -443,7 +453,7 @@ pub(crate) fn send_items_in_batches(
 ) {
     // 按大小降序排序，让用户先看到最大的项
     let mut sorted: Vec<ScanItem> = items.to_vec();
-    sorted.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
 
     const BATCH_SIZE: usize = 10;
     for chunk in sorted.chunks(BATCH_SIZE) {
@@ -821,7 +831,7 @@ pub(crate) fn run_docker_prune(lang_en: bool) -> Result<String, String> {
 /// 阶段1: 普通删除（多线程并行 rm -rf）
 /// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
 pub(crate) fn start_delete(
-    to_delete: Vec<(String, String, Vec<String>, bool)>,
+    to_delete: Vec<(String, String, Vec<String>, bool, u64)>,
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
     auto_restore: bool,
@@ -831,6 +841,11 @@ pub(crate) fn start_delete(
 
     std::thread::spawn(move || {
         let failed_items: std::sync::Mutex<Vec<(String, String)>> =
+            std::sync::Mutex::new(Vec::new());
+        // M-2：本次删除实际删掉的项，结束后落一份清单。
+        // 只记"真删掉了的"—— 不存在/被拒绝/失败的项不进清单，
+        // 否则用户会以为还能还原一个从没被删过的东西。
+        let backup_entries: std::sync::Mutex<Vec<crate::backup::BackupEntry>> =
             std::sync::Mutex::new(Vec::new());
 
         logger::info(&format!("删除任务开始: {} 项", to_delete.len()));
@@ -859,11 +874,12 @@ pub(crate) fn start_delete(
                     loop {
                         let i = idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if i >= to_delete.len() { break; }
-                        let (path, category, batch_paths, use_trash) = &to_delete[i];
+                        let (path, category, batch_paths, use_trash, size_bytes) = &to_delete[i];
                         let path = path.to_string();
                         let category = category.to_string();
                         let batch_paths = batch_paths.clone();
                         let use_trash = *use_trash;
+                        let size_bytes = *size_bytes;
 
                         // Windows 应用卸载特殊处理（干净卸载：卸载程序 + 扫描残留，不自动清理）
                         #[cfg(target_os = "windows")]
@@ -1105,6 +1121,22 @@ pub(crate) fn start_delete(
                             let _ = tx.send(DeleteMessage::Log(
                                 format!("✓ {} [{}] {}", action, category, path), path.clone(), category.clone(), true));
                             safety::log_deletion(&path, &category, true, None);
+
+                            // M-2：真删掉一项，就往清单里记一笔。
+                            // restorable 由平台判定：macOS 废纸篓可搬回，
+                            // Windows 回收站没有稳定路径，一律 false（那边靠还原点）。
+                            let restorable = crate::backup::is_restorable_by_move(
+                                use_trash,
+                                std::env::consts::OS,
+                            );
+                            if let Ok(mut guard) = backup_entries.lock() {
+                                guard.push(crate::backup::BackupEntry {
+                                    path: path.clone(),
+                                    size_bytes,
+                                    category: category.clone(),
+                                    restorable,
+                                });
+                            }
                         } else if use_trash {
                             // 废纸篓失败：保留文件 + 明确告知，不进 sudo 重试列表
                             let _ = tx.send(DeleteMessage::Log(
@@ -1123,8 +1155,25 @@ pub(crate) fn start_delete(
         // 否则整条删除链路连锁 panic，UI 永久卡在 Deleting 态
         let failed_items: Vec<(String, String)> =
             failed_items.into_inner().unwrap_or_else(|e| e.into_inner());
+        let backup_entries: Vec<crate::backup::BackupEntry> =
+            backup_entries.into_inner().unwrap_or_else(|e| e.into_inner());
 
         logger::info(&format!("阶段1删除完成, 失败 {} 项", failed_items.len()));
+
+        // M-2：落清单。写盘失败只记日志、绝不影响删除结果 ——
+        // 清单是事后追溯手段，不能因为它存不进去就把已删掉的东西说成没删。
+        //
+        // 边界说清楚：这份清单只覆盖本函数删掉的项。需要提权的那批走
+        // 另一条链路（sudo 阶段），不进这份清单；它们本来就是永久删除，
+        // 不可还原，进不进清单不改变"能不能后悔"这个结论。
+        if let Some(id) = crate::backup::record(backup_entries.clone()) {
+            let restorable = backup_entries.iter().filter(|e| e.restorable).count();
+            let _ = tx.send(DeleteMessage::BackupRecorded {
+                id,
+                restorable,
+                total: backup_entries.len(),
+            });
+        }
 
         // 普通删除完成后，若还有失败项，通知 GUI 弹出 egui 内置密码输入框
         if !failed_items.is_empty() {
