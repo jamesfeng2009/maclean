@@ -102,7 +102,7 @@ pub fn pick_asset<'a>(assets: &'a [UpdateAsset], target: &str) -> Option<&'a Upd
     if candidates.is_empty() {
         None
     } else {
-        candidates.sort_by(|a, b| b.size.cmp(&a.size));
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.size));
         Some(candidates[0])
     }
 }

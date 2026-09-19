@@ -256,8 +256,7 @@ pub(crate) fn install_dir_version_token(location: &str) -> Option<String> {
         .trim_matches('"')
         .split(['/', '\\'])
         .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .next_back()?;
+        .rfind(|s| !s.is_empty())?;
 
     let digit_at = leaf.char_indices().find(|(_, c)| c.is_ascii_digit())?.0;
     if digit_at < 2 {

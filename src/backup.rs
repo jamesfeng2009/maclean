@@ -142,8 +142,16 @@ pub fn list() -> Vec<BackupManifest> {
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| serde_json::from_str::<BackupManifest>(&s).ok())
         .collect();
-    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sort_newest_first(&mut out);
     out
+}
+
+/// 按创建时间倒序（最近的在前）
+///
+/// 抽成纯函数是为了让排序规则可被直接测试：`list()` 依赖真实磁盘，
+/// 在测试里造不出确定的清单集合。
+fn sort_newest_first(out: &mut [BackupManifest]) {
+    out.sort_by_key(|a| std::cmp::Reverse(a.created_at));
 }
 
 pub fn load(id: &str) -> Option<BackupManifest> {
@@ -403,7 +411,8 @@ mod tests {
 
     #[test]
     fn listing_sorts_newest_first() {
-        // 纯函数部分：直接验证排序规则，不依赖磁盘上有清单
+        // 走生产代码里的那个排序函数，而不是在测试里重写一遍降序 ——
+        // 后者只是在验证标准库，list() 的排序规则改坏了它也照样通过。
         let mut v = [
             BackupManifest {
                 id: "old".to_string(),
@@ -418,7 +427,26 @@ mod tests {
                 entries: Vec::new(),
             },
         ];
-        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        sort_newest_first(&mut v);
         assert_eq!(v[0].id, "new");
+        assert_eq!(v[1].id, "old");
+    }
+
+    #[test]
+    fn listing_routes_through_the_shared_sorter() {
+        // 排序规则只有一处实现：list() 若自己再写一遍 sort_by，
+        // 上面的测试就测了个寂寞
+        // 只取测试模块之前的部分：否则本测试自己的字符串字面量会被自己数进去
+        let src = include_str!("backup.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert_eq!(
+            prod.matches("std::cmp::Reverse").count(),
+            1,
+            "排序规则出现了第二处实现，sort_newest_first 没被共用"
+        );
+        assert!(
+            src.contains("    sort_newest_first(&mut out);"),
+            "list() 不再经过 sort_newest_first"
+        );
     }
 }
