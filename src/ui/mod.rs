@@ -2144,14 +2144,40 @@ pub(crate) fn render_gui(
                         if widgets::icon_button(ui, icons::Icon::X, BTN_H_SM).clicked() {
                             app.update_dismissed = true;
                         }
-                        let label = if app.lang_en {
+                        // C-2：有匹配本机的产物就真下载（含 sha256 校验），
+                        // 没有才退回"打开 Release 页面"。此前只有后者，
+                        // 等于把"检查更新"做成了"跳网页"。
+                        let has_asset = info.asset.is_some();
+                        let label = if app.update_downloading {
+                            if app.lang_en {
+                                "Downloading…"
+                            } else {
+                                "下载中…"
+                            }
+                        } else if has_asset {
+                            if app.lang_en {
+                                "Download & install"
+                            } else {
+                                "下载并安装"
+                            }
+                        } else if app.lang_en {
                             "Download"
                         } else {
                             "前往下载"
                         };
-                        if widgets::button(ui, None, label, widgets::Btn::Primary, BTN_H_SM)
-                            .clicked()
-                        {
+                        // 结果行（成功/失败原文）显示在按钮上方
+                        if let Some(ref r) = app.update_result {
+                            ui.colored_label(theme::text_2(), egui::RichText::new(r).size(11.0));
+                        }
+                        let clicked = widgets::button(
+                            ui,
+                            None,
+                            label,
+                            widgets::Btn::Primary,
+                            BTN_H_SM,
+                        )
+                        .clicked();
+                        if clicked && !app.update_downloading && !app.start_update_download() {
                             open_url(&info.url);
                         }
                     },

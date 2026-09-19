@@ -385,6 +385,14 @@ pub struct App {
     pub update_rx: Option<std::sync::mpsc::Receiver<crate::updater::UpdateInfo>>,
     /// 用户已忽略当前版本的更新提示（本次运行内不再显示）
     pub update_dismissed: bool,
+    /// C-2：是否正在后台下载更新包
+    pub update_downloading: bool,
+    /// C-2：下载/安装结果（横幅显示，成功与失败都显示原文）
+    pub update_result: Option<String>,
+    /// C-2：下载线程的返回通道
+    pub update_dl_rx: Option<
+        std::sync::mpsc::Receiver<Result<String, String>>,
+    >,
     /// Windows: 卸载后检测到的残留信息
     #[cfg(target_os = "windows")]
     pub uninstall_residual: Option<scanner::windows_apps::UninstallResidual>,
@@ -551,6 +559,9 @@ impl App {
             license_error: None,
             show_license_dialog: false,
             update_available: None,
+            update_downloading: false,
+            update_result: None,
+            update_dl_rx: None,
             update_rx: Some(update_rx),
             update_dismissed: false,
             #[cfg(target_os = "windows")]
@@ -1096,6 +1107,59 @@ impl App {
                 self.update_rx = None;
             }
         }
+        self.poll_update_download();
+    }
+
+    /// 收取更新下载线程的结果（C-2）
+    ///
+    /// 通道断开也要收尾：线程 panic 后若一直卡在 downloading=true，
+    /// 横幅上的按钮会永久变成禁用的"下载中"。
+    pub fn poll_update_download(&mut self) {
+        if !self.update_downloading {
+            return;
+        }
+        let mut finished: Option<Result<String, String>> = None;
+        let mut disconnected = false;
+        if let Some(rx) = &self.update_dl_rx {
+            match rx.try_recv() {
+                Ok(r) => finished = Some(r),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => disconnected = true,
+            }
+        }
+        if let Some(r) = finished {
+            self.update_downloading = false;
+            self.update_dl_rx = None;
+            self.update_result = Some(r.unwrap_or_else(|e| e));
+        } else if disconnected {
+            self.update_downloading = false;
+            self.update_dl_rx = None;
+            self.update_result = Some(self.t("update_download_aborted").to_string());
+        }
+    }
+
+    /// 开始下载更新包（C-2）
+    ///
+    /// 返回 false 表示没有匹配本机的产物，调用方应退回"打开 Release 页面"。
+    pub fn start_update_download(&mut self) -> bool {
+        if self.update_downloading {
+            return true;
+        }
+        let Some(info) = self.update_available.clone() else {
+            return false;
+        };
+        if info.asset.is_none() {
+            return false;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_dl_rx = Some(rx);
+        self.update_downloading = true;
+        self.update_result = None;
+        std::thread::spawn(move || {
+            let r = crate::updater::download_and_open(&info);
+            let _ = tx.send(r);
+        });
+        true
     }
 
     /// 尝试激活 License（UI 调用）
@@ -1471,6 +1535,8 @@ impl App {
                 "schedule_install_failed" => "Could not register the job: {}",
                 "schedule_removed" => "Scheduled job removed",
                 "schedule_remove_failed" => "Could not remove the job: {}",
+                // C-2 · 自动更新
+                "update_download_aborted" => "Update download stopped unexpectedly",
                 "setting_confirm_advanced" => "Double-check before deleting Advanced items",
                 "setting_confirm_advanced_desc" => "Advanced items require manual confirmation",
                 "setting_prevent_lid_close" => "Prevent deletion while lid is closed",
@@ -2598,6 +2664,62 @@ mod tests {
         assert!(
             body.contains("current_tier().allows_scheduled_cleanup()"),
             "定时清理没有按等级判定，C-1 的能力形同虚设"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    //  C-2 · 自动更新
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn update_download_refuses_to_start_without_a_matching_asset() {
+        // 没有匹配本机的产物时必须返回 false，让 UI 退回"打开 Release 页面"。
+        // 若这里也返回 true，用户会点到一个永远不动的"下载中"按钮。
+        let mut app = App::new();
+        assert!(!app.start_update_download()); // update_available 为空
+        app.update_available = Some(crate::updater::UpdateInfo {
+            version: "9.9.9".to_string(),
+            url: "https://example.com".to_string(),
+            notes: String::new(),
+            assets: Vec::new(),
+            asset: None,
+        });
+        assert!(!app.start_update_download());
+        assert!(!app.update_downloading);
+    }
+
+    #[test]
+    fn a_dead_update_thread_does_not_freeze_the_banner() {
+        // 反向验证：通道断开必须收尾。线程 panic 后若 downloading 一直是 true，
+        // 横幅按钮会永久禁用 —— 用户再也无法重试。
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        app.update_dl_rx = Some(rx);
+        app.update_downloading = true;
+        drop(tx); // 发送端释放 == 线程已死
+        app.poll_update_download();
+        assert!(!app.update_downloading);
+        assert!(app.update_result.is_some());
+    }
+
+    #[test]
+    fn the_update_banner_really_downloads_instead_of_just_opening_a_page() {
+        // 钉住源码：以前横幅只有 open_url 一条路，"检查更新"名不副实。
+        let ui = include_str!("ui/mod.rs");
+        assert!(
+            ui.contains("app.start_update_download()"),
+            "更新横幅没有接下载入口，C-2 等于没做"
+        );
+        // 没有产物时要能退回跳网页，不能点了没反应。
+        // 只断言"两者都出现且相邻"，不钉具体缩进 —— 钉缩进会被单纯的格式
+        // 调整打断，那是噪音不是回归。
+        let at = ui.find("app.start_update_download()").expect("无下载入口");
+        // 按字符截取而不是按字节：源码里有中文注释，按字节切会踩到
+        // 多字节字符边界直接 panic
+        let tail: String = ui[at..].chars().take(200).collect();
+        assert!(
+            tail.contains("open_url(&info.url)"),
+            "缺少无产物时退回打开 Release 页面的分支"
         );
     }
 
