@@ -4745,13 +4745,26 @@ pub(crate) fn show_residual_window(
         });
 }
 
-/// 截断路径
+/// 截断路径（按字符数，字节边界安全）
+///
+/// 原实现按字节索引切片（`&path[len - max + 3..]`），切点落在多字节 UTF-8
+/// 字符（中文/emoji）中间会直接 panic（"byte index is not a char boundary"）。
+/// 改为按字符数保留尾部 `max_len - 3` 个字符，前缀省略号，显示总字符数为 max_len。
 pub(crate) fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
+    let count = path.chars().count();
+    if count <= max_len {
         return path.to_string();
     }
-    let suffix = &path[path.len() - max_len + 3..];
-    format!("...{}", suffix)
+    let keep = max_len.saturating_sub(3);
+    if keep == 0 {
+        return "...".to_string();
+    }
+    let start = path
+        .char_indices()
+        .nth(count - keep)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    format!("...{}", &path[start..])
 }
 
 // =========================================================================
@@ -6758,6 +6771,29 @@ mod tests {
     }
 
     // ---------- P0-1 / P0-3: 跨 Tab 删除的统计必须真实 ----------
+
+    #[test]
+    fn truncate_path_is_byte_boundary_safe_for_multibyte() {
+        // 复现崩溃路径：字节索引 34 落在 '超' (bytes 33..36) 中间
+        let path =
+            "/Users/fengyu/Downloads/【永轩超市】10.27 数据库实例切换后服务异常复盘报告.docx";
+        for max_len in [3usize, 10, 20, 34, 40, 55, 80, 1000] {
+            let t = truncate_path(path, max_len);
+            let chars = t.chars().count();
+            assert!(
+                chars <= max_len,
+                "max_len={} 结果 {} 超限: {}",
+                max_len,
+                chars,
+                t
+            );
+            assert!(t.starts_with("...") || t == path, "超长应带省略号: {}", t);
+        }
+        assert_eq!(truncate_path("abc", 10), "abc");
+        assert_eq!(truncate_path(path, 2), "...");
+        let t = truncate_path(path, 10);
+        assert!(t.ends_with(".docx"), "应保留文件后缀: {}", t);
+    }
 
     #[test]
     fn overview_prepare_delete_is_noop_but_cross_tab_works() {
