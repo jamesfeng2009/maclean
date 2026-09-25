@@ -873,6 +873,9 @@ pub(crate) fn is_critical_system_path(path: &str) -> bool {
         "/Library/LaunchAgents/",
         "/Library/Managed Preferences/",
         "/Library/ConfigurationProfiles/",
+        // CoreSimulator 全局 runtime 镜像受 SIP 保护：即使管理员权限也无法删除，
+        // 扫描期直接标记为不可删（第 4 层系统黑名单），避免删除失败后再弹窗引导。
+        "/Library/Developer/CoreSimulator/",
         "/private/var/db/",
         "/private/var/audit/",
         "/private/var/root/",

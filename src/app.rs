@@ -1825,11 +1825,11 @@ impl App {
                 "summary_backup" => "Deletion log saved ({} of {} items can be restored from Trash)",
                 "summary_backup_none" => "Deletion log saved — none of these items are recoverable (they were permanently deleted)",
                 "summary_solution_title" => "Tips: Failure reasons and solutions",
-                "summary_sip_tip" => "SIP/System protection: System paths like /Library/Developer/CoreSimulator cannot be deleted even with sudo; disable SIP or use Apple official tools.",
-                "summary_perm_tip" => "Permission denied: Directories like node_modules may contain root-owned files. Click \"Copy sudo command\" to run manually in Terminal.",
-                "summary_solution_1" => "1. Copy sudo command to Terminal manually (alternative)",
-                "summary_solution_2" => "2. Disable SIP: Restart → hold Cmd+R → Terminal → csrutil disable → Restart",
-                "summary_solution_3" => "3. Use project tools: cd project dir && npm run clean / npx rimraf .next",
+                "summary_sip_tip" => "SIP/System protection: Paths like /Library/Developer/CoreSimulator are protected by macOS SIP and cannot be deleted with any privilege. Such paths are marked as undeletable during scanning — there is no need to disable SIP.",
+                "summary_perm_tip" => "Permission denied: Some files are owned by root or inside protected directories. Click \"Retry deletion (admin authorization)\" below and the app requests authorization automatically — no manual commands needed.",
+                "summary_solution_1" => "1. Click \"Retry deletion (admin authorization)\" below: the app authorizes and retries automatically",
+                "summary_solution_2" => "2. SIP-protected system paths cannot be deleted — the app never removes macOS system files",
+                "summary_solution_3" => "3. Items still failing: uncheck them in the tab and continue, or check whether the file is currently in use",
                 "summary_open_settings" => "Open System Settings",
                 "summary_fail_list" => "Failed list:",
                 "summary_copy_paths" => "Copy Paths",
@@ -2229,11 +2229,11 @@ impl App {
                 "summary_fail" => "删除失败 {} 项",
                 "summary_fail_hint" => "部分文件因权限或系统保护无法删除，详见上方日志。",
                 "summary_solution_title" => "提示: 失败原因及解决方案",
-                "summary_sip_tip" => "SIP/系统保护: /Library/Developer/CoreSimulator 等系统路径即使 sudo 也无法删除，需关闭 SIP 或使用 Apple 官方工具。",
-                "summary_perm_tip" => "权限不足: node_modules 等目录内部可能存在 root 拥有的文件，可点击「复制 sudo 命令」在终端手动执行。",
-                "summary_solution_1" => "1. 复制 sudo 命令到终端手动执行（备选）",
-                "summary_solution_2" => "2. 关闭 SIP: 重启→按住 Cmd+R→终端→csrutil disable→重启",
-                "summary_solution_3" => "3. 用项目工具删除: cd 项目目录 && npm run clean / npx rimraf .next",
+                "summary_sip_tip" => "SIP/系统保护: /Library/Developer/CoreSimulator 等路径受 macOS SIP 保护，任何权限都无法删除。此类路径已在扫描时标记为不可删除，无需关闭 SIP。",
+                "summary_perm_tip" => "权限不足: 部分文件由 root 拥有或位于受保护目录。点击下方「重试删除（管理员授权）」，应用会自动请求授权后完成删除，无需手动执行命令。",
+                "summary_solution_1" => "1. 点击下方「重试删除（管理员授权）」：应用自动授权并重试删除失败项",
+                "summary_solution_2" => "2. 系统保护路径（SIP）无法删除属正常现象：应用不会移除 macOS 系统文件",
+                "summary_solution_3" => "3. 重试后仍无法删除的项目：可在对应 Tab 取消勾选后继续使用，或检查文件是否被占用",
                 "summary_open_settings" => "打开系统设置",
                 "summary_fail_list" => "失败列表:",
                 "summary_copy_paths" => "复制路径",
@@ -2850,5 +2850,54 @@ mod tests {
                 entry
             );
         }
+    }
+
+    /// 回归：sudo 阶段启动前清空 failed_paths，避免阶段1失败计数重复计入最终弹窗
+    /// （用户场景：阶段1失败 59 项 → sudo 重试成功 30、再失败 29 → 弹窗必须显示 29 而非 88）
+    #[test]
+    fn sudo_retry_does_not_double_count_failures() {
+        let mut app = App::new();
+        app.confirm = ConfirmState::None;
+        app.pending_delete.clear();
+
+        // 模拟阶段1：59 项失败日志 → failed_paths = 59
+        for i in 0..59 {
+            app.receive_delete_log(
+                format!("✗ fail {}", i),
+                format!("/tmp/f{}", i),
+                "test".to_string(),
+                false,
+            );
+        }
+        assert_eq!(app.failed_paths.len(), 59);
+
+        // sudo 阶段启动点：先清空阶段1失败计数（与 src/ui/mod.rs 中
+        // start_sudo_delete / start_sudo_delete_touchid 调用前的 clear 对齐）
+        app.failed_paths.clear();
+
+        // 模拟 sudo 阶段：成功 30、再失败 29
+        for i in 0..30 {
+            app.receive_delete_log(
+                format!("✓ ok {}", i),
+                format!("/tmp/s{}", i),
+                "test".to_string(),
+                true,
+            );
+        }
+        for i in 0..29 {
+            app.receive_delete_log(
+                format!("✗ still fail {}", i),
+                format!("/tmp/r{}", i),
+                "test".to_string(),
+                false,
+            );
+        }
+
+        // 收尾统计：成功 = 阶段1成功(0) + sudo 成功(30)；失败 = 仅 sudo 再失败(29)
+        app.finish_delete();
+        let (ok, fail, _) = app.delete_summary.expect("应有汇总");
+        assert_eq!(ok, 30, "成功计数应含 sudo 阶段成功的项");
+        assert_eq!(fail, 29, "失败计数不得重复计入阶段1的 59 项");
+        assert_eq!(app.failed_paths.len(), 29, "failed_paths 只保留真实失败");
     }
 }

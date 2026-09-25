@@ -700,6 +700,9 @@ pub(crate) fn route_and_start_elevated_delete(
 
     if touch_id_enabled && touch_id_available && !clamshell_closed {
         // Touch ID 已启用且已录入指纹：直接用 sudo（Touch ID 自动触发）。
+        // 阶段1失败项将进入 sudo 阶段重试，先清掉阶段1的失败计数，
+        // 避免最终弹窗把已重试成功的项也算作失败（双重计数）。
+        app.failed_paths.clear();
         let items = app.sudo_failed_items.clone();
         if items.is_empty() {
             // 没有真正需要提权的项：直接收尾。
@@ -3595,6 +3598,7 @@ pub(crate) fn show_sudo_password_window(
                                     app.touch_id_setup_mode = false;
                                     app.touch_id_error = None;
                                     app.confirm = ConfirmState::SudoWithTouchId;
+                                    app.failed_paths.clear();
                                     let items = std::mem::take(&mut app.sudo_failed_items);
                                     app.delete_done = 0;
                                     app.delete_total = items.len();
@@ -3605,6 +3609,7 @@ pub(crate) fn show_sudo_password_window(
                                     app.touch_id_enabled = true;
                                     app.touch_id_setup_mode = false;
                                     app.confirm = ConfirmState::SudoWithTouchId;
+                                    app.failed_paths.clear();
                                     let items = std::mem::take(&mut app.sudo_failed_items);
                                     app.delete_done = 0;
                                     app.delete_total = items.len();
@@ -3619,6 +3624,7 @@ pub(crate) fn show_sudo_password_window(
                             {
                                 // Windows 无 Touch ID，直接走密码删除
                                 app.confirm = ConfirmState::Deleting;
+                                app.failed_paths.clear();
                                 let items = std::mem::take(&mut app.sudo_failed_items);
                                 app.delete_done = 0;
                                 app.delete_total = items.len();
@@ -3626,6 +3632,7 @@ pub(crate) fn show_sudo_password_window(
                             }
                         } else {
                             app.confirm = ConfirmState::Deleting;
+                            app.failed_paths.clear();
                             let items = std::mem::take(&mut app.sudo_failed_items);
                             app.delete_done = 0;
                             app.delete_total = items.len();
@@ -4320,7 +4327,8 @@ pub(crate) fn show_summary_window(
                         );
                     });
 
-                    // 列出所有失败的路径（可滚动+复制）
+                    // 列出所有失败的路径（可滚动+复制路径，不提供 sudo 命令——
+                    // 提权删除全部由应用内自动授权完成，用户无需手动执行任何命令）
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(app.t("summary_fail_list")).size(12.0).color(theme::text_2()));
@@ -4328,16 +4336,8 @@ pub(crate) fn show_summary_window(
                             .map(|(p, c)| format!("[{}] {}", c, p))
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let sudo_cmd: String = app.failed_paths.iter()
-                            .map(|(p, _)| format!("'{}'", p.replace("'", "'\\''")))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let sudo_text = format!("sudo /usr/bin/chflags -R nouchg {}; sudo /usr/sbin/chown -R $(whoami):staff {}; sudo /bin/chmod -R u+w {}; sudo /bin/rm -rf {}", sudo_cmd, sudo_cmd, sudo_cmd, sudo_cmd);
                         if ui.button(egui::RichText::new(app.t("summary_copy_paths")).size(11.0)).clicked() {
                             ui.output_mut(|o| o.copied_text = all_paths);
-                        }
-                        if ui.button(egui::RichText::new(app.t("summary_copy_sudo")).size(11.0)).clicked() {
-                            ui.output_mut(|o| o.copied_text = sudo_text);
                         }
                     });
 
