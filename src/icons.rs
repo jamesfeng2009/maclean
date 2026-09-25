@@ -488,16 +488,17 @@ impl Icon {
 }
 
 /// 导航图标顺序，与 `Tab::all()` 一一对应
-pub const NAV_ICONS: [Icon; 9] = [
-    Icon::Home,    // 概览
-    Icon::Box,     // 开发者缓存
-    Icon::File,    // 大文件
-    Icon::Broom,   // App 缓存
-    Icon::Folder,  // App 数据
-    Icon::Puzzle,  // 应用卸载
-    Icon::Sliders, // 系统优化
-    Icon::Disk,    // APFS 快照
-    Icon::Gear,    // 设置
+pub const NAV_ICONS: [Icon; 10] = [
+    Icon::Home,      // 概览
+    Icon::Box,       // 开发者缓存
+    Icon::File,      // 大文件
+    Icon::Broom,     // App 缓存
+    Icon::Folder,    // App 数据
+    Icon::Puzzle,    // 应用卸载
+    Icon::Sliders,   // 系统优化
+    Icon::Disk,      // APFS 快照
+    Icon::HardDrive, // 自定义规则
+    Icon::Gear,      // 设置
 ];
 
 /// 把图标画进给定矩形

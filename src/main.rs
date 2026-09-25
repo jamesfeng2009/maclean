@@ -18,6 +18,7 @@ mod logger;
 mod menubar;
 mod ops;
 mod platform;
+mod rules;
 mod safety;
 mod scanner;
 mod scheduler;

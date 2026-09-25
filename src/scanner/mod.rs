@@ -21,6 +21,7 @@ pub mod app_cache;
 pub mod app_data;
 pub mod cache_registry;
 pub mod dev_cache;
+pub mod dup_files;
 pub mod large_files;
 pub mod optimize;
 // 残留名称匹配：刻意不限定平台，见模块顶部注释。放在 scanner 根而非

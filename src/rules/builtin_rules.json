@@ -1,0 +1,220 @@
+[
+  {
+    "id": "browser-chromium-cache",
+    "name_key": "rule_browser_chromium_cache",
+    "desc_key": "rule_browser_chromium_cache_desc",
+    "category": "浏览器缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/Google/Chrome/Default",
+      "$HOME/Library/Caches/Google/Chrome/Profile *",
+      "$HOME/Library/Caches/Microsoft Edge/Default",
+      "$HOME/Library/Caches/BraveSoftware/Brave-Browser/Default",
+      "$HOME/AppData/Local/Google/Chrome/User Data/Default",
+      "$HOME/AppData/Local/Microsoft/Edge/User Data/Default"
+    ],
+    "patterns": [
+      "Cache",
+      "GPUCache",
+      "Code Cache",
+      "Service Worker/CacheStorage",
+      "ShaderCache"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": [
+      "Google Chrome",
+      "Chromium"
+    ]
+  },
+  {
+    "id": "browser-safari-cache",
+    "name_key": "rule_browser_safari_cache",
+    "desc_key": "rule_browser_safari_cache_desc",
+    "category": "浏览器缓存",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Caches/com.apple.Safari"
+    ],
+    "patterns": [
+      "WebKit"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": [
+      "Safari"
+    ]
+  },
+  {
+    "id": "docker-desktop-data",
+    "name_key": "rule_docker_data",
+    "desc_key": "rule_docker_data_desc",
+    "category": "容器数据",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Containers/com.docker.docker",
+      "$HOME/AppData/Local/Docker"
+    ],
+    "patterns": [
+      "Log",
+      "logs",
+      "tmp",
+      "Temp"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced"
+  },
+  {
+    "id": "gradle-caches",
+    "name_key": "rule_gradle_caches",
+    "desc_key": "rule_gradle_caches_desc",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.gradle/caches",
+      "$HOME/.gradle/daemon"
+    ],
+    "patterns": [
+      "modules-2",
+      "transforms-*",
+      "*.lock"
+    ],
+    "min_size": 52428800,
+    "risk": "Advanced"
+  },
+  {
+    "id": "node-package-manager-caches",
+    "name_key": "rule_node_pkg_caches",
+    "desc_key": "rule_node_pkg_caches_desc",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/pnpm",
+      "$HOME/Library/Caches/Yarn",
+      "$HOME/AppData/Local/pnpm-cache",
+      "$HOME/AppData/Local/Yarn/Cache"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Safe"
+  },
+  {
+    "id": "npm-cache",
+    "name_key": "rule_npm_cache",
+    "desc_key": "rule_npm_cache_desc",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.npm/_cacache"
+    ],
+    "patterns": [
+      "content-v2",
+      "tmp"
+    ],
+    "min_size": 104857600,
+    "risk": "Safe"
+  },
+  {
+    "id": "pip-cache",
+    "name_key": "rule_pip_cache",
+    "desc_key": "rule_pip_cache_desc",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/pip",
+      "$HOME/AppData/Local/pip/cache",
+      "$HOME/.cache/pip"
+    ],
+    "patterns": [
+      "http",
+      "wheels",
+      "selfcheck"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe"
+  },
+  {
+    "id": "cargo-registry-cache",
+    "name_key": "rule_cargo_cache",
+    "desc_key": "rule_cargo_cache_desc",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.cargo/registry/cache",
+      "$HOME/.cargo/registry/src"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced"
+  },
+  {
+    "id": "go-module-cache",
+    "name_key": "rule_go_module_cache",
+    "desc_key": "rule_go_module_cache_desc",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/go/pkg/mod/cache",
+      "$HOME/.cache/go-build"
+    ],
+    "patterns": [
+      "download",
+      "vcs",
+      "*.zip"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced"
+  },
+  {
+    "id": "xcode-derived-data",
+    "name_key": "rule_xcode_derived_data",
+    "desc_key": "rule_xcode_derived_data_desc",
+    "category": "Xcode 编译",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Developer/Xcode/DerivedData"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Advanced"
+  },
+  {
+    "id": "homebrew-downloads",
+    "name_key": "rule_homebrew_downloads",
+    "desc_key": "rule_homebrew_downloads_desc",
+    "category": "系统缓存",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Caches/Homebrew/downloads",
+      "$HOME/Library/Caches/Homebrew/api"
+    ],
+    "patterns": [
+      "*.bottle.tar.gz",
+      "*.tar.gz",
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe"
+  },
+  {
+    "id": "rustup-toolchains-old",
+    "name_key": "rule_rustup_old_toolchains",
+    "desc_key": "rule_rustup_old_toolchains_desc",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.rustup/toolchains"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Advanced"
+  }
+]

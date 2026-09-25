@@ -152,6 +152,14 @@ const MACOS_HOMES_EXACT: &[&str] = &[
     "Library/Cookies",                 // Cookies 根目录（子项 .binarycookies 可删）
     "Library/WebKit",                  // WebKit 根目录（子项可删）
     "Library/Application Scripts",     // Application Scripts 根目录（子项可删）
+    "OneDrive",                        // 云同步盘根（子缓存可删）
+    "OneDrive - ",                     // 企业 OneDrive 根
+    "Dropbox",                         // 云同步盘根
+    "Google Drive",                    // 云同步盘根
+    "iCloud Drive",                    // iCloud Drive 根（Mounted 位置）
+    "Nextcloud",                       // 自建云同步根
+    "OwnCloud",                        // 自建云同步根
+    "Box",                             // Box 同步根
 ];
 
 /// macOS 侧 home 黑名单：前缀匹配（自身与整个子树都禁）
@@ -175,6 +183,21 @@ const MACOS_HOMES_PREFIX: &[&str] = &[
     ".ssh",                                      // SSH 密钥
     ".gnupg",                                    // GPG 密钥
     ".config/git",                               // Git 配置
+    ".aws",                                      // AWS 凭证与配置
+    ".azure",                                    // Azure 凭证
+    ".gcloud",                                   // Google Cloud 凭证
+    ".kube",                                     // Kubernetes 凭证
+    ".netrc",                                    // 网络认证凭据
+    ".password-store",                           // pass 密码库
+    ".git-credentials",                          // Git 明文凭证
+    ".docker",                                   // Docker 配置与登录态
+    ".env",                                      // 环境变量（常含密钥）
+    "Library/Application Support/FileProvider",  // FileProvider 同步状态
+    "Library/Caches/CloudKit",                   // CloudKit 元数据库
+    "Library/Caches/com.apple.bird",             // iCloud Drive 同步状态
+    "Library/Caches/com.apple.cloudd",           // CloudDocs 守护同步库
+    "Library/Caches/com.apple.clouddocs",
+    "Library/Caches/com.apple.fileprovider",
 ];
 
 /// Windows 侧 home 黑名单：精确匹配（只禁目录自身，子项可删）
@@ -209,8 +232,16 @@ const WINDOWS_HOMES_PREFIX: &[&str] = &[
     "AppData/Roaming/Microsoft/SystemCertificates", // 用户根证书存储
     "AppData/Local/Microsoft/Outlook",              // OST/PST 邮件数据
     "AppData/Roaming/Microsoft/Outlook",
-    ".ssh",   // SSH 密钥
-    ".gnupg", // GPG 密钥
+    ".ssh",             // SSH 密钥
+    ".gnupg",           // GPG 密钥
+    ".aws",             // AWS 凭证
+    ".azure",           // Azure 凭证
+    ".gcloud",          // Google Cloud 凭证
+    ".kube",            // Kubernetes 凭证
+    ".netrc",           // 网络认证凭据
+    ".password-store",  // pass 密码库
+    ".git-credentials", // Git 明文凭证
+    ".docker",          // Docker 配置与登录态
 ];
 
 /// 按平台取 home 黑名单
@@ -398,6 +429,28 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     let homes = protected_homes();
     if let Some(danger) = check_home_paths(&canonical, &canonical_str, &homes) {
         return danger;
+    }
+
+    // ================================================================
+    //  第 4.4 层: 仓库元数据组件保护（任意深度）
+    // ================================================================
+    // 对标 MangoDisk PROTECTED_REPOSITORY_COMPONENTS：.git/.hg/.svn/.bzr 是仓库
+    // 状态而非构建产物，在任何深度出现都拒绝删除 —— 误删 .git 会毁掉整个版本历史。
+    // 缓存清理目标（DerivedData/Caches/node_modules 等）从不落在这些组件上。
+    {
+        const REPO_COMPONENTS: [&str; 4] = [".git", ".hg", ".svn", ".bzr"];
+        let has_repo_component = canonical.components().any(|comp| {
+            matches!(comp, std::path::Component::Normal(n) if {
+                let name = n.to_string_lossy();
+                REPO_COMPONENTS.contains(&name.as_ref())
+            })
+        });
+        if has_repo_component {
+            return SafetyCheck::Danger(format!(
+                "仓库元数据目录（.git/.hg/.svn/.bzr），拒绝删除: {}",
+                canonical_str
+            ));
+        }
     }
 
     // ================================================================
@@ -764,7 +817,7 @@ fn is_windows_critical_path(path: &str) -> bool {
 /// 参考 Mole 的 _mole_is_critical_deletion_path，包含 50+ 保护路径
 ///
 /// 跨平台：POSIX 黑名单（macOS/Linux）之外，先过一遍 Windows 黑名单。
-fn is_critical_system_path(path: &str) -> bool {
+pub(crate) fn is_critical_system_path(path: &str) -> bool {
     // Windows 形态先交给 Windows 那张表（POSIX 路径命中不了它，故此处不限 cfg）
     if is_windows_critical_path(path) {
         return true;
@@ -1085,6 +1138,202 @@ fn path_contains_component(path: &str, name: &str) -> bool {
     path.split('/').any(|component| component == name)
 }
 
+// ================================================================
+//  P0：规则根模板校验 + 受保护根判定（为声明式规则引擎前置）
+// ================================================================
+//
+// 设计目标（对齐 MangoDisk 的 root_validation，但叠加 maclean 已有优势）：
+// - 规则里声明的 roots 支持模板变量（$HOME 等），解析失败/为空必须 fail-closed，
+//   否则 "$HOME/Library/Caches" 在 HOME 为空时会退化成 "/Library/Caches" 造成越权删除
+// - 解析后的根必须绝对、不能落在受保护根本身（/、home、系统目录、卷根）
+// - 组件数上限：防止"根模板过浅"（如规则根恰好等于 home）通过校验
+// - 本模块是 P2 声明式规则的强制门禁，也是删除前二次校验的最后一道兜底
+
+/// 模板变量解析：把规则根里的 `$HOME` / `%USERPROFILE%` 替换为真实值
+///
+/// 返回 None 表示变量缺失或为空 —— 调用方必须拒绝该规则（fail-closed）。
+/// 环境变量可能被进程内篡改，因此优先用 passwd/注册表真实 home 兜底。
+fn resolve_root_variable(root: &str) -> Option<String> {
+    let homes = protected_homes();
+    let home = homes.first()?;
+    let home_str = home.to_string_lossy();
+    let mut out = root.to_string();
+    for (var, val) in [
+        ("$HOME", home_str.as_ref()),
+        ("%USERPROFILE%", home_str.as_ref()),
+    ] {
+        if out.contains(var) {
+            out = out.replace(var, val);
+        }
+    }
+    // 还残留模板变量说明遇到了不认识的变量（如 $APPDATA），拒绝
+    if out.contains('$') || out.contains('%') {
+        return None;
+    }
+    Some(out)
+}
+
+/// 受保护根：永远不允许作为删除根目标的本体路径
+///
+/// 与黑名单（保护目录本身/子项可删）不同，这里保护的是**根本身**：
+/// 待删路径等于这些路径时必须拒绝 —— 规则根解析若退化到这里，直接 fail-closed。
+#[cfg(target_os = "macos")]
+fn macos_protected_roots() -> Vec<&'static str> {
+    vec![
+        "/",
+        "/Users",
+        "/System",
+        "/Library",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/private",
+        "/etc",
+        "/var",
+        "/Applications",
+        "/Volumes",
+        "/cores",
+        "/opt",
+        "/dev",
+        "/tmp",
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn windows_protected_roots() -> Vec<String> {
+    let mut roots: Vec<String> = vec![
+        "C:\\".into(),
+        "C:\\Windows".into(),
+        "C:\\Program Files".into(),
+        "C:\\Program Files (x86)".into(),
+        "C:\\Users".into(),
+        "C:\\ProgramData".into(),
+        "C:\\Recovery".into(),
+        "C:\\System Volume Information".into(),
+    ];
+    // 盘符根一律保护：D:\、E:\ ... 防止规则解析到任一盘的根
+    for drive in b'C'..=b'Z' {
+        let letter = (drive as char).to_ascii_uppercase();
+        roots.push(format!("{}:\\", letter));
+    }
+    roots
+}
+
+/// 判断 path（已解析、规范化后）是否为受保护根本身
+///
+/// 供两个场景使用：
+/// 1. 规则根校验（validate_rule_root）：解析后的根不能是这里任一值
+/// 2. 删除前二次校验（ops::sanitize_before_delete）：待删路径不能是这里任一值
+#[cfg(target_os = "macos")]
+pub fn is_protected_root(path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    // home 根本身
+    if protected_homes().iter().any(|h| {
+        h.as_os_str() == std::ffi::OsStr::new(&canonical)
+            || h.as_os_str() == std::ffi::OsStr::new(path)
+    }) {
+        return true;
+    }
+    macos_protected_roots()
+        .iter()
+        .any(|r| canonical == *r || path == *r)
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_protected_root(path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    let normalized = path.replace('/', "\\").trim_end_matches('\\').to_string();
+    if protected_homes()
+        .iter()
+        .any(|h| h.to_string_lossy().as_ref() == normalized)
+    {
+        return true;
+    }
+    windows_protected_roots()
+        .iter()
+        .any(|r| normalized == r.trim_end_matches('\\'))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn is_protected_root(path: &str) -> bool {
+    path.is_empty() || path == "/"
+}
+
+/// 规则根组件数上限：防止"根模板过浅"通过校验
+#[cfg_attr(not(test), allow(dead_code))] // P2 声明式规则将消费
+pub const MAX_RULE_ROOT_COMPONENTS: usize = 3;
+
+/// 校验声明式规则的根模板，返回解析后的安全绝对路径
+///
+/// fail-closed：任何一步失败都返回 Err，调用方必须拒绝该规则。
+/// - 模板变量缺失/未知 → Err
+/// - 解析后非绝对路径 → Err
+/// - 解析后是受保护根本身 → Err
+/// - 解析后组件数 ≤ 3（如 $HOME 本身、/ 等浅根直接拒绝）→ Err
+#[cfg(target_os = "macos")]
+#[cfg_attr(not(test), allow(dead_code))] // P2 声明式规则将消费
+pub fn validate_rule_root(root: &str) -> Result<String, String> {
+    let resolved = resolve_root_variable(root)
+        .ok_or_else(|| format!("规则根含未解析模板变量或为空: {root}"))?;
+    let p = std::path::Path::new(&resolved);
+    if !p.is_absolute() {
+        return Err(format!("规则根必须为绝对路径: {root}"));
+    }
+    if resolved.contains("..") || resolved.chars().any(|c| c.is_control()) {
+        return Err(format!("规则根含目录遍历或控制字符: {root}"));
+    }
+    if is_protected_root(&resolved) {
+        return Err(format!("规则根是受保护根本身: {root}"));
+    }
+    let components = resolved.split('/').filter(|c| !c.is_empty()).count();
+    if components < MAX_RULE_ROOT_COMPONENTS {
+        return Err(format!(
+            "规则根过浅（{components} 个组件 < {MAX_RULE_ROOT_COMPONENTS}），拒绝: {root}"
+        ));
+    }
+    Ok(resolved)
+}
+
+#[cfg(target_os = "windows")]
+pub fn validate_rule_root(root: &str) -> Result<String, String> {
+    let resolved = resolve_root_variable(root)
+        .ok_or_else(|| format!("规则根含未解析模板变量或为空: {root}"))?;
+    let p = std::path::Path::new(&resolved);
+    if !p.is_absolute() {
+        return Err(format!("规则根必须为绝对路径: {root}"));
+    }
+    if resolved.contains("..") || resolved.chars().any(|c| c.is_control()) {
+        return Err(format!("规则根含目录遍历或控制字符: {root}"));
+    }
+    if is_protected_root(&resolved) {
+        return Err(format!("规则根是受保护根本身: {root}"));
+    }
+    // Windows：至少 3 个组件，如 C:\Users\Name 起步
+    let normalized = resolved.replace('/', "\\");
+    let components = normalized.split('\\').filter(|c| !c.is_empty()).count();
+    if components < MAX_RULE_ROOT_COMPONENTS {
+        return Err(format!(
+            "规则根过浅（{components} 个组件 < {MAX_RULE_ROOT_COMPONENTS}），拒绝: {root}"
+        ));
+    }
+    Ok(resolved)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn validate_rule_root(root: &str) -> Result<String, String> {
+    if root.is_empty() || root == "/" {
+        return Err("规则根无效".to_string());
+    }
+    Ok(root.to_string())
+}
+
 /// 记录删除日志到文件
 ///
 /// 所有删除操作都会记录到 ~/.maclean/delete.log，可回溯审计
@@ -1132,6 +1381,71 @@ fn chrono_like_timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- P0: 规则根模板校验 + 受保护根判定 ----------
+
+    #[test]
+    fn rule_root_validation_accepts_normal_cache_roots() {
+        // $HOME/Library/Caches 这类正常规则根必须通过
+        let resolved = validate_rule_root("$HOME/Library/Caches").expect("正常规则根应通过校验");
+        assert!(
+            resolved.starts_with('/'),
+            "解析后的根应为绝对路径: {resolved}"
+        );
+        assert!(resolved.ends_with("Library/Caches"));
+    }
+
+    #[test]
+    fn rule_root_validation_rejects_protected_roots() {
+        // 受保护根本身 → 拒绝
+        for bad in ["/", "/Library", "/System", "/Users", "/usr"] {
+            assert!(validate_rule_root(bad).is_err(), "受保护根应被拒绝: {bad}");
+        }
+    }
+
+    #[test]
+    fn rule_root_validation_rejects_home_itself_and_shallow_roots() {
+        // $HOME 本身（组件过浅）→ 拒绝
+        assert!(validate_rule_root("$HOME").is_err(), "$HOME 本身不应通过");
+        // 未知模板变量 → fail-closed
+        assert!(
+            validate_rule_root("$APPDATA/Foo").is_err(),
+            "未知变量应被拒绝"
+        );
+        // 相对路径 → 拒绝
+        assert!(
+            validate_rule_root("Library/Caches").is_err(),
+            "相对路径应被拒绝"
+        );
+    }
+
+    #[test]
+    fn protected_root_detection_blocks_system_and_home_roots() {
+        let homes = protected_homes();
+        let home = homes.first().expect("有 home");
+        let home_str = home.to_string_lossy().to_string();
+        for bad in ["/", "/Library", "/System", "/Users", "/usr", &home_str] {
+            assert!(is_protected_root(bad), "应识别为受保护根: {bad}");
+        }
+        // 普通可删路径不是受保护根
+        assert!(!is_protected_root("/Users/me/Library/Caches/foo"));
+        assert!(!is_protected_root(&format!(
+            "{}/Library/Caches/foo",
+            home_str
+        )));
+    }
+
+    #[test]
+    fn rule_root_validation_rejects_traversal_and_control_chars() {
+        assert!(
+            validate_rule_root("$HOME/Library/../..").is_err(),
+            "目录遍历应被拒绝"
+        );
+        assert!(
+            validate_rule_root("$HOME/Library/Caches\n").is_err(),
+            "控制字符应被拒绝"
+        );
+    }
 
     // ---------- W-5: Windows 用户关键目录保护 ----------
     //
@@ -1669,5 +1983,78 @@ mod tests {
         let path = home.join("Library/Preferences/git-credential-manager.plist");
         let result = check_path_safety_with_category(path.to_string_lossy().as_ref(), "");
         assert!(matches!(result, SafetyCheck::Safe));
+    }
+
+    #[test]
+    fn home_credential_and_sync_dirs_are_protected() {
+        // 本轮增强：凭证目录、密码库、同步盘根（对标 MangoDisk PROTECTED_HOME_ROOTS）
+        let home = std::env::temp_dir().join(format!("maclean_home_cred_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for sub in [
+            ".aws",
+            ".azure",
+            ".gcloud",
+            ".kube",
+            ".netrc",
+            ".password-store",
+            ".git-credentials",
+            ".docker",
+            ".env",
+            "OneDrive",
+            "Dropbox",
+            "Google Drive",
+            "iCloud Drive",
+            "Nextcloud",
+            "Box",
+        ] {
+            let p = home.join(sub);
+            std::fs::create_dir_all(&p).unwrap();
+            // 用可注入 home 的纯函数检查（真实 $HOME 不包含测试目录）
+            let s = check_home_paths(
+                &p,
+                p.to_string_lossy().as_ref(),
+                std::slice::from_ref(&home),
+            );
+            assert!(
+                matches!(s, Some(SafetyCheck::Danger(_))),
+                "{} 应被拒绝删除，实际 {:?}",
+                sub,
+                s
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn repo_metadata_components_protected_at_any_depth() {
+        // 对标 MangoDisk PROTECTED_REPOSITORY_COMPONENTS：任意深度的 .git 均拒绝
+        let tmp = std::env::temp_dir().join(format!("maclean_repo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        for (label, p) in [
+            ("git_root", tmp.join("proj/.git")),
+            ("git_deep", tmp.join("a/b/c/.git")),
+            ("hg", tmp.join("proj/.hg")),
+            ("svn", tmp.join("proj/.svn")),
+            ("bzr", tmp.join("proj/.bzr")),
+        ] {
+            std::fs::create_dir_all(&p).unwrap();
+            let s = check_path_safety_with_category(p.to_string_lossy().as_ref(), "");
+            assert!(
+                matches!(s, SafetyCheck::Danger(_)),
+                "{} 应被拒绝删除，实际 {:?}",
+                label,
+                s
+            );
+        }
+        // 普通缓存目录不受影响
+        let ok_dir = tmp.join("proj/DerivedData");
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        let s = check_path_safety_with_category(ok_dir.to_string_lossy().as_ref(), "");
+        assert!(
+            matches!(s, SafetyCheck::Safe),
+            "普通缓存目录应放行: {:?}",
+            s
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

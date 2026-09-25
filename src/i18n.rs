@@ -784,6 +784,9 @@ pub fn translate_undeletable_reason(reason: &str, lang_en: bool) -> String {
         if let Some(vendor) = reason.strip_prefix("protection_official_uninstaller:") {
             return format!("请使用 {} 官方卸载工具", vendor);
         }
+        if let Some(procs) = reason.strip_prefix("required_stopped_processes:") {
+            return format!("删除前请先退出: {}", procs);
+        }
         return reason.to_string();
     }
 
@@ -793,6 +796,9 @@ pub fn translate_undeletable_reason(reason: &str, lang_en: bool) -> String {
     }
     if let Some(vendor) = reason.strip_prefix("protection_official_uninstaller:") {
         return format!("Use {}'s official uninstaller", vendor);
+    }
+    if let Some(procs) = reason.strip_prefix("required_stopped_processes:") {
+        return format!("Quit before deleting: {}", procs);
     }
     reason.to_string()
 }

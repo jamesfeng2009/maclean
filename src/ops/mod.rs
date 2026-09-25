@@ -108,6 +108,8 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
         // 磁盘分析器在非主目录浏览时不使用缓存（路径不同，结果不同）
         let tab_name = match tab {
             Tab::Overview | Tab::Settings => None,
+            Tab::CustomRules => None, // 每次全扫，不缓存
+            Tab::DuplicateFiles => Some("dup_files"),
             Tab::DevCache => Some("dev_cache"),
             Tab::LargeFiles => {
                 // 仅在主目录时缓存
@@ -183,6 +185,8 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
                 Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
                 #[cfg(target_os = "macos")]
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+                Tab::CustomRules => crate::rules::RuleScanner::new().scan(),
+                Tab::DuplicateFiles => scanner::dup_files::DuplicateFileScanner::new().scan(),
                 // Windows/Linux: 这些 Tab 返回空结果
                 #[cfg(not(target_os = "macos"))]
                 Tab::AppCache => {
@@ -324,6 +328,8 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                 Tab::AppUninstall => Some("app_uninstall"),
                 Tab::SystemOptimize => None,
                 Tab::Apfs => Some("apfs"),
+                Tab::CustomRules => None, // 每次全扫，不缓存
+                Tab::DuplicateFiles => Some("dup_files"),
             };
 
             if let Some(name) = cache_name {
@@ -362,6 +368,8 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                 Tab::SystemOptimize => scanner::optimize::OptimizeScanner::new().scan(),
                 #[cfg(target_os = "macos")]
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
+                Tab::CustomRules => crate::rules::RuleScanner::new().scan(),
+                Tab::DuplicateFiles => scanner::dup_files::DuplicateFileScanner::new().scan(),
                 #[cfg(not(target_os = "macos"))]
                 Tab::AppCache => {
                     #[cfg(target_os = "windows")]
@@ -473,88 +481,367 @@ pub(crate) fn send_items_in_batches(
 
 /// 尽力删除：优先用系统命令（对 node_modules 等大目录更快），
 /// 失败则尝试解除只读标志后再删，再失败就放弃
-pub(crate) fn best_effort_delete(path: &std::path::Path) -> bool {
-    let path_str = path.to_string_lossy().to_string();
+/// 删除失败原因归因（P1）
+///
+/// 让用户看到"为什么删不掉"，而不是一个裸的失败：
+/// - 权限不足 → 提示可提权重试
+/// - SIP 保护 → 即使 root 也删不掉，说明系统保护
+/// - 被占用 → 提示关闭占用进程（Windows 常见）
+/// - immutable → 提示文件被锁定
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteFailure {
+    /// 权限不足（普通删除失败，可能需要提权）
+    PermissionDenied,
+    /// SIP/系统保护（即使 root 也删不掉）
+    SipProtected,
+    /// 被其他进程占用
+    FileInUse,
+    /// immutable/只读标志（已尝试 chflags 解除仍失败）
+    Immutable,
+    /// 其他原因
+    Other,
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        // macOS: 优先用系统 rm -rf
-        if std::process::Command::new("/bin/rm")
-            .arg("-rf")
-            .arg(&path_str)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-            && !path.exists()
+impl DeleteFailure {
+    /// 对应 i18n key（失败原因文案）
+    pub(crate) fn label_key(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "fail_reason_perm",
+            Self::SipProtected => "fail_reason_sip",
+            Self::FileInUse => "fail_reason_inuse",
+            Self::Immutable => "fail_reason_immutable",
+            Self::Other => "fail_reason_other",
+        }
+    }
+}
+
+/// 把 path 原子改名到同目录下不可预测的 staging 名（TOCTOU 防护辅助）。
+///
+/// - macOS：`renameatx_np(RENAME_EXCL)` —— "目标不存在才 rename"，原子且绝不覆盖外部文件；
+/// - Windows：`std::fs::rename` 对已存在目标直接失败，行为等价；
+/// - 源路径已消失（NotFound）：返回原 path，调用方按"已消失"自然处理。
+fn rename_to_staging(path: &std::path::Path) -> Result<std::path::PathBuf, DeleteFailure> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => return Err(DeleteFailure::Other),
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for attempt in 0..64u32 {
+        let name = format!(
+            ".maclean_stage_{}_{:x}_{}",
+            std::process::id(),
+            nanos,
+            attempt
+        );
+        let staging = parent.join(&name);
+        if staging.symlink_metadata().is_ok() {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
         {
-            return true;
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            let Ok(from) = CString::new(path.as_os_str().as_bytes()) else {
+                return Err(DeleteFailure::Other);
+            };
+            let Ok(to) = CString::new(staging.as_os_str().as_bytes()) else {
+                return Err(DeleteFailure::Other);
+            };
+            // RENAME_EXCL = 0x4：目标已存在则失败，原子且不覆盖外部文件
+            let r = unsafe {
+                libc::renameatx_np(
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    0x4,
+                )
+            };
+            if r == 0 {
+                return Ok(staging);
+            }
+            match std::io::Error::last_os_error().kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    return Err(DeleteFailure::PermissionDenied)
+                }
+                std::io::ErrorKind::NotFound => return Ok(path.to_path_buf()), // 源已消失
+                std::io::ErrorKind::AlreadyExists => continue, // staging 被占，换名重试
+                _ => return Err(DeleteFailure::Other),
+            }
         }
-
-        // rm -rf 失败，尝试解除可能存在的 immutable/只读标志后再删除
-        let _ = std::process::Command::new("/usr/bin/chflags")
-            .arg("-R")
-            .arg("nouchg")
-            .arg(&path_str)
-            .output();
-        let _ = std::process::Command::new("/bin/chmod")
-            .arg("-R")
-            .arg("u+w")
-            .arg(&path_str)
-            .output();
-
-        let _ = std::process::Command::new("/bin/rm")
-            .arg("-rf")
-            .arg(&path_str)
-            .output();
-
-        !path.exists() && path.symlink_metadata().is_err()
+        #[cfg(not(target_os = "macos"))]
+        {
+            match std::fs::rename(path, &staging) {
+                Ok(()) => return Ok(staging),
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::PermissionDenied => {
+                        return Err(DeleteFailure::PermissionDenied)
+                    }
+                    std::io::ErrorKind::NotFound => return Ok(path.to_path_buf()),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::Other => continue,
+                    _ => return Err(DeleteFailure::Other),
+                },
+            }
+        }
     }
+    Err(DeleteFailure::Other)
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        // Windows: 用 rd /s /q 删除目录，del /f /q 删除文件
-        let success = if path.is_dir() {
-            std::process::Command::new("cmd")
-                .arg("/C")
-                .arg("rd")
-                .arg("/S")
-                .arg("/Q")
-                .arg(&path_str)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        } else {
-            std::process::Command::new("cmd")
-                .arg("/C")
-                .arg("del")
-                .arg("/F")
-                .arg("/Q")
-                .arg(&path_str)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+/// 尝试删除并归因失败原因（P1）
+///
+/// 删除逻辑与原 `best_effort_delete` 完全一致（rm -rf → chflags/chmod 重试），
+/// 但失败时返回具体原因，供 UI 展示"为什么删不掉"。
+/// `best_effort_delete` 保留为兼容包装（返回 bool）。
+#[cfg(target_os = "macos")]
+pub(crate) fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
+    use std::os::macos::fs::MetadataExt as MacMeta;
+    use std::os::unix::fs::MetadataExt as UnixMeta;
+
+    // ========== TOCTOU 防护（对标 MangoDisk 物理身份比对，流程更稳） ==========
+    // 1. 捕获物理身份 (st_dev, st_ino) 并持有句柄 —— 防止验证后路径被替换、或
+    //    unlink 后同一 inode 编号在删除窗口内被复用；
+    // 2. 原子 rename 到同目录不可预测 staging 名（RENAME_EXCL，绝不覆盖外部文件）；
+    // 3. 比对 staging 的物理身份与捕获值：不一致说明"验证→删除"之间原路径被换成
+    //    新对象 → 恢复原路径并 fail-closed 拒绝删除；
+    // 4. 后续 rm/chflags/chmod 只作用于 staging —— 删的始终是验证过的那一个对象。
+    let deleted_path = {
+        let Some(meta) = std::fs::symlink_metadata(path).ok() else {
+            return Ok(()); // 目标已消失，视为删除成功
         };
+        let identity = (meta.dev(), meta.ino());
+        // 保持句柄打开直到本函数结束：防止 unlink 后同一物理身份被复用
+        let _identity_handle = std::fs::File::open(path);
 
-        if success {
-            return true;
+        let staging = rename_to_staging(path)?;
+        let Some(staging_meta) = std::fs::symlink_metadata(&staging).ok() else {
+            let _ = std::fs::rename(&staging, path); // 尽力恢复原路径
+            return Err(DeleteFailure::Other);
+        };
+        if (staging_meta.dev(), staging_meta.ino()) != identity {
+            // 验证后原路径被替换成新对象：恢复原位并拒绝删除（fail-closed）
+            let _ = std::fs::rename(&staging, path);
+            return Err(DeleteFailure::Other);
         }
+        staging
+    };
 
-        // fallback: Rust API
-        if path.is_dir() {
-            std::fs::remove_dir_all(path).is_ok()
-        } else {
-            std::fs::remove_file(path).is_ok()
+    let path_str = path.to_string_lossy().to_string(); // 归因用原路径（SIP 判断基于原路径）
+    let deleted_str = deleted_path.to_string_lossy().to_string(); // 操作用 staging
+    let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
+    let rm = |p: &str| {
+        std::process::Command::new("/bin/rm")
+            .arg("-rf")
+            .arg(p)
+            .output()
+    };
+
+    // 第一遍：直接 rm staging
+    if let Ok(o) = rm(&deleted_str) {
+        if o.status.success() && gone(&deleted_path) {
+            return Ok(());
+        }
+        if let Some(f) = classify_rm_failure(&o.stderr, &path_str) {
+            return Err(f);
         }
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    // 第二遍：解除 immutable/只读标志后再删
+    let _ = std::process::Command::new("/usr/bin/chflags")
+        .arg("-R")
+        .arg("nouchg")
+        .arg(&deleted_str)
+        .output();
+    let _ = std::process::Command::new("/bin/chmod")
+        .arg("-R")
+        .arg("u+w")
+        .arg(&deleted_str)
+        .output();
+    if let Ok(o) = rm(&deleted_str) {
+        if o.status.success() && gone(&deleted_path) {
+            return Ok(());
+        }
+        if let Some(f) = classify_rm_failure(&o.stderr, &path_str) {
+            return Err(f);
+        }
+    }
+
+    // 仍存在且无法归类：检查 immutable 标志（chflags 尝试可能没权限或没生效）
     {
-        if path.is_dir() {
-            std::fs::remove_dir_all(path).is_ok()
-        } else {
-            std::fs::remove_file(path).is_ok()
+        if let Ok(meta) = std::fs::symlink_metadata(&deleted_path) {
+            let flags = meta.st_flags();
+            // UF_IMMUTABLE=0x0001, SF_IMMUTABLE=0x8000
+            if flags & 0x0001 != 0 || flags & 0x8000 != 0 {
+                return Err(DeleteFailure::Immutable);
+            }
         }
     }
+    Err(DeleteFailure::Other)
+}
+
+/// 从 rm 的 stderr 归类失败原因（macOS）
+#[cfg(target_os = "macos")]
+fn classify_rm_failure(stderr: &[u8], path: &str) -> Option<DeleteFailure> {
+    let text = String::from_utf8_lossy(stderr).to_lowercase();
+    if text.contains("operation not permitted") || text.contains("not permitted") {
+        return Some(if crate::safety::is_critical_system_path(path) {
+            DeleteFailure::SipProtected
+        } else {
+            DeleteFailure::PermissionDenied
+        });
+    }
+    if text.contains("resource busy") || text.contains("device busy") {
+        return Some(DeleteFailure::FileInUse);
+    }
+    if text.contains("read-only file system") {
+        return Some(DeleteFailure::SipProtected);
+    }
+    None
+}
+
+/// 尝试删除并归因失败原因（Windows）
+#[cfg(target_os = "windows")]
+pub(crate) fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
+    // ========== TOCTOU 防护（Windows 版） ==========
+    // 先原子 rename 到同目录不可预测 staging（Windows 上 rename 目标存在即失败，
+    // 天然不覆盖外部文件），随后所有删除只作用于 staging —— 删的始终是验证过
+    // 的那一个对象，路径在验证后被替换也无法命中。
+    // 限制：Windows 端未做物理身份(st_dev/st_ino)比对，依赖 staging 名不可预测
+    //  + rename 原子性缩短竞态窗口；如需更强可引入 windows crate 取 FileIndex。
+    let deleted_path = {
+        if !path.exists() && path.symlink_metadata().is_err() {
+            return Ok(());
+        }
+        rename_to_staging(path)?
+    };
+
+    let path_str = path.to_string_lossy().to_string();
+    let deleted_str = deleted_path.to_string_lossy().to_string();
+    let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
+
+    let cmd_out = if deleted_path.is_dir() {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("rd")
+            .arg("/S")
+            .arg("/Q")
+            .arg(&deleted_str)
+            .output()
+    } else {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("del")
+            .arg("/F")
+            .arg("/Q")
+            .arg(&deleted_str)
+            .output()
+    };
+    if let Ok(o) = &cmd_out {
+        if o.status.success() && gone(&deleted_path) {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(&o.stderr).to_lowercase();
+        if text.contains("being used by another process") || text.contains("in use") {
+            return Err(DeleteFailure::FileInUse);
+        }
+        if text.contains("access is denied") {
+            return Err(DeleteFailure::PermissionDenied);
+        }
+    }
+
+    // Rust API fallback
+    let res = if deleted_path.is_dir() {
+        std::fs::remove_dir_all(&deleted_path)
+    } else {
+        std::fs::remove_file(&deleted_path)
+    };
+    match res {
+        Ok(()) if gone(&deleted_path) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(DeleteFailure::PermissionDenied)
+        }
+        Err(_) => Err(DeleteFailure::Other),
+        _ => Err(DeleteFailure::Other),
+    }
+}
+
+/// 尝试删除并归因失败原因（其他平台）
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
+    let res = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match res {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(DeleteFailure::PermissionDenied)
+        }
+        Err(_) => Err(DeleteFailure::Other),
+    }
+}
+
+/// 查找占用指定路径的进程名（Windows，P1）
+///
+/// 用 Windows 自带的 Restart Manager（rstrtmgr.dll）枚举占用进程，
+/// 不依赖任何第三方工具（handle.exe / Process Explorer 都不需要）。
+/// 找不到或调用失败返回空列表，由调用方决定如何提示。
+#[cfg(target_os = "windows")]
+pub(crate) fn find_locking_processes(path: &str) -> Vec<String> {
+    // Restart Manager 的 P/Invoke 声明 + 查询流程，全部是 Windows 系统 API。
+    // 占用的进程可能尚未写入 strAppName（如服务），此时过滤掉空名。
+    let script = r#"
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class Rm {
+    [StructLayout(LayoutKind.Sequential)] public struct RM_UNIQUE_PROCESS { public int dwProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime; }
+    public const int CCH_RM_MAX_APP_NAME = 255;
+    [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] public static extern int RmStartSession(out uint pSessionHandle, int dwSessionFlags, string strSessionKey);
+    [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] public static extern int RmRegisterResources(uint pSessionHandle, uint nFiles, string[] rgsFilenames, uint nApplications, RM_UNIQUE_PROCESS[] rgApplications, uint nServices, string[] rgsServiceNames);
+    [DllImport("rstrtmgr.dll")] public static extern int RmGetList(uint dwSessionHandle, out uint pnProcInfoNeeded, ref uint pnProcInfo, [In, Out] RM_PROCESS_INFO[] rgAffectedApps, ref uint lpdwRebootReasons);
+    [StructLayout(LayoutKind.Sequential)] public struct RM_PROCESS_INFO { public RM_UNIQUE_PROCESS Process; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=CCH_RM_MAX_APP_NAME)] public string strAppName; public int ApplicationType; public uint AppStatus; public uint TSSessionId; [MarshalAs(UnmanagedType.Bool)] public bool bRestartable; }
+    [DllImport("rstrtmgr.dll")] public static extern int RmEndSession(uint pSessionHandle);
+}
+"@
+$key = [guid]::NewGuid().ToString()
+$session = [uint32]0
+[Rm]::RmStartSession([ref]$session, 0, $key) | Out-Null
+$paths = @($args[0])
+[Rm]::RmRegisterResources($session, [uint32]$paths.Count, $paths, 0, $null, 0, $null) | Out-Null
+$needed = [uint32]0
+$count = [uint32]0
+$reasons = [uint32]0
+[Rm]::RmGetList($session, [ref]$needed, [ref]$count, $null, [ref]$reasons) | Out-Null
+if ($needed -gt 0) {
+    $apps = New-Object Rm+RM_PROCESS_INFO[] $needed
+    $count = $needed
+    [Rm]::RmGetList($session, [ref]$needed, [ref]$count, $apps, [ref]$reasons) | Out-Null
+    foreach ($a in $apps) { if ($a.strAppName) { $a.strAppName } }
+}
+[Rm]::RmEndSession($session) | Out-Null
+"#;
+    let out = std::process::Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        // 脚本与参数分开传：path 作为 $args[0]，Rust 负责按平台规则引号转义，
+        // 避免手工拼接 format 字符串把引号/花括号搞坏
+        .arg(script)
+        .arg(path)
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 /// 获取系统所有挂载点 (macOS 专属)
@@ -866,8 +1153,22 @@ pub(crate) fn start_delete(
             let _ = tx.send(DeleteMessage::Info(text));
         }
 
-        // ========== 阶段1: 普通删除（多线程并行） ==========
-        let worker_count = std::cmp::min(4, to_delete.len().max(1));
+        // ========== 阶段1: 普通删除（并行度调优，对标 MangoDisk benchmark 结论） ==========
+        // 平台分层 worker 上限：macOS 2 / Windows 4 —— 更高并发在活跃索引/防病毒扫描
+        // 场景下删除延迟不稳定；条目少时线程启动成本大于文件系统工作，直接串行。
+        const PARALLEL_DELETE_ENTRY_THRESHOLD: usize = 16;
+        #[cfg(target_os = "macos")]
+        const MAX_PARALLEL_DELETE_WORKERS: usize = 2;
+        #[cfg(target_os = "windows")]
+        const MAX_PARALLEL_DELETE_WORKERS: usize = 4;
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        const MAX_PARALLEL_DELETE_WORKERS: usize = 4;
+
+        let worker_count = if to_delete.len() >= PARALLEL_DELETE_ENTRY_THRESHOLD {
+            std::cmp::min(MAX_PARALLEL_DELETE_WORKERS, to_delete.len())
+        } else {
+            1 // 小批串行，省掉线程调度开销
+        };
         let idx = std::sync::atomic::AtomicUsize::new(0);
 
         std::thread::scope(|s| {
@@ -996,11 +1297,33 @@ pub(crate) fn start_delete(
                                     safety::SafetyCheck::Safe => {}
                                 }
                                 let p = std::path::Path::new(bp.as_str());
-                                if best_effort_delete(p) {
-                                    success_count += 1;
-                                } else {
-                                    fail_count += 1;
-                                    failed_items.lock().unwrap_or_else(|e| e.into_inner()).push((bp.clone(), category.clone()));
+                                match best_effort_delete_with_reason(p) {
+                                    Ok(()) => success_count += 1,
+                                    Err(failure) => {
+                                        fail_count += 1;
+                                        failed_items.lock().unwrap_or_else(|e| e.into_inner())
+                                            .push((bp.clone(), category.clone()));
+                                        // P1：失败归因 —— 用户能看到"为什么删不掉"
+                                        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                                        let mut reason: String = App::t_lang(lang_en, failure.label_key()).to_string();
+                                        #[cfg(target_os = "windows")]
+                                        if let DeleteFailure::FileInUse = failure {
+                                            let lockers = find_locking_processes(bp);
+                                            if !lockers.is_empty() {
+                                                reason = format!("{}: {}", reason, lockers.join(", "));
+                                            }
+                                        }
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!(
+                                                "⚠️ {} — {}",
+                                                App::t_lang(lang_en, "log_still_exists"),
+                                                reason
+                                            ),
+                                            bp.clone(),
+                                            category.clone(),
+                                            false,
+                                        ));
+                                    }
                                 }
                             }
                             let _ = tx.send(DeleteMessage::Log(
@@ -1149,7 +1472,7 @@ pub(crate) fn start_delete(
                         let deleted_ok = if use_trash {
                             move_to_trash(&path)
                         } else {
-                            best_effort_delete(p)
+                            best_effort_delete_with_reason(p).is_ok()
                         };
 
                         if deleted_ok {
@@ -1179,7 +1502,30 @@ pub(crate) fn start_delete(
                                 format!("✗ {}", App::tf_lang(lang_en, "log_trash_failed", &[&path])), path.clone(), category.clone(), false));
                             safety::log_deletion(&path, &category, false, Some(App::t_lang(lang_en, "log_trash_failed").replace("{}", "").trim()));
                         } else {
-                            // 普通删除失败，加入待 sudo 列表
+                            // 普通删除失败，加入待 sudo 列表；先归因失败原因展示给用户
+                            let failure = best_effort_delete_with_reason(p).err();
+                            #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                            let mut reason: String = failure
+                                .map(|f| App::t_lang(lang_en, f.label_key()).to_string())
+                                .unwrap_or_else(|| App::t_lang(lang_en, "fail_reason_other").to_string());
+                            // P1：Windows 上被占用时，尽力查出占用进程名，提示用户关闭
+                            #[cfg(target_os = "windows")]
+                            if let Some(DeleteFailure::FileInUse) = failure {
+                                let lockers = find_locking_processes(&path);
+                                if !lockers.is_empty() {
+                                    reason = format!("{}: {}", reason, lockers.join(", "));
+                                }
+                            }
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!(
+                                    "✗ {} — {}",
+                                    App::t_lang(lang_en, "log_still_exists"),
+                                    reason
+                                ),
+                                path.clone(),
+                                category.clone(),
+                                false,
+                            ));
                             failed_items.lock().unwrap_or_else(|e| e.into_inner()).push((path, category));
                         }
                     }
@@ -1371,6 +1717,22 @@ pub(crate) fn sanitize_before_delete(
     let mut rejected: Vec<RejectedItem> = Vec::new();
 
     for (path, category) in items {
+        // 0. 受保护根本身（P0 兜底）：待删路径等于 /、home、系统根、卷根等 → 拒绝。
+        //    与黑名单不同，这是 fail-closed 的最后一道闸 —— 规则根解析若退化
+        //    到这里（如 $HOME 变量为空导致 "$HOME/Library" 变成 "/Library"），
+        //    此处直接拦截，绝不把根目录交给删除流程。
+        if safety::is_protected_root(&path) {
+            rejected.push((
+                path,
+                category,
+                App::t_lang(lang_en, "log_protected_root_rejected")
+                    .replace("{}", "")
+                    .trim()
+                    .to_string(),
+            ));
+            continue;
+        }
+
         // 1. 重做安全校验（与阶段一相同规则）
         match safety::check_path_safety_with_category(&path, &category) {
             safety::SafetyCheck::Danger(reason) | safety::SafetyCheck::Warning(reason) => {
@@ -2962,7 +3324,7 @@ pub(crate) fn start_sudo_delete(
         }
 
         for (path, category) in failed_items {
-            let ok = best_effort_delete(std::path::Path::new(&path));
+            let ok = best_effort_delete_with_reason(std::path::Path::new(&path)).is_ok();
             let line = if ok {
                 App::tf_lang(lang_en, "log_deleted_sudo", &[&category, &path])
             } else {
@@ -2982,6 +3344,114 @@ pub(crate) fn start_sudo_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- P1: 删除失败归因 ----------
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn delete_failure_label_keys_map_to_i18n() {
+        // 每个原因都有对应文案 key（缺失会在 t_lang fallback 成空串）
+        for f in [
+            DeleteFailure::PermissionDenied,
+            DeleteFailure::SipProtected,
+            DeleteFailure::FileInUse,
+            DeleteFailure::Immutable,
+            DeleteFailure::Other,
+        ] {
+            let key = f.label_key();
+            assert!(
+                !crate::app::App::t_lang(true, key).is_empty(),
+                "EN key {key} 缺失"
+            );
+            assert!(
+                !crate::app::App::t_lang(false, key).is_empty(),
+                "ZH key {key} 缺失"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rm_failure_classification_attributes_permission_and_sip() {
+        // 用户目录普通路径 + operation not permitted → 权限不足
+        assert_eq!(
+            classify_rm_failure(b"rm: /Users/me/x: Operation not permitted", "/Users/me/x"),
+            Some(DeleteFailure::PermissionDenied)
+        );
+        // 系统保护路径 + not permitted → SIP
+        assert_eq!(
+            classify_rm_failure(
+                b"rm: /System/Library/y: Operation not permitted",
+                "/System/Library/y"
+            ),
+            Some(DeleteFailure::SipProtected)
+        );
+        // 忙 → 占用
+        assert_eq!(
+            classify_rm_failure(b"rm: /Users/me/z: Resource busy", "/Users/me/z"),
+            Some(DeleteFailure::FileInUse)
+        );
+        // 只读文件系统 → SIP
+        assert_eq!(
+            classify_rm_failure(b"rm: /x: Read-only file system", "/x"),
+            Some(DeleteFailure::SipProtected)
+        );
+        // 空 stderr → 无法归类
+        assert_eq!(classify_rm_failure(b"", "/Users/me/a"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn delete_attempt_attributes_gone_path_as_success() {
+        // 待删路径已不存在 → 视为成功（尽力删除语义）
+        let tmp = std::env::temp_dir().join(format!("maclean_p1_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(best_effort_delete_with_reason(&tmp).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn delete_attempt_attributes_real_directory_deletion() {
+        // 真实目录删除成功
+        let tmp = std::env::temp_dir().join(format!("maclean_p1_real_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("创建临时目录");
+        std::fs::write(tmp.join("a.txt"), b"x").expect("写文件");
+        let result = best_effort_delete_with_reason(&tmp);
+        assert!(result.is_ok(), "普通目录应删除成功: {:?}", result);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rename_to_staging_moves_and_can_restore() {
+        // TOCTOU staging 行为：改名后原路径消失、staging 指向原对象；恢复 rename 可还原
+        let tmp = std::env::temp_dir().join(format!("maclean_toctou_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("victim");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("f.txt"), b"payload").unwrap();
+
+        // 改名到 staging
+        let staging = rename_to_staging(&target).expect("rename_to_staging 应成功");
+        assert!(!target.exists(), "原路径应已被原子移走");
+        assert!(staging.exists(), "staging 应存在");
+        assert_eq!(
+            std::fs::read_to_string(staging.join("f.txt")).unwrap(),
+            "payload",
+            "staging 应指向原物理对象"
+        );
+        // staging 必须在同一目录（同卷，保证原子性）
+        assert_eq!(
+            staging.parent().unwrap(),
+            tmp,
+            "staging 必须在原目录下（同卷原子 rename）"
+        );
+
+        // 恢复
+        std::fs::rename(&staging, &target).unwrap();
+        assert!(target.exists(), "恢复后原路径应存在");
+        assert!(!staging.exists(), "staging 应清空");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn ps_single_quote_is_doubled() {

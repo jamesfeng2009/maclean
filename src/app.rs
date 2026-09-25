@@ -94,6 +94,10 @@ pub enum Tab {
     SystemOptimize,
     /// APFS 快照
     Apfs,
+    /// 自定义规则（声明式规则扫描）
+    CustomRules,
+    /// 重复文件（保留一份，其余进废纸篓）
+    DuplicateFiles,
     /// 设置
     Settings,
 }
@@ -105,7 +109,7 @@ pub enum Tab {
 
 impl Tab {
     /// 所有 Tab
-    pub fn all() -> [Tab; 9] {
+    pub fn all() -> [Tab; 11] {
         [
             Tab::Overview,
             Tab::DevCache,
@@ -115,6 +119,8 @@ impl Tab {
             Tab::AppUninstall,
             Tab::SystemOptimize,
             Tab::Apfs,
+            Tab::CustomRules,
+            Tab::DuplicateFiles,
             Tab::Settings,
         ]
     }
@@ -155,7 +161,9 @@ impl Tab {
             Tab::AppData => Tab::AppUninstall,
             Tab::AppUninstall => Tab::SystemOptimize,
             Tab::SystemOptimize => Tab::Apfs,
-            Tab::Apfs => Tab::Settings,
+            Tab::Apfs => Tab::CustomRules,
+            Tab::CustomRules => Tab::DuplicateFiles,
+            Tab::DuplicateFiles => Tab::Settings,
             Tab::Settings => Tab::Overview,
         };
         let mut t = raw_next(self);
@@ -212,9 +220,9 @@ pub struct App {
     /// 当前 Tab
     pub tab: Tab,
     /// 每个 Tab 的扫描结果
-    pub results: [Vec<ScanItem>; 9],
+    pub results: [Vec<ScanItem>; 11],
     /// 每个 Tab 的扫描状态
-    pub scan_states: [ScanState; 9],
+    pub scan_states: [ScanState; 11],
     /// 列表选中索引
     pub list_index: usize,
     // 2026-09-18 删除了 `selected_uninstall_app_index`：零引用，卸载 Tab 的
@@ -245,7 +253,7 @@ pub struct App {
     // 2026-09-18 删除了 `should_quit`：零引用。退出走 `App::quit()` /
     // `std::process::exit`，没人轮询这个标志。
     /// 扫描耗时（毫秒）
-    pub scan_time_ms: [u64; 9],
+    pub scan_time_ms: [u64; 11],
     /// 语言切换（true=英文, false=中文）
     pub lang_en: bool,
     /// 删除进度：已完成的项数
@@ -291,6 +299,8 @@ pub struct App {
     pub disk_analyzer_path: Option<std::path::PathBuf>,
     /// 磁盘分析器：导航历史栈（用于返回上一级）
     pub disk_analyzer_history: Vec<std::path::PathBuf>,
+    /// 磁盘分析视图：false=列表，true=矩形树图（P3）
+    pub disk_view_mode: bool,
     /// sudo 会话是否活跃（通过 keepalive 保活）
     pub sudo_session_active: bool,
     /// 过滤/搜索输入框内容
@@ -407,6 +417,8 @@ impl App {
         }
         let cache_name = match self.tab {
             Tab::Overview | Tab::Settings => None,
+            Tab::CustomRules => None, // 每次全扫，不缓存
+            Tab::DuplicateFiles => Some("dup_files"),
             Tab::DevCache => Some("dev_cache"),
             Tab::LargeFiles => Some("large_files"),
             Tab::AppCache => Some("app_cache"),
@@ -478,8 +490,12 @@ impl App {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
+                Vec::new(),
             ],
             scan_states: [
+                ScanState::Idle,
+                ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
@@ -498,7 +514,7 @@ impl App {
             pending_delete: Vec::new(),
             protection_blocked: 0,
             last_backup: None,
-            scan_time_ms: [0; 9],
+            scan_time_ms: [0; 11],
             lang_en: user_config.lang_en,
             settings_menubar_icon: user_config.settings_menubar_icon,
             settings_keep_sudo: user_config.settings_keep_sudo,
@@ -542,6 +558,7 @@ impl App {
             touch_id_error: None,
             associated_details: std::collections::HashMap::new(),
             expanded_items: std::collections::HashSet::new(),
+            disk_view_mode: false,
             disk_analyzer_path: None,
             disk_analyzer_history: Vec::new(),
             sudo_session_active: false,
@@ -583,7 +600,9 @@ impl App {
             Tab::AppUninstall => 5,
             Tab::SystemOptimize => 6,
             Tab::Apfs => 7,
-            Tab::Settings => 8,
+            Tab::CustomRules => 8,
+            Tab::DuplicateFiles => 9,
+            Tab::Settings => 10,
         }
     }
 
@@ -1484,6 +1503,10 @@ impl App {
                 "tab_app_uninstall" => "Uninstall",
                 "tab_system_optimize" => "Optimize",
                 "tab_apfs" => "APFS Snapshots",
+                "tab_custom_rules" => "Custom Rules",
+                "tab_dup_files" => "Duplicate Files",
+                "disk_view_list" => "List",
+                "disk_view_tree" => "Treemap",
                 "tab_settings" => "Settings",
                 "settings_appearance" => "Appearance",
                 "setting_dark_mode" => "Dark mode",
@@ -1804,13 +1827,21 @@ impl App {
                 "summary_solution_title" => "Tips: Failure reasons and solutions",
                 "summary_sip_tip" => "SIP/System protection: System paths like /Library/Developer/CoreSimulator cannot be deleted even with sudo; disable SIP or use Apple official tools.",
                 "summary_perm_tip" => "Permission denied: Directories like node_modules may contain root-owned files. Click \"Copy sudo command\" to run manually in Terminal.",
-                "summary_solution_1" => "1. Copy sudo command to Terminal (recommended)",
+                "summary_solution_1" => "1. Copy sudo command to Terminal manually (alternative)",
                 "summary_solution_2" => "2. Disable SIP: Restart → hold Cmd+R → Terminal → csrutil disable → Restart",
                 "summary_solution_3" => "3. Use project tools: cd project dir && npm run clean / npx rimraf .next",
                 "summary_open_settings" => "Open System Settings",
                 "summary_fail_list" => "Failed list:",
                 "summary_copy_paths" => "Copy Paths",
                 "summary_copy_sudo" => "Copy sudo Command",
+                "summary_retry_delete" => "Retry deletion (admin authorization)",
+                "log_protected_root_rejected" => "Protected system root — deletion refused: {}",
+                "summary_retry_hint" => "maclean will retry with administrator privileges automatically — no manual commands needed.",
+                "fail_reason_perm" => "Permission denied",
+                "fail_reason_sip" => "Protected by SIP/system",
+                "fail_reason_inuse" => "In use by another process",
+                "fail_reason_immutable" => "File is locked (immutable flag)",
+                "fail_reason_other" => "Other reason",
                 "summary_free_space" => "Available space: {}",
                 "summary_ok" => "OK",
                 "finish_summary" => "Cleanup completed: {} succeeded, {} failed",
@@ -1896,6 +1927,10 @@ impl App {
                 "tab_app_uninstall" => "应用卸载",
                 "tab_system_optimize" => "系统优化",
                 "tab_apfs" => "APFS快照",
+                "tab_custom_rules" => "自定义规则",
+                "tab_dup_files" => "重复文件",
+                "disk_view_list" => "列表",
+                "disk_view_tree" => "树图",
                 "tab_settings" => "设置",
                 "settings_appearance" => "外观",
                 "setting_dark_mode" => "深色模式",
@@ -2196,13 +2231,21 @@ impl App {
                 "summary_solution_title" => "提示: 失败原因及解决方案",
                 "summary_sip_tip" => "SIP/系统保护: /Library/Developer/CoreSimulator 等系统路径即使 sudo 也无法删除，需关闭 SIP 或使用 Apple 官方工具。",
                 "summary_perm_tip" => "权限不足: node_modules 等目录内部可能存在 root 拥有的文件，可点击「复制 sudo 命令」在终端手动执行。",
-                "summary_solution_1" => "1. 复制 sudo 命令到终端执行（推荐）",
+                "summary_solution_1" => "1. 复制 sudo 命令到终端手动执行（备选）",
                 "summary_solution_2" => "2. 关闭 SIP: 重启→按住 Cmd+R→终端→csrutil disable→重启",
                 "summary_solution_3" => "3. 用项目工具删除: cd 项目目录 && npm run clean / npx rimraf .next",
                 "summary_open_settings" => "打开系统设置",
                 "summary_fail_list" => "失败列表:",
                 "summary_copy_paths" => "复制路径",
                 "summary_copy_sudo" => "复制 sudo 命令",
+                "summary_retry_delete" => "重试删除（管理员授权）",
+                "log_protected_root_rejected" => "受保护的系统根目录，拒绝删除：{}",
+                "summary_retry_hint" => "应用会自动请求管理员授权重试删除，无需手动执行命令。",
+                "fail_reason_perm" => "权限不足",
+                "fail_reason_sip" => "受 SIP/系统保护",
+                "fail_reason_inuse" => "文件正被其他进程占用",
+                "fail_reason_immutable" => "文件被锁定（immutable 标志）",
+                "fail_reason_other" => "其他原因",
                 "summary_free_space" => "当前可用空间: {}",
                 "summary_ok" => "确定",
                 "finish_summary" => "清理完成: 成功 {} 项, 失败 {} 项",
@@ -2280,10 +2323,13 @@ impl App {
         }
     }
 
-    /// 格式化多语言文本（支持 {0}, {1}, {2} 占位符）
+    /// 格式化多语言文本（支持 {0}, {1}, {2} 与无索引 {} 两种占位符）
     ///
-    /// 用于需要动态参数的 UI 文本，例如 "{} 项, 总计 {}" 在英文中应为
-    /// "{} items, total {}"。占位符按顺序替换为 args 中的值。
+    /// 用于需要动态参数的 UI 文本，例如 "成功删除 {} 项" 或 "{0} items, total {1}"。
+    /// - 无索引 `{}`：按出现顺序依次替换为 args 中的值（第 1 个 `{}` 用 args[0]，以此类推）
+    /// - 带索引 `{i}`：替换为 args[i]
+    ///
+    /// 两种占位符可混用；args 不足时多余的占位符保持原样。
     pub fn tf(&self, key: &str, args: &[&str]) -> String {
         Self::tf_lang(self.lang_en, key, args)
     }
@@ -2291,6 +2337,16 @@ impl App {
     /// 静态版本，供后台线程等无法访问 `&App` 的地方使用
     pub fn tf_lang(lang_en: bool, key: &str, args: &[&str]) -> String {
         let mut s = Self::t_lang(lang_en, key).to_string();
+        // 无索引占位符 `{}`：按出现顺序消费 args。逐个替换而不是整体 replace，
+        // 避免模板中出现多个 `{}` 时全部被替换成第一个参数。
+        for arg in args {
+            if let Some(pos) = s.find("{}") {
+                s.replace_range(pos..pos + 2, arg);
+            } else {
+                break;
+            }
+        }
+        // 带索引占位符 `{i}`：按索引替换
         for (i, arg) in args.iter().enumerate() {
             s = s.replace(&format!("{{{}}}", i), arg);
         }
@@ -2382,6 +2438,34 @@ mod tests {
         }
     }
 
+    /// 回归：无索引 `{}` 与带索引 `{0}` 两种占位符都必须被替换。
+    /// 历史 bug：tf_lang 只替换 `{i}`，导致 summary_success 等 40+ 条
+    /// 文案运行时显示字面 `{}`（"成功删除 {} 项" 里的计数一直没回写）。
+    #[test]
+    fn tf_lang_replaces_both_placeholder_styles() {
+        // 无索引：单个参数
+        assert_eq!(
+            App::tf_lang(true, "summary_success", &["42"]),
+            "Successfully deleted 42 items"
+        );
+        // 无索引：多个参数按出现顺序消费
+        assert_eq!(
+            App::tf_lang(true, "summary_backup", &["3", "5"]),
+            "Deletion log saved (3 of 5 items can be restored from Trash)"
+        );
+        // 带索引：按索引替换
+        assert_eq!(
+            App::tf_lang(true, "items_total_size", &["12", "34 MB"]),
+            "12 items, total 34 MB"
+        );
+        // 混合场景不存在于现有文案，但保证两种占位符互不干扰：
+        // 无索引占位符只消费 args[0]，带索引按编号消费
+        assert_eq!(
+            App::tf_lang(true, "finish_summary", &["7", "2"]),
+            "Cleanup completed: 7 succeeded, 2 failed"
+        );
+    }
+
     // -----------------------------------------------------------------
     //  Tab 平台可用性（W-3）
     // -----------------------------------------------------------------
@@ -2455,14 +2539,14 @@ mod tests {
 
     #[test]
     fn tab_indices_stay_aligned_with_results() {
-        // results 是 [Vec<ScanItem>; 9]，按 Tab::all() 的下标寻址。
+        // results 是 [Vec<ScanItem>; 10]，按 Tab::all() 的下标寻址。
         // 平台过滤只能"跳过显示"，绝不能改变 all() 的长度或顺序，
         // 否则会删错 Tab 的数据。
-        assert_eq!(Tab::all().len(), 9);
+        assert_eq!(Tab::all().len(), 11);
         // results 是定长数组，长度写死在类型里；用源码钉住两者必须一致。
         // 一旦有人往 Tab 加变体却忘了扩 results，下标就会静默错位。
         assert!(
-            include_str!("app.rs").contains("pub results: [Vec<ScanItem>; 9],"),
+            include_str!("app.rs").contains("pub results: [Vec<ScanItem>; 11],"),
             "results 数组长度变了，必须同步 Tab::all()"
         );
     }
@@ -2483,8 +2567,8 @@ mod tests {
         let scannable = Tab::scannable();
         assert!(scannable.iter().all(|(t, _)| t.is_supported()));
         assert!(!scannable.iter().any(|(t, _)| *t == Tab::Overview));
-        // all() 9 个里跳过 Overview，剩 8 个；非 macOS 再去掉 Apfs → 7 个
-        let expected = if cfg!(target_os = "macos") { 8 } else { 7 };
+        // all() 11 个里跳过 Overview，剩 10 个；非 macOS 再去掉 Apfs → 9 个
+        let expected = if cfg!(target_os = "macos") { 10 } else { 9 };
         assert_eq!(scannable.len(), expected, "实际: {:?}", scannable);
         // 下标必须是 all() 里的真实下标，不能是过滤后重排的序号
         for (t, idx) in &scannable {

@@ -524,6 +524,9 @@ impl Gui {
     }
 
     /// 决策 + 副作用：不查询系统状态，三个条件由调用方传入，便于单测覆盖各分支
+    ///
+    /// 逻辑已下沉到 [`route_and_start_elevated_delete`]，GUI 流程与
+    /// 删除失败后的「重试删除」共用同一决策，避免两处漂移。
     #[cfg(target_os = "macos")]
     fn route_need_password(
         &mut self,
@@ -532,45 +535,14 @@ impl Gui {
         touch_id_available: bool,
         clamshell_closed: bool,
     ) -> bool {
-        {
-            let app = &mut self.app;
-            app.sudo_failed_items = items;
-            app.sudo_password_input.clear();
-            app.sudo_password = None;
-            app.sudo_error = None;
-            app.touch_id_error = None;
-            app.touch_id_available = touch_id_available;
-            app.touch_id_enabled = touch_id_enabled;
-            if clamshell_closed {
-                // 合盖时 Touch ID 不可用，回退到密码输入
-                app.touch_id_error = Some(app.t("touchid_clamshell_error").to_string());
-                app.touch_id_available = false;
-            }
-        }
-
-        if touch_id_enabled && !clamshell_closed {
-            // Touch ID 已启用：直接用 sudo（Touch ID 自动触发）
-            let items = self.app.sudo_failed_items.clone();
-            if items.is_empty() {
-                // 没有真正需要提权的项：直接收尾。
-                // 否则会停在"Touch ID 验证中"却没有任何线程在跑。
-                self.app.finish_delete();
-                return false;
-            }
-            self.app.confirm = ConfirmState::SudoWithTouchId;
-            self.app.delete_done = 0;
-            self.app.delete_total = items.len();
-            let lang_en = self.app.lang_en;
-            start_sudo_delete_touchid(items, lang_en, &mut self.delete_rx)
-        } else if touch_id_available && !clamshell_closed {
-            // Touch ID 可用但未启用：提示用户是否启用
-            self.app.confirm = ConfirmState::OfferTouchIdSetup;
-            false
-        } else {
-            // 无 Touch ID 或合盖：走密码输入流程
-            self.app.confirm = ConfirmState::NeedSudoPassword;
-            false
-        }
+        route_and_start_elevated_delete(
+            &mut self.app,
+            items,
+            touch_id_enabled,
+            touch_id_available,
+            clamshell_closed,
+            &mut self.delete_rx,
+        )
     }
 
     /// 收取后台删除线程的消息
@@ -689,6 +661,65 @@ impl Gui {
         if clear_delete_rx {
             self.delete_rx = None;
         }
+    }
+}
+
+/// 决策并启动管理员提权删除（GUI 流程与「重试删除」共用，单一决策来源）
+///
+/// 返回是否拉起了新的删除线程 —— 调用方据此决定 `delete_rx` 的去留。
+/// 三个系统条件（Touch ID 是否启用 / 是否可用 / 是否合盖）由调用方传入，
+/// 便于单测覆盖各分支。
+///
+/// 决策顺序：
+/// 1. Touch ID 已启用 **且已录入指纹**：直接走 Touch ID 删除
+///    （两个条件缺一不可 —— sudo_local 配好但没指纹时，系统弹 Touch ID
+///    却无法验证，删除会卡死在死路上，必须回退到密码输入）
+/// 2. Touch ID 可用但未启用：提示用户是否启用
+/// 3. 无 Touch ID / 未录指纹 / 合盖：走应用内密码输入提权
+#[cfg(target_os = "macos")]
+pub(crate) fn route_and_start_elevated_delete(
+    app: &mut App,
+    items: Vec<(String, String)>,
+    touch_id_enabled: bool,
+    touch_id_available: bool,
+    clamshell_closed: bool,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+) -> bool {
+    app.sudo_failed_items = items;
+    app.sudo_password_input.clear();
+    app.sudo_password = None;
+    app.sudo_error = None;
+    app.touch_id_error = None;
+    app.touch_id_available = touch_id_available;
+    app.touch_id_enabled = touch_id_enabled;
+    if clamshell_closed {
+        // 合盖时 Touch ID 不可用，回退到密码输入
+        app.touch_id_error = Some(app.t("touchid_clamshell_error").to_string());
+        app.touch_id_available = false;
+    }
+
+    if touch_id_enabled && touch_id_available && !clamshell_closed {
+        // Touch ID 已启用且已录入指纹：直接用 sudo（Touch ID 自动触发）。
+        let items = app.sudo_failed_items.clone();
+        if items.is_empty() {
+            // 没有真正需要提权的项：直接收尾。
+            // 否则会停在"Touch ID 验证中"却没有任何线程在跑。
+            app.finish_delete();
+            return false;
+        }
+        app.confirm = ConfirmState::SudoWithTouchId;
+        app.delete_done = 0;
+        app.delete_total = items.len();
+        let lang_en = app.lang_en;
+        start_sudo_delete_touchid(items, lang_en, delete_rx)
+    } else if touch_id_available && !clamshell_closed {
+        // Touch ID 可用但未启用：提示用户是否启用
+        app.confirm = ConfirmState::OfferTouchIdSetup;
+        false
+    } else {
+        // 无 Touch ID / 未录指纹 / 合盖：走密码输入流程
+        app.confirm = ConfirmState::NeedSudoPassword;
+        false
     }
 }
 
@@ -2602,6 +2633,8 @@ pub(crate) fn render_gui(
                                         Tab::AppUninstall => Some("app_uninstall"),
                                         Tab::SystemOptimize => Some("system_optimize"),
                                         Tab::Apfs => Some("apfs"),
+                                        Tab::CustomRules => Some("custom_rules"),
+                                        Tab::DuplicateFiles => Some("dup_files"),
                                         Tab::Overview => unreachable!(),
                                     };
                                     if let Some(name) = tab_name {
@@ -4139,7 +4172,7 @@ pub(crate) fn show_summary_window(
     ok: usize,
     fail: usize,
     _skip: usize,
-    _delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+    delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
 ) {
     let _has_failures = !app.failed_paths.is_empty();
 
@@ -4233,6 +4266,60 @@ pub(crate) fn show_summary_window(
                             });
                         });
 
+                    // 主操作：应用内自动提权重试删除。
+                    // 不让用户手动复制 sudo 命令去终端执行 —— 应用自己完成授权与删除。
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(app.t("summary_retry_delete"))
+                                        .color(egui::Color32::WHITE)
+                                        .size(13.0),
+                                )
+                                .fill(egui::Color32::from_rgb(0, 122, 255)),
+                            )
+                            .clicked()
+                        {
+                            let items = app.failed_paths.clone();
+                            app.delete_summary = None;
+                            app.deleted_paths.clear();
+                            app.failed_paths.clear();
+                            app.logs.clear();
+                            app.delete_done = 0;
+                            app.delete_total = items.len();
+                            #[cfg(target_os = "macos")]
+                            {
+                                let (enabled, available) = (
+                                    touchid::sudo_touch_id_enabled(),
+                                    touchid::touch_id_available(),
+                                );
+                                let clamshell_closed = safety::is_clamshell_closed();
+                                route_and_start_elevated_delete(
+                                    app,
+                                    items,
+                                    enabled,
+                                    available,
+                                    clamshell_closed,
+                                    delete_rx,
+                                );
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                app.sudo_failed_items = items;
+                                app.sudo_password_input.clear();
+                                app.sudo_password = None;
+                                app.sudo_error = None;
+                                app.touch_id_error = None;
+                                app.confirm = ConfirmState::NeedSudoPassword;
+                            }
+                        }
+                        ui.colored_label(
+                            theme::text_2(),
+                            egui::RichText::new(app.t("summary_retry_hint")).size(11.0),
+                        );
+                    });
+
                     // 列出所有失败的路径（可滚动+复制）
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
@@ -4311,6 +4398,8 @@ pub(crate) fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
         Tab::AppUninstall => app.t("tab_app_uninstall"),
         Tab::SystemOptimize => app.t("tab_system_optimize"),
         Tab::Apfs => app.t("tab_apfs"),
+        Tab::CustomRules => app.t("tab_custom_rules"),
+        Tab::DuplicateFiles => app.t("tab_dup_files"),
         Tab::Settings => app.t("tab_settings"),
     }
 }
@@ -4856,6 +4945,35 @@ pub(crate) fn render_disk_analyzer(
         }
     });
 
+    // ====== 视图切换：列表 / 矩形树图（P3） ======
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(app.t("view"))
+                .size(12.0)
+                .color(theme::text_3()),
+        );
+        let list_active = !app.disk_view_mode;
+        if ui
+            .selectable_label(list_active, app.t("disk_view_list"))
+            .clicked()
+        {
+            app.disk_view_mode = false;
+        }
+        if ui
+            .selectable_label(!list_active, app.t("disk_view_tree"))
+            .clicked()
+        {
+            app.disk_view_mode = true;
+        }
+    });
+
+    ui.add_space(5.0);
+
+    if app.disk_view_mode {
+        render_disk_treemap(ui, app, &items, total_size, is_scanning, scan_rx);
+        return;
+    }
+
     ui.add_space(5.0);
 
     // ====== 目录项列表 ======
@@ -4951,6 +5069,225 @@ pub(crate) fn render_disk_analyzer(
                     }
                 });
         });
+}
+
+/// 矩形树图渲染（P3 磁盘分析）
+///
+/// Squarified treemap：目录/文件按大小占比画矩形，颜色随占比从绿到红渐变；
+/// 点击目录可进入下一级（与列表视图共用 disk_analyzer_enter）。
+fn render_disk_treemap(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    items: &[crate::scanner::ScanItem],
+    total_size: u64,
+    is_scanning: bool,
+    scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>,
+) {
+    let list_size = ui.available_size();
+    egui::Frame::none()
+        .fill(theme::bg())
+        .rounding(egui::Rounding::same(8.0))
+        .show(ui, |ui| {
+            ui.set_min_size(list_size);
+            let rect = ui.max_rect().shrink(8.0);
+            if rect.width() < 50.0 || rect.height() < 50.0 {
+                return;
+            }
+
+            let data: Vec<(usize, f64)> = items
+                .iter()
+                .enumerate()
+                .map(|(i, it)| (i, it.size_bytes as f64))
+                .collect();
+            let layout = squarified_layout(&data, rect);
+
+            let painter = ui.painter();
+            let hover_pos = ui.input(|i| i.pointer.hover_pos());
+            let click = ui.input(|i| i.pointer.primary_clicked());
+
+            for (idx, r) in &layout {
+                let item = &items[*idx];
+                let t = if total_size > 0 {
+                    (item.size_bytes as f32 / total_size as f32).min(1.0)
+                } else {
+                    0.0
+                };
+                // 颜色：小占比偏绿，大占比偏红；选中项加深
+                let mut color = lerp_color(theme::safe(), theme::danger(), t);
+                if item.selected {
+                    color = color.gamma_multiply(1.25);
+                }
+                painter.rect_filled(*r, 2.0, color);
+                painter.rect_stroke(*r, 2.0, egui::Stroke::new(1.0, theme::bg()));
+
+                // 空间足够才画名字
+                if r.width() > 56.0 && r.height() > 16.0 {
+                    let name = std::path::Path::new(&item.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?");
+                    let text = if r.width() > 140.0 {
+                        format!("{} · {}", name, format_size(item.size_bytes))
+                    } else {
+                        name.to_string()
+                    };
+                    painter.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        text,
+                        egui::FontId::proportional(11.0),
+                        theme::text(),
+                    );
+                }
+
+                // 点击进入目录
+                if item.category == "目录" && !is_scanning && click {
+                    if let Some(hover) = hover_pos {
+                        if r.contains(hover) {
+                            let new_path = std::path::PathBuf::from(&item.path);
+                            app.disk_analyzer_enter(new_path);
+                            start_scan(app, scan_rx);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // 空布局兜底：有数据却一个矩形都没画出来时提示
+            if layout.is_empty() && !items.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(egui::RichText::new(app.t("no_large_files")).size(14.0));
+                });
+            }
+        });
+}
+
+/// Squarified treemap 布局
+///
+/// 输入：(item 下标, 大小) 列表与可用矩形；输出：(下标, 子矩形)。
+/// 经典 squarified 算法：贪心构建"最长边优先、宽高比最优"的行。
+fn squarified_layout(items: &[(usize, f64)], rect: egui::Rect) -> Vec<(usize, egui::Rect)> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let total: f64 = items.iter().map(|(_, s)| *s).sum();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let mut data: Vec<(usize, f64)> = items.to_vec();
+    data.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let rect_area = (rect.width() * rect.height()) as f64;
+    let mut out = Vec::new();
+    let mut row: Vec<(usize, f64)> = Vec::new();
+    let mut row_sum = 0.0f64;
+    let mut cur = rect;
+
+    while !data.is_empty() {
+        let (idx, size) = data.remove(0);
+        let area = size / total * rect_area;
+        if row.is_empty() {
+            row.push((idx, area));
+            row_sum = area;
+            continue;
+        }
+        let short = cur.width().min(cur.height()) as f64;
+        let long = cur.width().max(cur.height()) as f64;
+        let candidate = row_sum + area;
+        if worst_ratio(&row, area, candidate, long, short)
+            <= worst_ratio(&row, 0.0, row_sum, long, short)
+        {
+            row.push((idx, area));
+            row_sum = candidate;
+        } else {
+            layout_row(&mut row, row_sum, &mut cur, &mut out);
+            row.push((idx, area));
+            row_sum = area;
+        }
+    }
+    if !row.is_empty() {
+        layout_row(&mut row, row_sum, &mut cur, &mut out);
+    }
+    out
+}
+
+/// 当前行的最差宽高比（含待加入项，add<=0 表示不含）
+fn worst_ratio(row: &[(usize, f64)], add: f64, sum: f64, long: f64, short: f64) -> f64 {
+    if row.is_empty() && add <= 0.0 {
+        return f64::MAX;
+    }
+    if short <= 0.0 || long <= 0.0 {
+        return f64::MAX;
+    }
+    let mut worst = 0.0f64;
+    for (_, area) in row {
+        let r1 = long * long * area / (sum * short * short);
+        let r2 = sum * short * short / (long * long * area);
+        let r = r1.max(r2);
+        if r > worst {
+            worst = r;
+        }
+    }
+    if add > 0.0 {
+        let r1 = long * long * add / (sum * short * short);
+        let r2 = sum * short * short / (long * long * add);
+        let r = r1.max(r2);
+        if r > worst {
+            worst = r;
+        }
+    }
+    worst
+}
+
+/// 把一行矩形铺进当前可用区域（沿短边方向）
+fn layout_row(
+    row: &mut Vec<(usize, f64)>,
+    sum: f64,
+    cur: &mut egui::Rect,
+    out: &mut Vec<(usize, egui::Rect)>,
+) {
+    if row.is_empty() || sum <= 0.0 {
+        row.clear();
+        return;
+    }
+    let (x0, y0, w, h) = (cur.min.x, cur.min.y, cur.width(), cur.height());
+    if h >= w {
+        // 垂直切分：占满当前宽度，按比例分配高度
+        let mut y = y0;
+        for (idx, area) in row.iter() {
+            let rh = (area / sum * h as f64) as f32;
+            out.push((
+                *idx,
+                egui::Rect::from_min_size(egui::pos2(x0, y), egui::vec2(w, rh)),
+            ));
+            y += rh;
+        }
+        cur.min.x += w;
+    } else {
+        // 水平切分
+        let mut x = x0;
+        for (idx, area) in row.iter() {
+            let rw = (area / sum * w as f64) as f32;
+            out.push((
+                *idx,
+                egui::Rect::from_min_size(egui::pos2(x, y0), egui::vec2(rw, h)),
+            ));
+            x += rw;
+        }
+        cur.min.y += h;
+    }
+    row.clear();
+}
+
+/// 两个颜色按 t 线性插值（0.0 → a，1.0 → b）
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    egui::Color32::from_rgb(
+        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t).round() as u8,
+        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t).round() as u8,
+        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t).round() as u8,
+    )
 }
 
 /// 路径显示简化（用于扫描中提示）
@@ -6528,6 +6865,13 @@ mod tests {
         let mut gui = Gui::new();
         let started = gui.route_need_password(rejected(), true, true, true);
         assert!(!started, "合盖时 Touch ID 不可用");
+        assert!(matches!(gui.app.confirm, ConfirmState::NeedSudoPassword));
+
+        // 已启用但没录指纹（sudo_local 配好、bioutil 0 模板）→ 必须回退密码输入，
+        // 不能走 Touch ID 死路：系统会弹 Touch ID 却无指纹可验证，删除必失败（历史 bug）。
+        let mut gui = Gui::new();
+        let started = gui.route_need_password(rejected(), true, false, false);
+        assert!(!started, "无指纹时不应拉起 Touch ID 线程");
         assert!(matches!(gui.app.confirm, ConfirmState::NeedSudoPassword));
     }
 
