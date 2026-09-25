@@ -488,7 +488,7 @@ impl Icon {
 }
 
 /// 导航图标顺序，与 `Tab::all()` 一一对应
-pub const NAV_ICONS: [Icon; 10] = [
+pub const NAV_ICONS: [Icon; 11] = [
     Icon::Home,      // 概览
     Icon::Box,       // 开发者缓存
     Icon::File,      // 大文件
@@ -498,6 +498,7 @@ pub const NAV_ICONS: [Icon; 10] = [
     Icon::Sliders,   // 系统优化
     Icon::Disk,      // APFS 快照
     Icon::HardDrive, // 自定义规则
+    Icon::Search,    // 重复文件
     Icon::Gear,      // 设置
 ];
 
