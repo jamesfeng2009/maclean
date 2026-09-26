@@ -4280,10 +4280,17 @@ pub(crate) fn show_summary_window(
                             });
                         });
 
-                    // 主操作：应用内自动提权重试删除。
-                    // 不让用户手动复制 sudo 命令去终端执行 —— 应用自己完成授权与删除。
+                    // 主操作行：关闭（无论是否有失败项都必须能关掉弹窗）+ 重试提权删除。
+                    // 关闭按钮放在显眼位置：弹窗超高、底部"确定"滚出视口时也能直接关。
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
+                        if ui
+                            .button(egui::RichText::new(app.t("summary_close")).size(13.0))
+                            .clicked()
+                        {
+                            app.dismiss_summary();
+                        }
+                        ui.add_space(6.0);
                         if ui
                             .add(
                                 egui::Button::new(

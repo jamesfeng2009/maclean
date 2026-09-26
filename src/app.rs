@@ -1986,6 +1986,8 @@ impl App {
                 "log_cancelled_auth" => "Authorization cancelled: {}",
                 "log_cancel_reason" => "Authorization cancelled",
                 "log_sip_reason" => "SIP protection or system restriction",
+                "log_acl_protected" => "System protection (ACL rule forbids deletion, no privilege can remove it): {}",
+                "summary_close" => "Close",
                 // 关联文件标签
                 "assoc_app" => "App Bundle",
                 "assoc_container" => "App Container",
@@ -2431,6 +2433,8 @@ impl App {
                 "log_cancelled_auth" => "已取消授权: {}",
                 "log_cancel_reason" => "用户取消授权",
                 "log_sip_reason" => "SIP保护或系统限制",
+                "log_acl_protected" => "系统保护（ACL规则禁止删除，任何权限均无法删除）: {}",
+                "summary_close" => "关闭",
                 // 关联文件标签
                 "assoc_app" => "应用本体",
                 "assoc_container" => "应用容器",

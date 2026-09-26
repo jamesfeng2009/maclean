@@ -1355,6 +1355,50 @@ pub fn validate_rule_root(root: &str) -> Result<String, String> {
 /// 记录删除日志到文件
 ///
 /// 所有删除操作都会记录到 ~/.maclean/delete.log，可回溯审计
+/// 检测路径是否被 macOS ACL deny 规则保护（如父目录带 `deny delete`）。
+///
+/// macOS 的 ACL deny 优先级高于一切（包括 root 的 sudo/Touch ID 授权），
+/// 这类路径「任何权限都无法删除」，属于系统保护而非权限不足。
+/// 用于把 Touch ID 提权后的 EPERM 失败归类为「ACL 保护」，避免误导用户反复授权。
+#[cfg(target_os = "macos")]
+pub fn path_is_acl_protected(path: &str) -> bool {
+    // 删除某项需要父目录的 delete 权限，沿祖先链逐层检查
+    let mut cur = std::path::Path::new(path);
+    for _ in 0..8 {
+        let parent = match cur.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => break,
+        };
+        if dir_has_acl_deny(&parent.to_string_lossy()) {
+            return true;
+        }
+        cur = parent;
+        if cur.as_os_str() == "/" {
+            break;
+        }
+    }
+    false
+}
+
+/// 检查单个目录的扩展 ACL 中是否含 deny 规则（`ls -lde` 输出解析）
+#[cfg(target_os = "macos")]
+fn dir_has_acl_deny(dir: &str) -> bool {
+    let out = std::process::Command::new("/bin/ls")
+        .args(["-lde", dir])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            // ACL 块形如 ` 0: group:everyone deny delete`
+            text.lines().any(|l| {
+                let t = l.trim();
+                t.contains("deny") && t.contains(':')
+            })
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn log_deletion(path: &str, category: &str, success: bool, error: Option<&str>) {
     let log_dir = dirs::home_dir()
         .map(|h| h.join(".maclean"))
@@ -1411,6 +1455,38 @@ mod tests {
             "解析后的根应为绝对路径: {resolved}"
         );
         assert!(resolved.ends_with("Library/Caches"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn acl_protected_path_detection() {
+        let dir = std::env::temp_dir().join(format!("maclean_acl_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let child = dir.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let add = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone deny delete"])
+            .arg(&dir)
+            .output()
+            .unwrap();
+        assert!(add.status.success(), "chmod +a 应成功");
+
+        assert!(
+            path_is_acl_protected(&child.to_string_lossy()),
+            "父目录带 deny delete 时应被识别为 ACL 保护"
+        );
+
+        let _ = std::process::Command::new("/bin/chmod")
+            .args(["-a", "everyone deny delete"])
+            .arg(&dir)
+            .output();
+        assert!(
+            !path_is_acl_protected(&child.to_string_lossy()),
+            "移除 ACL 后不应再被识别"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

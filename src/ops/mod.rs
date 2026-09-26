@@ -2641,8 +2641,13 @@ exit 0
                         safety::log_deletion(path, category, true, None);
                     } else {
                         let err_text = rm_stderr.get(path).map(|s| s.as_str()).unwrap_or("");
-                        let is_sip = err_text.contains("Operation not permitted")
-                            || path.starts_with("/Library/Developer/CoreSimulator/Caches");
+                        let err_permitted = err_text.contains("Operation not permitted");
+                        let is_core_sim =
+                            path.starts_with("/Library/Developer/CoreSimulator/Caches");
+                        // ACL deny 规则保护的路径：任何权限（含 root/Touch ID）都无法删除，
+                        // 单独归类，避免误判为 SIP 或误导用户反复授权。
+                        let is_acl = err_permitted && crate::safety::path_is_acl_protected(path);
+                        let is_sip = is_core_sim || (err_permitted && !is_acl);
 
                         if is_sip {
                             let _ = tx.send(DeleteMessage::Log(
@@ -2659,6 +2664,22 @@ exit 0
                                 category,
                                 false,
                                 Some(App::t_lang(lang_en, "log_sip_reason")),
+                            );
+                        } else if is_acl {
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!(
+                                    "🔒 {}",
+                                    App::tf_lang(lang_en, "log_acl_protected", &[path])
+                                ),
+                                path.clone(),
+                                category.clone(),
+                                false,
+                            ));
+                            safety::log_deletion(
+                                path,
+                                category,
+                                false,
+                                Some(App::t_lang(lang_en, "log_acl_protected")),
                             );
                         } else {
                             let detail = if err_text.is_empty() {
