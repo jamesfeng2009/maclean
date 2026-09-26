@@ -4781,10 +4781,6 @@ pub(crate) fn truncate_path(path: &str, max_len: usize) -> String {
 /// - 列出当前目录下所有子项（按大小降序）
 /// - 每项显示大小、进度条（相对于当前目录总大小）
 /// - 目录可点击进入，文件可勾选删除
-/// 磁盘分析分类占比总览：按类别聚合大小，绘制横向堆叠条与图例
-///
-/// 每个目录层级都会基于当前 items 实时计算，随钻取同步更新；
-/// 类别超过上限时归并为"其他"，保证条与图例可读。
 /// 按类别聚合大小并降序排序；零大小类别剔除（返回空表时调用方直接跳过）。
 fn aggregate_category_sizes(items: &[ScanItem]) -> Vec<(String, u64)> {
     let mut by_cat: Vec<(String, u64)> = Vec::new();
@@ -4800,6 +4796,10 @@ fn aggregate_category_sizes(items: &[ScanItem]) -> Vec<(String, u64)> {
     by_cat
 }
 
+/// 磁盘分析分类占比总览：按类别聚合大小，绘制横向堆叠条与图例
+///
+/// 每个目录层级都会基于当前 items 实时计算，随钻取同步更新；
+/// 类别超过上限时归并为"其他"，保证条与图例可读。
 fn render_disk_category_overview(ui: &mut egui::Ui, app: &mut App, items: &[ScanItem]) {
     if items.is_empty() {
         return;
@@ -4897,7 +4897,7 @@ fn render_disk_category_overview(ui: &mut egui::Ui, app: &mut App, items: &[Scan
                     ui.allocate_space(egui::vec2(legend_w, 0.0));
                 }
             }
-            if shown.len() % 2 != 0 {
+            if !shown.len().is_multiple_of(2) {
                 ui.end_row();
             }
         });
