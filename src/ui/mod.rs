@@ -2119,13 +2119,32 @@ pub(crate) fn render_empty_state(
         }
     } else {
         let log_label = app.t("empty_view_log").to_string();
+        // 超时跳过的 Tab：显示超时提示而不是误导性的"很干净"
+        let timed_out = app.scan_current_path.starts_with('⚠');
+        let (icon, fg, bg, title, desc) = if timed_out {
+            (
+                icons::Icon::Alert,
+                theme::caution(),
+                theme::caution_50(),
+                app.t("empty_scan_timeout"),
+                app.t("empty_scan_timeout_desc"),
+            )
+        } else {
+            (
+                icons::Icon::Check,
+                theme::safe(),
+                theme::safe_50(),
+                app.t("empty_all_clean"),
+                app.t("empty_all_clean_desc"),
+            )
+        };
         if widgets::state_page(
             ui,
-            icons::Icon::Check,
-            theme::safe(),
-            theme::safe_50(),
-            app.t("empty_all_clean"),
-            app.t("empty_all_clean_desc"),
+            icon,
+            fg,
+            bg,
+            title,
+            desc,
             Some((&log_label, icons::Icon::Terminal)),
         ) {
             let log_dir = logger::log_dir();

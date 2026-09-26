@@ -467,6 +467,10 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                     let _ = tx.send(ScanMessage::Done(items, scan_result.scan_time_ms, tab_idx));
                 }
                 None => {
+                    crate::logger::warn(&format!(
+                        "[扫描] {} 扫描超时被跳过（目录 IO 异常）",
+                        cache_name.unwrap_or("tab")
+                    ));
                     let _ = tx.send(ScanMessage::Skipped(
                         tab_idx,
                         "该 Tab 扫描超时（目录 IO 异常），已跳过。可重启 Mac 后重扫。".to_string(),
@@ -486,7 +490,8 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
 /// 的 APFS 目录导致 readdir 永久阻塞）时，正常机器不会走到。
 fn scan_timeout_for(tab: Tab) -> std::time::Duration {
     match tab {
-        Tab::AppUninstall | Tab::DuplicateFiles => std::time::Duration::from_secs(120),
+        Tab::AppUninstall => std::time::Duration::from_secs(240),
+        Tab::DuplicateFiles => std::time::Duration::from_secs(120),
         _ => std::time::Duration::from_secs(60),
     }
 }

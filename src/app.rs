@@ -1709,6 +1709,8 @@ impl App {
                 }
                 "empty_all_clean" => "This machine is clean",
                 "empty_all_clean_desc" => "No cleanable items found",
+                "empty_scan_timeout" => "Scan timed out",
+                "empty_scan_timeout_desc" => "Directory IO stalled and the scan was skipped; restart Mac and rescan",
                 "empty_view_log" => "View scan log",
                 "app_subitems_detail" => "Sub-items: {0}",
                 "select_app_from_list" => "Please select an app from the left",
@@ -2160,6 +2162,8 @@ impl App {
                 "empty_never_scanned_desc" => "扫描只会读取缓存目录大小，不会修改或删除任何文件",
                 "empty_all_clean" => "这台机器很干净",
                 "empty_all_clean_desc" => "未发现可清理的项目",
+                "empty_scan_timeout" => "扫描超时，未完成",
+                "empty_scan_timeout_desc" => "目录 IO 异常导致扫描被跳过，可重启 Mac 后重新扫描",
                 "empty_view_log" => "查看扫描日志",
                 "app_subitems_detail" => "子项详情：{0}",
                 "select_app_from_list" => "请从左侧选择一个应用",
