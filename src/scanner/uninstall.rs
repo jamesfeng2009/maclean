@@ -341,18 +341,39 @@ impl Scanner for UninstallScanner {
 // =========================================================================
 
 /// 收集 /Applications/ 和 ~/Applications/ 下的所有 .app 路径
+///
+/// 注意：~/Applications/ 下存在子目录存放 PWA 快捷方式（如
+/// `Chrome Apps.localized/`、Safari Web Apps），因此对用户 Applications
+/// 目录额外递归一层，否则 Chrome/Safari 安装的网页应用永远扫不到。
 fn collect_app_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let home = home_dir();
 
-    let search_dirs = [PathBuf::from("/Applications"), home.join("Applications")];
+    // /Applications：仅顶层（保持原行为，避免扫进 Utilities 等系统工具）
+    if let Ok(entries) = std::fs::read_dir("/Applications") {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if is_app_bundle(&path) {
+                paths.push(path);
+            }
+        }
+    }
 
-    for dir in &search_dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if is_app_bundle(&path) {
-                    paths.push(path);
+    // ~/Applications：顶层 + 一层子目录
+    let user_apps = home.join("Applications");
+    if let Ok(entries) = std::fs::read_dir(&user_apps) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if is_app_bundle(&path) {
+                paths.push(path);
+            } else if path.is_dir() {
+                if let Ok(sub) = std::fs::read_dir(&path) {
+                    for sub_entry in sub.filter_map(|e| e.ok()) {
+                        let sub_path = sub_entry.path();
+                        if is_app_bundle(&sub_path) {
+                            paths.push(sub_path);
+                        }
+                    }
                 }
             }
         }
@@ -474,6 +495,7 @@ fn scan_downloads_apps() -> Vec<ScanItem> {
 }
 
 /// 收集 /Applications 和 ~/Applications 中已安装应用的文件名集合
+/// （与 collect_app_paths 一致：~/Applications 递归一层，覆盖 PWA 目录）
 fn collect_installed_app_names() -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     let home = home_dir();
@@ -483,6 +505,22 @@ fn collect_installed_app_names() -> std::collections::HashSet<String> {
             for entry in entries.filter_map(|e| e.ok()) {
                 if let Some(name) = entry.file_name().to_str() {
                     names.insert(name.to_string());
+                }
+            }
+        }
+        // ~/Applications 子目录（Chrome Apps.localized 等）递归一层
+        if dir == &home.join("Applications") {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    if entry.path().is_dir() {
+                        if let Ok(sub) = std::fs::read_dir(entry.path()) {
+                            for sub_entry in sub.filter_map(|e| e.ok()) {
+                                if let Some(name) = sub_entry.file_name().to_str() {
+                                    names.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -973,6 +1011,27 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
         let p = home.join(format!("Library/Preferences/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 7. Chrome Web App (PWA)：com.google.Chrome.app.<hash>
+    //    本体在 ~/Applications/Chrome Apps.localized/，数据在
+    //    ~/Library/Application Support/Google/Chrome/Default/Web Applications/
+    //    （Manifest Resources/<hash> + Temp/<hash>）
+    for bid in &bundle_id_variants {
+        if let Some(hash) = bid.strip_prefix("com.google.Chrome.app.") {
+            if is_safe_path_segment(hash) {
+                for sub in ["Manifest Resources", "Temp"] {
+                    let p = home.join(format!(
+                        "Library/Application Support/Google/Chrome/Default/Web Applications/{}/{}",
+                        sub, hash
+                    ));
+                    if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
+                        paths.push(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+            break;
         }
     }
 
