@@ -53,6 +53,7 @@ pub enum Icon {
     Disk,
     Gear,
     HardDrive,
+    Power,
     // —— 操作 ——
     Search,
     Check,
@@ -483,12 +484,28 @@ impl Icon {
                 ],
                 ..NONE
             },
+            Power => Def {
+                // 电源符号：顶部竖线 + 缺口圆弧
+                closed: &[
+                    &[(12.0, 1.5), (12.0, 10.0)],
+                    &[
+                        (6.8, 4.6),
+                        (4.2, 8.2),
+                        (4.2, 14.8),
+                        (12.0, 21.0),
+                        (19.8, 14.8),
+                        (19.8, 8.2),
+                        (17.2, 4.6),
+                    ],
+                ],
+                ..NONE
+            },
         }
     }
 }
 
 /// 导航图标顺序，与 `Tab::all()` 一一对应
-pub const NAV_ICONS: [Icon; 11] = [
+pub const NAV_ICONS: [Icon; 12] = [
     Icon::Home,      // 概览
     Icon::Box,       // 开发者缓存
     Icon::File,      // 大文件
@@ -499,6 +516,7 @@ pub const NAV_ICONS: [Icon; 11] = [
     Icon::Disk,      // APFS 快照
     Icon::HardDrive, // 自定义规则
     Icon::Search,    // 重复文件
+    Icon::Power,     // 启动项
     Icon::Gear,      // 设置
 ];
 

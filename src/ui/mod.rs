@@ -2638,6 +2638,7 @@ pub(crate) fn render_gui(
                                         Tab::Apfs => Some("apfs"),
                                         Tab::CustomRules => Some("custom_rules"),
                                         Tab::DuplicateFiles => Some("dup_files"),
+                                        Tab::StartupItems => None,
                                         Tab::Overview => unreachable!(),
                                     };
                                     if let Some(name) = tab_name {
@@ -2710,6 +2711,12 @@ pub(crate) fn render_gui(
             // --- 设置 Tab：配置面板 ---
             if app.tab == Tab::Settings {
                 render_settings_panel(ui, app);
+                return;
+            }
+
+            // --- 启动项 Tab：macOS Login Items / launchd（P3） ---
+            if app.tab == Tab::StartupItems {
+                render_startup_panel(ui, app);
                 return;
             }
 
@@ -4400,6 +4407,7 @@ pub(crate) fn tab_title<'a>(tab: &Tab, app: &'a App) -> &'a str {
         Tab::Apfs => app.t("tab_apfs"),
         Tab::CustomRules => app.t("tab_custom_rules"),
         Tab::DuplicateFiles => app.t("tab_dup_files"),
+        Tab::StartupItems => app.t("tab_startup_items"),
         Tab::Settings => app.t("tab_settings"),
     }
 }
@@ -6112,6 +6120,179 @@ pub(crate) fn render_optimize_panel(
             let log = execute_optimize_task(&item.path, app.lang_en);
             app.logs.push(log);
         }
+    }
+}
+
+/// 启动项管理面板（macOS Login Items / launchd）
+///
+/// 同步扫描（不走统一扫描管道），首次进入自动扫描；支持刷新、禁用/启用。
+/// 禁用 = 把 plist 移到 `~/.maclean/disabled_launchd/<scope>`（可逆）；
+/// 不 bootout 运行中的服务，避免误杀系统组件。
+fn render_startup_panel(ui: &mut egui::Ui, app: &mut App) {
+    use crate::scanner::startup::{disable_startup_item, enable_startup_item, scan_startup_items};
+
+    // 首次进入或列表为空时自动扫描
+    if app.startup_items.is_empty() {
+        app.startup_items = scan_startup_items();
+    }
+
+    ui.add_space(10.0);
+    ui.heading(egui::RichText::new(app.t("tab_startup_items")).size(18.0));
+    ui.label(
+        egui::RichText::new(app.t("startup_hint"))
+            .size(12.0)
+            .color(theme::text_3()),
+    );
+    ui.add_space(8.0);
+
+    // 操作栏：刷新 + 说明
+    ui.horizontal(|ui| {
+        if ui.button(app.t("startup_refresh")).clicked() {
+            app.startup_items = scan_startup_items();
+            app.logs.push(app.t("startup_refreshed").to_string());
+        }
+        ui.separator();
+        let enabled_cnt = app.startup_items.iter().filter(|i| i.enabled).count();
+        ui.label(
+            egui::RichText::new(app.tf(
+                "startup_count",
+                &[
+                    &app.startup_items.len().to_string(),
+                    &enabled_cnt.to_string(),
+                ],
+            ))
+            .size(12.0)
+            .color(theme::text_2()),
+        );
+    });
+
+    ui.add_space(10.0);
+
+    // 列表
+    let list_size = ui.available_size();
+    egui::Frame::none()
+        .fill(theme::bg())
+        .rounding(egui::Rounding::same(8.0))
+        .show(ui, |ui| {
+            ui.set_min_size(list_size);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    // 克隆避免循环内可变借用 app
+                    let startup_snapshot = app.startup_items.clone();
+                    for item in &startup_snapshot {
+                        egui::Frame::group(ui.style())
+                            .fill(theme::surface())
+                            .stroke(egui::Stroke::new(1.0_f32, theme::line()))
+                            .inner_margin(12.0)
+                            .outer_margin(4.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    icons::show(ui, icons::Icon::Power, 18.0, theme::brand());
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(&item.label)
+                                                    .size(14.0)
+                                                    .strong()
+                                                    .color(theme::text()),
+                                            );
+                                            // 状态徽标
+                                            if item.enabled {
+                                                ui.label(
+                                                    egui::RichText::new(app.t("startup_enabled"))
+                                                        .size(11.0)
+                                                        .color(theme::safe()),
+                                                );
+                                            } else {
+                                                ui.label(
+                                                    egui::RichText::new(app.t("startup_disabled"))
+                                                        .size(11.0)
+                                                        .color(theme::text_3()),
+                                                );
+                                            }
+                                        });
+                                        ui.label(
+                                            egui::RichText::new(item.plist.display().to_string())
+                                                .size(11.0)
+                                                .color(theme::text_3()),
+                                        );
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if item.enabled {
+                                                if ui
+                                                    .button(app.t("startup_disable"))
+                                                    .on_hover_text(item.plist.display().to_string())
+                                                    .clicked()
+                                                {
+                                                    match disable_startup_item(
+                                                        item,
+                                                        &app.startup_backup_root,
+                                                    ) {
+                                                        Ok(target) => {
+                                                            app.logs.push(app.tf(
+                                                                "startup_disabled_log",
+                                                                &[&item.label, &target],
+                                                            ));
+                                                            app.startup_items =
+                                                                scan_startup_items();
+                                                        }
+                                                        Err(e) => {
+                                                            app.logs.push(format!(
+                                                                "{}: {e}",
+                                                                app.t("startup_disable_fail")
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            } else if ui
+                                                .button(app.t("startup_enable"))
+                                                .on_hover_text(item.plist.display().to_string())
+                                                .clicked()
+                                            {
+                                                match enable_startup_item(
+                                                    item,
+                                                    &app.startup_backup_root,
+                                                ) {
+                                                    Ok(target) => {
+                                                        app.logs.push(app.tf(
+                                                            "startup_enabled_log",
+                                                            &[&item.label, &target],
+                                                        ));
+                                                        app.startup_items = scan_startup_items();
+                                                    }
+                                                    Err(e) => {
+                                                        app.logs.push(format!(
+                                                            "{}: {e}",
+                                                            app.t("startup_enable_fail")
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                    }
+                    ui.add_space(8.0);
+                });
+        });
+
+    // 操作日志
+    if !app.logs.is_empty() {
+        ui.add_space(5.0);
+        ui.collapsing(app.t("optimize_logs"), |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for log in &app.logs {
+                        ui.label(egui::RichText::new(log).size(11.0).color(theme::text_2()));
+                    }
+                });
+        });
     }
 }
 

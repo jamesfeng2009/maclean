@@ -128,6 +128,7 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
             Tab::AppUninstall => Some("app_uninstall"),
             Tab::SystemOptimize => None, // 不缓存
             Tab::Apfs => Some("apfs"),
+            Tab::StartupItems => None, // 同步扫描
         };
 
         // 尝试从磁盘缓存加载
@@ -187,6 +188,19 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
                 Tab::CustomRules => crate::rules::RuleScanner::new().scan(),
                 Tab::DuplicateFiles => scanner::dup_files::DuplicateFileScanner::new().scan(),
+                // StartupItems 不走统一扫描管道：同步扫描由 UI 直接调用
+                #[cfg(target_os = "macos")]
+                Tab::StartupItems => scanner::ScanResult {
+                    items: Vec::new(),
+                    total_size: 0,
+                    scan_time_ms: 0,
+                },
+                #[cfg(not(target_os = "macos"))]
+                Tab::StartupItems => scanner::ScanResult {
+                    items: Vec::new(),
+                    total_size: 0,
+                    scan_time_ms: 0,
+                },
                 // Windows/Linux: 这些 Tab 返回空结果
                 #[cfg(not(target_os = "macos"))]
                 Tab::AppCache => {
@@ -330,6 +344,7 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                 Tab::Apfs => Some("apfs"),
                 Tab::CustomRules => None, // 每次全扫，不缓存
                 Tab::DuplicateFiles => Some("dup_files"),
+                Tab::StartupItems => None, // 同步扫描
             };
 
             if let Some(name) = cache_name {
@@ -370,6 +385,11 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                 Tab::Apfs => scanner::apfs::ApfsScanner::new().scan(),
                 Tab::CustomRules => crate::rules::RuleScanner::new().scan(),
                 Tab::DuplicateFiles => scanner::dup_files::DuplicateFileScanner::new().scan(),
+                Tab::StartupItems => scanner::ScanResult {
+                    items: Vec::new(),
+                    total_size: 0,
+                    scan_time_ms: 0,
+                },
                 #[cfg(not(target_os = "macos"))]
                 Tab::AppCache => {
                     #[cfg(target_os = "windows")]

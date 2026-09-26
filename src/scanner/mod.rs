@@ -24,6 +24,8 @@ pub mod dev_cache;
 pub mod dup_files;
 pub mod large_files;
 pub mod optimize;
+#[cfg(target_os = "macos")]
+pub mod startup;
 // 残留名称匹配：刻意不限定平台，见模块顶部注释。放在 scanner 根而非
 // windows_apps 内，是为了让它（连同规定的删除保护）在开发机上可被编译和测试。
 mod residual_match;

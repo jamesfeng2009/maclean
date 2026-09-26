@@ -98,6 +98,8 @@ pub enum Tab {
     CustomRules,
     /// 重复文件（保留一份，其余进废纸篓）
     DuplicateFiles,
+    /// 启动项（macOS Login Items / launchd）
+    StartupItems,
     /// 设置
     Settings,
 }
@@ -109,7 +111,7 @@ pub enum Tab {
 
 impl Tab {
     /// 所有 Tab
-    pub fn all() -> [Tab; 11] {
+    pub fn all() -> [Tab; 12] {
         [
             Tab::Overview,
             Tab::DevCache,
@@ -121,6 +123,7 @@ impl Tab {
             Tab::Apfs,
             Tab::CustomRules,
             Tab::DuplicateFiles,
+            Tab::StartupItems,
             Tab::Settings,
         ]
     }
@@ -136,6 +139,7 @@ impl Tab {
     pub fn is_supported(self) -> bool {
         match self {
             Tab::Apfs => cfg!(target_os = "macos"),
+            Tab::StartupItems => cfg!(target_os = "macos"),
             _ => true,
         }
     }
@@ -163,7 +167,8 @@ impl Tab {
             Tab::SystemOptimize => Tab::Apfs,
             Tab::Apfs => Tab::CustomRules,
             Tab::CustomRules => Tab::DuplicateFiles,
-            Tab::DuplicateFiles => Tab::Settings,
+            Tab::DuplicateFiles => Tab::StartupItems,
+            Tab::StartupItems => Tab::Settings,
             Tab::Settings => Tab::Overview,
         };
         let mut t = raw_next(self);
@@ -220,9 +225,9 @@ pub struct App {
     /// 当前 Tab
     pub tab: Tab,
     /// 每个 Tab 的扫描结果
-    pub results: [Vec<ScanItem>; 11],
+    pub results: [Vec<ScanItem>; 12],
     /// 每个 Tab 的扫描状态
-    pub scan_states: [ScanState; 11],
+    pub scan_states: [ScanState; 12],
     /// 列表选中索引
     pub list_index: usize,
     // 2026-09-18 删除了 `selected_uninstall_app_index`：零引用，卸载 Tab 的
@@ -238,6 +243,10 @@ pub struct App {
     /// P1：用户点击 Advanced 级维护任务（如修复权限/校验启动盘）时不直接执行，
     /// 先弹确认框，确认后才进入执行。
     pub pending_optimize_task: Option<usize>,
+    /// 启动项 Tab：当前启动项列表（P3，macOS）
+    pub startup_items: Vec<crate::scanner::startup::StartupItem>,
+    /// 启动项备份根目录（禁用时 plist 移到这里，可逆）
+    pub startup_backup_root: std::path::PathBuf,
     /// 确认状态
     pub confirm: ConfirmState,
     /// 待删除的项索引列表，每项为 (tab_index, item_index)
@@ -258,7 +267,7 @@ pub struct App {
     // 2026-09-18 删除了 `should_quit`：零引用。退出走 `App::quit()` /
     // `std::process::exit`，没人轮询这个标志。
     /// 扫描耗时（毫秒）
-    pub scan_time_ms: [u64; 11],
+    pub scan_time_ms: [u64; 12],
     /// 语言切换（true=英文, false=中文）
     pub lang_en: bool,
     /// 删除进度：已完成的项数
@@ -431,6 +440,7 @@ impl App {
             Tab::AppUninstall => Some("app_uninstall"),
             Tab::SystemOptimize => None,
             Tab::Apfs => Some("apfs"),
+            Tab::StartupItems => None, // 同步扫描，不走缓存
         };
         crate::logger::info(&format!(
             "尝试加载当前 Tab({:?}) 缓存: {:?}",
@@ -497,8 +507,10 @@ impl App {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             ],
             scan_states: [
+                ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
                 ScanState::Idle,
@@ -516,11 +528,16 @@ impl App {
             disk_free,
             logs: Vec::new(),
             pending_optimize_task: None,
+            startup_items: Vec::new(),
+            startup_backup_root: std::path::PathBuf::from(
+                std::env::var("HOME").unwrap_or_default(),
+            )
+            .join(".maclean/disabled_launchd"),
             confirm: ConfirmState::None,
             pending_delete: Vec::new(),
             protection_blocked: 0,
             last_backup: None,
-            scan_time_ms: [0; 11],
+            scan_time_ms: [0; 12],
             lang_en: user_config.lang_en,
             settings_menubar_icon: user_config.settings_menubar_icon,
             settings_keep_sudo: user_config.settings_keep_sudo,
@@ -608,7 +625,8 @@ impl App {
             Tab::Apfs => 7,
             Tab::CustomRules => 8,
             Tab::DuplicateFiles => 9,
-            Tab::Settings => 10,
+            Tab::StartupItems => 10,
+            Tab::Settings => 11,
         }
     }
 
@@ -1511,6 +1529,19 @@ impl App {
                 "tab_apfs" => "APFS Snapshots",
                 "tab_custom_rules" => "Custom Rules",
                 "tab_dup_files" => "Duplicate Files",
+                "tab_startup_items" => "Startup Items",
+                "startup_hint" => "LaunchAgents / LaunchDaemons that run at login. Disabling moves the plist to a backup folder (reversible); running services are not force-stopped.",
+                "startup_refresh" => "Refresh",
+                "startup_refreshed" => "Startup items refreshed",
+                "startup_count" => "{0} items, {1} loaded",
+                "startup_enabled" => "Loaded",
+                "startup_disabled" => "Disabled",
+                "startup_disable" => "Disable",
+                "startup_enable" => "Enable",
+                "startup_disabled_log" => "Disabled {0} -> moved to {1}",
+                "startup_enabled_log" => "Enabled {0} <- restored from {1}",
+                "startup_disable_fail" => "Disable failed",
+                "startup_enable_fail" => "Enable failed",
                 "disk_view_list" => "List",
                 "disk_view_tree" => "Treemap",
                 "tab_settings" => "Settings",
@@ -1963,6 +1994,19 @@ impl App {
                 "tab_apfs" => "APFS快照",
                 "tab_custom_rules" => "自定义规则",
                 "tab_dup_files" => "重复文件",
+                "tab_startup_items" => "启动项",
+                "startup_hint" => "登录时自启的 LaunchAgent / LaunchDaemon。禁用会把 plist 移入备份目录（可逆），不会强停已在运行的服务。",
+                "startup_refresh" => "刷新",
+                "startup_refreshed" => "启动项已刷新",
+                "startup_count" => "{0} 项，已加载 {1}",
+                "startup_enabled" => "已加载",
+                "startup_disabled" => "已禁用",
+                "startup_disable" => "禁用",
+                "startup_enable" => "启用",
+                "startup_disabled_log" => "已禁用 {0} → 移入 {1}",
+                "startup_enabled_log" => "已启用 {0} ← 自 {1} 恢复",
+                "startup_disable_fail" => "禁用失败",
+                "startup_enable_fail" => "启用失败",
                 "disk_view_list" => "列表",
                 "disk_view_tree" => "树图",
                 "tab_settings" => "设置",
@@ -2604,11 +2648,11 @@ mod tests {
         // results 是 [Vec<ScanItem>; 10]，按 Tab::all() 的下标寻址。
         // 平台过滤只能"跳过显示"，绝不能改变 all() 的长度或顺序，
         // 否则会删错 Tab 的数据。
-        assert_eq!(Tab::all().len(), 11);
+        assert_eq!(Tab::all().len(), 12);
         // results 是定长数组，长度写死在类型里；用源码钉住两者必须一致。
         // 一旦有人往 Tab 加变体却忘了扩 results，下标就会静默错位。
         assert!(
-            include_str!("app.rs").contains("pub results: [Vec<ScanItem>; 11],"),
+            include_str!("app.rs").contains("pub results: [Vec<ScanItem>; 12],"),
             "results 数组长度变了，必须同步 Tab::all()"
         );
     }
@@ -2629,8 +2673,8 @@ mod tests {
         let scannable = Tab::scannable();
         assert!(scannable.iter().all(|(t, _)| t.is_supported()));
         assert!(!scannable.iter().any(|(t, _)| *t == Tab::Overview));
-        // all() 11 个里跳过 Overview，剩 10 个；非 macOS 再去掉 Apfs → 9 个
-        let expected = if cfg!(target_os = "macos") { 10 } else { 9 };
+        // all() 12 个里跳过 Overview，剩 11 个；非 macOS 再去掉 Apfs → 10 个
+        let expected = if cfg!(target_os = "macos") { 11 } else { 10 };
         assert_eq!(scannable.len(), expected, "实际: {:?}", scannable);
         // 下标必须是 all() 里的真实下标，不能是过滤后重排的序号
         for (t, idx) in &scannable {
