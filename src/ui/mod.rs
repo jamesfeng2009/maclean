@@ -4772,11 +4772,6 @@ pub(crate) fn truncate_path(path: &str, max_len: usize) -> String {
 // =========================================================================
 
 /// 渲染系统优化面板（特殊 UI，不是列表选择模式）
-/// 注意：直接复用外层 CentralPanel 传入的 ui，避免嵌套 CentralPanel 导致状态异常
-/// 渲染磁盘分析器（目录钻取式磁盘浏览器）
-///
-/// 功能：
-/// - 显示当前浏览路径（面包屑导航）
 /// 按类别聚合大小并降序排序；零大小类别剔除（返回空表时调用方直接跳过）。
 fn aggregate_category_sizes(items: &[ScanItem]) -> Vec<(String, u64)> {
     let mut by_cat: Vec<(String, u64)> = Vec::new();
@@ -4899,12 +4894,16 @@ fn render_disk_category_overview(ui: &mut egui::Ui, app: &mut App, items: &[Scan
         });
 }
 
-/// 磁盘分析器：目录钻取式浏览（进入目录查看大文件）
+/// 渲染磁盘分析器（目录钻取式磁盘浏览器）
 ///
+/// 功能：
+/// - 显示当前浏览路径（面包屑导航）
 /// - 返回上一级按钮
 /// - 列出当前目录下所有子项（按大小降序）
 /// - 每项显示大小、进度条（相对于当前目录总大小）
 /// - 目录可点击进入，文件可勾选删除
+///
+/// 注意：直接复用外层 CentralPanel 传入的 ui，避免嵌套 CentralPanel 导致状态异常
 pub(crate) fn render_disk_analyzer(
     ui: &mut egui::Ui,
     app: &mut App,
