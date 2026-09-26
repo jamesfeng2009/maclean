@@ -42,29 +42,84 @@ impl Scanner for OptimizeScanner {
     }
 }
 
-/// macOS 优化任务（8 项）
+/// macOS 优化任务（14 项）
+///
+/// 前 8 项为常规优化；后 6 项为系统维护，对标 MangoDisk system_maintenance：
+/// 低风险（icon-cache/finder-service/audio-service/legacy-overrides）直接可用，
+/// 高风险（user-permissions/startup-disk）需用户确认后执行。
 fn macos_optimize_tasks() -> Vec<ScanItem> {
     vec![
-        make_task("dns_cache_flush", "刷新 DNS 缓存，修复网络解析问题"),
+        make_task(
+            "dns_cache_flush",
+            "刷新 DNS 缓存，修复网络解析问题",
+            Recommend::Safe,
+        ),
         make_task(
             "quicklook_rebuild",
             "清理 QuickLook 缩略图缓存，修复预览问题",
+            Recommend::Safe,
         ),
         make_task(
             "launchservices_rebuild",
             "重建 LaunchServices 数据库，修复\"打开方式\"菜单问题",
+            Recommend::Safe,
         ),
-        make_task("saved_state_cleanup", "清理超过 30 天的应用保存状态"),
-        make_task("gatekeeper_cleanup", "清理 Gatekeeper 下载追踪记录"),
+        make_task(
+            "saved_state_cleanup",
+            "清理超过 30 天的应用保存状态",
+            Recommend::Safe,
+        ),
+        make_task(
+            "gatekeeper_cleanup",
+            "清理 Gatekeeper 下载追踪记录",
+            Recommend::Safe,
+        ),
         make_task(
             "memory_pressure_release",
             "释放非活跃内存，提升系统响应速度",
+            Recommend::Safe,
         ),
         make_task(
             "spotlight_reindex",
             "重建 Spotlight 搜索索引，修复搜索不到文件的问题",
+            Recommend::Caution,
         ),
-        make_task("login_items_audit", &scan_login_items_description()),
+        make_task(
+            "login_items_audit",
+            &scan_login_items_description(),
+            Recommend::Safe,
+        ),
+        // ---- 系统维护（P1，对标 MangoDisk system_maintenance）----
+        make_task(
+            "icon_cache_rebuild",
+            "重建图标缓存，修复桌面/访达图标显示异常",
+            Recommend::Safe,
+        ),
+        make_task(
+            "finder_service_restart",
+            "重启 Finder 服务，刷新文件关联与侧边栏",
+            Recommend::Safe,
+        ),
+        make_task(
+            "audio_service_restart",
+            "重启音频服务，修复无声/卡顿（可能需要管理员权限）",
+            Recommend::Safe,
+        ),
+        make_task(
+            "legacy_overrides_clean",
+            "清理旧版 LaunchServices 打开方式覆盖，恢复默认关联",
+            Recommend::Safe,
+        ),
+        make_task(
+            "user_permissions_repair",
+            "修复用户 Library 目录权限，解决应用无法写入/打开异常",
+            Recommend::Advanced,
+        ),
+        make_task(
+            "startup_disk_verify",
+            "校验启动盘卷健康（只读检查，不修改数据）",
+            Recommend::Advanced,
+        ),
     ]
 }
 
@@ -74,42 +129,55 @@ fn macos_optimize_tasks() -> Vec<ScanItem> {
 /// 聚焦清理、隐私、性能三类安全优化，不涉及系统关键服务。
 fn windows_optimize_tasks() -> Vec<ScanItem> {
     vec![
-        make_task("win_dns_flush", "刷新 DNS 缓存，修复网络解析问题"),
+        make_task(
+            "win_dns_flush",
+            "刷新 DNS 缓存，修复网络解析问题",
+            Recommend::Safe,
+        ),
         make_task(
             "win_temp_cleanup",
             "清理 Windows 临时文件、缩略图缓存、交付优化缓存",
+            Recommend::Safe,
         ),
         make_task(
             "win_disable_telemetry",
             "关闭 Windows 遥测与诊断数据收集，减少隐私泄露",
+            Recommend::Caution,
         ),
         make_task(
             "win_disable_copilot",
             "禁用 Windows Copilot 与 AI 功能，释放内存与后台资源",
+            Recommend::Caution,
         ),
         make_task(
             "win_disable_suggestions",
             "关闭开始菜单、设置、锁屏的推荐与广告内容",
+            Recommend::Caution,
         ),
         make_task(
             "win_startup_audit",
             "审计开机启动项与计划任务，加快开机速度",
+            Recommend::Safe,
         ),
         make_task(
             "win_disable_fast_startup",
             "关闭快速启动，减少休眠文件占用并避免驱动异常",
+            Recommend::Caution,
         ),
         make_task(
             "win_restore_point",
             "创建系统还原点，优化前自动备份当前状态",
+            Recommend::Safe,
         ),
         make_task(
             "win_restart_explorer",
             "重启资源管理器，刷新任务栏/开始菜单/桌面",
+            Recommend::Safe,
         ),
         make_task(
             "win_trim_drives",
             "对 SSD 执行 TRIM 优化，对 HDD 执行碎片整理",
+            Recommend::Caution,
         ),
     ]
 }
@@ -125,7 +193,7 @@ fn windows_optimize_tasks() -> Vec<ScanItem> {
 /// - `deletable`: false（操作项，非删除项）
 /// - `size_bytes`: 0（操作项无大小）
 /// - `recommend`: Safe（均为安全操作）
-fn make_task(name: &str, description: &str) -> ScanItem {
+fn make_task(name: &str, description: &str, recommend: Recommend) -> ScanItem {
     ScanItem {
         path: name.to_string(),
         size_bytes: 0,
@@ -134,7 +202,7 @@ fn make_task(name: &str, description: &str) -> ScanItem {
         deletable: false,
         undeletable_reason: String::new(),
         batch_paths: Vec::new(),
-        recommend: Recommend::Safe,
+        recommend,
         description: description.to_string(),
     }
 }
@@ -252,6 +320,38 @@ mod tests {
                 "优化任务 {} 在 execute_windows_optimize_task 里没有对应分支",
                 item.path
             );
+        }
+    }
+
+    #[test]
+    fn every_macos_task_has_an_executor_branch() {
+        // 与 Windows 同理：macOS 清单里的每个任务都必须在
+        // execute_macos_optimize_task 里有对应分支，否则点击无反应。
+        let ops_src = include_str!("../ops/mod.rs");
+        for item in macos_optimize_tasks() {
+            assert!(
+                ops_src.contains(&format!("\"{}\" =>", item.path)),
+                "macOS 优化任务 {} 在 execute_macos_optimize_task 里没有对应分支",
+                item.path
+            );
+        }
+    }
+
+    #[test]
+    fn macos_maintenance_has_high_risk_confirm_items() {
+        // P1：系统维护需确认项 —— Advanced 任务必须存在且至少 2 项
+        let tasks = macos_optimize_tasks();
+        let advanced: Vec<&ScanItem> = tasks
+            .iter()
+            .filter(|t| t.recommend == Recommend::Advanced)
+            .collect();
+        assert!(
+            advanced.len() >= 2,
+            "高风险维护任务应 >= 2，实际 {}",
+            advanced.len()
+        );
+        for t in &advanced {
+            assert!(!t.description.is_empty(), "高风险任务 {} 缺少说明", t.path);
         }
     }
 

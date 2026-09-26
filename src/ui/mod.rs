@@ -5861,7 +5861,14 @@ pub(crate) fn render_optimize_panel(
                                             )
                                             .clicked()
                                             {
-                                                task_to_run = Some(i);
+                                                // P1：Advanced 级维护任务先确认再执行
+                                                if item.recommend
+                                                    == crate::scanner::Recommend::Advanced
+                                                {
+                                                    app.pending_optimize_task = Some(i);
+                                                } else {
+                                                    task_to_run = Some(i);
+                                                }
                                             }
                                         },
                                     );
@@ -5889,6 +5896,76 @@ pub(crate) fn render_optimize_panel(
                     ui.add_space(10.0);
                 });
         });
+
+    // P1：高风险维护任务确认弹窗
+    if let Some(pending_idx) = app.pending_optimize_task {
+        if let Some(pending_item) = items.get(pending_idx) {
+            egui::Window::new("confirm_optimize_modal")
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .frame(widgets::modal_frame())
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_width(MODAL_W);
+                    ui.set_max_width(MODAL_W);
+                    widgets::modal_header(
+                        ui,
+                        icons::Icon::Alert,
+                        theme::danger(),
+                        theme::danger_50(),
+                        app.t("optimize_confirm_title"),
+                        app.t("optimize_confirm_body"),
+                    );
+                    ui.add_space(12.0);
+                    egui::Frame::none()
+                        .fill(theme::surface_3())
+                        .stroke(egui::Stroke::NONE)
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            render_confirm_row(
+                                ui,
+                                app.t("confirm_selected_items"),
+                                &pending_item.path,
+                                theme::text(),
+                            );
+                            render_confirm_row(
+                                ui,
+                                app.t("confirm_releasable"),
+                                &pending_item.description,
+                                theme::brand(),
+                            );
+                        });
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        if widgets::button(
+                            ui,
+                            None,
+                            app.t("optimize_confirm_no"),
+                            widgets::Btn::Secondary,
+                            BTN_H,
+                        )
+                        .clicked()
+                        {
+                            app.pending_optimize_task = None;
+                        }
+                        if widgets::button(
+                            ui,
+                            Some(icons::Icon::ChevronRight),
+                            app.t("optimize_confirm_yes"),
+                            widgets::Btn::Primary,
+                            BTN_H,
+                        )
+                        .clicked()
+                        {
+                            task_to_run = Some(pending_idx);
+                            app.pending_optimize_task = None;
+                        }
+                    });
+                });
+        }
+    }
 
     // 执行选中的优化任务
     if let Some(task_idx) = task_to_run {

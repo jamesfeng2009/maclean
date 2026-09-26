@@ -2839,6 +2839,103 @@ pub(crate) fn execute_macos_optimize_task(task_name: &str, lang_en: bool) -> Str
                 _ => App::t_lang(lang_en, "opt_login_items_fail").to_string(),
             }
         }
+        // ---- 系统维护（P1，对标 MangoDisk system_maintenance）----
+        "icon_cache_rebuild" => {
+            // 删除图标缓存存储，Finder 自动重建；killall 刷新 Dock/Finder
+            let home = std::env::var("HOME").unwrap_or_default();
+            let icon_store = format!("{}/Library/Caches/com.apple.iconservices.store", home);
+            let mut ok = true;
+            if std::path::Path::new(&icon_store).exists() {
+                ok = std::fs::remove_dir_all(&icon_store).is_ok();
+            }
+            let r = std::process::Command::new("killall").arg("Finder").output();
+            let kill_ok = r.map(|o| o.status.success()).unwrap_or(false);
+            if ok && kill_ok {
+                App::t_lang(lang_en, "opt_icon_cache_success").to_string()
+            } else if ok {
+                App::t_lang(lang_en, "opt_icon_cache_partial").to_string()
+            } else {
+                App::t_lang(lang_en, "opt_icon_cache_fail").to_string()
+            }
+        }
+        "finder_service_restart" => {
+            // 重启 Finder：刷新文件关联、侧边栏与扩展
+            let r = std::process::Command::new("killall").arg("Finder").output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_finder_restart_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_finder_restart_fail").to_string(),
+            }
+        }
+        "audio_service_restart" => {
+            // 重启 coreaudiod：修复无声/音频卡顿
+            // coreaudiod 是系统守护进程，普通权限下 killall 可能被拒绝，
+            // 失败时如实提示，不引导用户手动执行命令。
+            let r = std::process::Command::new("killall")
+                .arg("coreaudiod")
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_audio_restart_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_audio_restart_fail").to_string(),
+            }
+        }
+        "legacy_overrides_clean" => {
+            // 备份并删除 LaunchServices 打开方式覆盖，cfprefsd 刷新后系统重建默认关联
+            let home = std::env::var("HOME").unwrap_or_default();
+            let plist = format!(
+                "{}/Library/Preferences/com.apple.LaunchServices.plist",
+                home
+            );
+            if !std::path::Path::new(&plist).exists() {
+                App::t_lang(lang_en, "opt_legacy_overrides_empty").to_string()
+            } else {
+                let backup = format!("{}.maclean.bak", plist);
+                let backed_up = std::fs::copy(&plist, &backup).is_ok();
+                let removed = std::fs::remove_file(&plist).is_ok();
+                let _ = std::process::Command::new("killall")
+                    .arg("cfprefsd")
+                    .output();
+                if backed_up && removed {
+                    App::t_lang(lang_en, "opt_legacy_overrides_success").to_string()
+                } else if removed {
+                    App::t_lang(lang_en, "opt_legacy_overrides_no_backup").to_string()
+                } else {
+                    App::t_lang(lang_en, "opt_legacy_overrides_fail").to_string()
+                }
+            }
+        }
+        "user_permissions_repair" => {
+            // 修复用户 Library 目录权限（不涉及系统目录，无需 sudo）
+            let home = std::env::var("HOME").unwrap_or_default();
+            let lib = format!("{}/Library", home);
+            let r = std::process::Command::new("chmod")
+                .arg("-R")
+                .arg("u+rwX")
+                .arg(&lib)
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_permissions_repair_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_permissions_repair_fail").to_string(),
+            }
+        }
+        "startup_disk_verify" => {
+            // 只读校验启动盘卷，不修改数据
+            let r = std::process::Command::new("diskutil")
+                .arg("verifyVolume")
+                .arg("/")
+                .output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    App::t_lang(lang_en, "opt_startup_disk_success").to_string()
+                }
+                _ => App::t_lang(lang_en, "opt_startup_disk_fail").to_string(),
+            }
+        }
         _ => App::tf_lang(lang_en, "opt_unknown", &[task_name]),
     }
 }
