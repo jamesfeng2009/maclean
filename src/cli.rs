@@ -373,8 +373,13 @@ fn tab_supported(name: &str) -> bool {
     }
 }
 
-fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
-    match tab_name {
+fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
+    // watchdog：坏目录（APFS 异常等）会让 readdir 永久阻塞；超时返回空并提示，
+    // 进程不再无限挂起（超时 tab 计入退出码 8）。
+    const TAB_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    // 转 String 再 move：scan_with_timeout 要求闭包 'static，不能捕获 &str
+    let tab_key_owned = tab_name.to_string();
+    let scan = move || match tab_key_owned.as_str() {
         "dev-cache" => DevCacheScanner::new().scan().items,
         "large-files" => LargeFileScanner::new().scan().items,
         #[cfg(target_os = "macos")]
@@ -413,6 +418,14 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
                 .items
         }
         _ => Vec::new(),
+    };
+
+    match crate::scanner::scan_with_timeout(TAB_SCAN_TIMEOUT, scan) {
+        Some(items) => (items, false),
+        None => {
+            eprintln!("\r  ⚠ {tab_name} 扫描超时（目录 IO 异常？），已跳过该 Tab");
+            (Vec::new(), true)
+        }
     }
 }
 
@@ -473,6 +486,7 @@ fn cmd_scan(tab: Option<String>, deep: bool, format: OutputFormat, color: bool, 
 
     let mut total_size: u64 = 0;
     let mut total_count: usize = 0;
+    let mut has_warnings = false;
     // JSON 与表格共用同一份扫描结果，绝不各扫一遍
     let mut out_tabs: Vec<JsonTab> = Vec::new();
     let total_tabs = tabs.len();
@@ -485,7 +499,10 @@ fn cmd_scan(tab: Option<String>, deep: bool, format: OutputFormat, color: bool, 
             eprint!("\r  扫描 {}/{} — {} ...", idx + 1, total_tabs, tab_label);
         }
         let start = std::time::Instant::now();
-        let items = scan_tab(tab_key);
+        let (items, tab_timed_out) = scan_tab(tab_key);
+        if tab_timed_out {
+            has_warnings = true;
+        }
         let elapsed = start.elapsed();
 
         // 保存扫描结果到本地缓存，便于 GUI 启动时直接加载
@@ -603,7 +620,11 @@ fn cmd_scan(tab: Option<String>, deep: bool, format: OutputFormat, color: bool, 
             true,
         );
     }
-    EXIT_OK
+    if has_warnings {
+        EXIT_WARNINGS
+    } else {
+        EXIT_OK
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -704,7 +725,7 @@ fn cmd_clean(
             .map(|(_, v)| *v)
             .unwrap_or(tab_key);
 
-        let items = scan_tab(tab_key);
+        let (items, _tab_timed_out) = scan_tab(tab_key);
 
         let to_clean: Vec<&ScanItem> = if safe_only {
             items
@@ -1202,7 +1223,7 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
         if !tab_supported(key) {
             continue;
         }
-        let items = scan_tab(key);
+        let (items, _tab_timed_out) = scan_tab(key);
         scanned.push(key.to_string());
         total_count += items.len();
         for item in &items {

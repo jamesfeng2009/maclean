@@ -351,6 +351,17 @@ impl Gui {
                             app.scan_current_path = path;
                         }
                     }
+                    Ok(ScanMessage::Skipped(tab_idx, reason)) => {
+                        if let Some(app) = Some(&mut self.app) {
+                            let idx = tab_idx as usize;
+                            app.results[idx] = Vec::new();
+                            app.scan_states[idx] = ScanState::Done;
+                            app.scan_time_ms[idx] = 0;
+                            app.scan_current_path = format!("⚠ {reason}");
+                        }
+                        // 与 Done 一致：之后的 Progress 一律忽略，避免进度条回退
+                        scan_finished = true;
+                    }
                     Ok(ScanMessage::Done(items, time_ms, tab_idx)) => {
                         if let Some(app) = Some(&mut self.app) {
                             let idx = tab_idx as usize;

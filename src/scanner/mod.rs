@@ -4,6 +4,7 @@
 //! 并导出具体的子模块：开发者缓存、大文件、应用缓存、APFS 快照。
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use walkdir::WalkDir;
 
 // 导出缓存模块
@@ -107,6 +108,29 @@ pub struct ScanResult {
 pub trait Scanner {
     /// 执行扫描，返回扫描结果
     fn scan(&self) -> ScanResult;
+}
+
+/// 带超时的扫描执行器。
+///
+/// 文件系统异常（如损坏的 APFS 目录、挂起的网络卷）会让 `read_dir`
+/// 永久阻塞，普通线程无法安全中断。本执行器把扫描放到独立线程，
+/// 超时未返回即视为"跳过该扫描"，调用方继续后续流程；卡死的线程
+/// 在进程退出时由系统回收。内部用 `catch_unwind` 兜底：扫描器 panic
+/// 或超时一律返回 `None`，不炸线程。
+///
+/// 返回 `Some(result)` 表示正常完成；`None` 表示超时或 panic。
+pub(crate) fn scan_with_timeout<R, F>(timeout: Duration, f: F) -> Option<R>
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok();
+        // sync_channel 容量 1：发送永不阻塞，recv_timeout 收到即返回
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout).ok().flatten()
 }
 
 /// 检测路径是否可被当前用户删除
@@ -278,5 +302,39 @@ mod tests {
             crate::i18n::translate_recommend(&Recommend::Advanced, false),
             "需确认"
         );
+    }
+
+    #[test]
+    fn scan_with_timeout_returns_result_when_fast() {
+        let r = scan_with_timeout(Duration::from_secs(5), || ScanResult {
+            items: Vec::new(),
+            total_size: 42,
+            scan_time_ms: 1,
+        });
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().total_size, 42);
+    }
+
+    #[test]
+    fn scan_with_timeout_returns_none_on_timeout() {
+        // 超时：卡住的扫描被放弃，返回 None（卡死线程 200ms 后自然结束）
+        let r = scan_with_timeout(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(200));
+            ScanResult {
+                items: Vec::new(),
+                total_size: 0,
+                scan_time_ms: 0,
+            }
+        });
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn scan_with_timeout_catches_panic() {
+        // panic 的扫描器不炸线程，视为扫描失败返回 None
+        let r = scan_with_timeout(Duration::from_secs(5), || {
+            panic!("boom");
+        });
+        assert!(r.is_none());
     }
 }

@@ -22,6 +22,8 @@ pub(crate) enum ScanMessage {
     CurrentPath(String),
     /// 单个 Tab 扫描完成
     Done(Vec<ScanItem>, u64, u64), // (items, scan_time_ms, tab_index)
+    /// 单个 Tab 扫描超时跳过（目录 IO 异常导致 readdir 永久阻塞）— (tab_index, reason)
+    Skipped(u64, String),
     /// 全部扫描完成（用于批量扫描）
     AllDone,
 }
@@ -363,7 +365,10 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                 }
             }
 
-            let result = std::panic::catch_unwind(|| match tab {
+            // watchdog：坏目录（如 APFS 异常）会让 readdir 永久阻塞，
+            // 超时跳过该 Tab，不让一个 IO 异常拖死整个全量扫描。
+            let timeout = scan_timeout_for(tab);
+            let scan_fn = move || match tab {
                 Tab::Overview | Tab::Settings => scanner::ScanResult {
                     items: Vec::new(),
                     total_size: 0,
@@ -441,10 +446,12 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                     total_size: 0,
                     scan_time_ms: 0,
                 },
-            });
+            };
+
+            let result = scanner::scan_with_timeout(timeout, scan_fn);
 
             match result {
-                Ok(scan_result) => {
+                Some(scan_result) => {
                     if let Some(name) = cache_name {
                         scanner::cache::save_cache(name, &scan_result);
                     }
@@ -459,14 +466,29 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
                     send_items_in_batches(&tx, &items, tab_idx);
                     let _ = tx.send(ScanMessage::Done(items, scan_result.scan_time_ms, tab_idx));
                 }
-                Err(_) => {
-                    let _ = tx.send(ScanMessage::Done(Vec::new(), 0, tab_idx));
+                None => {
+                    let _ = tx.send(ScanMessage::Skipped(
+                        tab_idx,
+                        "该 Tab 扫描超时（目录 IO 异常），已跳过。可重启 Mac 后重扫。".to_string(),
+                    ));
                 }
             }
         }
 
         let _ = tx.send(ScanMessage::AllDone);
     });
+}
+
+/// 每个 Tab 扫描的 watchdog 超时。
+///
+/// AppUninstall / DuplicateFiles 遍历面大（全量 Containers / 全盘大文件），
+/// 给更宽裕的时限；其余 Tab 60 秒足够。超时只发生在目录 IO 异常（如损坏
+/// 的 APFS 目录导致 readdir 永久阻塞）时，正常机器不会走到。
+fn scan_timeout_for(tab: Tab) -> std::time::Duration {
+    match tab {
+        Tab::AppUninstall | Tab::DuplicateFiles => std::time::Duration::from_secs(120),
+        _ => std::time::Duration::from_secs(60),
+    }
 }
 
 /// 将扫描结果按大小降序分批发送，实现增量显示
