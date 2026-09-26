@@ -2039,7 +2039,7 @@ exit 0
         script_content.push_str(&current_user.replace("'", "'\\''"));
         script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
         script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
-        script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
+        script_content.push_str("  /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
         script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
         script_content.push_str("}\n\n");
 
@@ -2535,7 +2535,7 @@ exit 0
         script_content.push_str(&current_user.replace("'", "'\\''"));
         script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
         script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
-        script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
+        script_content.push_str("  /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
         script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
         script_content.push_str("}\n\n");
 
@@ -3547,7 +3547,7 @@ pub(crate) fn cli_sudo_delete_touchid(items: Vec<(String, String)>) -> CliSudoRe
     script_content.push_str(&current_user.replace("'", "'\\''"));
     script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
     script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
-    script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
+    script_content.push_str("  /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
     script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
     script_content.push_str("}\n\n");
 
