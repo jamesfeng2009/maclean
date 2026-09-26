@@ -3,7 +3,9 @@
 //! 支持 `maclean scan`、`maclean clean`、`maclean check-disk` 等子命令。
 //! 无参数时返回 None，由 main 启动 GUI。
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "macos")]
 use crate::scanner::apfs::ApfsScanner;
@@ -15,9 +17,82 @@ use crate::scanner::dev_cache::DevCacheScanner;
 use crate::scanner::large_files::LargeFileScanner;
 use crate::scanner::optimize::OptimizeScanner;
 #[cfg(target_os = "macos")]
+use crate::scanner::startup::{
+    disable_startup_item, enable_startup_item, restore_origin_from_backup, scan_startup_items,
+    StartupItem,
+};
 use crate::scanner::uninstall::UninstallScanner;
 use crate::scanner::{format_size, Scanner};
 use crate::scanner::{Recommend, ScanItem};
+
+// =========================================================================
+//  语义退出码（供脚本/CI 消费，稳定契约）
+//
+//  0 成功；1 通用失败；2 JSON 序列化失败（历史保留）；
+//  4 需确认（非交互环境执行删除未带 --yes）；
+//  7 用户取消（Ctrl+C）；8 带警告完成（clean 有失败/被拦截项）。
+// =========================================================================
+pub const EXIT_OK: u8 = 0;
+pub const EXIT_FAILURE: u8 = 1;
+pub const EXIT_SERIALIZE: u8 = 2;
+pub const EXIT_CONFIRM_REQUIRED: u8 = 4;
+pub const EXIT_CANCELLED: u8 = 7;
+pub const EXIT_WARNINGS: u8 = 8;
+
+/// 取消标志：Ctrl+C 置位，扫描/删除循环检查后以 7 退出
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+pub fn cancelled() -> bool {
+    CANCELLED.load(Ordering::Relaxed)
+}
+
+/// 安装 Ctrl+C 处理器（CLI 专用；GUI 不安装，避免抢信号）
+pub fn install_cancel_handler() {
+    let _ = ctrlc::set_handler(|| {
+        CANCELLED.store(true, Ordering::Relaxed);
+    });
+}
+
+/// 输出格式（机器可读输出永不包含 ANSI 颜色）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    Human,
+    Json,
+    Jsonl,
+}
+
+/// 人类可读输出的颜色控制
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+fn color_enabled(color: ColorMode, format: OutputFormat) -> bool {
+    if format != OutputFormat::Human || std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    match color {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => std::io::stdout().is_terminal(),
+    }
+}
+
+/// ANSI 上色（仅 human 且启用时生效）
+fn paint(enabled: bool, code: &str, s: &str) -> String {
+    if enabled {
+        format!("\x1b[{code}m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+
+/// 进度条是否启用：默认开，--no-progress 或 stderr 非终端时关
+fn progress_enabled(no_progress: bool) -> bool {
+    !no_progress && std::io::stderr().is_terminal()
+}
 
 /// maclean — macOS 磁盘清理工具
 #[derive(Parser, Debug)]
@@ -27,19 +102,30 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// 以 JSON 输出（供脚本/监控系统消费）
+    /// 以 JSON 输出（供脚本/监控系统消费；等价 --format json）
     ///
-    /// 结构化输出是稳定契约：字段名与语义不随文案翻译改变。人类可读的表格
-    /// 输出不受影响（有测试锁住）。
+    /// 结构化输出是稳定契约：字段名与语义不随文案翻译改变。
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// 输出格式：human / json / jsonl（jsonl 流式，每行一个对象）
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
+    pub format: OutputFormat,
+
+    /// 人类可读输出的颜色：auto / always / never（机器格式恒无色）
+    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
+    pub color: ColorMode,
+
+    /// 关闭 stderr 进度条（脚本/日志场景）
+    #[arg(long, global = true)]
+    pub no_progress: bool,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// 扫描可清理项目
     Scan {
-        /// 指定扫描的 Tab（dev-cache, large-files, app-cache, app-data, app-uninstall, optimize, apfs）
+        /// 指定扫描的 Tab（dev-cache, large-files, app-cache, app-data, app-uninstall, optimize, apfs, dup-files, custom-rules）
         #[arg(long)]
         tab: Option<String>,
 
@@ -49,6 +135,9 @@ pub enum Commands {
     },
 
     /// 清理安全可删除的项目
+    ///
+    /// 默认只预览不删除；加 --yes 才实际执行。定时任务（--scheduled）
+    /// 视为用户已确认（无人值守自动清理，行为不变）。
     Clean {
         /// 指定清理的 Tab
         #[arg(long)]
@@ -58,9 +147,13 @@ pub enum Commands {
         #[arg(long)]
         safe_only: bool,
 
-        /// 试运行，只显示会清理什么，不实际删除
-        #[arg(long)]
+        /// 只预览将清理的项目，不实际删除
+        #[arg(long, conflicts_with = "yes")]
         dry_run: bool,
+
+        /// 确认执行删除（非交互环境必须显式携带，否则拒绝执行）
+        #[arg(long, conflicts_with = "dry_run")]
+        yes: bool,
 
         /// 由系统定时任务调用（C-3）：执行后把 schedule_last_run 记为当前时间
         ///
@@ -85,8 +178,12 @@ pub enum Commands {
         days: Option<u32>,
     },
 
-    /// 检查磁盘空间使用情况
-    CheckDisk,
+    /// 检查磁盘空间使用情况；--breakdown 输出分类占比
+    CheckDisk {
+        /// 扫描各缓存类别并按分类输出磁盘占用占比（P2 口径）
+        #[arg(long)]
+        breakdown: bool,
+    },
 
     /// 列出所有可用的扫描类别
     List,
@@ -119,42 +216,95 @@ pub enum Commands {
         /// 清单 id（`maclean backups` 输出的第一列）
         id: String,
     },
+
+    /// macOS 启动项管理（LaunchAgents / LaunchDaemons）
+    Startup {
+        #[command(subcommand)]
+        action: StartupAction,
+    },
+
+    /// 系统优化/维护任务
+    Optimize {
+        #[command(subcommand)]
+        action: OptimizeAction,
+    },
 }
 
-/// 运行 CLI 命令，返回是否处理了 CLI（true=已处理，应退出；false=无命令，启动 GUI）
-pub fn run_cli() -> bool {
+#[derive(Subcommand, Debug)]
+pub enum StartupAction {
+    /// 列出启动项（含已加载状态）
+    List,
+    /// 禁用启动项（plist 移入备份目录，可逆）
+    Disable {
+        /// launchd Label（`maclean startup list` 第一列）
+        label: String,
+    },
+    /// 启用（从备份目录恢复 plist）
+    Enable {
+        /// launchd Label
+        label: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OptimizeAction {
+    /// 列出全部优化/维护任务（含风险等级）
+    ListTasks,
+    /// 执行指定任务（非 Safe 任务需 --yes 确认）
+    Run {
+        /// 任务 id（`maclean optimize list-tasks` 第一列）
+        task: String,
+        /// 确认执行非 Safe 任务
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// 运行 CLI 命令，返回退出码（无子命令时返回 None 由 main 启动 GUI）
+pub fn run_cli() -> Option<u8> {
     let cli = Cli::parse();
 
     match cli.command {
-        None => false, // 无子命令，启动 GUI
+        None => None, // 无子命令，启动 GUI
         Some(cmd) => {
-            run_command(cmd, cli.json);
-            true
+            install_cancel_handler();
+            // 兼容：--json 等价 --format json
+            let format = if cli.json {
+                OutputFormat::Json
+            } else {
+                cli.format
+            };
+            let color_on = color_enabled(cli.color, format);
+            Some(run_command(cmd, format, color_on, cli.no_progress))
         }
     }
 }
 
-fn run_command(cmd: Commands, json: bool) {
+fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bool) -> u8 {
+    let prog = progress_enabled(no_progress);
     match cmd {
-        Commands::Scan { tab, deep } => cmd_scan(tab, deep, json),
+        Commands::Scan { tab, deep } => cmd_scan(tab, deep, format, color, prog),
         Commands::Clean {
             tab,
             safe_only,
             dry_run,
             scheduled,
-        } => cmd_clean(tab, safe_only, dry_run, scheduled, json),
+            yes,
+        } => cmd_clean(tab, safe_only, dry_run, scheduled, yes, format, color, prog),
         Commands::Schedule {
             install,
             remove,
             days,
-        } => cmd_schedule(install, remove, days, json),
-        Commands::CheckDisk => cmd_check_disk(json),
-        Commands::List => cmd_list(json),
+        } => cmd_schedule(install, remove, days, format),
+        Commands::CheckDisk { breakdown } => cmd_check_disk(breakdown, format),
+        Commands::List => cmd_list(format),
         // 日志是给人看的，不做 JSON
         Commands::Log { tail, open } => cmd_log(tail, open),
-        Commands::Backups { restorable_only } => cmd_backups(restorable_only, json),
+        Commands::Backups { restorable_only } => cmd_backups(restorable_only, format),
         // 还原结果涉及逐个路径的成功/失败，JSON 更有用（脚本可据此重试）
-        Commands::Restore { id } => cmd_restore(&id, json),
+        Commands::Restore { id } => cmd_restore(&id, format),
+        Commands::Startup { action } => cmd_startup(action, format, color),
+        Commands::Optimize { action } => cmd_optimize(action, format, color),
     }
 }
 
@@ -165,8 +315,15 @@ fn run_command(cmd: Commands, json: bool) {
 //  绝不能"表格和 JSON 各扫一遍" —— 那两份结果可能对不上。
 // =========================================================================
 
-fn print_json<T: serde::Serialize>(value: &T) {
-    match serde_json::to_string_pretty(value) {
+fn emit_json<T: serde::Serialize>(value: &T, format: OutputFormat, pretty: bool) {
+    let s = if format == OutputFormat::Jsonl {
+        serde_json::to_string(value)
+    } else if pretty {
+        serde_json::to_string_pretty(value)
+    } else {
+        serde_json::to_string(value)
+    };
+    match s {
         Ok(s) => println!("{}", s),
         Err(e) => {
             // 序列化失败不能静默：调用方拿不到任何输出会以为"没有可清理项"
@@ -174,7 +331,7 @@ fn print_json<T: serde::Serialize>(value: &T) {
                 "{{\"error\": \"json serialization failed\", \"detail\": \"{}\"}}",
                 e
             );
-            std::process::exit(2);
+            std::process::exit(EXIT_SERIALIZE as i32);
         }
     }
 }
@@ -191,6 +348,8 @@ const ALL_TABS: &[(&str, &str)] = &[
     ("app-uninstall", "App卸载"),
     ("optimize", "系统优化"),
     ("apfs", "APFS快照"),
+    ("dup-files", "重复文件"),
+    ("custom-rules", "自定义规则"),
 ];
 
 /// 该扫描类别在当前平台是否有对应扫描器
@@ -201,6 +360,8 @@ const ALL_TABS: &[(&str, &str)] = &[
 fn tab_supported(name: &str) -> bool {
     match name {
         "apfs" => cfg!(target_os = "macos"),
+        // dup-files 只实现了 macOS 扫描器；custom-rules 全平台
+        "dup-files" => cfg!(target_os = "macos"),
         _ => true,
     }
 }
@@ -218,6 +379,13 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
         "optimize" => OptimizeScanner::new().scan().items,
         #[cfg(target_os = "macos")]
         "apfs" => ApfsScanner::new().scan().items,
+        #[cfg(target_os = "macos")]
+        "dup-files" => {
+            crate::scanner::dup_files::DuplicateFileScanner::new()
+                .scan()
+                .items
+        }
+        "custom-rules" => crate::rules::RuleScanner::new().scan().items,
         // Windows 扫描器
         #[cfg(target_os = "windows")]
         "app-cache" => {
@@ -245,7 +413,7 @@ fn scan_tab(tab_name: &str) -> Vec<ScanItem> {
 //  子命令实现
 // =========================================================================
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct JsonItem {
     path: String,
     size_bytes: u64,
@@ -256,7 +424,7 @@ struct JsonItem {
     recommend: Recommend,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct JsonTab {
     key: String,
     label: String,
@@ -276,7 +444,7 @@ struct JsonScan {
     total_size: u64,
 }
 
-fn cmd_scan(tab: Option<String>, deep: bool, json: bool) {
+fn cmd_scan(tab: Option<String>, deep: bool, format: OutputFormat, color: bool, prog: bool) -> u8 {
     let tabs: Vec<(String, String)> = if deep {
         ALL_TABS
             .iter()
@@ -300,8 +468,15 @@ fn cmd_scan(tab: Option<String>, deep: bool, json: bool) {
     let mut total_count: usize = 0;
     // JSON 与表格共用同一份扫描结果，绝不各扫一遍
     let mut out_tabs: Vec<JsonTab> = Vec::new();
+    let total_tabs = tabs.len();
 
-    for (tab_key, tab_label) in &tabs {
+    for (idx, (tab_key, tab_label)) in tabs.iter().enumerate() {
+        if cancelled() {
+            return EXIT_CANCELLED;
+        }
+        if prog {
+            eprint!("\r  扫描 {}/{} — {} ...", idx + 1, total_tabs, tab_label);
+        }
         let start = std::time::Instant::now();
         let items = scan_tab(tab_key);
         let elapsed = start.elapsed();
@@ -352,74 +527,76 @@ fn cmd_scan(tab: Option<String>, deep: bool, json: bool) {
         total_size += tab_total;
         total_count += items.len();
 
-        if json {
+        if format == OutputFormat::Jsonl {
+            // 流式：每个 Tab 扫完立即输出一行，脚本可边收边处理
+            emit_json(
+                &JsonScan {
+                    command: "scan",
+                    tabs: vec![out_tabs.last().unwrap().clone()],
+                    total_count: 0,
+                    total_size: 0,
+                },
+                format,
+                false,
+            );
+            continue;
+        }
+        if format == OutputFormat::Json {
             continue;
         }
 
         println!("\n╔══════════════════════════════════════════╗");
         println!("║  扫描 — {} ({})", tab_label, tab_key);
         println!("╚══════════════════════════════════════════╝");
-
-        if items.is_empty() {
-            println!("  （无可清理项目）\n");
-            continue;
-        }
-
-        println!("  发现 {} 项，总计 {}", items.len(), format_size(tab_total));
         println!(
-            "  其中安全可清理：{} 项，{}",
+            "  找到 {} 项，共 {}（安全 {} 项，{}）",
+            items.len(),
+            format_size(tab_total),
             safe_count,
             format_size(safe_size)
         );
-        println!("  耗时 {:.2}s\n", elapsed.as_secs_f64());
-
-        // 列出前 20 项
-        let display_count = items.len().min(20);
-        for (i, item) in items.iter().take(display_count).enumerate() {
-            let recommend_icon = match item.recommend {
-                Recommend::Safe => "✅",
-                Recommend::CacheOnly => "🧹",
-                Recommend::Caution => "⚠️",
-                Recommend::Advanced => "🔴",
+        if items.is_empty() {
+            println!("  （无）");
+        }
+        for item in &items {
+            let mark = if item.recommend.default_selected() && item.deletable {
+                paint(color, "32", "✓")
+            } else {
+                " ".to_string()
             };
-            let deletable = if item.deletable { "" } else { " 🔒" };
-            println!(
-                "  {:>3}. {} [{}] {}{}",
-                i + 1,
-                recommend_icon,
-                format_size(item.size_bytes),
-                item.path,
-                deletable
-            );
-            if !item.description.is_empty() {
-                println!("       └─ {}", item.description);
-            }
-        }
-
-        if items.len() > display_count {
-            println!("  ... 还有 {} 项未显示", items.len() - display_count);
+            let prefix = if item.deletable {
+                format!("[{}]", format_size(item.size_bytes))
+            } else {
+                format!(
+                    "[-] {}",
+                    if item.undeletable_reason.is_empty() {
+                        "不可删除"
+                    } else {
+                        &item.undeletable_reason
+                    }
+                )
+            };
+            println!("  {} {} {}", mark, prefix, item.path);
         }
     }
 
-    if json {
-        print_json(&JsonScan {
-            command: "scan",
-            tabs: out_tabs,
-            total_count,
-            total_size,
-        });
-        return;
+    if prog {
+        eprint!("\r\x1b[K");
     }
 
-    if tabs.len() > 1 {
-        println!("\n═══════════════════════════════════════════");
-        println!(
-            "  合计：{} 项，总计 {}",
-            total_count,
-            format_size(total_size)
+    if format == OutputFormat::Json {
+        emit_json(
+            &JsonScan {
+                command: "scan",
+                tabs: out_tabs,
+                total_count,
+                total_size,
+            },
+            format,
+            true,
         );
-        println!("═══════════════════════════════════════════");
     }
+    EXIT_OK
 }
 
 #[derive(serde::Serialize)]
@@ -429,33 +606,51 @@ struct JsonPath {
 }
 
 #[derive(serde::Serialize)]
+struct JsonCleanTab {
+    key: String,
+    label: String,
+    /// 预览模式下列出的计划删除项
+    planned: Vec<JsonPath>,
+    /// 实际删除的路径
+    deleted: Vec<String>,
+    failed: Vec<JsonFailure>,
+    rejected: Vec<JsonFailure>,
+    skipped_snapshots: usize,
+    /// true = 本次是预览（未删除任何文件）
+    preview: bool,
+}
+
+#[derive(serde::Serialize)]
 struct JsonFailure {
     path: String,
     reason: String,
 }
 
 #[derive(serde::Serialize)]
-struct JsonCleanTab {
-    key: String,
-    label: String,
-    planned: Vec<JsonPath>,
-    deleted: Vec<String>,
-    failed: Vec<JsonFailure>,
-    rejected: Vec<JsonFailure>,
-    skipped_snapshots: usize,
-}
-
-#[derive(serde::Serialize)]
 struct JsonClean {
     command: &'static str,
+    /// 预览模式（未确认执行）
+    preview: bool,
     dry_run: bool,
+    yes: bool,
+    scheduled: bool,
     tabs: Vec<JsonCleanTab>,
     success: usize,
     failed: usize,
     rejected: usize,
 }
 
-fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: bool, json: bool) {
+#[allow(clippy::too_many_arguments)]
+fn cmd_clean(
+    tab: Option<String>,
+    safe_only: bool,
+    dry_run: bool,
+    scheduled: bool,
+    yes: bool,
+    format: OutputFormat,
+    color: bool,
+    prog: bool,
+) -> u8 {
     // C-3：定时任务跑完就记账，设置页才显示得出"上次执行"时间
     if scheduled {
         let mut cfg = crate::config::load_config();
@@ -464,6 +659,18 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: boo
             .map(|d| d.as_secs())
             .unwrap_or(0);
         crate::config::save_config(&cfg);
+    }
+
+    // 安全确认（P0）：
+    // - 定时任务（--scheduled）视为用户已在 GUI 配置时确认 → 无人值守自动执行
+    // - --yes 显式确认执行
+    // - 否则一律预览（不删除）；非交互终端（stdin 非 TTY）时拒绝执行并退出码 4
+    let confirmed = yes || scheduled;
+    let preview = dry_run || !confirmed;
+    if !confirmed && !dry_run && !std::io::stdin().is_terminal() {
+        // 非交互环境：不给预览的机会直接要求 --yes（脚本必须显式确认删除意图）
+        eprintln!("非交互环境执行删除必须显式携带 --yes（仅预览请加 --dry-run）");
+        return EXIT_CONFIRM_REQUIRED;
     }
 
     let tabs: Vec<String> = if let Some(t) = &tab {
@@ -478,6 +685,9 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: boo
     let mut g_rejected = 0usize;
 
     for tab_key in &tabs {
+        if cancelled() {
+            return EXIT_CANCELLED;
+        }
         let tab_label = ALL_TABS
             .iter()
             .find(|(k, _)| *k == tab_key.as_str())
@@ -496,77 +706,80 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: boo
         };
 
         if to_clean.is_empty() {
-            if !json {
+            if format == OutputFormat::Human {
                 println!("  （无可清理项目）");
             }
             continue;
         }
 
         let clean_size: u64 = to_clean.iter().map(|i| i.size_bytes).sum();
-        let mut rec = JsonCleanTab {
-            key: tab_key.clone(),
-            label: tab_label.to_string(),
-            planned: to_clean
-                .iter()
-                .map(|i| JsonPath {
-                    path: i.path.clone(),
-                    size_bytes: i.size_bytes,
-                })
-                .collect(),
-            deleted: Vec::new(),
-            failed: Vec::new(),
-            rejected: Vec::new(),
-            skipped_snapshots: 0,
-        };
 
-        if !json {
+        if format == OutputFormat::Human {
             println!("\n🧹 清理 {} ({})", tab_label, tab_key);
-            println!(
-                "  将清理 {} 项，释放 {}",
-                to_clean.len(),
-                format_size(clean_size)
-            );
+            if preview {
+                println!(
+                    "  [预览] 将清理 {} 项，释放 {}（加 --yes 执行）",
+                    to_clean.len(),
+                    format_size(clean_size)
+                );
+            } else {
+                println!(
+                    "  将清理 {} 项，释放 {}",
+                    to_clean.len(),
+                    format_size(clean_size)
+                );
+            }
         }
 
-        if dry_run {
-            if json {
+        // 预览模式：列出计划项，不删除
+        if preview {
+            let rec = JsonCleanTab {
+                key: tab_key.clone(),
+                label: tab_label.to_string(),
+                planned: to_clean
+                    .iter()
+                    .map(|i| JsonPath {
+                        path: i.path.clone(),
+                        size_bytes: i.size_bytes,
+                    })
+                    .collect(),
+                deleted: Vec::new(),
+                failed: Vec::new(),
+                rejected: Vec::new(),
+                skipped_snapshots: 0,
+                preview: true,
+            };
+            if format == OutputFormat::Jsonl {
+                emit_json(&rec, format, false);
+            } else if format == OutputFormat::Json {
                 out.push(rec);
-                continue;
-            }
-            println!("  [dry-run] 未实际删除，以下为将被清理的项目：");
-            for item in &to_clean {
-                println!("    - [{}] {}", format_size(item.size_bytes), item.path);
+            } else {
+                for item in &to_clean {
+                    println!("    - [{}] {}", format_size(item.size_bytes), item.path);
+                }
             }
             continue;
         }
 
-        // 删除前复做安全校验（与 GUI 同一层）
-        //
-        // 扫描时判过 `deletable`，但从扫描到删除有时间差：路径可能已被替换
-        // （TOCTOU），也可能被换成符号链接 —— 对软链执行 remove_dir_all 会
-        // 顺着链接删到目标之外。GUI 侧 ops::sanitize_before_delete 一直在做
-        // 这件事，CLI 原先完全跳过，等于绕过整层防护直接删。
+        // 删除前复做安全校验（与 GUI 同一层 TOCTOU 防护）
         let pairs: Vec<(String, String)> = to_clean
             .iter()
             .filter(|i| !i.path.starts_with("snapshot:"))
             .map(|i| (i.path.clone(), i.category.clone()))
             .collect();
         let skipped_snapshots = to_clean.len() - pairs.len();
-        rec.skipped_snapshots = skipped_snapshots;
 
         let (allowed, rejected) = crate::ops::sanitize_before_delete(pairs, false);
-        rec.rejected = rejected
-            .iter()
-            .map(|(p, _c, r)| JsonFailure {
-                path: p.clone(),
-                reason: r.clone(),
-            })
-            .collect();
         g_rejected += rejected.len();
 
-        if !json {
+        if format == OutputFormat::Human {
             for (path, _category, reason) in &rejected {
-                println!("  🛡️  已拦截 {} — {}", path, reason);
+                println!(
+                    "  {} {} — {}",
+                    paint(color, "33", "🛡️  已拦截"),
+                    path,
+                    reason
+                );
             }
             if skipped_snapshots > 0 {
                 println!(
@@ -576,10 +789,37 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: boo
             }
         }
 
-        // 实际删除
+        let mut rec = JsonCleanTab {
+            key: tab_key.clone(),
+            label: tab_label.to_string(),
+            planned: Vec::new(),
+            deleted: Vec::new(),
+            failed: rejected
+                .iter()
+                .map(|(p, _c, r)| JsonFailure {
+                    path: p.clone(),
+                    reason: r.clone(),
+                })
+                .collect(),
+            rejected: Vec::new(),
+            skipped_snapshots,
+            preview: false,
+        };
+
+        // 实际删除（带进度与取消检查）
         let mut success = 0usize;
         let mut failed = 0usize;
+        let total = allowed.len();
+        let mut done = 0usize;
+        #[allow(clippy::explicit_counter_loop)]
         for (path, _category) in &allowed {
+            if cancelled() {
+                return EXIT_CANCELLED;
+            }
+            if prog && total > 0 {
+                eprint!("\r  删除 {}/{} ...", done + 1, total);
+            }
+            done += 1;
             let result = if std::path::Path::new(path).is_dir() {
                 std::fs::remove_dir_all(path)
             } else {
@@ -590,8 +830,20 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: boo
                 Ok(_) => {
                     rec.deleted.push(path.clone());
                     success += 1;
-                    if !json {
-                        println!("  ✅ {}", path);
+                    if format == OutputFormat::Jsonl {
+                        emit_json(
+                            &JsonlCleanEvent {
+                                event: "deleted",
+                                tab: tab_key.clone(),
+                                path: path.clone(),
+                                size_bytes: 0,
+                                reason: String::new(),
+                            },
+                            format,
+                            false,
+                        );
+                    } else if format == OutputFormat::Human {
+                        println!("  {} {}", paint(color, "32", "✅"), path);
                     }
                 }
                 Err(e) => {
@@ -600,16 +852,31 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: boo
                         reason: e.to_string(),
                     });
                     failed += 1;
-                    if !json {
-                        println!("  ❌ {} — {}", path, e);
+                    if format == OutputFormat::Jsonl {
+                        emit_json(
+                            &JsonlCleanEvent {
+                                event: "failed",
+                                tab: tab_key.clone(),
+                                path: path.clone(),
+                                size_bytes: 0,
+                                reason: e.to_string(),
+                            },
+                            format,
+                            false,
+                        );
+                    } else if format == OutputFormat::Human {
+                        println!("  {} {} — {}", paint(color, "31", "❌"), path, e);
                     }
                 }
             }
         }
+        if prog {
+            eprint!("\r\x1b[K");
+        }
         g_success += success;
         g_failed += failed;
 
-        if !json {
+        if format == OutputFormat::Human {
             println!(
                 "\n  完成：成功 {}，失败 {}，安全拦截 {}",
                 success,
@@ -620,16 +887,40 @@ fn cmd_clean(tab: Option<String>, safe_only: bool, dry_run: bool, scheduled: boo
         out.push(rec);
     }
 
-    if json {
-        print_json(&JsonClean {
-            command: "clean",
-            dry_run,
-            tabs: out,
-            success: g_success,
-            failed: g_failed,
-            rejected: g_rejected,
-        });
+    if format == OutputFormat::Json {
+        emit_json(
+            &JsonClean {
+                command: "clean",
+                preview,
+                dry_run,
+                yes,
+                scheduled,
+                tabs: out,
+                success: g_success,
+                failed: g_failed,
+                rejected: g_rejected,
+            },
+            format,
+            true,
+        );
     }
+
+    if cancelled() {
+        EXIT_CANCELLED
+    } else if g_failed > 0 || g_rejected > 0 {
+        EXIT_WARNINGS
+    } else {
+        EXIT_OK
+    }
+}
+
+#[derive(serde::Serialize)]
+struct JsonlCleanEvent {
+    event: &'static str,
+    tab: String,
+    path: String,
+    size_bytes: u64,
+    reason: String,
 }
 
 #[derive(serde::Serialize)]
@@ -644,17 +935,38 @@ struct JsonDisk {
     alert_level: u8,
 }
 
-fn cmd_check_disk(json: bool) {
+#[derive(serde::Serialize)]
+struct JsonBreakdownEntry {
+    category: String,
+    size_bytes: u64,
+    /// 占总扫描结果的比例（0-100）
+    percent: f64,
+    count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct JsonBreakdown {
+    command: &'static str,
+    tabs_scanned: Vec<String>,
+    total_bytes: u64,
+    total_count: usize,
+    categories: Vec<JsonBreakdownEntry>,
+}
+
+fn cmd_check_disk(breakdown: bool, format: OutputFormat) -> u8 {
+    if breakdown {
+        return cmd_check_disk_breakdown(format);
+    }
     let (total, free) = get_disk_info();
     if total == 0 {
-        if json {
+        if format != OutputFormat::Human {
             // 拿不到磁盘信息时必须是**结构化的错误**，不能静默成功：
             // 监控脚本看到 exit 0 且字段全 0 会以为"磁盘空了"
             eprintln!("{{\"command\": \"check-disk\", \"error\": \"unable to read disk info\"}}");
-            std::process::exit(1);
+            return EXIT_FAILURE;
         }
         println!("❌ 无法获取磁盘信息");
-        return;
+        return EXIT_FAILURE;
     }
 
     let used = total - free;
@@ -672,17 +984,21 @@ fn cmd_check_disk(json: bool) {
         (0, "🟢", "正常：磁盘空间充足")
     };
 
-    if json {
-        print_json(&JsonDisk {
-            command: "check-disk",
-            total_bytes: total,
-            used_bytes: used,
-            free_bytes: free,
-            used_percent: used_pct,
-            free_percent: free_pct,
-            alert_level: level,
-        });
-        return;
+    if format != OutputFormat::Human {
+        emit_json(
+            &JsonDisk {
+                command: "check-disk",
+                total_bytes: total,
+                used_bytes: used,
+                free_bytes: free,
+                used_percent: used_pct,
+                free_percent: free_pct,
+                alert_level: level,
+            },
+            format,
+            true,
+        );
+        return EXIT_OK;
     }
 
     println!("╔══════════════════════════════════════════╗");
@@ -706,6 +1022,98 @@ fn cmd_check_disk(json: bool) {
     }
 
     println!("╚══════════════════════════════════════════╝");
+    EXIT_OK
+}
+
+/// 分类占比总览（P2 口径，与 GUI 磁盘分析器的 aggregate_category_sizes 一致）
+fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
+    // 扫描主要缓存类别（跳过 optimize 这类"操作型"Tab）
+    let keys = [
+        "dev-cache",
+        "large-files",
+        "app-cache",
+        "app-data",
+        "custom-rules",
+        "dup-files",
+    ];
+    let mut categories: Vec<(String, u64)> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    let mut total_count: usize = 0;
+    let mut scanned: Vec<String> = Vec::new();
+
+    for key in keys {
+        if !tab_supported(key) {
+            continue;
+        }
+        let items = scan_tab(key);
+        scanned.push(key.to_string());
+        total_count += items.len();
+        for item in &items {
+            total_bytes += item.size_bytes;
+            if let Some(entry) = categories.iter_mut().find(|(c, _)| *c == item.category) {
+                entry.1 += item.size_bytes;
+            } else {
+                categories.push((item.category.clone(), item.size_bytes));
+            }
+        }
+    }
+    categories.sort_by(|a, b| b.1.cmp(&a.1));
+    categories.retain(|(_, s)| *s > 0);
+
+    let entries: Vec<JsonBreakdownEntry> = categories
+        .iter()
+        .map(|(cat, size)| JsonBreakdownEntry {
+            category: cat.clone(),
+            size_bytes: *size,
+            percent: if total_bytes > 0 {
+                *size as f64 / total_bytes as f64 * 100.0
+            } else {
+                0.0
+            },
+            count: 0,
+        })
+        .collect();
+
+    if format != OutputFormat::Human {
+        emit_json(
+            &JsonBreakdown {
+                command: "check-disk",
+                tabs_scanned: scanned,
+                total_bytes,
+                total_count,
+                categories: entries,
+            },
+            format,
+            true,
+        );
+        return EXIT_OK;
+    }
+
+    println!("╔══════════════════════════════════════════╗");
+    println!("║        磁盘占用分类占比（扫描结果）        ║");
+    println!("╚══════════════════════════════════════════╝");
+    println!("  扫描类别: {}", scanned.join(", "));
+    println!("  共 {} 项，{}", total_count, format_size(total_bytes));
+    println!();
+    if entries.is_empty() {
+        println!("  （无分类数据）");
+        return EXIT_OK;
+    }
+    for (i, e) in entries.iter().enumerate() {
+        // 横向占比条
+        let bar_len = 30;
+        let filled = (e.percent / 100.0 * bar_len as f64).round() as usize;
+        let bar: String = "█".repeat(filled) + &"░".repeat(bar_len - filled);
+        println!(
+            "  {:>2}. {:<14} {:>9} {:>5.1}%  [{}]",
+            i + 1,
+            e.category,
+            format_size(e.size_bytes),
+            e.percent,
+            bar
+        );
+    }
+    EXIT_OK
 }
 
 #[derive(serde::Serialize)]
@@ -720,22 +1128,26 @@ struct JsonList<'a> {
     tabs: Vec<JsonListEntry<'a>>,
 }
 
-fn cmd_list(json: bool) {
+fn cmd_list(format: OutputFormat) -> u8 {
     let supported: Vec<(&str, &str)> = ALL_TABS
         .iter()
         .filter(|(k, _)| tab_supported(k))
         .map(|(k, v)| (*k, *v))
         .collect();
 
-    if json {
-        print_json(&JsonList {
-            command: "list",
-            tabs: supported
-                .iter()
-                .map(|(k, v)| JsonListEntry { key: k, label: v })
-                .collect(),
-        });
-        return;
+    if format != OutputFormat::Human {
+        emit_json(
+            &JsonList {
+                command: "list",
+                tabs: supported
+                    .iter()
+                    .map(|(k, v)| JsonListEntry { key: k, label: v })
+                    .collect(),
+            },
+            format,
+            true,
+        );
+        return EXIT_OK;
     }
 
     println!("\nmaclean 可用扫描类别：\n");
@@ -747,6 +1159,7 @@ fn cmd_list(json: bool) {
     println!("  maclean scan --deep              # 深度扫描所有类别");
     println!("  maclean clean --tab dev-cache --safe-only --dry-run  # 预览安全清理");
     println!("  maclean check-disk               # 检查磁盘空间");
+    EXIT_OK
 }
 
 // =========================================================================
@@ -772,7 +1185,7 @@ fn now_secs() -> u64 {
 }
 
 /// 查看 / 注册 / 注销定时清理任务
-fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, json: bool) {
+fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, format: OutputFormat) -> u8 {
     let mut cfg = crate::config::load_config();
 
     if let Some(d) = days {
@@ -803,21 +1216,25 @@ fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, json: bool) {
         });
     }
 
-    if json {
-        print_json(&JsonSchedule {
-            command: "schedule",
-            enabled: cfg.schedule_enabled,
-            interval_days: cfg.schedule_interval_days,
-            last_run: cfg.schedule_last_run,
-            due: crate::scheduler::is_due(
-                cfg.schedule_enabled,
-                cfg.schedule_interval_days,
-                cfg.schedule_last_run,
-                now_secs(),
-            ),
-            result,
-        });
-        return;
+    if format != OutputFormat::Human {
+        emit_json(
+            &JsonSchedule {
+                command: "schedule",
+                enabled: cfg.schedule_enabled,
+                interval_days: cfg.schedule_interval_days,
+                last_run: cfg.schedule_last_run,
+                due: crate::scheduler::is_due(
+                    cfg.schedule_enabled,
+                    cfg.schedule_interval_days,
+                    cfg.schedule_last_run,
+                    now_secs(),
+                ),
+                result,
+            },
+            format,
+            true,
+        );
+        return EXIT_OK;
     }
 
     println!("\n定时清理：\n");
@@ -844,6 +1261,7 @@ fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, json: bool) {
     println!("\n用法：");
     println!("  maclean schedule --install --days 7   # 注册每 7 天执行一次的任务");
     println!("  maclean schedule --remove             # 注销任务");
+    EXIT_OK
 }
 
 // =========================================================================
@@ -880,30 +1298,34 @@ struct JsonBackups<'a> {
 ///
 /// 顺带清掉超过保留期的旧清单：路径会复用，一个月前的"还原"很可能
 /// 把旧文件搬到一个早就被新内容占掉的路径上，留着反而制造混乱。
-fn cmd_backups(restorable_only: bool, json: bool) {
+fn cmd_backups(restorable_only: bool, format: OutputFormat) -> u8 {
     let pruned = crate::backup::prune_old();
     let mut manifests = crate::backup::list();
     if restorable_only {
         manifests.retain(|m| m.restorable_count() > 0);
     }
 
-    if json {
-        print_json(&JsonBackups {
-            command: "backups",
-            manifests: manifests
-                .iter()
-                .map(|m| JsonBackup {
-                    id: &m.id,
-                    created_at: m.created_at,
-                    platform: &m.platform,
-                    total: m.entries.len(),
-                    restorable: m.restorable_count(),
-                    total_bytes: m.total_bytes(),
-                    entries: None,
-                })
-                .collect(),
-        });
-        return;
+    if format != OutputFormat::Human {
+        emit_json(
+            &JsonBackups {
+                command: "backups",
+                manifests: manifests
+                    .iter()
+                    .map(|m| JsonBackup {
+                        id: &m.id,
+                        created_at: m.created_at,
+                        platform: &m.platform,
+                        total: m.entries.len(),
+                        restorable: m.restorable_count(),
+                        total_bytes: m.total_bytes(),
+                        entries: None,
+                    })
+                    .collect(),
+            },
+            format,
+            true,
+        );
+        return EXIT_OK;
     }
 
     println!("\n历史删除清单：\n");
@@ -932,6 +1354,7 @@ fn cmd_backups(restorable_only: bool, json: bool) {
     println!("\n用法：");
     println!("  maclean restore <清单 ID>    # 还原该清单中仍可还原的项");
     println!("  maclean backups --restorable-only   # 只看还有救的清单");
+    EXIT_OK
 }
 
 /// 把 Unix 秒渲染成固定宽度的时间串
@@ -995,31 +1418,39 @@ struct JsonRestore<'a> {
 }
 
 /// 按清单还原
-fn cmd_restore(id: &str, json: bool) {
+fn cmd_restore(id: &str, format: OutputFormat) -> u8 {
     let Some(manifest) = crate::backup::load(id) else {
-        if json {
-            print_json(&serde_json::json!({
-                "command": "restore",
-                "manifest_id": id,
-                "error": "manifest not found",
-            }));
+        if format != OutputFormat::Human {
+            emit_json(
+                &serde_json::json!({
+                    "command": "restore",
+                    "manifest_id": id,
+                    "error": "manifest not found",
+                }),
+                format,
+                true,
+            );
         } else {
             eprintln!("找不到清单 {}，用 `maclean backups` 查看可用清单", id);
         }
-        std::process::exit(1);
+        return EXIT_FAILURE;
     };
 
     let report = crate::backup::restore(id, &crate::backup::trash_dir());
 
-    if json {
-        print_json(&JsonRestore {
-            command: "restore",
-            manifest_id: id,
-            restored: &report.restored,
-            not_restorable: &report.not_restorable,
-            failed: &report.failed,
-        });
-        return;
+    if format != OutputFormat::Human {
+        emit_json(
+            &JsonRestore {
+                command: "restore",
+                manifest_id: id,
+                restored: &report.restored,
+                not_restorable: &report.not_restorable,
+                failed: &report.failed,
+            },
+            format,
+            true,
+        );
+        return EXIT_OK;
     }
 
     println!("\n还原清单 {}（共 {} 项）：\n", id, manifest.entries.len());
@@ -1036,6 +1467,11 @@ fn cmd_restore(id: &str, json: bool) {
     if report.restored.is_empty() {
         println!("\n  本次没有可还原的项。永久删除的数据无法通过清单找回。");
     }
+    if !report.failed.is_empty() {
+        EXIT_WARNINGS
+    } else {
+        EXIT_OK
+    }
 }
 
 // =========================================================================
@@ -1050,7 +1486,7 @@ fn get_disk_info() -> (u64, u64) {
 //  日志命令
 // =========================================================================
 
-fn cmd_log(tail: Option<usize>, open: bool) {
+fn cmd_log(tail: Option<usize>, open: bool) -> u8 {
     let log_dir = crate::logger::log_dir();
 
     if open {
@@ -1064,7 +1500,7 @@ fn cmd_log(tail: Option<usize>, open: bool) {
             let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
         }
         println!("已在文件管理器中打开: {}", log_dir.display());
-        return;
+        return EXIT_OK;
     }
 
     if let Some(n) = tail {
@@ -1096,6 +1532,398 @@ fn cmd_log(tail: Option<usize>, open: bool) {
         println!("\n用法:");
         println!("  maclean log --tail 50    # 查看最近 50 行日志");
         println!("  maclean log --open       # 在文件管理器中打开日志目录");
+    }
+    EXIT_OK
+}
+
+// =========================================================================
+//  Startup · macOS 启动项管理（P3 配套）
+// =========================================================================
+
+fn default_startup_backup_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".maclean/disabled_launchd")
+}
+
+#[derive(serde::Serialize)]
+struct JsonStartupItem {
+    label: String,
+    plist: String,
+    scope: String,
+    enabled: bool,
+}
+
+#[derive(serde::Serialize)]
+struct JsonStartupList {
+    command: &'static str,
+    count: usize,
+    enabled: usize,
+    items: Vec<JsonStartupItem>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonStartupResult {
+    command: &'static str,
+    action: &'static str,
+    label: String,
+    plist: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
+    let backup_root = default_startup_backup_root();
+    match action {
+        StartupAction::List => {
+            let items = scan_startup_items();
+            let enabled = items.iter().filter(|i| i.enabled).count();
+            if format != OutputFormat::Human {
+                emit_json(
+                    &JsonStartupList {
+                        command: "startup",
+                        count: items.len(),
+                        enabled,
+                        items: items
+                            .iter()
+                            .map(|i| JsonStartupItem {
+                                label: i.label.clone(),
+                                plist: i.plist.display().to_string(),
+                                scope: i.scope.clone(),
+                                enabled: i.enabled,
+                            })
+                            .collect(),
+                    },
+                    format,
+                    true,
+                );
+                return EXIT_OK;
+            }
+            println!("\n启动项（{} 项，已加载 {}）：\n", items.len(), enabled);
+            for it in &items {
+                let mark = if it.enabled {
+                    paint(color, "32", "已加载")
+                } else {
+                    paint(color, "90", "已禁用")
+                };
+                println!(
+                    "  {:<6} {:<40} [{}] {}",
+                    mark,
+                    it.label,
+                    it.scope,
+                    it.plist.display()
+                );
+            }
+            EXIT_OK
+        }
+        StartupAction::Disable { label } => {
+            let items = scan_startup_items();
+            let Some(item) = items.into_iter().find(|i| i.label == label) else {
+                if format != OutputFormat::Human {
+                    emit_json(
+                        &JsonStartupResult {
+                            command: "startup",
+                            action: "disable",
+                            label: label.clone(),
+                            plist: String::new(),
+                            ok: false,
+                            error: Some(format!("未找到启动项: {label}")),
+                        },
+                        format,
+                        true,
+                    );
+                } else {
+                    eprintln!("未找到启动项: {}", label);
+                    eprintln!("用 `maclean startup list` 查看可用 label");
+                }
+                return EXIT_FAILURE;
+            };
+            match disable_startup_item(&item, &backup_root) {
+                Ok(target) => {
+                    if format != OutputFormat::Human {
+                        emit_json(
+                            &JsonStartupResult {
+                                command: "startup",
+                                action: "disable",
+                                label,
+                                plist: target.clone(),
+                                ok: true,
+                                error: None,
+                            },
+                            format,
+                            true,
+                        );
+                    } else {
+                        println!("✅ 已禁用 {} → {}", label, target);
+                    }
+                    EXIT_OK
+                }
+                Err(e) => {
+                    if format != OutputFormat::Human {
+                        emit_json(
+                            &JsonStartupResult {
+                                command: "startup",
+                                action: "disable",
+                                label,
+                                plist: String::new(),
+                                ok: false,
+                                error: Some(e.clone()),
+                            },
+                            format,
+                            true,
+                        );
+                    } else {
+                        eprintln!("禁用失败: {e}");
+                    }
+                    EXIT_FAILURE
+                }
+            }
+        }
+        StartupAction::Enable { label } => {
+            // 从备份目录中按 Label 找（新结构 <scope>/<dir>/<file>，旧结构 <scope>/<file>）
+            let home = std::env::var("HOME").unwrap_or_default();
+            let mut found: Option<StartupItem> = None;
+            if backup_root.exists() {
+                for entry in walkdir::WalkDir::new(&backup_root)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "plist").unwrap_or(false)
+                        && crate::scanner::startup::read_label(path).as_deref()
+                            == Some(label.as_str())
+                    {
+                        match restore_origin_from_backup(path, &backup_root, &home) {
+                            Ok(item) => {
+                                found = Some(item);
+                                break;
+                            }
+                            Err(e) => {
+                                if format == OutputFormat::Human {
+                                    eprintln!("跳过 {}: {e}", path.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let Some(item) = found else {
+                if format != OutputFormat::Human {
+                    emit_json(
+                        &JsonStartupResult {
+                            command: "startup",
+                            action: "enable",
+                            label: label.clone(),
+                            plist: String::new(),
+                            ok: false,
+                            error: Some(format!("备份中未找到启动项: {label}")),
+                        },
+                        format,
+                        true,
+                    );
+                } else {
+                    eprintln!("备份中未找到启动项: {}", label);
+                    eprintln!("用 `maclean startup list` 查看当前启动项；已禁用的项在 ~/.maclean/disabled_launchd");
+                }
+                return EXIT_FAILURE;
+            };
+            match enable_startup_item(&item, &backup_root) {
+                Ok(restored) => {
+                    if format != OutputFormat::Human {
+                        emit_json(
+                            &JsonStartupResult {
+                                command: "startup",
+                                action: "enable",
+                                label,
+                                plist: restored.clone(),
+                                ok: true,
+                                error: None,
+                            },
+                            format,
+                            true,
+                        );
+                    } else {
+                        println!("✅ 已启用 {} ← {}", label, restored);
+                    }
+                    EXIT_OK
+                }
+                Err(e) => {
+                    if format != OutputFormat::Human {
+                        emit_json(
+                            &JsonStartupResult {
+                                command: "startup",
+                                action: "enable",
+                                label,
+                                plist: String::new(),
+                                ok: false,
+                                error: Some(e.clone()),
+                            },
+                            format,
+                            true,
+                        );
+                    } else {
+                        eprintln!("启用失败: {e}");
+                    }
+                    EXIT_FAILURE
+                }
+            }
+        }
+    }
+}
+
+// =========================================================================
+//  Optimize · 系统优化/维护任务（P1 配套）
+// =========================================================================
+
+#[derive(serde::Serialize)]
+struct JsonOptimizeTask {
+    id: String,
+    description: String,
+    recommend: Recommend,
+    /// 非 Safe 任务执行需要 --yes
+    needs_confirmation: bool,
+}
+
+#[derive(serde::Serialize)]
+struct JsonOptimizeList {
+    command: &'static str,
+    tasks: Vec<JsonOptimizeTask>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonOptimizeRun {
+    command: &'static str,
+    task: String,
+    ok: bool,
+    output: String,
+    error: Option<String>,
+}
+
+fn platform_tasks() -> Vec<ScanItem> {
+    // 任务名约定：macOS 用短横线命名（dns_cache_flush 等），
+    // Windows 统一 win_ 前缀（win_disable_telemetry 等）。
+    OptimizeScanner::new()
+        .scan()
+        .items
+        .into_iter()
+        .filter(|i| {
+            if cfg!(target_os = "windows") {
+                i.path.starts_with("win_")
+            } else {
+                !i.path.starts_with("win_")
+            }
+        })
+        .collect()
+}
+
+fn cmd_optimize(action: OptimizeAction, format: OutputFormat, color: bool) -> u8 {
+    match action {
+        OptimizeAction::ListTasks => {
+            let tasks = platform_tasks();
+            if format != OutputFormat::Human {
+                emit_json(
+                    &JsonOptimizeList {
+                        command: "optimize",
+                        tasks: tasks
+                            .iter()
+                            .map(|t| JsonOptimizeTask {
+                                id: t.path.clone(),
+                                description: t.description.clone(),
+                                recommend: t.recommend,
+                                needs_confirmation: !matches!(t.recommend, Recommend::Safe),
+                            })
+                            .collect(),
+                    },
+                    format,
+                    true,
+                );
+                return EXIT_OK;
+            }
+            println!("\n系统优化/维护任务（{} 项）：\n", tasks.len());
+            for t in &tasks {
+                let risk = match t.recommend {
+                    Recommend::Safe => paint(color, "32", "低风险"),
+                    Recommend::CacheOnly => paint(color, "36", "缓存"),
+                    Recommend::Caution => paint(color, "33", "需确认"),
+                    Recommend::Advanced => paint(color, "31", "高级"),
+                };
+                println!("  {:<24} {:<10} {}", t.path, risk, t.description);
+            }
+            println!(
+                "\n执行示例：maclean optimize run --task dns_cache_flush --yes（非低风险任务需 --yes）"
+            );
+            EXIT_OK
+        }
+        OptimizeAction::Run { task, yes } => {
+            let tasks = platform_tasks();
+            let Some(item) = tasks.into_iter().find(|i| i.path == task) else {
+                if format != OutputFormat::Human {
+                    emit_json(
+                        &JsonOptimizeRun {
+                            command: "optimize",
+                            task,
+                            ok: false,
+                            output: String::new(),
+                            error: Some(
+                                "未找到任务，用 `maclean optimize list-tasks` 查看".to_string(),
+                            ),
+                        },
+                        format,
+                        true,
+                    );
+                } else {
+                    eprintln!("未找到任务: {}", task);
+                    eprintln!("用 `maclean optimize list-tasks` 查看可用任务");
+                }
+                return EXIT_FAILURE;
+            };
+            // 非 Safe 任务需要显式 --yes（与 GUI 高危险项确认弹窗同口径）
+            if !matches!(item.recommend, Recommend::Safe) && !yes {
+                if format != OutputFormat::Human {
+                    emit_json(
+                        &JsonOptimizeRun {
+                            command: "optimize",
+                            task,
+                            ok: false,
+                            output: String::new(),
+                            error: Some(format!("任务 {} 非低风险，需 --yes 确认", item.path)),
+                        },
+                        format,
+                        true,
+                    );
+                } else {
+                    eprintln!("任务 {} 非低风险，需 --yes 确认", item.path);
+                }
+                return EXIT_CONFIRM_REQUIRED;
+            }
+
+            let lang_en = crate::config::load_config().lang_en;
+            #[cfg(target_os = "macos")]
+            let output = crate::ops::execute_macos_optimize_task(&item.path, lang_en);
+            #[cfg(target_os = "windows")]
+            let output = crate::ops::execute_windows_optimize_task(&item.path, lang_en);
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let output = "当前平台不支持优化任务".to_string();
+
+            if format != OutputFormat::Human {
+                emit_json(
+                    &JsonOptimizeRun {
+                        command: "optimize",
+                        task,
+                        ok: true,
+                        output: output.clone(),
+                        error: None,
+                    },
+                    format,
+                    true,
+                );
+            } else {
+                println!("{}", output);
+            }
+            EXIT_OK
+        }
     }
 }
 
@@ -1168,7 +1996,10 @@ mod tests {
         // 脚本据此判断"为什么没删掉"。
         let c = JsonClean {
             command: "clean",
+            preview: true,
             dry_run: true,
+            yes: false,
+            scheduled: false,
             tabs: vec![JsonCleanTab {
                 key: "dev-cache".to_string(),
                 label: "开发者缓存".to_string(),
@@ -1183,6 +2014,7 @@ mod tests {
                     reason: "符号链接".to_string(),
                 }],
                 skipped_snapshots: 0,
+                preview: true,
             }],
             success: 0,
             failed: 0,
@@ -1207,6 +2039,11 @@ mod tests {
             // 那是参数没给全，不是 global 失效。补占位值再断言，
             // 否则这条用例会把新命令误判成回归。
             let mut argv: Vec<String> = vec!["maclean".to_string(), name.clone()];
+            // 嵌套子命令（startup list / optimize list-tasks）：补第一个子命令名，
+            // 否则父命令因缺 action 报错，会误判成 global 失效。
+            if let Some(inner) = sub.get_subcommands().next() {
+                argv.push(inner.get_name().to_string());
+            }
             for _ in sub.get_arguments().filter(|a| a.is_required_set()) {
                 argv.push("x".to_string());
             }
@@ -1235,15 +2072,13 @@ mod tests {
         // 加 JSON 不能破坏人类可读输出：--json 分支必须早于任何 println，
         // 反之文本模式也不得混入 JSON。用源码钉住这一点。
         let src = include_str!("cli.rs");
-        let check = src[src
-            .find("fn cmd_check_disk(json: bool) {")
-            .expect("cmd_check_disk")..]
+        let check = src[src.find("fn cmd_check_disk(").expect("cmd_check_disk")..]
             .split("\nfn cmd_list(")
             .next()
             .unwrap();
         let json_at = check
-            .find("if json {")
-            .expect("cmd_check_disk 没有 json 分支");
+            .find("format != OutputFormat::Human")
+            .expect("cmd_check_disk 没有机器输出分支");
         let first_print = check.find("println!(\"╔").expect("没有表格输出");
         assert!(
             json_at < first_print,
@@ -1319,7 +2154,7 @@ mod tests {
         // 提醒他要么真做 JSON 输出，要么回来改这条用例。
         let src = include_str!("cli.rs");
         assert!(
-            src.contains("fn cmd_log(tail: Option<usize>, open: bool) {"),
+            src.contains("fn cmd_log(tail: Option<usize>, open: bool) -> u8 {"),
             "cmd_log 签名变了：要么真的实现 JSON 输出，要么回来改这条用例"
         );
     }

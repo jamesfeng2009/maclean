@@ -55,6 +55,88 @@ Touch ID 删除。早期还有一套"开 Terminal 让用户自己授权、应用
 
 ---
 
+---
+
+## 命令行（CLI）
+
+GUI 与 CLI 是**同一个二进制**：不带参数启动 GUI，带子命令走 CLI。
+脚本化场景（CI / 定时任务 / 监控）请使用结构化输出（`--json` / `--format jsonl`）
+与语义退出码。
+
+### 安装
+
+```bash
+./scripts/install-cli.sh          # cargo build --release 后安装到 ~/.local/bin
+./scripts/install-cli.sh --system # 安装到 /usr/local/bin（需 sudo）
+```
+
+### 命令总览
+
+| 命令 | 能力 | 对应 Tab |
+|---|---|---|
+| `scan [--tab <key>] [--deep]` | 扫描可清理项（含进度、可 Ctrl+C 取消） | 全部 |
+| `clean [--tab <key>] [--safe-only] [--dry-run] [--yes] [--scheduled]` | 删除（默认预览；删除走与 GUI 同一套安全闸门） | 全部 |
+| `check-disk [--breakdown]` | 磁盘空间 / 分类占比总览 | 磁盘分析 |
+| `list` | 列出可用扫描类别 | - |
+| `startup list \| disable <label> \| enable <label>` | macOS 启动项管理（可逆禁用） | 启动项 |
+| `optimize list-tasks \| run --task <id> [--yes]` | 系统优化/维护任务 | 系统优化 |
+| `schedule [--install --days N] [--remove]` | 定时清理任务管理 | 设置 |
+| `backups [--restorable-only]` | 列出历史删除清单（废纸篓还原用） | 设置 |
+| `restore <id>` | 按清单还原可恢复项 | 设置 |
+| `log [--tail N] [--open]` | 查看日志（刻意保持人类可读，不做 JSON） | - |
+
+### 安全确认（P0）
+
+`clean` 默认**只预览不删除**：
+
+- 交互终端：直接运行 `clean` 输出将删清单，不带 `--yes` 不执行。
+- 非交互终端（管道 / 脚本）：未带 `--yes` 时拒绝执行并返回退出码 `4`。
+- 定时任务 `--scheduled` 视为用户在 GUI 配置时已确认，无人值守执行。
+- 删除前会复做 `sanitize_before_delete`（TOCTOU 防护：符号链接复查、受保护
+  路径拦截、占用处理），与 GUI 完全同一层，不会因走 CLI 而绕过。
+
+### 退出码契约（脚本消费）
+
+| 码 | 含义 |
+|---|---|
+| 0 | 成功 |
+| 1 | 通用失败（找不到项、磁盘信息不可读等） |
+| 2 | JSON 序列化失败 |
+| 4 | 需要确认（非 TTY 下 `clean` 未带 `--yes`；`optimize run` 非低风险任务未带 `--yes`） |
+| 7 | Ctrl+C 取消 |
+| 8 | `clean` / `restore` 有失败项或被安全拦截项（带警告完成） |
+
+### 输出格式
+
+- 全局参数 `--json`（兼容旧脚本，等价于 `--format json`）、`--format human|json|jsonl`、
+  `--color auto|always|never`、`--no-progress`。
+- 机器可读格式下自动禁用颜色（同时尊重 `NO_COLOR`）。
+- `jsonl`：`scan` 每 Tab 一行、`clean` 每项一个 `deleted`/`failed` 事件，适合流式处理。
+
+### 示例
+
+```bash
+# 预览要删什么（不删任何东西）
+maclean clean --tab dev-cache
+
+# 确认删除（脚本里必须显式 --yes）
+maclean clean --tab dev-cache --yes --format jsonl
+
+# 磁盘占用分类占比
+maclean check-disk --breakdown --json
+
+# 启动项可逆禁用/恢复
+maclean startup list
+maclean startup disable com.example.agent
+maclean startup enable  com.example.agent
+
+# 系统维护任务
+maclean optimize list-tasks
+maclean optimize run --task dns_cache_flush --yes
+```
+
+---
+
 ## 安全模型
 
 这是会**真实删除用户文件**的程序，以下几条是硬约束，改动前先读：

@@ -74,10 +74,10 @@ fn main() -> eframe::Result {
     // 初始化日志系统（CLI 和 GUI 模式都需要）
     logger::init();
 
-    // CLI 模式：有子命令时执行并退出，无子命令时启动 GUI
-    if cli::run_cli() {
+    // CLI 模式：有子命令时执行并退出（带语义退出码），无子命令时启动 GUI
+    if let Some(code) = cli::run_cli() {
         logger::info("CLI 模式执行完毕，退出");
-        return Ok(());
+        std::process::exit(code as i32);
     }
 
     // GUI 模式

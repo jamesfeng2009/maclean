@@ -72,7 +72,7 @@ pub fn scan_startup_items() -> Vec<StartupItem> {
 }
 
 /// 读取 plist 中的 Label（兼容 XML 与二进制 plist）
-fn read_label(path: &Path) -> Option<String> {
+pub(crate) fn read_label(path: &Path) -> Option<String> {
     // 优先原生解析：文件为 XML 时直接读 <key>Label</key>
     if let Ok(bytes) = std::fs::read(path) {
         if let Ok(text) = String::from_utf8(bytes.clone()) {
@@ -130,11 +130,81 @@ fn loaded_labels() -> Vec<String> {
 }
 
 /// 禁用启动项：把 plist 移到备份目录（可逆，不 bootout 运行中服务）
+fn backup_dir_for(item: &StartupItem, backup_root: &Path) -> PathBuf {
+    // 备份路径 = backup_root/<scope>/<原目录名>/<file>
+    // 原目录名（LaunchAgents / LaunchDaemons）让 CLI 的 enable 能反推出
+    // 原 plist 路径；旧版备份没有这层子目录时由 enable 做 fallback。
+    let parent = item
+        .plist
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    backup_root.join(&item.scope).join(parent)
+}
+
+/// 从备份恢复原路径：备份路径 -> (scope, 原 plist 路径)
+pub fn restore_origin_from_backup(
+    backup_path: &Path,
+    backup_root: &Path,
+    home: &str,
+) -> Result<StartupItem, String> {
+    let Ok(rel) = backup_path.strip_prefix(backup_root) else {
+        return Err("备份文件不在备份根目录内".to_string());
+    };
+    let segs: Vec<&str> = rel.iter().filter_map(|s| s.to_str()).collect();
+    if segs.len() >= 2 {
+        let scope = segs[0].to_string();
+        let file = segs[segs.len() - 1];
+        let label =
+            read_label(backup_path).unwrap_or_else(|| file.trim_end_matches(".plist").to_string());
+        if segs.len() == 3 {
+            // 新结构：<scope>/<LaunchAgents|LaunchDaemons>/<file>
+            let dir_key = segs[1];
+            let base = if scope == "user" {
+                PathBuf::from(home).join("Library")
+            } else {
+                PathBuf::from("/Library")
+            };
+            let origin = base.join(dir_key).join(file);
+            return Ok(StartupItem {
+                label,
+                plist: origin,
+                scope,
+                enabled: false,
+            });
+        }
+        // 旧结构：<scope>/<file> —— 用文件名在三个原目录中定位
+        let home = PathBuf::from(home);
+        let candidates = [
+            home.join("Library/LaunchAgents"),
+            PathBuf::from("/Library/LaunchAgents"),
+            PathBuf::from("/Library/LaunchDaemons"),
+        ];
+        for dir in &candidates {
+            let origin = dir.join(file);
+            if origin.exists() {
+                return Ok(StartupItem {
+                    label,
+                    plist: origin,
+                    scope,
+                    enabled: false,
+                });
+            }
+        }
+        return Err(format!(
+            "无法推断原路径（旧版备份），请用 GUI 恢复: {}",
+            backup_path.display()
+        ));
+    }
+    Err("备份路径结构异常".to_string())
+}
+
 pub fn disable_startup_item(item: &StartupItem, backup_root: &Path) -> Result<String, String> {
     if !item.plist.exists() {
         return Err(format!("plist 不存在: {}", item.plist.display()));
     }
-    let backup_dir = backup_root.join(&item.scope);
+    let backup_dir = backup_dir_for(item, backup_root);
     std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
     let target = backup_dir.join(
         item.plist
@@ -150,14 +220,21 @@ pub fn disable_startup_item(item: &StartupItem, backup_root: &Path) -> Result<St
 
 /// 启用（恢复）启动项：从备份目录移回原位置
 pub fn enable_startup_item(item: &StartupItem, backup_root: &Path) -> Result<String, String> {
-    let backup_dir = backup_root.join(&item.scope);
-    let source = backup_dir.join(
-        item.plist
-            .file_name()
-            .ok_or_else(|| "无法解析文件名".to_string())?,
-    );
+    let file_name = item
+        .plist
+        .file_name()
+        .ok_or_else(|| "无法解析文件名".to_string())?;
+    // 新结构：<scope>/<原目录名>/<file>
+    let mut source = backup_dir_for(item, backup_root).join(file_name);
+    // 旧结构 fallback：<scope>/<file>
+    if !source.exists() {
+        source = backup_root.join(&item.scope).join(file_name);
+    }
     if !source.exists() {
         return Err(format!("备份中不存在: {}", source.display()));
+    }
+    if let Some(parent) = item.plist.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建原目录失败: {e}"))?;
     }
     std::fs::rename(&source, &item.plist).map_err(|e| format!("恢复失败: {e}"))?;
     Ok(item.plist.display().to_string())

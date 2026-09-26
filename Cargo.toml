@@ -20,6 +20,8 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 sha2 = "0.10"
+# CLI: Ctrl+C 优雅取消（进度中断时以退出码 7 结束）
+ctrlc = "3"
 
 [build-dependencies]
 # 把 .ico / manifest 编进 Windows exe。选它而不是 winres，是因为它支持
