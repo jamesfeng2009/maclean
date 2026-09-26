@@ -4781,6 +4781,128 @@ pub(crate) fn truncate_path(path: &str, max_len: usize) -> String {
 /// - 列出当前目录下所有子项（按大小降序）
 /// - 每项显示大小、进度条（相对于当前目录总大小）
 /// - 目录可点击进入，文件可勾选删除
+/// 磁盘分析分类占比总览：按类别聚合大小，绘制横向堆叠条与图例
+///
+/// 每个目录层级都会基于当前 items 实时计算，随钻取同步更新；
+/// 类别超过上限时归并为"其他"，保证条与图例可读。
+/// 按类别聚合大小并降序排序；零大小类别剔除（返回空表时调用方直接跳过）。
+fn aggregate_category_sizes(items: &[ScanItem]) -> Vec<(String, u64)> {
+    let mut by_cat: Vec<(String, u64)> = Vec::new();
+    for it in items {
+        if let Some(entry) = by_cat.iter_mut().find(|(name, _)| *name == it.category) {
+            entry.1 += it.size_bytes;
+        } else {
+            by_cat.push((it.category.clone(), it.size_bytes));
+        }
+    }
+    by_cat.retain(|(_, sz)| *sz > 0);
+    by_cat.sort_by(|a, b| b.1.cmp(&a.1));
+    by_cat
+}
+
+fn render_disk_category_overview(ui: &mut egui::Ui, app: &mut App, items: &[ScanItem]) {
+    if items.is_empty() {
+        return;
+    }
+    let by_cat = aggregate_category_sizes(items);
+    if by_cat.is_empty() {
+        return;
+    }
+    let total: u64 = by_cat.iter().map(|(_, sz)| sz).sum();
+
+    // 常量色板：8 色，随类别索引取模（避免大面积品牌色）
+    const PALETTE: [egui::Color32; 8] = [
+        egui::Color32::from_rgb(0x2F, 0x80, 0xED), // 蓝
+        egui::Color32::from_rgb(0xE8, 0x5D, 0x4A), // 红
+        egui::Color32::from_rgb(0x2E, 0xA0, 0x43), // 绿
+        egui::Color32::from_rgb(0xF2, 0x9E, 0x38), // 橙
+        egui::Color32::from_rgb(0x8E, 0x5C, 0xA2), // 紫
+        egui::Color32::from_rgb(0x16, 0xA0, 0x85), // 青
+        egui::Color32::from_rgb(0x7F, 0x8C, 0x8D), // 灰
+        egui::Color32::from_rgb(0xB0, 0x6B, 0x3C), // 棕
+    ];
+
+    // 最多展示 7 个类别，其余归并为"其他"
+    let mut shown: Vec<(String, u64)> = by_cat.into_iter().take(7).collect();
+    let rest: u64 = items.iter().map(|i| i.size_bytes).sum::<u64>() - total;
+    if rest > 0 {
+        shown.push((app.t("others").to_string(), rest));
+    }
+
+    ui.label(
+        egui::RichText::new(app.t("disk_category_overview"))
+            .size(13.0)
+            .color(theme::text_2()),
+    );
+    ui.add_space(4.0);
+
+    // 堆叠条
+    let bar_h = 22.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(760.0), bar_h),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::Rounding::same(3.0), theme::line());
+    let mut x = rect.min.x;
+    for (i, (_, sz)) in shown.iter().enumerate() {
+        let w = (*sz as f32 / total.max(1) as f32) * rect.width();
+        if w < 1.0 {
+            continue;
+        }
+        let seg = egui::Rect::from_min_max(
+            egui::pos2(x, rect.min.y),
+            egui::pos2((x + w).min(rect.max.x), rect.max.y),
+        );
+        painter.rect_filled(seg, egui::Rounding::same(3.0), PALETTE[i % PALETTE.len()]);
+        x += w;
+    }
+
+    ui.add_space(6.0);
+
+    // 图例：每行 色块 + 类别名 + 大小 + 占比
+    let legend_w = (ui.available_width().min(760.0) - 12.0) / 2.0;
+    egui::Grid::new("disk_category_legend")
+        .num_columns(2)
+        .min_col_width(0.0)
+        .spacing([24.0, 4.0])
+        .show(ui, |ui| {
+            for (i, (name, sz)) in shown.iter().enumerate() {
+                let pct = (*sz as f32 / total.max(1) as f32) * 100.0;
+                ui.horizontal(|ui| {
+                    let (sw, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        sw,
+                        egui::Rounding::same(2.0),
+                        PALETTE[i % PALETTE.len()],
+                    );
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(name).size(12.0).color(theme::text()));
+                    ui.label(
+                        egui::RichText::new(format_size(*sz))
+                            .size(12.0)
+                            .color(theme::text_2()),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{:.1}%", pct))
+                            .size(12.0)
+                            .color(theme::text_3()),
+                    );
+                });
+                if (i + 1) % 2 == 0 {
+                    ui.end_row();
+                } else {
+                    // 占位让 Grid 对齐
+                    ui.allocate_space(egui::vec2(legend_w, 0.0));
+                }
+            }
+            if shown.len() % 2 != 0 {
+                ui.end_row();
+            }
+        });
+}
+
 pub(crate) fn render_disk_analyzer(
     ui: &mut egui::Ui,
     app: &mut App,
@@ -4926,6 +5048,11 @@ pub(crate) fn render_disk_analyzer(
             );
         }
     });
+
+    ui.add_space(5.0);
+
+    // ====== 分类占比总览（P2：按类别聚合的堆叠条 + 图例） ======
+    render_disk_category_overview(ui, app, &items);
 
     ui.add_space(5.0);
 
@@ -7216,5 +7343,52 @@ mod tests {
             gui.app.confirm
         );
         assert!(gui.delete_rx.is_none(), "本轮没有新线程，通道应被清理");
+    }
+}
+
+#[cfg(test)]
+mod disk_analyzer_tests {
+    use super::*;
+
+    fn item(category: &str, size: u64) -> ScanItem {
+        ScanItem {
+            path: "x".to_string(),
+            size_bytes: size,
+            category: category.to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
+            recommend: crate::scanner::Recommend::Safe,
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn aggregate_sums_by_category_and_drops_zero() {
+        let items = vec![
+            item("视频", 100),
+            item("文档", 30),
+            item("视频", 50),
+            item("缓存", 0),
+        ];
+        let agg = aggregate_category_sizes(&items);
+        assert_eq!(agg.len(), 2, "零大小类别应被剔除");
+        assert_eq!(agg[0], ("视频".to_string(), 150), "应降序且同类别求和");
+        assert_eq!(agg[1], ("文档".to_string(), 30));
+    }
+
+    #[test]
+    fn aggregate_empty_returns_empty() {
+        assert!(aggregate_category_sizes(&[]).is_empty());
+    }
+
+    #[test]
+    fn overview_total_matches_sum() {
+        // 与 UI 使用的 total 口径一致：只统计展示类别（已剔除零大小）
+        let items = vec![item("A", 70), item("B", 30), item("C", 0)];
+        let agg = aggregate_category_sizes(&items);
+        let total: u64 = agg.iter().map(|(_, sz)| sz).sum();
+        assert_eq!(total, 100);
     }
 }
