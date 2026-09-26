@@ -5026,13 +5026,26 @@ pub(crate) fn render_disk_analyzer(
                         .color(theme::brand()),
                     );
                     ui.add_space(15.0);
-                    let pct = (app.scan_progress * 100.0) as u32;
-                    ui.add(
-                        egui::ProgressBar::new(app.scan_progress)
-                            .desired_width(500.0)
-                            .fill(theme::brand())
-                            .text(format!("{}%", pct)),
+                    // 不确定进度：流动动画，不显示估算百分比
+                    let bar_rect = egui::Rect::from_min_size(
+                        ui.available_rect_before_wrap().min,
+                        egui::vec2(ui.available_rect_before_wrap().width().min(500.0), 8.0),
                     );
+                    let painter = ui.painter();
+                    painter.rect_filled(bar_rect, egui::Rounding::same(4.0), theme::surface_3());
+                    let time_f = ui.ctx().input(|i| i.time) as f32;
+                    let seg_w = (bar_rect.width() * 0.35).max(40.0);
+                    let phase = (time_f * 0.6).rem_euclid(1.0);
+                    let seg_start = bar_rect.min.x + (bar_rect.width() - seg_w) * phase;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(seg_start, bar_rect.min.y),
+                            egui::vec2(seg_w, bar_rect.height()),
+                        ),
+                        egui::Rounding::same(4.0),
+                        theme::brand(),
+                    );
+                    ui.allocate_rect(bar_rect, egui::Sense::hover());
                 });
             });
         ui.ctx()
@@ -7005,7 +7018,6 @@ pub(crate) fn render_settings_item(
 pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
     let tab_idx = app.tab_index();
     let tab_title_text = tab_title(&app.tab, app);
-    let pct = (app.scan_progress * 100.0).clamp(0.0, 100.0) as u32;
     let discovered = app.results[tab_idx].len();
     let discovered_size: u64 = app.results[tab_idx].iter().map(|i| i.size_bytes).sum();
     let current_path = if app.scan_current_path.is_empty() {
@@ -7083,7 +7095,8 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
                 });
 
                 ui.add_space(16.0);
-                // 进度条
+                // 进度条：扫描阶段用流动动画（不确定进度），
+                // 不再显示估算百分比——避免"99% 却一直不动"的僵死观感
                 let progress_rect = ui.available_rect_before_wrap();
                 let bar_rect = egui::Rect::from_min_size(
                     progress_rect.min,
@@ -7091,30 +7104,42 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
                 );
                 let painter = ui.painter();
                 painter.rect_filled(bar_rect, egui::Rounding::same(4.0), theme::surface_3());
-                let fill_width = bar_rect.width() * app.scan_progress.clamp(0.0, 1.0);
-                if fill_width > 0.0 {
-                    let fill_rect = egui::Rect::from_min_size(
-                        bar_rect.min,
-                        egui::vec2(fill_width, bar_rect.height()),
-                    );
-                    painter.rect_filled(fill_rect, egui::Rounding::same(4.0), theme::brand());
-                }
+                let time_f = ui.ctx().input(|i| i.time) as f32;
+                let seg_w = (bar_rect.width() * 0.35).max(40.0);
+                let phase = (time_f * 0.6).rem_euclid(1.0);
+                let seg_start = bar_rect.min.x + (bar_rect.width() - seg_w) * phase;
+                let seg_rect = egui::Rect::from_min_size(
+                    egui::pos2(seg_start, bar_rect.min.y),
+                    egui::vec2(seg_w, bar_rect.height()),
+                );
+                painter.rect_filled(seg_rect, egui::Rounding::same(4.0), theme::brand());
                 ui.allocate_rect(bar_rect, egui::Sense::hover());
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.colored_label(
                         theme::text_2(),
-                        egui::RichText::new(format!(
-                            "{}% · {} {}",
-                            pct,
-                            app.t("scanning"),
-                            current_path
-                        ))
-                        .size(12.0)
-                        .monospace(),
+                        egui::RichText::new(format!("{} {}", app.t("scanning"), current_path))
+                            .size(12.0)
+                            .monospace(),
                     );
                 });
+
+                // 取消扫描按钮：点后置取消标志，扫描线程在各 Tab 间检查后提前退出
+                ui.add_space(8.0);
+                let cancelling = app.scan_cancel.load(std::sync::atomic::Ordering::Relaxed);
+                let cancel_label = if cancelling {
+                    app.t("cancelling_scan").to_string()
+                } else {
+                    app.t("cancel_scan").to_string()
+                };
+                if ui
+                    .add_enabled(!cancelling, egui::Button::new(cancel_label))
+                    .clicked()
+                {
+                    app.scan_cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
 
                 // 日志区域
                 ui.add_space(12.0);

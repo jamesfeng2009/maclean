@@ -257,6 +257,8 @@ pub struct App {
     pub disk_total: u64,
     /// 磁盘可用空间（字节）
     pub disk_free: u64,
+    /// 用户取消扫描标志：UI 点「取消扫描」后置 true，扫描线程在各 Tab 间检查后提前退出
+    pub scan_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 清理日志
     pub logs: Vec<String>,
     /// 系统优化 Tab：待用户确认的高风险任务索引（None=无待确认项）
@@ -547,6 +549,7 @@ impl App {
             list_index: 0,
             disk_total,
             disk_free,
+            scan_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             logs: Vec::new(),
             pending_optimize_task: None,
             startup_items: Vec::new(),
@@ -1710,6 +1713,8 @@ impl App {
                 "empty_all_clean" => "This machine is clean",
                 "empty_all_clean_desc" => "No cleanable items found",
                 "empty_scan_timeout" => "Scan timed out",
+                "cancel_scan" => "Cancel Scan",
+                "cancelling_scan" => "Stopping…",
                 "empty_scan_timeout_desc" => "Directory IO stalled and the scan was skipped; restart Mac and rescan",
                 "empty_view_log" => "View scan log",
                 "app_subitems_detail" => "Sub-items: {0}",
@@ -2163,6 +2168,8 @@ impl App {
                 "empty_all_clean" => "这台机器很干净",
                 "empty_all_clean_desc" => "未发现可清理的项目",
                 "empty_scan_timeout" => "扫描超时，未完成",
+                "cancel_scan" => "取消扫描",
+                "cancelling_scan" => "正在停止…",
                 "empty_scan_timeout_desc" => "目录 IO 异常导致扫描被跳过，可重启 Mac 后重新扫描",
                 "empty_view_log" => "查看扫描日志",
                 "app_subitems_detail" => "子项详情：{0}",

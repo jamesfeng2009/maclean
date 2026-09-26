@@ -65,6 +65,11 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
     // 清空上一次扫描结果，为增量显示做准备
     app.results[tab_idx].clear();
 
+    // 重置用户取消标志
+    app.scan_cancel
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let cancel = app.scan_cancel.clone();
+
     // 磁盘分析器：获取当前浏览路径
     let disk_path = if tab == Tab::LargeFiles {
         Some(app.disk_analyzer_current_path())
@@ -78,10 +83,15 @@ pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<Scan
     // 进度估算线程：每 200ms 发送进度更新
     // 扫描通常 2-8 秒完成，但大文件扫描可能更久，用渐近曲线估算进度
     let tx_progress = tx.clone();
+    let cancel_progress = cancel.clone();
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
+            // 用户取消：提前退出进度线程
+            if cancel_progress.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             let elapsed = start.elapsed().as_secs_f32();
             // 分段渐近曲线：
             //   0-5s: 快速上升到约 90%
@@ -301,15 +311,25 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
     // 若某 Tab 扫描 panic 没发 Done，重复项还会固化下来。
     app.reset_for_full_scan();
 
+    // 重置用户取消标志（全量扫描可被用户取消）
+    app.scan_cancel
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let cancel = app.scan_cancel.clone();
+
     let (tx, rx) = mpsc::channel();
     *scan_rx = Some(rx);
 
     // 进度估算线程
     let tx_progress = tx.clone();
+    let cancel_progress = cancel.clone();
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(200));
+            // 用户取消：提前退出进度线程
+            if cancel_progress.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             let elapsed = start.elapsed().as_secs_f32();
             let progress = if elapsed < 10.0 {
                 0.9 * (1.0 - (-elapsed / 5.0).exp())
@@ -334,6 +354,12 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
             .collect();
 
         for (tab, tab_idx) in tabs_to_scan {
+            // 用户取消：停止后续扫描
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::logger::warn("[扫描] 用户点击取消，终止全量扫描");
+                let _ = tx.send(ScanMessage::Skipped(tab_idx, "用户取消扫描".to_string()));
+                break;
+            }
             // 检查缓存
             let cache_name = match tab {
                 Tab::Overview | Tab::Settings => None,
