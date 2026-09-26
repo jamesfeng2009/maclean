@@ -1599,6 +1599,10 @@ pub(crate) fn start_delete(
                                 category.clone(),
                                 false,
                             ));
+                            crate::logger::warn(&format!(
+                                "[删除] 失败: {} — {} [{}]",
+                                path, reason, category
+                            ));
                             failed_items.lock().unwrap_or_else(|e| e.into_inner()).push((path, category));
                         }
                     }
@@ -2283,6 +2287,7 @@ exit 0
             }
             Err(e) => {
                 for (path, category) in &failed_items {
+                    crate::logger::warn(&format!("[sudo删除] 无法启动 sudo: {} — {}", path, e));
                     let _ = tx.send(DeleteMessage::Log(
                         format!(
                             "✗ {}",
@@ -2661,6 +2666,7 @@ exit 0
                         App::t_lang(lang_en, "log_touchid_cancel")
                     )));
                     for (path, category) in &failed_items {
+                        crate::logger::warn(&format!("[sudo删除] Touch ID 授权取消: {}", path));
                         let _ = tx.send(DeleteMessage::Log(
                             format!("✗ {}: {}", App::t_lang(lang_en, "log_touchid_cancel"), path),
                             path.clone(),
@@ -2703,6 +2709,7 @@ exit 0
                         let is_sip = is_core_sim || (err_permitted && !is_acl);
 
                         if is_sip {
+                            crate::logger::warn(&format!("[sudo删除] SIP 保护: {}", path));
                             let _ = tx.send(DeleteMessage::Log(
                                 format!(
                                     "🔒 {}",
@@ -2719,6 +2726,7 @@ exit 0
                                 Some(App::t_lang(lang_en, "log_sip_reason")),
                             );
                         } else if is_acl {
+                            crate::logger::warn(&format!("[sudo删除] ACL 保护: {}", path));
                             let _ = tx.send(DeleteMessage::Log(
                                 format!(
                                     "🔒 {}",
@@ -2740,6 +2748,7 @@ exit 0
                             } else {
                                 err_text.trim().to_string()
                             };
+                            crate::logger::warn(&format!("[sudo删除] 失败: {} — {}", path, detail));
                             let _ = tx.send(DeleteMessage::Log(
                                 format!(
                                     "✗ {}",
@@ -2756,6 +2765,7 @@ exit 0
             }
             Err(e) => {
                 for (path, category) in &failed_items {
+                    crate::logger::warn(&format!("[sudo删除] 无法启动 sudo: {} — {}", path, e));
                     let _ = tx.send(DeleteMessage::Log(
                         format!(
                             "✗ {}",

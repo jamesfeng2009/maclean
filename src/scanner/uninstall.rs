@@ -1388,14 +1388,23 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 }
 
                 // 普通残留目录：只要有文件就展示
+                // ACL deny 规则保护的路径（如 FamilyCircle）：任何权限都删不掉，
+                // 扫描时直接标记为不可删除，避免用户勾选后反复授权重试。
                 let size = dir_size(&path);
+                let path_str = path.to_string_lossy().to_string();
+                let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
+                let undeletable_reason = if acl_blocked {
+                    "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
+                } else {
+                    String::new()
+                };
                 items.push(ScanItem {
-                    path: path.to_string_lossy().to_string(),
+                    path: path_str,
                     size_bytes: size,
                     category: "App残留".to_string(),
                     selected: false,
-                    deletable: true,
-                    undeletable_reason: String::new(),
+                    deletable: !acl_blocked,
+                    undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend: Recommend::Advanced,
                     description: format!("{} 的残留数据（App 可能已卸载）", name),
@@ -1436,14 +1445,22 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 }
 
                 // 普通残留缓存：只要有文件就展示
+                // ACL deny 规则保护的路径：任何权限都删不掉，扫描时直接标记。
                 let size = dir_size(&path);
+                let path_str = path.to_string_lossy().to_string();
+                let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
+                let undeletable_reason = if acl_blocked {
+                    "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
+                } else {
+                    String::new()
+                };
                 items.push(ScanItem {
-                    path: path.to_string_lossy().to_string(),
+                    path: path_str,
                     size_bytes: size,
                     category: "App残留缓存".to_string(),
                     selected: false,
-                    deletable: true,
-                    undeletable_reason: String::new(),
+                    deletable: !acl_blocked,
+                    undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend: Recommend::CacheOnly,
                     description: format!("{} 的残留缓存，删除后无影响（App 可能已卸载）", name),
@@ -1479,14 +1496,21 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
 
                 let (recommend, description) = classify_leftover_plist(&name);
                 let size = path_size(path.to_string_lossy().as_ref());
+                let path_str = path.to_string_lossy().to_string();
+                let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
+                let undeletable_reason = if acl_blocked {
+                    "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
+                } else {
+                    String::new()
+                };
 
                 items.push(ScanItem {
-                    path: path.to_string_lossy().to_string(),
+                    path: path_str,
                     size_bytes: size,
                     category: "App残留配置".to_string(),
                     selected: false,
-                    deletable: true,
-                    undeletable_reason: String::new(),
+                    deletable: !acl_blocked,
+                    undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend,
                     description,
@@ -1704,13 +1728,20 @@ fn scan_vendor_subdir_leftovers(
 
         let size = dir_size(&sub_path);
         if size > min_size {
+            let sub_str = sub_path.to_string_lossy().to_string();
+            let acl_blocked = crate::safety::path_is_acl_protected(&sub_str);
+            let undeletable_reason = if acl_blocked {
+                "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
+            } else {
+                String::new()
+            };
             items.push(ScanItem {
-                path: sub_path.to_string_lossy().to_string(),
+                path: sub_str,
                 size_bytes: size,
                 category: category.to_string(),
                 selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
+                deletable: !acl_blocked,
+                undeletable_reason,
                 batch_paths: Vec::new(),
                 recommend,
                 description: format!(
