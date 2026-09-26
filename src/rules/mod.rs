@@ -358,6 +358,59 @@ mod tests {
     }
 
     #[test]
+    fn builtin_rules_full_coverage_2026_09() {
+        // P0：开发者缓存/AI/容器全覆盖 —— 总数与类别断言
+        let rules = RuleScanner::load_builtin();
+        let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+        assert!(rules.len() >= 40, "规则总数应 >= 40，实际 {}", rules.len());
+
+        // 语言/工具链全覆盖：Rust/Node/Go/Python/Mobile/IDE 各至少 1 条
+        for lang in [
+            "pnpm-store",
+            "yarn-cache",
+            "bun-cache",
+            "deno-cache",     // Node 生态
+            "go-build-cache", // Go
+            "uv-cache",
+            "poetry-cache",
+            "conda-pkgs",    // Python
+            "sccache-cache", // Rust 工具链
+            "cocoapods-cache",
+            "swiftpm-cache",
+            "flutter-cache", // Mobile
+            "vscode-cache",
+            "jetbrains-cache", // IDE
+        ] {
+            assert!(ids.contains(&lang), "缺少规则: {}", lang);
+        }
+
+        // AI 模型缓存 + 容器细分
+        for ai in ["huggingface-cache", "ollama-models", "lm-studio-models"] {
+            assert!(ids.contains(&ai), "缺少 AI 规则: {}", ai);
+        }
+        for ct in [
+            "podman-data",
+            "orbstack-data",
+            "colima-data",
+            "minikube-cache",
+        ] {
+            assert!(ids.contains(&ct), "缺少容器规则: {}", ct);
+        }
+
+        // 进程锁定规则必须带 required_stopped_processes
+        let ollama = rules.iter().find(|r| r.id == "ollama-models").unwrap();
+        assert!(
+            !ollama.required_stopped_processes.is_empty(),
+            "ollama 应锁定进程"
+        );
+        let vscode = rules.iter().find(|r| r.id == "vscode-cache").unwrap();
+        assert!(
+            !vscode.required_stopped_processes.is_empty(),
+            "vscode 应锁定进程"
+        );
+    }
+
+    #[test]
     fn invalid_rules_are_rejected_fail_closed() {
         // patterns 为空 → 拒绝
         let bad = CleanRule {

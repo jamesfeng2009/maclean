@@ -216,5 +216,572 @@
     ],
     "min_size": 52428800,
     "risk": "Advanced"
+  },
+  {
+    "id": "pnpm-store",
+    "name_key": "rule_pnpm_store",
+    "desc_key": "pnpm 全局存储目录，删除后按需重新下载",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/pnpm/store",
+      "$HOME/.local/share/pnpm/store",
+      "%LOCALAPPDATA%/pnpm/store"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "yarn-cache",
+    "name_key": "rule_yarn_cache",
+    "desc_key": "Yarn 依赖缓存（v6），删除后重新安装时自动重建",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/Yarn",
+      "$HOME/.cache/yarn",
+      "%LOCALAPPDATA%/Yarn/Cache"
+    ],
+    "patterns": [
+      "v6",
+      "v7"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "bun-cache",
+    "name_key": "rule_bun_cache",
+    "desc_key": "Bun 安装缓存，删除后按需重新下载",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.bun/install/cache",
+      "$HOME/Library/Caches/bun"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "deno-cache",
+    "name_key": "rule_deno_cache",
+    "desc_key": "Deno 模块缓存（npm/remote），删除后自动重新拉取",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/deno",
+      "$HOME/.cache/deno",
+      "%LOCALAPPDATA%/deno"
+    ],
+    "patterns": [
+      "npm",
+      "remote"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "go-build-cache",
+    "name_key": "rule_go_build_cache",
+    "desc_key": "Go 编译缓存，go build 会自动重建",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/go-build",
+      "$HOME/.cache/go-build",
+      "%LOCALAPPDATA%/go-build"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "uv-cache",
+    "name_key": "rule_uv_cache",
+    "desc_key": "uv 包缓存，删除后按需重新下载",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/uv",
+      "$HOME/.cache/uv"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "poetry-cache",
+    "name_key": "rule_poetry_cache",
+    "desc_key": "Poetry 包缓存，删除后按需重新下载",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/pypoetry",
+      "$HOME/.cache/pypoetry"
+    ],
+    "patterns": [
+      "artifacts",
+      "cache"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "conda-pkgs",
+    "name_key": "rule_conda_pkgs",
+    "desc_key": "Conda 包缓存（pkgs），体积大，删除后环境可能需重新下载依赖",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.conda/pkgs",
+      "%LOCALAPPDATA%/conda/pkgs"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "sccache-cache",
+    "name_key": "rule_sccache_cache",
+    "desc_key": "sccache 编译缓存，自动重新生成",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/sccache",
+      "$HOME/.cache/sccache"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "nuget-cache",
+    "name_key": "rule_nuget_cache",
+    "desc_key": "NuGet 包缓存，删除后重新还原",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.nuget/packages",
+      "%USERPROFILE%/.nuget/packages"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "maven-cache",
+    "name_key": "rule_maven_cache",
+    "desc_key": "Maven 本地仓库，删除后重新下载依赖",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.m2/repository",
+      "%USERPROFILE%/.m2/repository"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "cmake-cache",
+    "name_key": "rule_cmake_cache",
+    "desc_key": "CMake 包注册缓存，自动重建",
+    "category": "构建缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.cmake/packages"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "cocoapods-cache",
+    "name_key": "rule_cocoapods_cache",
+    "desc_key": "CocoaPods 仓库缓存，pod install 自动重建",
+    "category": "移动开发",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Caches/CocoaPods"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "swiftpm-cache",
+    "name_key": "rule_swiftpm_cache",
+    "desc_key": "Swift Package Manager 缓存，Xcode 自动重建",
+    "category": "移动开发",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Caches/org.swift.swiftpm"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "android-sdk-temp",
+    "name_key": "rule_android_sdk_temp",
+    "desc_key": "Android SDK 临时下载文件",
+    "category": "移动开发",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Android/sdk/.temp",
+      "%LOCALAPPDATA%/Android/Sdk/.temp"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "flutter-cache",
+    "name_key": "rule_flutter_cache",
+    "desc_key": "Flutter pub 包缓存与引擎缓存，自动重建",
+    "category": "移动开发",
+    "platform": "all",
+    "roots": [
+      "$HOME/.pub-cache",
+      "$HOME/Library/Caches/flutter_engine"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "vscode-cache",
+    "name_key": "rule_vscode_cache",
+    "desc_key": "VS Code 渲染/GPU/代码缓存，重启后自动重建",
+    "category": "开发者工具",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Application Support/Code/CachedData",
+      "$HOME/Library/Application Support/Code/Cache",
+      "$HOME/Library/Application Support/Code/Code Cache",
+      "%APPDATA%/Code/Cache",
+      "%APPDATA%/Code/Code Cache"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": [
+      "Code"
+    ]
+  },
+  {
+    "id": "vscode-extension-vsix",
+    "name_key": "rule_vscode_ext_vsix",
+    "desc_key": "VS Code 已安装扩展的安装包缓存",
+    "category": "开发者工具",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Application Support/Code/CachedExtensionVSIXs",
+      "%APPDATA%/Code/CachedExtensionVSIXs"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": [
+      "Code"
+    ]
+  },
+  {
+    "id": "jetbrains-cache",
+    "name_key": "rule_jetbrains_cache",
+    "desc_key": "JetBrains IDE 索引与缓存（IntelliJ/GoLand/PyCharm 等）",
+    "category": "开发者工具",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/JetBrains",
+      "$HOME/.cache/JetBrains",
+      "%LOCALAPPDATA%/JetBrains"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Advanced",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "xcode-user-cache",
+    "name_key": "rule_xcode_user_cache",
+    "desc_key": "Xcode 用户级缓存，自动重建",
+    "category": "Xcode 编译",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Caches/com.apple.dt.Xcode"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "homebrew-cache",
+    "name_key": "rule_homebrew_cache",
+    "desc_key": "Homebrew 下载与 API 缓存，自动重建",
+    "category": "系统缓存",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Caches/Homebrew"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 52428800,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "huggingface-cache",
+    "name_key": "rule_hf_cache",
+    "desc_key": "HuggingFace 模型/数据集缓存，删除后需重新下载",
+    "category": "AI 模型缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.cache/huggingface",
+      "%USERPROFILE%/.cache/huggingface",
+      "%LOCALAPPDATA%/huggingface"
+    ],
+    "patterns": [
+      "hub",
+      "datasets"
+    ],
+    "min_size": 104857600,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "ollama-models",
+    "name_key": "rule_ollama_models",
+    "desc_key": "Ollama 本地模型（重新下载成本高）",
+    "category": "AI 模型缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.ollama/models",
+      "%USERPROFILE%/.ollama/models"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": [
+      "ollama",
+      "Ollama"
+    ]
+  },
+  {
+    "id": "lm-studio-models",
+    "name_key": "rule_lmstudio_models",
+    "desc_key": "LM Studio 模型缓存（重新下载成本高）",
+    "category": "AI 模型缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.lmstudio",
+      "$HOME/.cache/lm-studio"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": [
+      "LM Studio"
+    ]
+  },
+  {
+    "id": "llama-cache",
+    "name_key": "rule_llama_cache",
+    "desc_key": "llama.cpp 模型缓存",
+    "category": "AI 模型缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.cache/llama.cpp"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "mlx-cache",
+    "name_key": "rule_mlx_cache",
+    "desc_key": "MLX 模型缓存",
+    "category": "AI 模型缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.cache/mlx"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "replicate-cache",
+    "name_key": "rule_replicate_cache",
+    "desc_key": "Replicate 模型缓存",
+    "category": "AI 模型缓存",
+    "platform": "all",
+    "roots": [
+      "$HOME/.cache/replicate"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Safe",
+    "required_stopped_processes": []
+  },
+  {
+    "id": "podman-data",
+    "name_key": "rule_podman_data",
+    "desc_key": "Podman 容器与镜像数据（删除前请先停止 Podman）",
+    "category": "容器数据",
+    "platform": "all",
+    "roots": [
+      "$HOME/.local/share/containers",
+      "$HOME/Library/Containers/com.github.containers.podman"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": [
+      "podman",
+      "Podman Desktop"
+    ]
+  },
+  {
+    "id": "orbstack-data",
+    "name_key": "rule_orbstack_data",
+    "desc_key": "OrbStack 容器与镜像数据（删除前请先退出 OrbStack）",
+    "category": "容器数据",
+    "platform": "macos",
+    "roots": [
+      "$HOME/Library/Containers/dev.orbstack"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": [
+      "OrbStack"
+    ]
+  },
+  {
+    "id": "colima-data",
+    "name_key": "rule_colima_data",
+    "desc_key": "Colima 虚拟机与容器数据（删除前请先停止 colima）",
+    "category": "容器数据",
+    "platform": "all",
+    "roots": [
+      "$HOME/.colima",
+      "$HOME/.cache/colima"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": [
+      "colima"
+    ]
+  },
+  {
+    "id": "rancher-desktop-cache",
+    "name_key": "rule_rancher_cache",
+    "desc_key": "Rancher Desktop 容器缓存（删除前请先退出）",
+    "category": "容器数据",
+    "platform": "all",
+    "roots": [
+      "$HOME/Library/Caches/rancher-desktop",
+      "$HOME/.rd"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": [
+      "Rancher Desktop"
+    ]
+  },
+  {
+    "id": "minikube-cache",
+    "name_key": "rule_minikube_cache",
+    "desc_key": "minikube 镜像缓存（删除前请先停止 minikube）",
+    "category": "容器数据",
+    "platform": "all",
+    "roots": [
+      "$HOME/.minikube/cache"
+    ],
+    "patterns": [
+      "*"
+    ],
+    "min_size": 104857600,
+    "risk": "Advanced",
+    "required_stopped_processes": [
+      "minikube"
+    ]
   }
 ]

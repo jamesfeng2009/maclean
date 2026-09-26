@@ -1152,7 +1152,8 @@ fn path_contains_component(path: &str, name: &str) -> bool {
 // - 组件数上限：防止"根模板过浅"（如规则根恰好等于 home）通过校验
 // - 本模块是 P2 声明式规则的强制门禁，也是删除前二次校验的最后一道兜底
 
-/// 模板变量解析：把规则根里的 `$HOME` / `%USERPROFILE%` 替换为真实值
+/// 模板变量解析：把规则根里的 `$HOME` / `%USERPROFILE%` / `%APPDATA%` /
+/// `%LOCALAPPDATA%` 替换为真实值
 ///
 /// 返回 None 表示变量缺失或为空 —— 调用方必须拒绝该规则（fail-closed）。
 /// 环境变量可能被进程内篡改，因此优先用 passwd/注册表真实 home 兜底。
@@ -1160,10 +1161,24 @@ fn resolve_root_variable(root: &str) -> Option<String> {
     let homes = protected_homes();
     let home = homes.first()?;
     let home_str = home.to_string_lossy();
+    // %APPDATA% / %LOCALAPPDATA% 按平台映射：Windows 走 AppData 目录，
+    // macOS 无 Roaming/Local 之分，统一落在 ~/Library/Application Support
+    // （与 Windows 侧语义最接近；规则根里的这些变量在另一平台扫描不到，
+    // 由 validate 的"至少一个可用根"兜底，不会误删）。
+    let (appdata, localappdata) = if std::env::consts::OS == "windows" {
+        let roaming = format!("{}\\AppData\\Roaming", home_str);
+        let local = format!("{}\\AppData\\Local", home_str);
+        (roaming, local)
+    } else {
+        let support = format!("{}/Library/Application Support", home_str);
+        (support.clone(), support)
+    };
     let mut out = root.to_string();
     for (var, val) in [
         ("$HOME", home_str.as_ref()),
         ("%USERPROFILE%", home_str.as_ref()),
+        ("%APPDATA%", appdata.as_str()),
+        ("%LOCALAPPDATA%", localappdata.as_str()),
     ] {
         if out.contains(var) {
             out = out.replace(var, val);

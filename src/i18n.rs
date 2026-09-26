@@ -151,6 +151,10 @@ fn static_category_en(cat: &str) -> Option<&'static str> {
         "Remix" => Some("Remix"),
         "Gradle项目" => Some("Gradle Project"),
         "安装包" => Some("Installer"),
+        "移动开发" => Some("Mobile Dev"),
+        "开发者工具" => Some("Dev Tools"),
+        "AI模型缓存" => Some("AI Model Cache"),
+        "AI模型" => Some("AI Model"),
         "K8s缓存" => Some("K8s Cache"),
         "K8sHTTP缓存" => Some("K8s HTTP Cache"),
         "Helm缓存" => Some("Helm Cache"),
@@ -437,6 +441,93 @@ fn exact_description_en(desc: &str) -> Option<&'static str> {
         }
         "对 SSD 执行 TRIM 优化，对 HDD 执行碎片整理" => {
             Some("Run TRIM optimization for SSDs, defragmentation for HDDs")
+        }
+        // === builtin_rules.json 扩展规则描述（P0） ===
+        "pnpm 全局存储目录，删除后按需重新下载" => {
+            Some("pnpm global store, re-downloaded on demand")
+        }
+        "Yarn 依赖缓存（v6），删除后重新安装时自动重建" => {
+            Some("Yarn dependency cache (v6), rebuilt on next install")
+        }
+        "Bun 安装缓存，删除后按需重新下载" => {
+            Some("Bun install cache, re-downloaded on demand")
+        }
+        "Deno 模块缓存（npm/remote），删除后自动重新拉取" => {
+            Some("Deno module cache (npm/remote), re-fetched automatically")
+        }
+        "Go 编译缓存，go build 会自动重建" => Some("Go build cache, rebuilt by go build"),
+        "uv 包缓存，删除后按需重新下载" => {
+            Some("uv package cache, re-downloaded on demand")
+        }
+        "Poetry 包缓存，删除后按需重新下载" => {
+            Some("Poetry package cache, re-downloaded on demand")
+        }
+        "Conda 包缓存（pkgs），体积大，删除后环境可能需重新下载依赖" => {
+            Some("Conda package cache (pkgs), large; environments may need re-download")
+        }
+        "sccache 编译缓存，自动重新生成" => {
+            Some("sccache compile cache, regenerated automatically")
+        }
+        "NuGet 包缓存，删除后重新还原" => {
+            Some("NuGet package cache, restored on next build")
+        }
+        "Maven 本地仓库，删除后重新下载依赖" => {
+            Some("Maven local repository, dependencies re-downloaded")
+        }
+        "CMake 包注册缓存，自动重建" => {
+            Some("CMake package registry cache, rebuilt automatically")
+        }
+        "CocoaPods 仓库缓存，pod install 自动重建" => {
+            Some("CocoaPods repo cache, rebuilt by pod install")
+        }
+        "Swift Package Manager 缓存，Xcode 自动重建" => {
+            Some("Swift Package Manager cache, rebuilt by Xcode")
+        }
+        "Android SDK 临时下载文件" => Some("Android SDK temporary download files"),
+        "Flutter pub 包缓存与引擎缓存，自动重建" => {
+            Some("Flutter pub/engine cache, rebuilt automatically")
+        }
+        "VS Code 渲染/GPU/代码缓存，重启后自动重建" => {
+            Some("VS Code render/GPU/code cache, rebuilt on restart")
+        }
+        "VS Code 已安装扩展的安装包缓存" => {
+            Some("VS Code cached extension VSIX installers")
+        }
+        "JetBrains IDE 索引与缓存（IntelliJ/GoLand/PyCharm 等）" => {
+            Some("JetBrains IDE indexes and caches (IntelliJ/GoLand/PyCharm etc.)")
+        }
+        "Xcode 用户级缓存，自动重建" => {
+            Some("Xcode user-level cache, rebuilt automatically")
+        }
+        "Homebrew 下载与 API 缓存，自动重建" => {
+            Some("Homebrew downloads and API cache, rebuilt automatically")
+        }
+        "HuggingFace 模型/数据集缓存，删除后需重新下载" => {
+            Some("HuggingFace model/dataset cache, re-download needed")
+        }
+        "Ollama 本地模型（重新下载成本高）" => {
+            Some("Ollama local models (expensive to re-download)")
+        }
+        "LM Studio 模型缓存（重新下载成本高）" => {
+            Some("LM Studio model cache (expensive to re-download)")
+        }
+        "llama.cpp 模型缓存" => Some("llama.cpp model cache"),
+        "MLX 模型缓存" => Some("MLX model cache"),
+        "Replicate 模型缓存" => Some("Replicate model cache"),
+        "Podman 容器与镜像数据（删除前请先停止 Podman）" => {
+            Some("Podman containers and images (stop Podman first)")
+        }
+        "OrbStack 容器与镜像数据（删除前请先退出 OrbStack）" => {
+            Some("OrbStack containers and images (quit OrbStack first)")
+        }
+        "Colima 虚拟机与容器数据（删除前请先停止 colima）" => {
+            Some("Colima VM and container data (stop colima first)")
+        }
+        "Rancher Desktop 容器缓存（删除前请先退出）" => {
+            Some("Rancher Desktop container cache (quit first)")
+        }
+        "minikube 镜像缓存（删除前请先停止 minikube）" => {
+            Some("minikube image cache (stop minikube first)")
         }
         // === 注册表新增缓存描述 ===
         _ => None,
