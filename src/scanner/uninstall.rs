@@ -289,6 +289,27 @@ pub fn is_system_library_name(name: &str) -> bool {
     false
 }
 
+/// 系统服务缓存排除表
+///
+/// 这些目录归属于系统守护进程/框架（如 FamilyCircle 对应 familycircled
+/// 守护进程，服务于"家人共享"），位于用户 Library 下但受 macOS 系统级
+/// 访问控制保护 —— 任何权限（含管理员/Touch ID）都无法读取或删除，且
+/// 属于系统服务在用数据，不是任何已卸载 App 的残留。
+///
+/// 扫描时对命中项直接 `continue`：不进 ScanItem、不进计数、不进统计。
+/// 展示给用户只会造成"扫到了但永远删不掉"的困惑（曾导致用户反复
+/// 勾选 → Touch ID 授权 → 删除失败 → 重试的挫败循环）。
+pub fn is_system_service_cache(name: &str) -> bool {
+    const SYSTEM_SERVICE_CACHES: &[&str] = &[
+        // FamilyCircle.framework / familycircled 守护进程（家人共享/Family Sharing）
+        "familycircle",
+        "familycircled",
+    ];
+    SYSTEM_SERVICE_CACHES
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
+
 /// App 卸载扫描器
 #[derive(Debug, Default)]
 pub struct UninstallScanner;
@@ -1368,6 +1389,11 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 if is_system_library_name(&name) {
                     continue;
                 }
+                // 跳过系统服务缓存（FamilyCircle 等）：受系统级访问控制保护，
+                // 任何权限都删不掉，展示只会造成困惑 —— 直接不扫描
+                if is_system_service_cache(&name) {
+                    continue;
+                }
 
                 // 检查是否有对应的 App
                 if is_app_installed(&name, &installed_apps) {
@@ -1392,8 +1418,12 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 // 扫描时直接标记为不可删除，避免用户勾选后反复授权重试。
                 let size = dir_size(&path);
                 let path_str = path.to_string_lossy().to_string();
+                let sys_blocked = crate::safety::path_is_inaccessible(&path_str);
                 let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
-                let undeletable_reason = if acl_blocked {
+                let undeletable_reason = if sys_blocked {
+                    "系统保护: 此路径受系统访问控制保护，无法读取或删除（含管理员/Touch ID）"
+                        .to_string()
+                } else if acl_blocked {
                     "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
                 } else {
                     String::new()
@@ -1403,7 +1433,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     size_bytes: size,
                     category: "App残留".to_string(),
                     selected: false,
-                    deletable: !acl_blocked,
+                    deletable: !sys_blocked && !acl_blocked,
                     undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend: Recommend::Advanced,
@@ -1427,6 +1457,11 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 if is_system_library_name(&name) {
                     continue;
                 }
+                // 跳过系统服务缓存（FamilyCircle 等）：受系统级访问控制保护，
+                // 任何权限都删不掉，展示只会造成困惑 —— 直接不扫描
+                if is_system_service_cache(&name) {
+                    continue;
+                }
 
                 if is_app_installed(&name, &installed_apps) {
                     continue;
@@ -1448,8 +1483,12 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 // ACL deny 规则保护的路径：任何权限都删不掉，扫描时直接标记。
                 let size = dir_size(&path);
                 let path_str = path.to_string_lossy().to_string();
+                let sys_blocked = crate::safety::path_is_inaccessible(&path_str);
                 let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
-                let undeletable_reason = if acl_blocked {
+                let undeletable_reason = if sys_blocked {
+                    "系统保护: 此路径受系统访问控制保护，无法读取或删除（含管理员/Touch ID）"
+                        .to_string()
+                } else if acl_blocked {
                     "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
                 } else {
                     String::new()
@@ -1459,7 +1498,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     size_bytes: size,
                     category: "App残留缓存".to_string(),
                     selected: false,
-                    deletable: !acl_blocked,
+                    deletable: !sys_blocked && !acl_blocked,
                     undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend: Recommend::CacheOnly,
@@ -1489,6 +1528,12 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     continue;
                 }
 
+                // 跳过系统服务缓存对应的 plist（familycircled.plist 等）：
+                // 系统守护进程在用数据，不属于任何已卸载 App 的残留
+                if is_system_service_cache(name.trim_end_matches(".plist")) {
+                    continue;
+                }
+
                 // 只展示已卸载 App 的 plist
                 if is_app_installed(&name, &installed_apps) {
                     continue;
@@ -1497,8 +1542,12 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 let (recommend, description) = classify_leftover_plist(&name);
                 let size = path_size(path.to_string_lossy().as_ref());
                 let path_str = path.to_string_lossy().to_string();
+                let sys_blocked = crate::safety::path_is_inaccessible(&path_str);
                 let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
-                let undeletable_reason = if acl_blocked {
+                let undeletable_reason = if sys_blocked {
+                    "系统保护: 此路径受系统访问控制保护，无法读取或删除（含管理员/Touch ID）"
+                        .to_string()
+                } else if acl_blocked {
                     "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
                 } else {
                     String::new()
@@ -1509,7 +1558,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     size_bytes: size,
                     category: "App残留配置".to_string(),
                     selected: false,
-                    deletable: !acl_blocked,
+                    deletable: !sys_blocked && !acl_blocked,
                     undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend,
@@ -1729,8 +1778,12 @@ fn scan_vendor_subdir_leftovers(
         let size = dir_size(&sub_path);
         if size > min_size {
             let sub_str = sub_path.to_string_lossy().to_string();
+            let sys_blocked = crate::safety::path_is_inaccessible(&sub_str);
             let acl_blocked = crate::safety::path_is_acl_protected(&sub_str);
-            let undeletable_reason = if acl_blocked {
+            let undeletable_reason = if sys_blocked {
+                "系统保护: 此路径受系统访问控制保护，无法读取或删除（含管理员/Touch ID）"
+                    .to_string()
+            } else if acl_blocked {
                 "ACL保护: 系统规则禁止删除此路径，任何权限均无法删除".to_string()
             } else {
                 String::new()
@@ -1740,7 +1793,7 @@ fn scan_vendor_subdir_leftovers(
                 size_bytes: size,
                 category: category.to_string(),
                 selected: false,
-                deletable: !acl_blocked,
+                deletable: !sys_blocked && !acl_blocked,
                 undeletable_reason,
                 batch_paths: Vec::new(),
                 recommend,
@@ -1848,6 +1901,43 @@ mod tests {
         // 普通第三方应用不应被过滤
         assert!(!is_system_library_name("Google Chrome"));
         assert!(!is_system_library_name("com.jetbrains.intellij"));
+    }
+
+    #[test]
+    fn test_is_system_service_cache() {
+        // FamilyCircle / familycircled：系统守护进程缓存，必须命中排除表
+        assert!(is_system_service_cache("FamilyCircle"));
+        assert!(is_system_service_cache("familycircle"));
+        assert!(is_system_service_cache("familycircled"));
+        assert!(is_system_service_cache("FAMILYCIRCLED"));
+        // 普通第三方缓存不得误伤
+        assert!(!is_system_service_cache("google-chrome"));
+        assert!(!is_system_service_cache("com.jetbrains.intellij"));
+        assert!(!is_system_service_cache("vscode-cache"));
+        assert!(!is_system_service_cache(""));
+        assert!(!is_system_service_cache("FamilyCircleBackup"));
+    }
+
+    #[test]
+    fn leftover_scan_skips_system_service_caches() {
+        // 源码级断言：Library 残留扫描（Application Support + Caches）必须在
+        // is_system_library_name 之后紧接着跳过系统服务缓存 —— 否则 FamilyCircle
+        // 这类"扫到了但任何权限都删不掉"的项会再次出现在列表里，用户又会陷入
+        // 勾选 → Touch ID → 失败 → 重试的循环。
+        let src = include_str!("uninstall.rs");
+        // 只统计生产代码：include_str! 会把下面这条断言自身也算进去
+        let prod = &src[..src.find("mod tests").expect("测试模块")];
+        // Application Support + Caches 两处目录扫描各应有一处排除表调用
+        assert_eq!(
+            prod.matches("is_system_service_cache(&name)").count(),
+            2,
+            "目录残留扫描（Application Support / Caches）漏了系统服务缓存排除"
+        );
+        // Preferences 扫描按 plist stem 匹配（familycircled.plist 等）
+        assert!(
+            src.contains("is_system_service_cache(name.trim_end_matches(\".plist\"))"),
+            "Preferences 扫描没有跳过系统服务缓存 plist"
+        );
     }
 
     // ---------- P0-4: bundle ID / 应用名不得用于路径穿越 ----------

@@ -2188,7 +2188,16 @@ pub(crate) fn render_gui(
     //   但为避免每帧多一次分配，非该 Tab 时直接给空 Vec。）
     let uninstall_groups: Vec<(String, Vec<usize>)> = if app.tab == Tab::AppUninstall {
         let idx = app.tab_index();
-        build_uninstall_groups(&app.results[idx], &app.filtered_indices())
+        // 「显示受保护/系统项」默认关：过滤掉系统保护/ACL 等任何权限都无法
+        // 删除的项，避免用户反复勾选 → Touch ID 授权 → 删除失败 → 重试。
+        let show_protected = app.settings_show_protected_items;
+        let mut indices: Vec<usize> = app
+            .filtered_indices()
+            .into_iter()
+            .filter(|&i| show_protected || app.results[idx][i].deletable)
+            .collect();
+        indices.sort_unstable();
+        build_uninstall_groups(&app.results[idx], &indices)
     } else {
         Vec::new()
     };
@@ -6365,6 +6374,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_scan_cache,
         app.settings_scan_all_disks,
         app.settings_prefer_official_uninstaller,
+        app.settings_show_protected_items,
         app.schedule_enabled,
         app.schedule_interval_days,
         app.settings_confirm_advanced,
@@ -6465,6 +6475,13 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                             app.t("setting_confirm_advanced"),
                             app.t("setting_confirm_advanced_desc"),
                             &mut app.settings_confirm_advanced,
+                            true,
+                        );
+                        render_settings_item(
+                            ui,
+                            app.t("setting_show_protected_items"),
+                            app.t("setting_show_protected_items_desc"),
+                            &mut app.settings_show_protected_items,
                             true,
                         );
                         let lid_enabled = cfg!(target_os = "macos");
@@ -6955,6 +6972,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
         app.settings_scan_cache,
         app.settings_scan_all_disks,
         app.settings_prefer_official_uninstaller,
+        app.settings_show_protected_items,
         app.schedule_enabled,
         app.schedule_interval_days,
         app.settings_confirm_advanced,

@@ -1362,22 +1362,31 @@ pub fn validate_rule_root(root: &str) -> Result<String, String> {
 /// 用于把 Touch ID 提权后的 EPERM 失败归类为「ACL 保护」，避免误导用户反复授权。
 #[cfg(target_os = "macos")]
 pub fn path_is_acl_protected(path: &str) -> bool {
-    // 删除某项需要父目录的 delete 权限，沿祖先链逐层检查
-    let mut cur = std::path::Path::new(path);
-    for _ in 0..8 {
-        let parent = match cur.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => break,
-        };
-        if dir_has_acl_deny(&parent.to_string_lossy()) {
-            return true;
-        }
-        cur = parent;
-        if cur.as_os_str() == "/" {
-            break;
-        }
+    // 只检查目标自身的扩展 ACL 是否含 deny 规则。
+    // macOS 会给用户主目录 / Library / Caches 等父目录加
+    // `0: group:everyone deny delete`，但该 deny 只阻止"删除目录本身"，
+    // 不阻止删除目录内的子项（实测 owner 可正常删除其中缓存），
+    // 因此不能沿祖先链逐层检查，否则会把所有子项误判为不可删除。
+    dir_has_acl_deny(path)
+}
+
+/// 检测路径是否受系统级访问控制保护（如 TCC 隐私保护目录）。
+/// 这类目录即使权限位正常、无 ACL deny，非系统进程也无法读取/遍历
+/// （read_dir 报 EPERM），因此任何权限（含 root / Touch ID）都无法删除。
+pub fn path_is_inaccessible(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    // 目录：能否列举子项决定能否删除（TCC 类系统保护连 ls 都 EPERM）
+    if p.is_dir() {
+        return std::fs::read_dir(p).is_err();
     }
-    false
+    // 文件：能否打开读取决定能否删除（Preferences 下 plist 等）。
+    // 注意：read_dir 对普通文件必然失败，绝不能用来探测文件 ——
+    // 否则所有 plist 都会被误判为"系统保护不可删除"。
+    if p.is_file() {
+        return std::fs::File::open(p).is_err();
+    }
+    // 不存在或其他：fail-closed 视为不可访问（与旧行为一致）
+    true
 }
 
 /// 检查单个目录的扩展 ACL 中是否含 deny 规则（`ls -lde` 输出解析）
@@ -1463,8 +1472,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("maclean_acl_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let child = dir.join("child");
-        std::fs::create_dir_all(&child).unwrap();
 
         let add = std::process::Command::new("/bin/chmod")
             .args(["+a", "everyone deny delete"])
@@ -1474,8 +1481,8 @@ mod tests {
         assert!(add.status.success(), "chmod +a 应成功");
 
         assert!(
-            path_is_acl_protected(&child.to_string_lossy()),
-            "父目录带 deny delete 时应被识别为 ACL 保护"
+            path_is_acl_protected(&dir.to_string_lossy()),
+            "目标自身带 deny delete 时应被识别为 ACL 保护"
         );
 
         let _ = std::process::Command::new("/bin/chmod")
@@ -1483,10 +1490,35 @@ mod tests {
             .arg(&dir)
             .output();
         assert!(
-            !path_is_acl_protected(&child.to_string_lossy()),
+            !path_is_acl_protected(&dir.to_string_lossy()),
             "移除 ACL 后不应再被识别"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inaccessible_path_detection() {
+        // 不存在的路径应视为不可访问（read_dir 失败）
+        let missing = std::env::temp_dir().join(format!("maclean_missing_{}", std::process::id()));
+        assert!(path_is_inaccessible(&missing.to_string_lossy()));
+        // 存在的普通目录应可访问
+        let dir = std::env::temp_dir().join(format!("maclean_ok_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(!path_is_inaccessible(&dir.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inaccessible_path_detection_does_not_misjudge_regular_files() {
+        // 回归：read_dir 对普通文件必然失败 —— 老实现会把所有 plist 文件
+        // 误判为"系统保护不可删除"，导致 Preferences 下几十项全变灰色。
+        let file = std::env::temp_dir().join(format!("maclean_file_ok_{}", std::process::id()));
+        let _ = std::fs::write(&file, b"x");
+        assert!(
+            !path_is_inaccessible(&file.to_string_lossy()),
+            "普通可读文件不应被判定为系统保护"
+        );
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

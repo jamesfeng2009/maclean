@@ -379,6 +379,9 @@ pub struct App {
     /// 而不是自己 remove_dir_all —— 那些卸载器还要清 launchd 任务、
     /// pkgutil 收据、系统扩展授权，删目录做不到。
     pub settings_prefer_official_uninstaller: bool,
+    /// 显示受保护/系统项（默认关）：受系统访问控制保护的不可删项
+    /// 默认在 App 卸载列表中隐藏，开启后置灰显示便于排查
+    pub settings_show_protected_items: bool,
     /// 本次删除将交给官方卸载器处理的应用：(应用路径, 卸载器路径)
     ///
     /// 在 confirm_delete 时算一次并缓存，确认弹窗据此告知用户；
@@ -568,6 +571,7 @@ impl App {
             settings_scan_cache: user_config.settings_scan_cache,
             settings_scan_all_disks: user_config.settings_scan_all_disks,
             settings_prefer_official_uninstaller: user_config.settings_prefer_official_uninstaller,
+            settings_show_protected_items: user_config.settings_show_protected_items,
             official_handoffs: Vec::new(),
             schedule_enabled: user_config.schedule_enabled,
             schedule_interval_days: crate::scheduler::normalize_interval_days(
@@ -1507,6 +1511,7 @@ impl App {
         self.user_config.settings_scan_all_disks = self.settings_scan_all_disks;
         self.user_config.settings_prefer_official_uninstaller =
             self.settings_prefer_official_uninstaller;
+        self.user_config.settings_show_protected_items = self.settings_show_protected_items;
         self.user_config.schedule_enabled = self.schedule_enabled;
         self.user_config.schedule_interval_days = self.schedule_interval_days;
         self.user_config.schedule_last_run = self.schedule_last_run;
@@ -1622,6 +1627,8 @@ impl App {
                 "update_download_aborted" => "Update download stopped unexpectedly",
                 "setting_confirm_advanced" => "Double-check before deleting Advanced items",
                 "setting_confirm_advanced_desc" => "Advanced items require manual confirmation",
+                "setting_show_protected_items" => "Show protected / system items",
+                "setting_show_protected_items_desc" => "Items protected by macOS (undeletable by any privilege) are hidden by default to avoid failed-delete loops; enable to show them greyed out for troubleshooting",
                 "setting_prevent_lid_close" => "Prevent deletion while lid is closed",
                 "setting_prevent_lid_close_desc" => "Detect MacBook clamshell state to avoid accidental deletion",
                 "setting_auto_restore_point" => "Auto-create restore point before operations",
@@ -2083,6 +2090,8 @@ impl App {
                 "schedule_remove_failed" => "移除定时任务失败：{}",
                 "setting_confirm_advanced" => "删除前二次确认",
                 "setting_confirm_advanced_desc" => "Advanced 项目必须手动确认",
+                "setting_show_protected_items" => "显示受保护/系统项",
+                "setting_show_protected_items_desc" => "默认隐藏受系统访问控制保护、任何权限都无法删除的项，避免反复授权删除失败；开启后置灰显示，便于排查",
                 "setting_prevent_lid_close" => "合盖时禁止删除",
                 "setting_prevent_lid_close_desc" => "检测 MacBook 合盖状态，防止误触",
                 "setting_auto_restore_point" => "操作前自动创建系统还原点",
@@ -2839,6 +2848,27 @@ mod tests {
         let _ = app.confirm_delete();
         assert!(app.official_handoffs.is_empty());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn show_protected_items_defaults_off_and_persists() {
+        // 「显示受保护/系统项」默认关：普通用户看不到系统保护项，
+        // 避免"勾选 → 授权 → 失败"循环；开关打开后必须持久化。
+        let app = App::new();
+        assert!(
+            !app.settings_show_protected_items,
+            "受保护/系统项默认应隐藏"
+        );
+        let mut app2 = App::new();
+        app2.settings_show_protected_items = true;
+        app2.save_settings();
+        assert!(
+            app2.user_config.settings_show_protected_items,
+            "开关切换后未写回 user_config，重启后会丢失"
+        );
+        // 还原：避免污染后续测试读取的 user_config
+        app2.settings_show_protected_items = false;
+        app2.save_settings();
     }
 
     #[test]

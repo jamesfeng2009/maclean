@@ -50,6 +50,13 @@ pub struct AppConfig {
     /// 默认开：删目录不等于卸载软件，launchd 任务 / pkgutil 收据 /
     /// 系统扩展授权都要靠官方卸载器才清得掉。关掉则退回只删 .app 目录。
     pub settings_prefer_official_uninstaller: bool,
+    /// 显示受保护/系统项（默认关）
+    ///
+    /// 系统保护路径（如 FamilyCircle，受 macOS 系统级访问控制保护、
+    /// 任何权限都删不掉）在扫描时已直接排除。若仍有漏网项被探针识别为
+    /// 不可删除，默认在列表中隐藏，避免"勾选 → 授权 → 失败"循环；
+    /// 开启后置灰显示，便于排查。
+    pub settings_show_protected_items: bool,
     /// 定时清理（C-3）：是否开启
     pub schedule_enabled: bool,
     /// 定时清理间隔（天），只取 1 / 7 / 30
@@ -77,6 +84,7 @@ impl Default for AppConfig {
             settings_scan_cache: true,
             settings_scan_all_disks: false,
             settings_prefer_official_uninstaller: true,
+            settings_show_protected_items: false,
             schedule_enabled: false,
             schedule_interval_days: 7,
             schedule_last_run: 0,
