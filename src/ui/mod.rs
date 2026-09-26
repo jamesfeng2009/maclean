@@ -753,6 +753,15 @@ impl eframe::App for Gui {
         // 磁盘监控：每 5 秒轮询磁盘空间
         self.app.poll_disk_space();
 
+        // 扫描 / 删除进行中：持续请求重绘。
+        // 关键：egui 是事件驱动的，若扫描线程因磁盘 IO 慢而阻塞、不产生
+        // 新消息，且没有持续 repaint，事件循环会空闲休眠，整个界面定格
+        // （进度条、路径、按钮全部"卡死"）。这里每 50ms 强制唤醒一次，
+        // 保证流动进度条持续动画、当前路径/已发现项实时刷新、取消按钮可点。
+        if self.scan_rx.is_some() || self.delete_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
         // 请求重绘以保持告警 UI 实时更新
         if self.app.disk_alert_level().0 >= 2 {
             ctx.request_repaint();
