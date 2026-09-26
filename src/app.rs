@@ -3,6 +3,27 @@
 //! 管理 egui GUI 应用的全部状态，包括当前 Tab、扫描结果、选中状态等。
 
 use crate::safety;
+
+/// 界面主题模式（迁移自 theme.rs：theme 是 GUI 专属模块，CLI 构建被裁剪）
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Mode {
+    /// 浅色（默认）
+    #[default]
+    Light,
+    /// 深色
+    Dark,
+}
+
+impl Mode {
+    /// 从配置中的 `dark_mode` 生成
+    pub fn from_dark_flag(dark: bool) -> Self {
+        if dark {
+            Mode::Dark
+        } else {
+            Mode::Light
+        }
+    }
+}
 use crate::scanner::{self, ScanItem};
 
 /// 跨平台 Touch ID 可用性检查（macOS 专属，其他平台返回 false）
@@ -709,6 +730,7 @@ impl App {
     /// - 1: 注意 (10-20%)
     /// - 2: 警告 (5-10%)
     /// - 3: 危险 (<5%)
+    #[cfg(feature = "gui")]
     pub fn disk_alert_level(&self) -> (u8, egui::Color32, f64) {
         if self.disk_total == 0 {
             return (0, egui::Color32::from_rgb(100, 200, 100), 0.0);
@@ -1495,8 +1517,8 @@ impl App {
     }
 
     /// 当前配色模式
-    pub fn theme_mode(&self) -> crate::theme::Mode {
-        crate::theme::Mode::from_dark_flag(self.dark_mode)
+    pub fn theme_mode(&self) -> Mode {
+        Mode::from_dark_flag(self.dark_mode)
     }
 
     /// 切换深色模式并落盘

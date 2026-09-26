@@ -21,11 +21,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_NAME="maclean"
 DEST_DIR="${HOME}/.local/bin"
 SKIP_BUILD=0
+CLI_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --system)
             DEST_DIR="/usr/local/bin"
+            shift
+            ;;
+        --cli-only)
+            CLI_ONLY=1
             shift
             ;;
         --bin)
@@ -46,8 +51,14 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
         exit 1
     fi
 else
-    echo "==> cargo build --release（项目根: $ROOT）"
-    (cd "$ROOT" && cargo build --release)
+    if [[ "$CLI_ONLY" == "1" ]]; then
+        # 纯 CLI 二进制：不链接 GUI 库（服务器 / CI / 容器场景）
+        echo "==> cargo build --release --no-default-features（纯 CLI，裁剪 GUI 壳）"
+        (cd "$ROOT" && cargo build --release --no-default-features)
+    else
+        echo "==> cargo build --release（完整版：GUI + CLI）"
+        (cd "$ROOT" && cargo build --release)
+    fi
     BIN_PATH="$ROOT/target/release/$BIN_NAME"
 fi
 
@@ -60,6 +71,9 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 fi
 
 echo "==> 已安装到 $DEST_DIR/$BIN_NAME"
+if [[ "$CLI_ONLY" == "1" ]]; then
+    echo "    形态: 纯 CLI（无 GUI；未带子命令时提示用法）"
+fi
 echo "    验证: $DEST_DIR/$BIN_NAME --help"
 
 # 提示 PATH

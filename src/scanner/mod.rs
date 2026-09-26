@@ -227,33 +227,30 @@ mod tests {
 
     #[test]
     fn recommend_labels_are_stable() {
-        // 锁的是 `theme::recommend_label` —— UI 徽标真正调用的那个。
+        // 锁的是 `i18n::recommend_label`（自 theme 迁移，语义不变） —— UI 徽标真正调用的那个。
         // 此前这条用例锁的是 `Recommend::label()`（已删），后者零生产调用：
         // 锁在一个没人用的副本上，UI 文案改了这条用例照样绿。
         // 改动需同步 maclean-ui-design-v2.html。
         assert_eq!(
-            crate::theme::recommend_label(&Recommend::Safe, false),
+            crate::i18n::recommend_label(&Recommend::Safe, false),
             "安全"
         );
         assert_eq!(
-            crate::theme::recommend_label(&Recommend::CacheOnly, false),
+            crate::i18n::recommend_label(&Recommend::CacheOnly, false),
             "仅缓存"
         );
         assert_eq!(
-            crate::theme::recommend_label(&Recommend::Caution, false),
+            crate::i18n::recommend_label(&Recommend::Caution, false),
             "谨慎"
         );
         assert_eq!(
-            crate::theme::recommend_label(&Recommend::Advanced, false),
+            crate::i18n::recommend_label(&Recommend::Advanced, false),
             "高级"
         );
         // 英文侧
+        assert_eq!(crate::i18n::recommend_label(&Recommend::Safe, true), "Safe");
         assert_eq!(
-            crate::theme::recommend_label(&Recommend::Safe, true),
-            "Safe"
-        );
-        assert_eq!(
-            crate::theme::recommend_label(&Recommend::Advanced, true),
+            crate::i18n::recommend_label(&Recommend::Advanced, true),
             "Advanced"
         );
     }
@@ -266,7 +263,7 @@ mod tests {
         // Safe 与 Advanced 两档对不上。不强行统一（改哪边都是产品决策），
         // 但把差异钉住：以后有人改其中一份，这条会红，逼他确认另一份。
         assert_eq!(
-            crate::theme::recommend_label(&Recommend::Safe, false),
+            crate::i18n::recommend_label(&Recommend::Safe, false),
             "安全"
         );
         assert_eq!(
@@ -274,7 +271,7 @@ mod tests {
             "推荐"
         );
         assert_eq!(
-            crate::theme::recommend_label(&Recommend::Advanced, false),
+            crate::i18n::recommend_label(&Recommend::Advanced, false),
             "高级"
         );
         assert_eq!(

@@ -31,6 +31,42 @@ pub fn translate_recommend(rec: &Recommend, lang_en: bool) -> &'static str {
     }
 }
 
+/// UI 等级徽标文案（与 translate_recommend 是两套口径，勿合并）：
+/// translate_recommend 用于普通说明文字，本函数是徽标短标签。
+/// 迁移自 theme.rs（theme 模块是 GUI 专属，CLI 构建时被裁剪，徽标文案移到 i18n）。
+pub fn recommend_label(rec: &Recommend, lang_en: bool) -> &'static str {
+    match rec {
+        Recommend::Safe => {
+            if lang_en {
+                "Safe"
+            } else {
+                "安全"
+            }
+        }
+        Recommend::CacheOnly => {
+            if lang_en {
+                "Cache only"
+            } else {
+                "仅缓存"
+            }
+        }
+        Recommend::Caution => {
+            if lang_en {
+                "Caution"
+            } else {
+                "谨慎"
+            }
+        }
+        Recommend::Advanced => {
+            if lang_en {
+                "Advanced"
+            } else {
+                "高级"
+            }
+        }
+    }
+}
+
 /// 翻译分类名
 ///
 /// 对于动态分类（如 "Xcode编译-MyProject"），按 "-" 分割，

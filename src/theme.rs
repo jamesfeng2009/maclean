@@ -44,29 +44,11 @@ use crate::scanner::Recommend;
 //  配色模式
 // =========================================================================
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Mode {
-    /// 浅色（默认）
-    #[default]
-    Light,
-    /// 深色
-    Dark,
-}
-
-impl Mode {
-    /// 从配置中的 `dark_mode` 生成
-    pub fn from_dark_flag(dark: bool) -> Self {
-        if dark {
-            Mode::Dark
-        } else {
-            Mode::Light
-        }
-    }
-}
-
 // =========================================================================
 //  配色表
 // =========================================================================
+
+use crate::app::Mode;
 
 /// 一整套界面配色。
 ///
@@ -457,40 +439,6 @@ pub fn recommend_bg(rec: &Recommend) -> egui::Color32 {
         Recommend::CacheOnly => cache_50(),
         Recommend::Caution => caution_50(),
         Recommend::Advanced => danger_50(),
-    }
-}
-
-/// 推荐等级 → 徽标文案（与 scanner::Recommend::label 保持一致，但区分「安全 / 仅缓存」）
-pub fn recommend_label(rec: &Recommend, lang_en: bool) -> &'static str {
-    match rec {
-        Recommend::Safe => {
-            if lang_en {
-                "Safe"
-            } else {
-                "安全"
-            }
-        }
-        Recommend::CacheOnly => {
-            if lang_en {
-                "Cache only"
-            } else {
-                "仅缓存"
-            }
-        }
-        Recommend::Caution => {
-            if lang_en {
-                "Caution"
-            } else {
-                "谨慎"
-            }
-        }
-        Recommend::Advanced => {
-            if lang_en {
-                "Advanced"
-            } else {
-                "高级"
-            }
-        }
     }
 }
 

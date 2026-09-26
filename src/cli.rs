@@ -161,6 +161,10 @@ pub enum Commands {
         /// "上次定时清理是什么时候"，否则设置页永远显示"尚未执行过"。
         #[arg(long)]
         scheduled: bool,
+
+        /// 权限失败项自动提权删除（macOS 弹 Touch ID / 密码授权；非交互环境不可用）
+        #[arg(long)]
+        privileged: bool,
     },
 
     /// 查看 / 注册 / 注销定时清理任务（C-3）
@@ -290,7 +294,10 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
             dry_run,
             scheduled,
             yes,
-        } => cmd_clean(tab, safe_only, dry_run, scheduled, yes, format, color, prog),
+            privileged,
+        } => cmd_clean(
+            tab, safe_only, dry_run, scheduled, yes, privileged, format, color, prog,
+        ),
         Commands::Schedule {
             install,
             remove,
@@ -634,6 +641,8 @@ struct JsonClean {
     dry_run: bool,
     yes: bool,
     scheduled: bool,
+    /// 是否启用了权限失败自动提权（--privileged）
+    privileged: bool,
     tabs: Vec<JsonCleanTab>,
     success: usize,
     failed: usize,
@@ -647,6 +656,7 @@ fn cmd_clean(
     dry_run: bool,
     scheduled: bool,
     yes: bool,
+    privileged: bool,
     format: OutputFormat,
     color: bool,
     prog: bool,
@@ -809,6 +819,9 @@ fn cmd_clean(
         // 实际删除（带进度与取消检查）
         let mut success = 0usize;
         let mut failed = 0usize;
+        // 权限类失败项单独收集：提权重试（--privileged）后再定成败，
+        // 保证"失败计数只报真实再次失败项"（用户多次确认的口径）。
+        let mut priv_needed: Vec<(String, String)> = Vec::new();
         let total = allowed.len();
         let mut done = 0usize;
         #[allow(clippy::explicit_counter_loop)]
@@ -847,6 +860,14 @@ fn cmd_clean(
                     }
                 }
                 Err(e) => {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        // 权限不足：先收集，等提权重试阶段统一处理（用户可见）
+                        priv_needed.push((path.clone(), _category.clone()));
+                        if format == OutputFormat::Human {
+                            println!("  {} {} — 需要管理员权限", paint(color, "33", "⛔"), path);
+                        }
+                        continue;
+                    }
                     rec.failed.push(JsonFailure {
                         path: path.clone(),
                         reason: e.to_string(),
@@ -870,6 +891,141 @@ fn cmd_clean(
                 }
             }
         }
+
+        // 权限失败项处理：--privileged 自动提权（必须先让用户知晓，再触发系统授权）
+        if !priv_needed.is_empty() {
+            #[cfg(target_os = "macos")]
+            {
+                if privileged && std::io::stdin().is_terminal() {
+                    // 用户知晓：逐项列出即将提权删除的路径，然后才弹 Touch ID
+                    println!(
+                        "\n  🔐 以下 {} 项需要管理员权限，即将弹出系统授权（Touch ID / 密码）：",
+                        priv_needed.len()
+                    );
+                    for (path, _) in &priv_needed {
+                        println!("    - {}", path);
+                    }
+                    println!("  ⏳ 请在系统弹窗中完成授权（可随时取消）…\n");
+                    let (ok_paths, fail_paths) = crate::ops::cli_sudo_delete_touchid(priv_needed);
+                    for (path, category) in ok_paths {
+                        rec.deleted.push(path.clone());
+                        success += 1;
+                        if format == OutputFormat::Jsonl {
+                            emit_json(
+                                &JsonlCleanEvent {
+                                    event: "deleted",
+                                    tab: tab_key.clone(),
+                                    path: path.clone(),
+                                    size_bytes: 0,
+                                    reason: "privileged".to_string(),
+                                },
+                                format,
+                                false,
+                            );
+                        } else if format == OutputFormat::Human {
+                            println!("  {} {} (提权)", paint(color, "32", "✅"), path);
+                            let _ = category;
+                        }
+                    }
+                    for (path, reason) in fail_paths {
+                        rec.failed.push(JsonFailure {
+                            path: path.clone(),
+                            reason: reason.clone(),
+                        });
+                        failed += 1;
+                        if format == OutputFormat::Jsonl {
+                            emit_json(
+                                &JsonlCleanEvent {
+                                    event: "failed",
+                                    tab: tab_key.clone(),
+                                    path: path.clone(),
+                                    size_bytes: 0,
+                                    reason,
+                                },
+                                format,
+                                false,
+                            );
+                        } else if format == OutputFormat::Human {
+                            println!("  {} {} — {}", paint(color, "31", "❌"), path, reason);
+                        }
+                    }
+                } else if privileged {
+                    // 非交互环境：无法弹窗授权，如实报告（脚本确定性）
+                    for (path, _) in &priv_needed {
+                        rec.failed.push(JsonFailure {
+                            path: path.clone(),
+                            reason: "需要管理员权限（非交互环境无法弹窗授权）".to_string(),
+                        });
+                        failed += 1;
+                        if format == OutputFormat::Jsonl {
+                            emit_json(
+                                &JsonlCleanEvent {
+                                    event: "failed",
+                                    tab: tab_key.clone(),
+                                    path: path.clone(),
+                                    size_bytes: 0,
+                                    reason: "需要管理员权限（非交互环境无法弹窗授权）".to_string(),
+                                },
+                                format,
+                                false,
+                            );
+                        } else if format == OutputFormat::Human {
+                            println!(
+                                "  {} {} — 需要管理员权限（非交互环境无法弹窗授权）",
+                                paint(color, "31", "❌"),
+                                path
+                            );
+                        }
+                    }
+                } else {
+                    // 未开启 --privileged：给出明确指引
+                    for (path, _) in &priv_needed {
+                        rec.failed.push(JsonFailure {
+                            path: path.clone(),
+                            reason: "需要管理员权限（可加 --privileged 自动提权）".to_string(),
+                        });
+                        failed += 1;
+                        if format == OutputFormat::Jsonl {
+                            emit_json(
+                                &JsonlCleanEvent {
+                                    event: "failed",
+                                    tab: tab_key.clone(),
+                                    path: path.clone(),
+                                    size_bytes: 0,
+                                    reason: "需要管理员权限（可加 --privileged 自动提权）"
+                                        .to_string(),
+                                },
+                                format,
+                                false,
+                            );
+                        }
+                    }
+                    if format == OutputFormat::Human {
+                        println!(
+                            "\n  💡 {} 项需要管理员权限，可用 `--privileged` 自动提权删除（将弹出系统授权）",
+                            priv_needed.len()
+                        );
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                for (path, _) in &priv_needed {
+                    rec.failed.push(JsonFailure {
+                        path: path.clone(),
+                        reason: "需要管理员权限（当前平台 CLI 不支持自动提权）".to_string(),
+                    });
+                    failed += 1;
+                }
+                if format == OutputFormat::Human {
+                    println!(
+                        "\n  💡 {} 项需要管理员权限，当前平台 CLI 不支持自动提权",
+                        priv_needed.len()
+                    );
+                }
+            }
+        }
+
         if prog {
             eprint!("\r\x1b[K");
         }
@@ -895,6 +1051,7 @@ fn cmd_clean(
                 dry_run,
                 yes,
                 scheduled,
+                privileged,
                 tabs: out,
                 success: g_success,
                 failed: g_failed,
@@ -2000,6 +2157,7 @@ mod tests {
             dry_run: true,
             yes: false,
             scheduled: false,
+            privileged: false,
             tabs: vec![JsonCleanTab {
                 key: "dev-cache".to_string(),
                 label: "开发者缓存".to_string(),

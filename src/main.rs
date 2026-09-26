@@ -1,6 +1,12 @@
 //! maclean - macOS 磁盘清理 GUI 工具
 //!
 //! 使用 egui 构建，专注开发者缓存与深度清理。
+//!
+//! 纯 CLI 构建（--no-default-features）裁剪 GUI 壳，但 GUI 状态层
+//! （app.rs 的 App 及 ops 的 GUI 删除流程）仍编译、仅不被引用。
+//! 裁剪的目标是不链接 GUI 库，而非零 dead_code —— 此处集中放行，避免刷屏。
+
+#![cfg_attr(not(feature = "gui"), allow(dead_code))]
 
 // 已删除 mod aewp（2026-09-18）：AuthorizationExecuteWithPrivileges 的 FFI 封装，
 // 全仓零引用。提权删除现已统一走 touchid.rs 的
@@ -12,10 +18,8 @@ mod backup;
 mod cli;
 mod config;
 mod i18n;
-mod icons;
 mod license;
 mod logger;
-mod menubar;
 mod ops;
 mod platform;
 mod rules;
@@ -24,13 +28,23 @@ mod scanner;
 mod scheduler;
 #[cfg(target_os = "macos")]
 mod sudo_keepalive;
-mod theme;
 #[cfg(target_os = "macos")]
 mod touchid;
-mod ui;
 mod updater;
+
+// GUI 壳（egui/eframe/菜单栏）：默认启用；`--no-default-features` 裁剪为纯 CLI。
+#[cfg(feature = "gui")]
+mod icons;
+#[cfg(feature = "gui")]
+mod menubar;
+#[cfg(feature = "gui")]
+mod theme;
+#[cfg(feature = "gui")]
+mod ui;
+#[cfg(feature = "gui")]
 mod widgets;
 
+#[cfg(feature = "gui")]
 use crate::ui::Gui;
 
 /// 写入扫描日志（用于追踪扫描进度，崩溃时定位问题）
@@ -67,7 +81,7 @@ fn load_dotenv() {
     }
 }
 
-fn main() -> eframe::Result {
+fn main() {
     // 优先加载 .env（开发模式 MACLEAN_DEV=1 等配置）
     load_dotenv();
 
@@ -80,7 +94,21 @@ fn main() -> eframe::Result {
         std::process::exit(code as i32);
     }
 
-    // GUI 模式
+    #[cfg(feature = "gui")]
+    run_gui();
+
+    // 纯 CLI 构建（--no-default-features）没有 GUI 可兜底：
+    // 未带子命令视为用法错误，给出提示并返回通用失败码。
+    #[cfg(not(feature = "gui"))]
+    {
+        eprintln!("未指定子命令。当前为纯 CLI 构建（GUI 已裁剪），可用命令见 `maclean --help`。");
+        std::process::exit(1);
+    }
+}
+
+/// GUI 入口（egui/eframe）。`--no-default-features` 裁剪后此函数不存在。
+#[cfg(feature = "gui")]
+fn run_gui() {
     logger::info("GUI 模式启动");
 
     let options = eframe::NativeOptions {
@@ -91,11 +119,14 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    if let Err(e) = eframe::run_native(
         "Maclean",
         options,
         Box::new(|_cc| Ok(Box::new(Gui::new()) as Box<dyn eframe::App>)),
-    )
+    ) {
+        logger::error(&format!("GUI 启动失败: {}", e));
+        eprintln!("GUI 启动失败: {}", e);
+    }
 }
 
 /// 获取磁盘信息 (macOS 实现)

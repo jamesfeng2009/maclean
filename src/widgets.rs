@@ -338,7 +338,7 @@ pub fn badge(
 pub fn recommend_badge(ui: &mut egui::Ui, rec: &Recommend, lang_en: bool) {
     let fg = theme::recommend_fg(rec);
     let bg = theme::recommend_bg(rec);
-    badge(ui, theme::recommend_label(rec, lang_en), fg, bg, None);
+    badge(ui, crate::i18n::recommend_label(rec, lang_en), fg, bg, None);
 }
 
 /// 占比条（80×6，表示该项占当前列表总量的比例）

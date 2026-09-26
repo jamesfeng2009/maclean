@@ -3458,6 +3458,144 @@ pub(crate) fn start_sudo_delete(
     });
 }
 
+// =========================================================================
+//  CLI 专用 Touch ID 提权删除
+//
+//  与 GUI 的 start_sudo_delete_touchid 走同一安全通道（随机名临时脚本 +
+//  O_EXCL + 0600 + sudo 触发 Touch ID），但提供同步接口、返回结构化结果，
+//  供 cmd_clean 在普通删除遇权限失败后自动重试。仅 macOS。
+// =========================================================================
+
+/// 提权删除结果：(成功项, 失败项及其原因)
+#[cfg(target_os = "macos")]
+pub(crate) type CliSudoResult = (Vec<(String, String)>, Vec<(String, String)>);
+
+#[cfg(target_os = "macos")]
+pub(crate) fn cli_sudo_delete_touchid(items: Vec<(String, String)>) -> CliSudoResult {
+    if items.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    // 提权前必须复做安全校验（与 GUI 同层 TOCTOU 防护）
+    let (allowed, rejected) = sanitize_before_delete(items, false);
+    let mut failed: Vec<(String, String)> = rejected
+        .into_iter()
+        .map(|(p, _c, r)| (p, format!("安全拦截: {}", r)))
+        .collect();
+
+    if allowed.is_empty() {
+        return (Vec::new(), failed);
+    }
+
+    let current_user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "root".to_string());
+
+    let mut script_content = String::from("#!/bin/bash\nset +e\n");
+    script_content.push_str("workdir=$(/usr/bin/mktemp -d)\n");
+    script_content.push_str("trap \"/bin/rm -rf \\\"$workdir\\\"\" EXIT\n\n");
+    script_content.push_str("process_one() {\n");
+    script_content.push_str("  local idx=\"$1\"\n");
+    script_content.push_str("  local path=\"$2\"\n");
+    script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
+    script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
+    script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
+    script_content.push_str("  /usr/sbin/chown -R '");
+    script_content.push_str(&current_user.replace("'", "'\\''"));
+    script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
+    script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
+    script_content.push_str("  /bin/rm -rf \"$path\" 2>&1 >> \"$out\"\n");
+    script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
+    script_content.push_str("}\n\n");
+
+    for (i, (path, _)) in allowed.iter().enumerate() {
+        let escaped = path.replace("'", "'\\''");
+        script_content.push_str(&format!("process_one {} '{}' &\n", i, escaped));
+    }
+    script_content.push_str("\nwait\n");
+    script_content
+        .push_str("for f in \"$workdir\"/*.out; do [ -f \"$f\" ] && /bin/cat \"$f\"; done\n");
+    script_content.push_str("exit 0\n");
+
+    // P0-2：随机名 + O_EXCL + 0600，避免脚本被本地进程预置
+    let Some(tmp_script) = write_private_temp_file("maclean_sudo_tid", "sh", &script_content)
+    else {
+        crate::logger::error("无法安全创建提权删除脚本，跳过 Touch ID 删除");
+        failed.extend(
+            allowed
+                .into_iter()
+                .map(|(p, _c)| (p, "无法创建提权脚本".to_string())),
+        );
+        return (Vec::new(), failed);
+    };
+
+    let Some((sudo_log, sudo_log_file)) = create_private_temp_file("maclean_sudo_tid_out", "log")
+    else {
+        crate::logger::error("无法安全创建提权日志文件，跳过 Touch ID 删除");
+        let _ = std::fs::remove_file(&tmp_script);
+        failed.extend(
+            allowed
+                .into_iter()
+                .map(|(p, _c)| (p, "无法创建提权日志文件".to_string())),
+        );
+        return (Vec::new(), failed);
+    };
+
+    // 清票据，确保触发 Touch ID
+    let _ = std::process::Command::new("/usr/bin/sudo")
+        .arg("-k")
+        .output();
+
+    let mut sudo_cmd = std::process::Command::new("/usr/bin/sudo");
+    sudo_cmd.arg("/bin/bash").arg(&tmp_script);
+    let mut child = sudo_cmd
+        .stdout(std::process::Stdio::from(sudo_log_file))
+        .spawn();
+    let _ = sudo_log_file;
+
+    // 等待 sudo（Touch ID 弹窗可能让用户等几秒）
+    let sudo_result = child.as_mut().map(|c| c.wait());
+
+    let sudo_stdout = std::fs::read_to_string(&sudo_log).unwrap_or_default();
+    let _ = std::fs::remove_file(&tmp_script);
+    let _ = std::fs::remove_file(&sudo_log);
+
+    let mut ok: Vec<(String, String)> = Vec::new();
+
+    match sudo_result {
+        Ok(Ok(_)) => {
+            let user_cancelled = sudo_stdout.contains("canceled")
+                || sudo_stdout.contains("cancelled")
+                || sudo_stdout.contains("User canceled");
+            if user_cancelled {
+                failed.extend(
+                    allowed
+                        .into_iter()
+                        .map(|(p, _c)| (p, "Touch ID 授权已取消".to_string())),
+                );
+                return (ok, failed);
+            }
+            for (path, category) in allowed {
+                let p = std::path::Path::new(path.as_str());
+                if !p.exists() && p.symlink_metadata().is_err() {
+                    ok.push((path, category));
+                } else {
+                    failed.push((path, "提权删除后仍存在（可能受 SIP 保护）".to_string()));
+                }
+            }
+        }
+        _ => {
+            failed.extend(
+                allowed
+                    .into_iter()
+                    .map(|(p, _c)| (p, "提权删除失败（sudo 未执行或已取消）".to_string())),
+            );
+        }
+    }
+
+    (ok, failed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

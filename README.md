@@ -68,7 +68,12 @@ GUI 与 CLI 是**同一个二进制**：不带参数启动 GUI，带子命令走
 ```bash
 ./scripts/install-cli.sh          # cargo build --release 后安装到 ~/.local/bin
 ./scripts/install-cli.sh --system # 安装到 /usr/local/bin（需 sudo）
+./scripts/install-cli.sh --cli-only # 纯 CLI 二进制（--no-default-features，不链接 GUI 库）
 ```
+
+纯 CLI 构建场景：服务器 / CI / 容器只需要 `maclean clean --yes` 这类命令时，
+用 `--cli-only` 安装，二进制不携带任何窗口系统依赖（体积更小、供应链更干净）。
+裁剪只移除 GUI 壳，扫描 / 删除闸门 / 备份 / 启动项 / 优化 / 调度 / 提权能力全部保留。
 
 ### 命令总览
 
@@ -94,6 +99,9 @@ GUI 与 CLI 是**同一个二进制**：不带参数启动 GUI，带子命令走
 - 定时任务 `--scheduled` 视为用户在 GUI 配置时已确认，无人值守执行。
 - 删除前会复做 `sanitize_before_delete`（TOCTOU 防护：符号链接复查、受保护
   路径拦截、占用处理），与 GUI 完全同一层，不会因走 CLI 而绕过。
+- 权限不足的项：默认报告失败（退出码 8）并提示；加 `--privileged` 自动提权
+  ——交互终端下会**先逐项列出待提权路径，再弹出系统授权（Touch ID / 密码）**，
+  用户取消则计入失败；非交互环境不弹窗，直接如实报告（保证脚本确定性）。
 
 ### 退出码契约（脚本消费）
 
@@ -121,6 +129,9 @@ maclean clean --tab dev-cache
 
 # 确认删除（脚本里必须显式 --yes）
 maclean clean --tab dev-cache --yes --format jsonl
+
+# 权限失败自动提权（交互终端：先列出待提权项，再弹 Touch ID）
+maclean clean --tab dev-cache --yes --privileged
 
 # 磁盘占用分类占比
 maclean check-disk --breakdown --json
