@@ -203,6 +203,17 @@ pub enum Commands {
         open: bool,
     },
 
+    /// 查看 / 清空 IO 卡死目录黑名单（目录级隔离扫描自动维护）
+    BlockedDirs {
+        /// 列出当前黑名单中的目录
+        #[arg(long)]
+        list: bool,
+
+        /// 清空黑名单（磁盘恢复后重试全部目录）
+        #[arg(long)]
+        clear: bool,
+    },
+
     /// 列出历史删除清单（M-2）
     ///
     /// 每次删除都会落一份清单，记录删了哪些路径、多大、其中多少项还救得回来。
@@ -307,6 +318,7 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
         Commands::List => cmd_list(format),
         // 日志是给人看的，不做 JSON
         Commands::Log { tail, open } => cmd_log(tail, open),
+        Commands::BlockedDirs { list, clear } => cmd_blocked_dirs(list, clear, format),
         Commands::Backups { restorable_only } => cmd_backups(restorable_only, format),
         // 还原结果涉及逐个路径的成功/失败，JSON 更有用（脚本可据此重试）
         Commands::Restore { id } => cmd_restore(&id, format),
@@ -1663,6 +1675,46 @@ fn get_disk_info() -> (u64, u64) {
 // =========================================================================
 //  日志命令
 // =========================================================================
+
+/// 查看 / 清空 IO 卡死目录黑名单（目录级隔离扫描自动维护）
+fn cmd_blocked_dirs(_list: bool, clear: bool, format: OutputFormat) -> u8 {
+    if clear {
+        crate::scanner::clear_blocked_dirs();
+        if format == OutputFormat::Human {
+            println!("已清空 IO 卡死目录黑名单");
+        } else {
+            emit_json(&serde_json::json!({ "cleared": true }), format, false);
+        }
+        return 0;
+    }
+
+    let mut dirs: Vec<String> = crate::scanner::load_blocked_dirs()
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    dirs.sort();
+
+    if format == OutputFormat::Human {
+        if dirs.is_empty() {
+            println!("黑名单为空（暂无 IO 卡死目录）");
+        } else {
+            println!("IO 卡死目录黑名单（{} 个）：", dirs.len());
+            for d in &dirs {
+                println!("  {}", d);
+            }
+            println!();
+            println!("提示：这些目录在扫描时磁盘 IO 卡死被跳过，7 天后自动重试；");
+            println!("     磁盘恢复（如重启 Mac / 磁盘工具急救）后可用 --clear 立即清空重扫。");
+        }
+    } else {
+        emit_json(
+            &serde_json::json!({ "dirs": dirs, "count": dirs.len() }),
+            format,
+            false,
+        );
+    }
+    0
+}
 
 fn cmd_log(tail: Option<usize>, open: bool) -> u8 {
     let log_dir = crate::logger::log_dir();

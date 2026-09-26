@@ -5,7 +5,6 @@
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use walkdir::WalkDir;
 
 // 导出缓存模块
 pub mod cache;
@@ -165,46 +164,148 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// 递归计算目录大小（字节）
-///
-/// 使用 walkdir 遍历目录下所有文件，累加文件大小。
-/// 遇到无法访问的文件/目录时直接跳过，不报错。
-pub fn dir_size(path: &Path) -> u64 {
-    let mut total: u64 = 0;
-    for entry in WalkDir::new(path)
-        .follow_links(false)
-        .max_depth(50)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.depth() > 0 {
-                if e.file_type().is_dir() && std::fs::metadata(e.path()).is_err() {
-                    return false;
-                }
-                // 跳过 Photos Library 等问题 bundle
-                if let Some(name) = e.file_name().to_str() {
-                    let lower = name.to_lowercase();
-                    if lower.ends_with(".photoslibrary")
-                        || lower.ends_with(".musiclibrary")
-                        || lower.ends_with(".tvlibrary")
-                    {
-                        return false;
-                    }
-                }
-            }
-            true
-        })
-    {
-        match entry {
-            Ok(entry) => {
-                if entry.file_type().is_file() {
-                    if let Ok(metadata) = entry.metadata() {
-                        total += metadata.len();
-                    }
+/// 单目录遍历超时：超过视为该目录磁盘 IO 卡死，跳过并记入黑名单
+const DIR_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 遍历最大深度（与原 WalkDir 行为一致）
+const DIR_MAX_DEPTH: usize = 50;
+
+/// 黑名单有效期（秒）：7 天。过期后目录会被重新尝试扫描，
+/// 避免磁盘恢复后永久误跳过。
+const BLOCKED_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// 黑名单文件：上次遍历卡死的目录（~/.maclean/blocked_dirs.json）
+fn blocked_dirs_file() -> PathBuf {
+    home_dir().join(".maclean/blocked_dirs.json")
+}
+
+/// 读取黑名单（过滤过期条目）
+pub fn load_blocked_dirs() -> std::collections::HashSet<PathBuf> {
+    let mut dirs = std::collections::HashSet::new();
+    let path = blocked_dirs_file();
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if let Ok(list) = serde_json::from_str::<Vec<(String, u64)>>(&s) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            for (p, ts) in list {
+                if now.saturating_sub(ts) < BLOCKED_TTL_SECS {
+                    dirs.insert(PathBuf::from(p));
                 }
             }
-            Err(_) => continue,
         }
     }
+    dirs
+}
+
+/// 将目录加入黑名单（持久化，7 天自动过期）
+pub fn add_blocked_dir(path: &Path) {
+    let mut dirs = load_blocked_dirs();
+    if !dirs.insert(path.to_path_buf()) {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let list: Vec<(String, u64)> = dirs
+        .iter()
+        .map(|p| (p.to_string_lossy().to_string(), now))
+        .collect();
+    if let Ok(s) = serde_json::to_string(&list) {
+        let file = blocked_dirs_file();
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&file, s);
+    }
+}
+
+/// 清空黑名单（磁盘恢复后手动重试全部目录）
+pub fn clear_blocked_dirs() {
+    let _ = std::fs::remove_file(blocked_dirs_file());
+}
+
+/// 递归计算目录大小（字节）
+///
+/// 目录级隔离：每个目录的枚举放到独立线程，主循环用超时等待。
+/// 当某个目录磁盘 IO 卡死（APFS 异常 / 网络卷挂起，readdir/stat 在内核
+/// 长时间不返回）时，超时后跳过该目录并记入黑名单，其余目录照常统计——
+/// 一个坏目录不再拖垮整个扫描，也不会让 UI 长时间停在同一个路径。
+///
+/// 遇到无法访问的文件/目录时直接跳过，不报错。
+pub fn dir_size(path: &Path) -> u64 {
+    let blocked = load_blocked_dirs();
+    let mut total: u64 = 0;
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
+    queue.push_back((path.to_path_buf(), 0));
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if depth > DIR_MAX_DEPTH {
+            continue;
+        }
+        // 黑名单目录：上次遍历卡死，直接跳过
+        if blocked.contains(&dir) {
+            crate::logger::warn(&format!(
+                "[dir_size] 跳过黑名单目录（上次遍历卡死）: {}",
+                dir.display()
+            ));
+            continue;
+        }
+        // 跳过 Photos Library 等问题 bundle（与原 WalkDir filter_entry 一致）
+        if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+            let lower = name.to_lowercase();
+            if lower.ends_with(".photoslibrary")
+                || lower.ends_with(".musiclibrary")
+                || lower.ends_with(".tvlibrary")
+            {
+                continue;
+            }
+        }
+
+        // 每个目录在独立线程枚举，主循环超时等待（可中断的目录级 watchdog）
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let dir_task = dir.clone();
+        std::thread::spawn(move || {
+            let mut files_size: u64 = 0;
+            let mut subdirs: Vec<PathBuf> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&dir_task) {
+                for e in entries.flatten() {
+                    // file_type() 是 lstat 语义：目录符号链接 is_dir()=false，
+                    // 天然不跟随链接（与 follow_links(false) 一致）
+                    if let Ok(ft) = e.file_type() {
+                        if ft.is_dir() {
+                            subdirs.push(e.path());
+                        } else if ft.is_file() {
+                            if let Ok(meta) = e.metadata() {
+                                files_size += meta.len();
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = tx.send((files_size, subdirs));
+        });
+
+        match rx.recv_timeout(DIR_SCAN_TIMEOUT) {
+            Ok((files_size, subdirs)) => {
+                total += files_size;
+                for sub in subdirs {
+                    queue.push_back((sub, depth + 1));
+                }
+            }
+            Err(_) => {
+                // 该目录遍历超时（IO 卡死）：跳过并记入黑名单
+                crate::logger::warn(&format!(
+                    "[dir_size] 目录遍历超时（IO 卡死），跳过并加入黑名单: {}",
+                    dir.display()
+                ));
+                add_blocked_dir(&dir);
+            }
+        }
+    }
+
     total
 }
 
