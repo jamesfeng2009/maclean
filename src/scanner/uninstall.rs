@@ -25,7 +25,7 @@ use rayon::prelude::*;
 
 use crate::app_protection::{self, ProtectionLevel};
 
-use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{dir_size, home_dir, read_dir_with_timeout, Recommend, ScanItem, ScanResult, Scanner};
 
 /// macOS 系统自带应用名称（不应卸载）
 ///
@@ -350,9 +350,8 @@ fn collect_app_paths() -> Vec<PathBuf> {
     let home = home_dir();
 
     // /Applications：仅顶层（保持原行为，避免扫进 Utilities 等系统工具）
-    if let Ok(entries) = std::fs::read_dir("/Applications") {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
+    if let Some(entries) = read_dir_with_timeout(Path::new("/Applications")) {
+        for path in entries {
             if is_app_bundle(&path) {
                 paths.push(path);
             }
@@ -361,15 +360,13 @@ fn collect_app_paths() -> Vec<PathBuf> {
 
     // ~/Applications：顶层 + 一层子目录
     let user_apps = home.join("Applications");
-    if let Ok(entries) = std::fs::read_dir(&user_apps) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
+    if let Some(entries) = read_dir_with_timeout(&user_apps) {
+        for path in entries {
             if is_app_bundle(&path) {
                 paths.push(path);
             } else if path.is_dir() {
-                if let Ok(sub) = std::fs::read_dir(&path) {
-                    for sub_entry in sub.filter_map(|e| e.ok()) {
-                        let sub_path = sub_entry.path();
+                if let Some(sub) = read_dir_with_timeout(&path) {
+                    for sub_path in sub {
                         if is_app_bundle(&sub_path) {
                             paths.push(sub_path);
                         }
@@ -412,9 +409,8 @@ fn scan_trash_apps() -> Vec<ScanItem> {
     // 收集已安装应用名称集合，用于排除正在重装的情况
     let installed_names = collect_installed_app_names();
 
-    if let Ok(entries) = std::fs::read_dir(&trash_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
+    if let Some(entries) = read_dir_with_timeout(&trash_dir) {
+        for path in entries {
             if !is_app_bundle(&path) {
                 continue;
             }
@@ -454,9 +450,8 @@ fn scan_downloads_apps() -> Vec<ScanItem> {
 
     let installed_names = collect_installed_app_names();
 
-    if let Ok(entries) = std::fs::read_dir(&downloads) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
+    if let Some(entries) = read_dir_with_timeout(&downloads) {
+        for path in entries {
             if !is_app_bundle(&path) {
                 continue;
             }
@@ -501,21 +496,21 @@ fn collect_installed_app_names() -> std::collections::HashSet<String> {
     let home = home_dir();
     let dirs = [PathBuf::from("/Applications"), home.join("Applications")];
     for dir in &dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                if let Some(name) = entry.file_name().to_str() {
+        if let Some(entries) = read_dir_with_timeout(dir) {
+            for path in entries {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     names.insert(name.to_string());
                 }
             }
         }
         // ~/Applications 子目录（Chrome Apps.localized 等）递归一层
         if dir == &home.join("Applications") {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    if entry.path().is_dir() {
-                        if let Ok(sub) = std::fs::read_dir(entry.path()) {
-                            for sub_entry in sub.filter_map(|e| e.ok()) {
-                                if let Some(name) = sub_entry.file_name().to_str() {
+            if let Some(entries) = read_dir_with_timeout(dir) {
+                for path in entries {
+                    if path.is_dir() {
+                        if let Some(sub) = read_dir_with_timeout(&path) {
+                            for sub_path in sub {
+                                if let Some(name) = sub_path.file_name().and_then(|n| n.to_str()) {
                                     names.insert(name.to_string());
                                 }
                             }
@@ -967,12 +962,15 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
 
     // 2. ~/Library/Group Containers/*<bundle_id>*/
     let group_dir = home.join("Library/Group Containers");
-    if let Ok(entries) = std::fs::read_dir(&group_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
+    if let Some(entries) = read_dir_with_timeout(&group_dir) {
+        for path in entries {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             for bid in &bundle_id_variants {
                 if name.contains(bid) {
-                    let p = entry.path().to_string_lossy().to_string();
+                    let p = path.to_string_lossy().to_string();
                     if !paths.contains(&p) {
                         paths.push(p);
                     }
@@ -1266,14 +1264,17 @@ fn scan_launch_dir(
     name_variants: &[String],
     paths: &mut Vec<String>,
 ) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let entries = match read_dir_with_timeout(dir) {
+        Some(e) => e,
+        None => return,
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        let file_path = entry.path().to_string_lossy().to_string();
+    for path in entries {
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let file_path = path.to_string_lossy().to_string();
 
         // 跳过非 plist 文件
         if !file_name.ends_with(".plist") {
@@ -1356,10 +1357,12 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
     // 扫描 ~/Library/Application Support/ 下的残留
     let app_support = home.join("Library/Application Support");
     if app_support.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&app_support) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let path = entry.path();
+        if let Some(entries) = read_dir_with_timeout(&app_support) {
+            for path in entries {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
 
                 // 跳过系统级和开发工具目录
                 if is_system_library_name(&name) {
@@ -1404,10 +1407,12 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
     // 扫描 ~/Library/Caches/ 下的残留（大于 100MB 的）
     let caches = home.join("Library/Caches");
     if caches.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&caches) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let path = entry.path();
+        if let Some(entries) = read_dir_with_timeout(&caches) {
+            for path in entries {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
 
                 // 跳过系统缓存
                 if is_system_library_name(&name) {
@@ -1450,10 +1455,12 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
     // 扫描 ~/Library/Preferences/ 下的残留 plist（每个文件独立展示）
     let prefs = home.join("Library/Preferences");
     if prefs.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&prefs) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let path = entry.path();
+        if let Some(entries) = read_dir_with_timeout(&prefs) {
+            for path in entries {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
 
                 // 只处理 .plist 文件
                 if !name.ends_with(".plist") {
@@ -1500,9 +1507,12 @@ fn get_installed_app_names() -> std::collections::HashSet<String> {
     let home_str = home_dir().to_string_lossy().to_string();
     for apps_dir in ["/Applications", &format!("{}/Applications", home_str)] {
         let apps_path = PathBuf::from(apps_dir);
-        if let Ok(entries) = std::fs::read_dir(&apps_path) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(entries) = read_dir_with_timeout(&apps_path) {
+            for path in entries {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 if name.ends_with(".app") {
                     let app_name = name.trim_end_matches(".app").to_string();
                     apps.insert(app_name.clone());
@@ -1535,9 +1545,12 @@ fn get_installed_app_names() -> std::collections::HashSet<String> {
     ];
     let applications = PathBuf::from("/Applications");
     if applications.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&applications) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(entries) = read_dir_with_timeout(&applications) {
+            for path in entries {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 if !name.ends_with(".app") {
                     continue;
                 }
@@ -1659,13 +1672,15 @@ fn scan_vendor_subdir_leftovers(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let Ok(entries) = std::fs::read_dir(vendor_path) else {
+    let Some(entries) = read_dir_with_timeout(vendor_path) else {
         return items;
     };
 
-    for entry in entries.filter_map(|e| e.ok()) {
-        let sub_name = entry.file_name().to_string_lossy().to_string();
-        let sub_path = entry.path();
+    for sub_path in entries {
+        let sub_name = sub_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         if !sub_path.is_dir() {
             continue;

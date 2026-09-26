@@ -199,6 +199,35 @@ pub fn load_blocked_dirs() -> std::collections::HashSet<PathBuf> {
     dirs
 }
 
+/// 带超时的目录枚举：返回子路径列表。
+///
+/// 目录磁盘 IO 卡死（readdir 在内核长时间不返回）时，超时返回 None，
+/// 调用方直接跳过该目录——单个坏目录不再阻塞整个扫描流程。
+/// 与 dir_size 的目录级隔离共用 DIR_SCAN_TIMEOUT。
+pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let d = dir.to_path_buf();
+    std::thread::spawn(move || {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for e in entries.flatten() {
+                paths.push(e.path());
+            }
+        }
+        let _ = tx.send(paths);
+    });
+    match rx.recv_timeout(DIR_SCAN_TIMEOUT) {
+        Ok(paths) => Some(paths),
+        Err(_) => {
+            crate::logger::warn(&format!(
+                "[read_dir] 目录遍历超时（IO 卡死），跳过: {}",
+                dir.display()
+            ));
+            None
+        }
+    }
+}
+
 /// 将目录加入黑名单（持久化，7 天自动过期）
 pub fn add_blocked_dir(path: &Path) {
     let mut dirs = load_blocked_dirs();
