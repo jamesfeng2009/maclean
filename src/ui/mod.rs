@@ -2986,7 +2986,14 @@ pub(crate) fn render_gui(
 
                 // 显示过滤结果计数
                 let total_count = items.len();
-                let filtered_indices = app.filtered_indices();
+                // 不可删除项（SIP/系统保护/仓库元数据等）对用户无操作价值，
+                // 统一从列表过滤，避免「勾选 → 授权 → 删除失败 → 重试」循环。
+                // 统计徽章与概览推荐区本就只计 deletable 项，此处过滤后口径一致。
+                let filtered_indices: Vec<usize> = app
+                    .filtered_indices()
+                    .into_iter()
+                    .filter(|&i| items[i].deletable)
+                    .collect();
                 let filtered_count = filtered_indices.len();
                 if !app.filter_query.trim().is_empty() {
                     ui.colored_label(
