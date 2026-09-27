@@ -87,6 +87,8 @@ impl Scanner for DuplicateFileScanner {
             };
         }
         let home = home_dir();
+        // 提质：用户配置的重复文件忽略名单（config.json -> dup_ignore_patterns）
+        let ignore_patterns: Vec<String> = crate::config::load_config().dup_ignore_patterns;
 
         // 1. 收集候选文件（大小分组）
         let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
@@ -105,6 +107,21 @@ impl Scanner for DuplicateFileScanner {
                 continue;
             }
             if !entry.file_type().is_file() {
+                continue;
+            }
+            // 止血：清单管理的包目录（site-packages / dist-packages /
+            // node_modules / .venv* / .terraform / go/pkg/mod / *.app/Contents）
+            // 任意层级硬排除 —— 这些目录由 RECORD / package-lock.json /
+            // go.sum 等清单管理，删任一份副本都会破坏完整性校验。
+            if is_manifest_managed_path(path) {
+                continue;
+            }
+            // 提质：用户可配置忽略名单（子串匹配路径，命中即跳过）
+            if !ignore_patterns.is_empty()
+                && ignore_patterns
+                    .iter()
+                    .any(|pat| path.to_string_lossy().contains(pat.as_str()))
+            {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -127,11 +144,36 @@ impl Scanner for DuplicateFileScanner {
             if group.len() < 2 {
                 continue;
             }
-            // 保留最短路径的那个（更可能是"原始"而非深层副本），其余为待删副本
+            // 提质：按包根分桶 —— 同一包根下出现 ≥2 份副本说明是包内镜像/
+            // 硬链接场景，宁可不省空间，整组不呈现（删任一份都可能破坏包
+            // 一致性）。
+            let mut buckets: std::collections::HashMap<PathBuf, usize> =
+                std::collections::HashMap::new();
+            for p in &group {
+                if let Some(b) = package_bucket(p) {
+                    *buckets.entry(b).or_insert(0) += 1;
+                }
+            }
+            if buckets.values().any(|&c| c >= 2) {
+                continue;
+            }
+            // 跨包根（或普通副本）：保留 mtime 最新的一份 —— 用户最近触碰的
+            // 更可能是"正在用"的原始文件；平局按路径较短者优先（更可能是根）。
             group.sort_by(|a, b| {
-                let al = a.to_string_lossy().len();
-                let bl = b.to_string_lossy().len();
-                al.cmp(&bl).then(a.cmp(b))
+                let mt_a = a
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let mt_b = b
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                mt_b.cmp(&mt_a).then_with(|| {
+                    a.to_string_lossy()
+                        .len()
+                        .cmp(&b.to_string_lossy().len())
+                        .then(a.cmp(b))
+                })
             });
             let keep = group.remove(0);
             let total_dup: u64 = group
@@ -142,6 +184,10 @@ impl Scanner for DuplicateFileScanner {
                 .into_iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
+            let keep_name = keep
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             items.push(ScanItem {
                 path: keep.to_string_lossy().into_owned(),
                 size_bytes: total_dup,
@@ -150,13 +196,14 @@ impl Scanner for DuplicateFileScanner {
                 deletable: true,
                 undeletable_reason: String::new(),
                 recommend: Recommend::Safe,
+                // 对齐 + 提质：文案与行为一致（强制走废纸篓，可恢复），
+                // 并完整写"保留了谁、删了谁"供用户核对。
                 description: format!(
-                    "发现 {} 个相同文件，将保留 {}，其余 {} 个副本移入废纸篓（可恢复）",
+                    "发现 {} 个相同文件，保留 {}（mtime 最新），其余 {} 个副本移入废纸篓（可恢复）：{}",
                     batch.len() + 1,
-                    keep.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    batch.len()
+                    keep_name,
+                    batch.len(),
+                    batch.join(", ")
                 ),
                 batch_paths: batch,
             });
@@ -180,6 +227,10 @@ fn should_skip_dir(entry: &walkdir::DirEntry, home: &Path) -> bool {
     let path = entry.path();
     if path == home {
         return false;
+    }
+    // 止血：清单管理目录任意层级剪枝（提前整棵跳过，避免逐文件过滤）
+    if is_manifest_managed_path(path) {
+        return true;
     }
     let rel = path.strip_prefix(home).unwrap_or(path);
     let rel_str = rel.to_string_lossy();
@@ -228,6 +279,86 @@ fn find_duplicate_groups(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         }
     }
     result
+}
+
+/// 止血：路径任意层级是否命中清单管理的包目录标记
+///
+/// 命中即该路径（或该子树）不参与重复检测 —— 不依赖 home 相对前缀，
+/// 任意层级出现即视为受清单管理。
+fn is_manifest_managed_path(path: &Path) -> bool {
+    let comps: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    for (i, c) in comps.iter().enumerate() {
+        if c == "site-packages" || c == "dist-packages" || c == "node_modules" || c == ".terraform"
+        {
+            return true;
+        }
+        // .venv* 只匹配虚拟环境命名（.venv / .venv2 / .venv311 等数字后缀），
+        // 避免把 .venvista 这类普通目录误伤。
+        if c.starts_with(".venv") && (c.len() == 5 || c[5..].chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return true;
+        }
+        if c == "go"
+            && comps.get(i + 1).map(|s| s.as_str()) == Some("pkg")
+            && comps.get(i + 2).map(|s| s.as_str()) == Some("mod")
+        {
+            return true;
+        }
+        if c.ends_with(".app") && comps.get(i + 1).map(|s| s.as_str()) == Some("Contents") {
+            return true;
+        }
+    }
+    false
+}
+
+/// 提质：推断副本所属的"包根"（管理目录标记的完整前缀）
+///
+/// 与 is_manifest_managed_path 同源标记；此处用于组内分桶 ——
+/// 同包根 ≥2 份副本时整组跳过，跨包根才进入保留者选择。
+fn package_bucket(path: &Path) -> Option<PathBuf> {
+    let comps: Vec<PathBuf> = path
+        .components()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    for (i, c) in comps.iter().enumerate() {
+        let name = c.to_string_lossy();
+        if name == "site-packages"
+            || name == "dist-packages"
+            || name == "node_modules"
+            || name == ".terraform"
+        {
+            return Some(comps[..=i].iter().collect());
+        }
+        if name.starts_with(".venv")
+            && (name.len() == 5 || name[5..].chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return Some(comps[..=i].iter().collect());
+        }
+        if name == "go"
+            && comps
+                .get(i + 1)
+                .map(|s| s.to_string_lossy().as_ref() == "pkg")
+                .unwrap_or(false)
+            && comps
+                .get(i + 2)
+                .map(|s| s.to_string_lossy().as_ref() == "mod")
+                .unwrap_or(false)
+        {
+            return Some(comps[..=i + 2].iter().collect());
+        }
+        if name.ends_with(".app")
+            && comps
+                .get(i + 1)
+                .map(|s| s.to_string_lossy().as_ref() == "Contents")
+                .unwrap_or(false)
+        {
+            return Some(comps[..=i + 1].iter().collect());
+        }
+    }
+    None
 }
 
 /// 前 N 字节哈希（预筛）
@@ -295,6 +426,52 @@ mod tests {
         std::fs::write(&b, vec![0xCDu8; 2 * 1024 * 1024]).unwrap();
         assert_ne!(full_hash(&a), full_hash(&b));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn manifest_managed_paths_are_excluded_any_depth() {
+        // 止血：site-packages / node_modules / .venv* / .terraform /
+        // go/pkg/mod / *.app/Contents 任意层级命中即排除，不依赖 home 前缀。
+        for p in [
+            "/Users/u/.venv/lib/python3.13/site-packages/pkg/a.bin",
+            "/Users/u/proj/node_modules/pkg/b.bin",
+            "/Users/u/a/b/c/dist-packages/pkg/c.bin",
+            "/Users/u/tools/.venv2/bin/d.bin",
+            "/Users/u/ops/.terraform/e.bin",
+            "/Users/u/gopath/go/pkg/mod/f.bin",
+            "/Users/u/App.app/Contents/Resources/g.bin",
+        ] {
+            assert!(is_manifest_managed_path(Path::new(p)), "应排除: {}", p);
+        }
+        for p in [
+            "/Users/u/Downloads/a.bin",
+            "/Users/u/proj/src/h.bin",
+            "/Users/u/.venvista/i.bin", // 前缀 .venv 严格匹配：.venvista 不误伤
+        ] {
+            assert!(!is_manifest_managed_path(Path::new(p)), "不应误排除: {}", p);
+        }
+    }
+
+    #[test]
+    fn package_bucket_groups_same_package_root() {
+        // 提质：同一包根应映射到同一桶；不同包根桶不同；普通文件无桶。
+        let a = package_bucket(Path::new(
+            "/Users/u/p1/.venv/lib/python3.13/site-packages/x/y.bin",
+        ));
+        let b = package_bucket(Path::new(
+            "/Users/u/p1/.venv/lib/python3.13/site-packages/z/w.bin",
+        ));
+        assert_eq!(a, b, "同一 .venv 下两份副本应同桶");
+        let c = package_bucket(Path::new(
+            "/Users/u/p2/venv2/lib/python3.13/site-packages/q.bin",
+        ));
+        assert_ne!(a, c, "不同 .venv 应不同桶");
+        assert!(a.is_some());
+        assert_eq!(
+            package_bucket(Path::new("/Users/u/Downloads/a.bin")),
+            None,
+            "普通文件无包根"
+        );
     }
 
     #[test]

@@ -571,6 +571,12 @@ impl Gui {
                             app.receive_delete_log(log, path, category, success);
                         }
                     }
+                    Ok(DeleteMessage::Skip(log, _path, _category)) => {
+                        // 跳过项：只进日志区展示，不计入成功/失败统计
+                        if let Some(app) = Some(&mut self.app) {
+                            app.logs.push(log);
+                        }
+                    }
                     Ok(DeleteMessage::Info(info)) => {
                         if let Some(app) = Some(&mut self.app) {
                             app.logs.push(info);

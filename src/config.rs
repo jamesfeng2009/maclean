@@ -73,6 +73,12 @@ pub struct AppConfig {
     ///
     /// 首次启动时若 config.json 不存在，会用系统偏好初始化；之后以这里为准。
     pub dark_mode: bool,
+    /// 重复文件扫描的用户忽略名单（子串匹配路径，命中即跳过）
+    ///
+    /// 与内置硬排除（site-packages 等清单管理目录）互补：这里给用户
+    /// 自己声明"这些目录/文件绝不参与重复清理"，CLI 用
+    /// `maclean dup-ignore add/remove/list` 维护。
+    pub dup_ignore_patterns: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -92,6 +98,7 @@ impl Default for AppConfig {
             settings_prevent_lid_close: true,
             settings_auto_restore_point: true,
             dark_mode: false,
+            dup_ignore_patterns: Vec::new(),
         }
     }
 }

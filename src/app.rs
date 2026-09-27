@@ -1320,6 +1320,14 @@ impl App {
                     crate::scanner::Recommend::Caution => false, // 系统缓存：永久删除（root 属主无法移到用户废纸篓）
                     crate::scanner::Recommend::Advanced => true, // 大文件/高级项：移至废纸篓
                 };
+                // 止血：重复文件强制走废纸篓 —— description 承诺"移入废纸篓
+                // （可恢复）"，行为必须与文案一致；不能因 recommend=Safe 而
+                // 永久删除（副本可能被用户误用为原始文件，删了无法恢复）。
+                let use_trash = if item.category == "重复文件" {
+                    true
+                } else {
+                    use_trash
+                };
                 (
                     item.path.clone(),
                     item.category.clone(),

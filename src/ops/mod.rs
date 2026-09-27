@@ -32,6 +32,8 @@ pub(crate) enum ScanMessage {
 pub(crate) enum DeleteMessage {
     /// 单项删除结果（日志, 路径, 类别, 是否成功）
     Log(String, String, String, bool),
+    /// 单项跳过（日志, 路径, 类别）—— 路径已不存在等，不计入成功/失败统计
+    Skip(String, String, String),
     /// 进度信息（不计入成功/失败统计）
     Info(String),
     /// 普通删除完成，部分项需要管理员权限
@@ -1374,33 +1376,84 @@ pub(crate) fn start_delete(
                                     safety::SafetyCheck::Safe => {}
                                 }
                                 let p = std::path::Path::new(bp.as_str());
-                                match best_effort_delete_with_reason(p) {
-                                    Ok(()) => success_count += 1,
-                                    Err(failure) => {
-                                        fail_count += 1;
-                                        failed_items.lock().unwrap_or_else(|e| e.into_inner())
-                                            .push((bp.clone(), category.clone()));
-                                        // P1：失败归因 —— 用户能看到"为什么删不掉"
+                                // 对齐：已消失的路径记 SKIP —— 之前直接算成功，
+                                // 用户什么都没做也让成功数虚高。
+                                if !p.exists() && p.symlink_metadata().is_err() {
+                                    let _ = tx.send(DeleteMessage::Skip(
+                                        format!(
+                                            "⏭️ {}",
+                                            App::tf_lang(
+                                                lang_en,
+                                                "log_skipped",
+                                                &[bp, &App::t_lang(lang_en, "already_cleaned")]
+                                            )
+                                        ),
+                                        bp.clone(),
+                                        category.clone(),
+                                    ));
+                                    continue;
+                                }
+                                // 止血：批量分支尊重 use_trash —— 重复文件等批量项
+                                // 同样走废纸篓，不再一律 best_effort 永久删除。
+                                let deleted_ok = if use_trash {
+                                    move_to_trash(bp)
+                                } else {
+                                    best_effort_delete_with_reason(p).is_ok()
+                                };
+                                if deleted_ok {
+                                    success_count += 1;
+                                    // M-2：批量项真删掉也记备份清单
+                                    let restorable = crate::backup::is_restorable_by_move(
+                                        use_trash,
+                                        std::env::consts::OS,
+                                    );
+                                    if let Ok(mut guard) = backup_entries.lock() {
+                                        guard.push(crate::backup::BackupEntry {
+                                            path: bp.clone(),
+                                            size_bytes,
+                                            category: category.clone(),
+                                            restorable,
+                                        });
+                                    }
+                                } else {
+                                    fail_count += 1;
+                                    failed_items.lock().unwrap_or_else(|e| e.into_inner())
+                                        .push((bp.clone(), category.clone()));
+                                    // 失败归因 —— 用户能看到"为什么删不掉"
+                                    let reason = if use_trash {
+                                        App::t_lang(lang_en, "log_trash_failed")
+                                            .replace("{}", "")
+                                            .trim()
+                                            .to_string()
+                                    } else {
+                                        let failure =
+                                            best_effort_delete_with_reason(p).err();
                                         #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-                                        let mut reason: String = App::t_lang(lang_en, failure.label_key()).to_string();
+                                        let mut reason: String = failure
+                                            .map(|f| App::t_lang(lang_en, f.label_key()).to_string())
+                                            .unwrap_or_else(|| {
+                                                App::t_lang(lang_en, "fail_reason_other").to_string()
+                                            });
+                                        // P1：Windows 上被占用时，尽力查出占用进程名
                                         #[cfg(target_os = "windows")]
-                                        if let DeleteFailure::FileInUse = failure {
+                                        if let Some(DeleteFailure::FileInUse) = failure {
                                             let lockers = find_locking_processes(bp);
                                             if !lockers.is_empty() {
                                                 reason = format!("{}: {}", reason, lockers.join(", "));
                                             }
                                         }
-                                        let _ = tx.send(DeleteMessage::Log(
-                                            format!(
-                                                "⚠️ {} — {}",
-                                                App::t_lang(lang_en, "log_still_exists"),
-                                                reason
-                                            ),
-                                            bp.clone(),
-                                            category.clone(),
-                                            false,
-                                        ));
-                                    }
+                                        reason
+                                    };
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!(
+                                            "⚠️ {} — {}",
+                                            App::t_lang(lang_en, "log_still_exists"),
+                                            reason
+                                        ),
+                                        bp.clone(),
+                                        category.clone(),
+                                        false,
+                                    ));
                                 }
                             }
                             let _ = tx.send(DeleteMessage::Log(
@@ -1523,13 +1576,21 @@ pub(crate) fn start_delete(
                         let p = std::path::Path::new(path.as_str());
 
                         if !p.exists() && p.symlink_metadata().is_err() {
-                            // 路径已不存在：视为删除成功（幂等性）。
-                            // 用户想要的结果就是该路径消失，现在目标已经达成，
-                            // 无需因缓存过期或外部已删除而报错。
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ {} ({})", App::tf_lang(lang_en, "log_path_not_exist", &[&path]),
-                                    App::t_lang(lang_en, "already_cleaned")), path.clone(), category.clone(), true));
-                            safety::log_deletion(&path, &category, true, None);
+                            // 对齐：路径已不存在 → 记 SKIP，不计成功也不计失败。
+                            // 之前记"✓ (已清理)"会让成功数虚高 —— 用户没做任何事，
+                            // 只是缓存过期或外部已删除。
+                            let _ = tx.send(DeleteMessage::Skip(
+                                format!(
+                                    "⏭️ {}",
+                                    App::tf_lang(
+                                        lang_en,
+                                        "log_skipped",
+                                        &[&path, &App::t_lang(lang_en, "already_cleaned")]
+                                    )
+                                ),
+                                path.clone(),
+                                category.clone(),
+                            ));
                             continue;
                         }
 

@@ -243,6 +243,14 @@ pub enum Commands {
         #[command(subcommand)]
         action: OptimizeAction,
     },
+
+    /// 管理重复文件扫描的用户忽略名单（config.json -> dup_ignore_patterns）
+    ///
+    /// 命中模式的路径（子串匹配）不参与重复文件清理，与内置硬排除互补。
+    DupIgnore {
+        #[command(subcommand)]
+        action: DupIgnoreAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -258,6 +266,22 @@ pub enum StartupAction {
     Enable {
         /// launchd Label
         label: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DupIgnoreAction {
+    /// 列出当前忽略名单
+    List,
+    /// 添加忽略模式（子串匹配路径；命中即跳过，如 "site-packages"、"/backup/old"）
+    Add {
+        /// 路径子串模式
+        pattern: String,
+    },
+    /// 移除一个忽略模式（需与 add 时的字符串完全一致）
+    Remove {
+        /// 要移除的模式
+        pattern: String,
     },
 }
 
@@ -324,6 +348,7 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
         Commands::Restore { id } => cmd_restore(&id, format),
         Commands::Startup { action } => cmd_startup(action, format, color),
         Commands::Optimize { action } => cmd_optimize(action, format, color),
+        Commands::DupIgnore { action } => cmd_dup_ignore(action, format),
     }
 }
 
@@ -1826,6 +1851,97 @@ struct JsonStartupResult {
     plist: String,
     ok: bool,
     error: Option<String>,
+}
+
+fn cmd_dup_ignore(action: DupIgnoreAction, format: OutputFormat) -> u8 {
+    let mut cfg = crate::config::load_config();
+    match action {
+        DupIgnoreAction::Add { pattern } => {
+            let pattern = pattern.trim().to_string();
+            if pattern.is_empty() {
+                eprintln!("⚠ 忽略模式不能为空");
+                return 2;
+            }
+            if cfg.dup_ignore_patterns.contains(&pattern) {
+                if format != OutputFormat::Human {
+                    emit_json(
+                        &serde_json::json!({
+                            "command": "dup-ignore",
+                            "action": "add",
+                            "pattern": pattern,
+                            "added": false,
+                            "already": true,
+                        }),
+                        format,
+                        false,
+                    );
+                } else {
+                    println!("已存在（未改动）: {}", pattern);
+                }
+                return 0;
+            }
+            cfg.dup_ignore_patterns.push(pattern.clone());
+            crate::config::save_config(&cfg);
+            if format != OutputFormat::Human {
+                emit_json(
+                    &serde_json::json!({
+                        "command": "dup-ignore",
+                        "action": "add",
+                        "pattern": pattern,
+                        "added": true,
+                    }),
+                    format,
+                    false,
+                );
+            } else {
+                println!("已添加忽略模式: {}", pattern);
+                println!("（重复文件扫描命中该子串的路径将被跳过）");
+            }
+        }
+        DupIgnoreAction::Remove { pattern } => {
+            let before = cfg.dup_ignore_patterns.len();
+            cfg.dup_ignore_patterns.retain(|p| p != &pattern);
+            let removed = cfg.dup_ignore_patterns.len() != before;
+            crate::config::save_config(&cfg);
+            if format != OutputFormat::Human {
+                emit_json(
+                    &serde_json::json!({
+                        "command": "dup-ignore",
+                        "action": "remove",
+                        "pattern": pattern,
+                        "removed": removed,
+                    }),
+                    format,
+                    false,
+                );
+            } else if removed {
+                println!("已移除忽略模式: {}", pattern);
+            } else {
+                println!("未找到该模式（无需移除）: {}", pattern);
+            }
+        }
+        DupIgnoreAction::List => {
+            if format != OutputFormat::Human {
+                emit_json(
+                    &serde_json::json!({
+                        "command": "dup-ignore",
+                        "action": "list",
+                        "count": cfg.dup_ignore_patterns.len(),
+                        "patterns": cfg.dup_ignore_patterns,
+                    }),
+                    format,
+                    false,
+                );
+            } else if cfg.dup_ignore_patterns.is_empty() {
+                println!("（当前无忽略模式 —— 重复文件扫描只受内置硬排除保护）");
+            } else {
+                for p in &cfg.dup_ignore_patterns {
+                    println!("{}", p);
+                }
+            }
+        }
+    }
+    0
 }
 
 fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
