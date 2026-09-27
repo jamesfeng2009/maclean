@@ -7042,11 +7042,38 @@ pub(crate) fn render_settings_item(
 }
 
 /// 扫描中 UI
+/// 概览扫描中的聚合进度：统计所有 Tab 当前可删除的项数与大小
+///
+/// Overview 自身的扫描器恒空（聚合视图，`results[0]` 无 item），扫描中
+/// 若直接用本 Tab 结果会显示"0 项 总计 0B"，与顶部聚合色块（如 Safe
+/// 18.4G）自相矛盾。这里跨 Tab 聚合可删项，让"扫描中"显示真实进度。
+fn overview_aggregate_progress(results: &[Vec<ScanItem>]) -> (usize, u64) {
+    let mut n = 0usize;
+    let mut size = 0u64;
+    for tab in results.iter().skip(1) {
+        for item in tab {
+            if item.deletable {
+                n += 1;
+                size += item.size_bytes;
+            }
+        }
+    }
+    (n, size)
+}
+
 pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
     let tab_idx = app.tab_index();
     let tab_title_text = tab_title(&app.tab, app);
-    let discovered = app.results[tab_idx].len();
-    let discovered_size: u64 = app.results[tab_idx].iter().map(|i| i.size_bytes).sum();
+    let (discovered, discovered_size) = if app.tab == Tab::Overview {
+        // Overview 自身扫描器恒空：扫描中显示跨 Tab 聚合进度，
+        // 避免"顶部 18.4G 可释放却显示 0 项 0B"的误导
+        overview_aggregate_progress(&app.results)
+    } else {
+        (
+            app.results[tab_idx].len(),
+            app.results[tab_idx].iter().map(|i| i.size_bytes).sum(),
+        )
+    };
     let current_path = if app.scan_current_path.is_empty() {
         app.t("scanning_hint").to_string()
     } else {
@@ -7221,6 +7248,22 @@ pub(crate) fn ui_scanning(ui: &mut egui::Ui, app: &mut App) {
 mod tests {
     use super::*;
     use crate::scanner::{Recommend, ScanItem};
+
+    #[test]
+    fn overview_progress_aggregates_deletable_across_tabs() {
+        // 概览自身扫描器恒空（results[0] 无 item）；扫描中进度必须聚合
+        // 其他 Tab 的可删项，否则界面显示"顶部 18.4G 却 0 项 0B"矛盾。
+        let mut results: Vec<Vec<ScanItem>> = vec![Vec::new(); 12];
+        results[0].push(mk_item("/tmp/overview_self", 1)); // Overview 自身不计入
+        results[3].push(mk_item("/tmp/a", 100));
+        results[3].push(mk_item("/tmp/b", 200));
+        let mut protected = mk_item("/tmp/c", 500);
+        protected.deletable = false;
+        results[5].push(protected);
+        let (n, size) = overview_aggregate_progress(&results);
+        assert_eq!(n, 2, "应只统计可删项，且跳过 Overview 自身");
+        assert_eq!(size, 300, "大小应只累加可删项");
+    }
 
     /// 构造一个可删除的测试条目
     fn mk_item(path: &str, size: u64) -> ScanItem {
