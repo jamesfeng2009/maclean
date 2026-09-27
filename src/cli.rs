@@ -756,6 +756,12 @@ fn cmd_clean(
         }
 
         let clean_size: u64 = to_clean.iter().map(|i| i.size_bytes).sum();
+        crate::logger::info(&format!(
+            "[删除] 任务开始: {} — {} 项（{}）",
+            tab_key,
+            to_clean.len(),
+            format_size(clean_size)
+        ));
 
         if format == OutputFormat::Human {
             println!("\n🧹 清理 {} ({})", tab_label, tab_key);
@@ -901,6 +907,7 @@ fn cmd_clean(
                         }
                         continue;
                     }
+                    crate::logger::warn(&format!("[删除] 失败: {} — {}", path, e));
                     rec.failed.push(JsonFailure {
                         path: path.clone(),
                         reason: e.to_string(),
@@ -961,6 +968,7 @@ fn cmd_clean(
                         }
                     }
                     for (path, reason) in fail_paths {
+                        crate::logger::warn(&format!("[删除] 失败(提权): {} — {}", path, reason));
                         rec.failed.push(JsonFailure {
                             path: path.clone(),
                             reason: reason.clone(),
@@ -985,6 +993,10 @@ fn cmd_clean(
                 } else if privileged {
                     // 非交互环境：无法弹窗授权，如实报告（脚本确定性）
                     for (path, _) in &priv_needed {
+                        crate::logger::warn(&format!(
+                            "[删除] 失败(需提权): {} — 需要管理员权限（非交互环境无法弹窗授权）",
+                            path
+                        ));
                         rec.failed.push(JsonFailure {
                             path: path.clone(),
                             reason: "需要管理员权限（非交互环境无法弹窗授权）".to_string(),
@@ -1013,6 +1025,10 @@ fn cmd_clean(
                 } else {
                     // 未开启 --privileged：给出明确指引
                     for (path, _) in &priv_needed {
+                        crate::logger::warn(&format!(
+                            "[删除] 失败(需提权): {} — 需要管理员权限（可加 --privileged 自动提权）",
+                            path
+                        ));
                         rec.failed.push(JsonFailure {
                             path: path.clone(),
                             reason: "需要管理员权限（可加 --privileged 自动提权）".to_string(),
@@ -1044,6 +1060,10 @@ fn cmd_clean(
             #[cfg(not(target_os = "macos"))]
             {
                 for (path, _) in &priv_needed {
+                    crate::logger::warn(&format!(
+                        "[删除] 失败(需提权): {} — 当前平台 CLI 不支持自动提权",
+                        path
+                    ));
                     rec.failed.push(JsonFailure {
                         path: path.clone(),
                         reason: "需要管理员权限（当前平台 CLI 不支持自动提权）".to_string(),
@@ -1074,6 +1094,13 @@ fn cmd_clean(
             );
         }
         out.push(rec);
+        crate::logger::info(&format!(
+            "[删除] 任务完成: {} — 成功 {}，失败 {}，拦截 {}",
+            tab_key,
+            success,
+            failed,
+            rejected.len()
+        ));
     }
 
     if format == OutputFormat::Json {

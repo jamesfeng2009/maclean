@@ -213,6 +213,45 @@ fn clean_old_logs(log_dir: &PathBuf) {
 //  时间格式化（不依赖 chrono，手动计算）
 // =========================================================================
 
+/// 本地时区时间分量（Unix 用 localtime_r；其他平台回退 UTC）
+///
+/// 返回 (年, 月, 日, 时, 分, 秒)。日志时间戳必须用本地时间，
+/// 否则用户看到的日志比真实时间慢 8 小时（UTC 无偏移），
+/// 会被误读为"日志没在写/停在某时刻"。
+fn localtime_fields(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    #[cfg(unix)]
+    {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let t = secs as i64;
+        unsafe {
+            libc::localtime_r(&t, &mut tm);
+        }
+        let year = (tm.tm_year + 1900) as u32;
+        let month = (tm.tm_mon + 1) as u32;
+        (
+            year,
+            month,
+            tm.tm_mday as u32,
+            tm.tm_hour as u32,
+            tm.tm_min as u32,
+            tm.tm_sec as u32,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let (y, m, d) = secs_to_date(secs);
+        let tod = secs % 86400;
+        (
+            y,
+            m,
+            d,
+            (tod / 3600) as u32,
+            ((tod % 3600) / 60) as u32,
+            (tod % 60) as u32,
+        )
+    }
+}
+
 /// 格式化日期: YYYY-MM-DD
 fn format_date(time: SystemTime) -> String {
     let secs = time
@@ -220,7 +259,7 @@ fn format_date(time: SystemTime) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let (year, month, day) = secs_to_date(secs);
+    let (year, month, day, _, _, _) = localtime_fields(secs);
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
@@ -231,8 +270,7 @@ fn format_timestamp(time: SystemTime) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let (year, month, day) = secs_to_date(secs);
-    let (hour, minute, second) = secs_to_time(secs);
+    let (year, month, day, hour, minute, second) = localtime_fields(secs);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         year, month, day, hour, minute, second
@@ -260,15 +298,12 @@ fn secs_to_date(secs: u64) -> (u32, u32, u32) {
     (year as u32, m as u32, d as u32)
 }
 
-/// Unix 时间戳转时间 (时, 分, 秒) - UTC
+/// Unix 时间戳转时间 (时, 分, 秒) - 本地时区
 ///
-/// 注意：这里使用 UTC 时间。对于日志来说，UTC 是可以接受的，
-/// 且避免了本地时区转换的复杂性。
+/// 注意：使用本地时区（localtime_r）。日志时间戳若用 UTC，
+/// 用户看到的日志会比真实时间慢 8 小时，误以为日志未写入。
 fn secs_to_time(secs: u64) -> (u32, u32, u32) {
-    let tod = secs % 86400;
-    let hour = (tod / 3600) as u32;
-    let minute = ((tod % 3600) / 60) as u32;
-    let second = (tod % 60) as u32;
+    let (_, _, _, hour, minute, second) = localtime_fields(secs);
     (hour, minute, second)
 }
 
@@ -296,15 +331,17 @@ mod tests {
 
     #[test]
     fn test_secs_to_time() {
-        let (h, m, s) = secs_to_time(1720828800); // 00:00:00 UTC
-        assert_eq!(h, 0);
-        assert_eq!(m, 0);
-        assert_eq!(s, 0);
+        // 本地时区：具体时分随机器 TZ 变化，只验证分量合法
+        let (h, m, s) = secs_to_time(1720828800);
+        assert!(h < 24 && m < 60 && s < 60);
     }
 
     #[test]
     fn test_format_date() {
-        let date = format_date(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1720828800));
-        assert_eq!(date, "2024-07-13");
+        // 本地时区：日期可能随 TZ 前后漂移一天，只验证格式
+        let date = format_date(SystemTime::now());
+        assert_eq!(date.len(), 10);
+        assert_eq!(&date[4..5], "-");
+        assert_eq!(&date[7..8], "-");
     }
 }
