@@ -144,6 +144,8 @@ fn backup_dir_for(item: &StartupItem, backup_root: &Path) -> PathBuf {
 }
 
 /// 从备份恢复原路径：备份路径 -> (scope, 原 plist 路径)
+/// 调用点在 cli 的 cmd_startup（macOS 专属），其它平台编译但不使用。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn restore_origin_from_backup(
     backup_path: &Path,
     backup_root: &Path,

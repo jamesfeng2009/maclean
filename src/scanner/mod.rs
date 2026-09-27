@@ -12,9 +12,9 @@ pub mod cache;
 // 导出子模块
 #[cfg(target_os = "macos")]
 pub mod apfs;
-// app_cache/app_data/uninstall 扫描 macOS 专属路径（~/Library/Containers 等），
-// Windows 上不支持，用 cfg 包装。optimize 内部已按平台返回不同任务清单，
-// 无需限制平台（Windows 有自己的 Win11Debloat 风格任务）。
+// app_cache/app_data 扫描 macOS 专属路径（~/Library/Containers 等），
+// Windows 上不支持，用 cfg 包装（调用点已确认全部在 cfg(macos) 内）。
+// optimize 内部已按平台返回不同任务清单，无需限制平台。
 #[cfg(target_os = "macos")]
 pub mod app_cache;
 #[cfg(target_os = "macos")]
@@ -24,12 +24,16 @@ pub mod dev_cache;
 pub mod dup_files;
 pub mod large_files;
 pub mod optimize;
-#[cfg(target_os = "macos")]
+// startup/uninstall 刻意不加 cfg（2026-09-28）：cli/ui/app 里的调用点
+// （App.startup_items 字段类型、CLI startup/uninstall 子命令、启动项面板）
+// 是跨平台编译的，cfg(macos) 会直接砸断 Windows 构建（交叉 check 11 错）。
+// 两模块自身只用 std::process::Command 与路径字符串，Windows 上可编译；
+// 扫描目标（~/Library/LaunchAgents、/Applications 等）在 Windows 不存在，
+// 天然返回空结果，不会误扫误删。
 pub mod startup;
 // 残留名称匹配：刻意不限定平台，见模块顶部注释。放在 scanner 根而非
 // windows_apps 内，是为了让它（连同规定的删除保护）在开发机上可被编译和测试。
 mod residual_match;
-#[cfg(target_os = "macos")]
 pub mod uninstall;
 // Windows 专属模块（采集层：读注册表 / 枚举 UWP / 执行卸载）
 #[cfg(target_os = "windows")]

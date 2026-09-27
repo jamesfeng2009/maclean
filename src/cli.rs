@@ -21,6 +21,7 @@ use crate::scanner::startup::{
     disable_startup_item, enable_startup_item, restore_origin_from_backup, scan_startup_items,
     StartupItem,
 };
+#[cfg(target_os = "macos")]
 use crate::scanner::uninstall::UninstallScanner;
 use crate::scanner::{format_size, Scanner};
 use crate::scanner::{Recommend, ScanItem};
@@ -1822,12 +1823,16 @@ fn cmd_log(tail: Option<usize>, open: bool) -> u8 {
 //  Startup · macOS 启动项管理（P3 配套）
 // =========================================================================
 
+#[cfg(target_os = "macos")]
 fn default_startup_backup_root() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
         .join(".maclean/disabled_launchd")
 }
 
+// 三个 JSON 结构只被 macOS 版 cmd_startup 构造；刻意不加 cfg，
+// 让它们在 Windows 上继续参与类型检查。
 #[derive(serde::Serialize)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct JsonStartupItem {
     label: String,
     plist: String,
@@ -1836,6 +1841,7 @@ struct JsonStartupItem {
 }
 
 #[derive(serde::Serialize)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct JsonStartupList {
     command: &'static str,
     count: usize,
@@ -1844,6 +1850,7 @@ struct JsonStartupList {
 }
 
 #[derive(serde::Serialize)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct JsonStartupResult {
     command: &'static str,
     action: &'static str,
@@ -1944,6 +1951,7 @@ fn cmd_dup_ignore(action: DupIgnoreAction, format: OutputFormat) -> u8 {
     0
 }
 
+#[cfg(target_os = "macos")]
 fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
     let backup_root = default_startup_backup_root();
     match action {
@@ -2149,6 +2157,15 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
 // =========================================================================
 //  Optimize · 系统优化/维护任务（P1 配套）
 // =========================================================================
+
+/// 启动项（launchd plist）是 macOS 专属能力。CLI 表面跨平台编译，
+/// 其它平台明确拒绝而不是静默空转，避免脚本误以为"已处理"。
+#[cfg(not(target_os = "macos"))]
+fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
+    let _ = (action, format, color);
+    eprintln!("startup 管理仅 macOS 支持");
+    EXIT_FAILURE
+}
 
 #[derive(serde::Serialize)]
 struct JsonOptimizeTask {

@@ -17,6 +17,10 @@
 //! - ~/Library/Saved Application State/<bundle_id>.savedState/
 //! - ~/Library/HTTPStorages/<bundle_id>/
 
+// 模块刻意跨平台编译（cli/app 的引用点不做 cfg），但 Windows 的卸载走
+// windows_apps 链路，本模块整体不被调用 —— 死代码告警是设计使然，不是回归。
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
