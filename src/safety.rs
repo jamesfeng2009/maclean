@@ -320,6 +320,42 @@ fn check_home_paths_for_platform(
 /// 5. 用户关键目录黑名单（Keychains, Mail, Messages 等）
 /// 6. 白名单校验（只允许已知安全路径模式）
 /// 7. 敏感文件名检测（.env, id_rsa, credentials 等）
+/// 路径任意层级是否命中清单管理的包目录标记（site-packages / dist-packages /
+/// node_modules / .venv* / .terraform / go/pkg/mod / *.app/Contents）。
+///
+/// 这些目录由包管理器清单（RECORD / package-lock.json / go.sum 等）管理：
+/// 删任一份副本都会破坏完整性校验，属于「项目文件」而非缓存。
+/// 任意层级出现即命中（不依赖 home 相对前缀），供 safety 第 4.6 层与
+/// 重复文件候选收集共用，保证两处判定永远一致。
+pub fn is_manifest_managed_path(path: &Path) -> bool {
+    let comps: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    for (i, c) in comps.iter().enumerate() {
+        if c == "site-packages" || c == "dist-packages" || c == "node_modules" || c == ".terraform"
+        {
+            return true;
+        }
+        // .venv* 只匹配虚拟环境命名（.venv / .venv2 / .venv311 等数字后缀），
+        // 避免把 .venvista 这类普通目录误伤。
+        if c.starts_with(".venv") && (c.len() == 5 || c[5..].chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return true;
+        }
+        if c == "go"
+            && comps.get(i + 1).map(|s| s.as_str()) == Some("pkg")
+            && comps.get(i + 2).map(|s| s.as_str()) == Some("mod")
+        {
+            return true;
+        }
+        if c.ends_with(".app") && comps.get(i + 1).map(|s| s.as_str()) == Some("Contents") {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyCheck {
     // 当前策略对所有分类一视同仁（category 预留给后续按场景细化，如"大文件"放宽白名单）。
     // 先显式消费掉，避免误删参数后调用方悄悄失配。
@@ -451,6 +487,22 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
                 canonical_str
             ));
         }
+    }
+
+    // ================================================================
+    //  第 4.6 层: 清单管理目录保护（任意深度）
+    // ================================================================
+    // site-packages / dist-packages / node_modules / .venv* / .terraform /
+    // go/pkg/mod / *.app/Contents 由包管理器清单管理，删任一份副本都会
+    // 破坏完整性校验（用户实际误删过：delete.log 累计 350+ 条落在
+    // site-packages、波及 20+ 个 venv）。这些是「项目文件」而非缓存，
+    // 任何类目、任何删除入口都硬阻断 —— 与候选收集共用同一判定，
+    // 保证「扫不进」与「删不掉」永远一致。
+    if is_manifest_managed_path(&canonical) {
+        return SafetyCheck::Danger(format!(
+            "清单管理目录（site-packages/.venv/node_modules 等），拒绝删除: {}",
+            canonical_str
+        ));
     }
 
     // ================================================================
@@ -1452,6 +1504,63 @@ fn chrono_like_timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- 第 4.6 层: 清单管理目录保护 ----------
+
+    #[test]
+    fn manifest_managed_dirs_are_never_deletable() {
+        // 根因修复：delete.log 曾累计 350+ 条误删落在 site-packages、波及
+        // 20+ 个 venv。清单管理目录在任何删除入口都必须被硬阻断。
+        for p in [
+            "/Users/u/proj/.venv/lib/python3.13/site-packages/x/y.bin",
+            "/Users/u/proj/node_modules/pkg/b.bin",
+            "/Users/u/a/b/dist-packages/c.bin",
+            "/Users/u/ops/.terraform/e.bin",
+            "/Users/u/gopath/go/pkg/mod/f.bin",
+            "/Users/u/App.app/Contents/Resources/g.bin",
+            "/Users/u/tools/.venv2/bin/h.bin",
+        ] {
+            let r = check_path_safety_with_category(p, "重复文件");
+            assert!(
+                matches!(r, SafetyCheck::Danger(_)),
+                "应拒绝删除: {} (got {:?})",
+                p,
+                r
+            );
+        }
+        // 普通用户文件仍可正常删除（回归：保护不能误伤普通路径）
+        for p in [
+            "/Users/u/Downloads/a.bin",
+            "/Users/u/proj/src/h.bin",
+            "/Users/u/.venvista/i.bin",
+        ] {
+            let r = check_path_safety_with_category(p, "重复文件");
+            assert!(
+                !matches!(r, SafetyCheck::Danger(_)),
+                "不应拒绝普通路径: {} (got {:?})",
+                p,
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_and_candidate_collection_share_one_judgement() {
+        // is_manifest_managed_path 是唯一判定源：候选收集（dup_files）与
+        // 删除阶段（safety 4.6）必须走同一函数，防止两处规则漂移。
+        let paths = [
+            "/Users/u/.venv/lib/python3.13/site-packages/pkg/a.bin",
+            "/Users/u/proj/node_modules/pkg/b.bin",
+            "/Users/u/gopath/go/pkg/mod/f.bin",
+        ];
+        for p in paths {
+            assert!(
+                is_manifest_managed_path(Path::new(p)),
+                "判定源应命中: {}",
+                p
+            );
+        }
+    }
 
     // ---------- P0: 规则根模板校验 + 受保护根判定 ----------
 

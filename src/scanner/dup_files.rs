@@ -25,6 +25,8 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use super::{has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+// 清单管理目录判定与删除阶段共用 safety 第 4.6 层，保证「扫不进/删不掉」一致
+use crate::safety::is_manifest_managed_path;
 
 /// 参与重复检测的最小文件大小（1MB）
 const MIN_SIZE: u64 = 1024 * 1024;
@@ -281,38 +283,8 @@ fn find_duplicate_groups(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     result
 }
 
-/// 止血：路径任意层级是否命中清单管理的包目录标记
-///
-/// 命中即该路径（或该子树）不参与重复检测 —— 不依赖 home 相对前缀，
-/// 任意层级出现即视为受清单管理。
-fn is_manifest_managed_path(path: &Path) -> bool {
-    let comps: Vec<String> = path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    for (i, c) in comps.iter().enumerate() {
-        if c == "site-packages" || c == "dist-packages" || c == "node_modules" || c == ".terraform"
-        {
-            return true;
-        }
-        // .venv* 只匹配虚拟环境命名（.venv / .venv2 / .venv311 等数字后缀），
-        // 避免把 .venvista 这类普通目录误伤。
-        if c.starts_with(".venv") && (c.len() == 5 || c[5..].chars().all(|ch| ch.is_ascii_digit()))
-        {
-            return true;
-        }
-        if c == "go"
-            && comps.get(i + 1).map(|s| s.as_str()) == Some("pkg")
-            && comps.get(i + 2).map(|s| s.as_str()) == Some("mod")
-        {
-            return true;
-        }
-        if c.ends_with(".app") && comps.get(i + 1).map(|s| s.as_str()) == Some("Contents") {
-            return true;
-        }
-    }
-    false
-}
+/// 清单管理目录判定统一走 safety::is_manifest_managed_path（第 4.6 层）。
+/// 命中即该路径（或该子树）不参与重复检测，也与删除阶段共用同一判定。
 
 /// 提质：推断副本所属的"包根"（管理目录标记的完整前缀）
 ///
