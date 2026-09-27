@@ -1291,6 +1291,21 @@ impl App {
         self.save_settings();
     }
 
+    /// 路径属主是否为 root（uid==0）。读不到 metadata 时按非 root 处理 ——
+    /// 拿不准就走废纸篓（保护侧优先）。非 Unix 平台无此概念，恒为 false。
+    #[cfg(unix)]
+    fn path_is_root_owned(path: &str) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .map(|m| m.uid() == 0)
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(unix))]
+    fn path_is_root_owned(_path: &str) -> bool {
+        false
+    }
+
     /// 确认删除 - 收集待删除项，返回 (path, category, batch_paths, use_trash, size_bytes) 供后台线程使用
     /// use_trash: true 表示移至废纸篓（可恢复），false 表示永久删除
     /// size_bytes: 扫描时算出的大小，随删除任务带到备份清单里。
@@ -1300,7 +1315,11 @@ impl App {
         self.confirm = ConfirmState::Deleting;
 
         // 收集要删除的路径和类别（跳过不可删除的项）
-        // 策略：Safe 级别永久删除（缓存自动重建），Caution/Advanced 移至废纸篓（可恢复）
+        // 策略：默认一律移至废纸篓（可恢复）。唯一例外是 Caution 档里 root 属主
+        // 的系统缓存 —— 用户废纸篓无权移动 root 文件，强行 trash 只会失败并让
+        // 系统缓存清理功能瘫痪，这类项维持永久删除 + sudo 重试链路。
+        // 事故复盘：Safe/CacheOnly 曾被误标到用户数据（venv site-packages、
+        // IM 聊天日志），永久删除让误判不可挽回；"判成 Safe 就直删"不再成立。
         let to_delete: Vec<(String, String, Vec<String>, bool, u64)> = self
             .pending_delete
             .iter()
@@ -1315,14 +1334,15 @@ impl App {
             .map(|(tab_idx, item_idx)| {
                 let item = &self.results[*tab_idx][*item_idx];
                 let use_trash = match item.recommend {
-                    crate::scanner::Recommend::Safe => false, // 缓存类：永久删除
-                    crate::scanner::Recommend::CacheOnly => false, // 应用缓存/日志：永久删除
-                    crate::scanner::Recommend::Caution => false, // 系统缓存：永久删除（root 属主无法移到用户废纸篓）
-                    crate::scanner::Recommend::Advanced => true, // 大文件/高级项：移至废纸篓
+                    // Caution 档含 root 属主系统缓存，用户废纸篓搬不动，维持直删
+                    crate::scanner::Recommend::Caution => {
+                        !Self::path_is_root_owned(&item.path)
+                    }
+                    // Safe/CacheOnly/Advanced：一律废纸篓 —— 误判可挽回
+                    _ => true,
                 };
-                // 止血：重复文件强制走废纸篓 —— description 承诺"移入废纸篓
-                // （可恢复）"，行为必须与文案一致；不能因 recommend=Safe 而
-                // 永久删除（副本可能被用户误用为原始文件，删了无法恢复）。
+                // 重复文件永远可恢复：即使属主异常也不允许直删（description 承诺
+                // "移入废纸篓（可恢复）"，行为必须与文案一致）。
                 let use_trash = if item.category == "重复文件" {
                     true
                 } else {
@@ -2668,9 +2688,36 @@ mod tests {
         assert!(app.last_backup.is_none());
     }
 
+    /// 误删防护：Safe/CacheOnly 一律走废纸篓（误判可挽回）；
+    /// Caution 仅 root 属主项维持永久删除（用户废纸篓搬不动 root 文件）。
     #[test]
-    fn delete_batch_stays_a_five_field_tuple() {
-        // 钉住签名：(path, category, batch_paths, use_trash, size_bytes)。
+    fn trash_default_covers_all_levels_except_root_owned_caution() {
+        let mut app = App::new();
+        let mut safe = item(true);
+        safe.recommend = Recommend::Safe;
+        let mut cache_only = item(true);
+        cache_only.recommend = Recommend::CacheOnly;
+        let mut caution_user = item(true);
+        caution_user.recommend = Recommend::Caution;
+        caution_user.path = "/tmp/maclean_test_definitely_not_existing".to_string();
+        let mut caution_root = item(true);
+        caution_root.recommend = Recommend::Caution;
+        caution_root.path = "/tmp".to_string(); // root:wheel，macOS/Linux 均成立
+        for it in [safe, cache_only, caution_user, caution_root] {
+            app.results[1].push(it);
+        }
+        for i in 0..4 {
+            app.pending_delete.push((1, i));
+        }
+        let batch = app.confirm_delete();
+        assert_eq!(batch.len(), 4);
+        // confirm_delete 按 rev() 收集：batch[0]=caution_root, 其后依次倒序
+        assert!(!batch[0].3, "root 属主的 Caution 系统缓存维持永久删除，否则清理功能瘫痪");
+        assert!(batch[1..].iter().all(|b| b.3), "Safe/CacheOnly/非root Caution 必须走废纸篓");
+    }
+
+    #[test]
+    fn delete_batch_stays_a_five_field_tuple() {        // 钉住签名：(path, category, batch_paths, use_trash, size_bytes)。
         // 有人改回 4 元组，编译能过，但清单从此拿不到大小 —— 静默退化，
         // 只能靠源码断言拦住。
         assert!(include_str!("app.rs").contains(

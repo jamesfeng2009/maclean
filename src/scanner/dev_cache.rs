@@ -999,6 +999,13 @@ fn search_dirs(base: &Path, name: &str, max_depth: usize) -> Vec<PathBuf> {
                 if dir_name == ".git" || dir_name == ".svn" || dir_name == ".hg" {
                     return false;
                 }
+                // 清单管理子树（venv/site-packages/node_modules 等）整棵剪掉，
+                // 与 safety 第 4.6 层共用同一判定：扫不进 = 删不掉。
+                // node_modules 自身的清理条目也因此不再产生 —— 那些删除
+                // 本来就会被 4.6 阻断，列出来只会误导用户。
+                if crate::safety::is_manifest_managed_path(e.path()) {
+                    return false;
+                }
             }
             true
         })
@@ -1169,8 +1176,10 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
     }
 
     // Poetry 缓存 (跨平台)
-    // macOS: ~/Library/Caches/pypoetry
-    // Windows: %APPDATA%\pypoetry\Cache
+    // ⚠ 只收缓存子目录：Poetry 默认把**全部项目的虚拟环境**放在
+    // <cache>/virtualenvs/ 下，整目录删除等于毁掉所有 Poetry 项目环境
+    // （与 site-packages 误删事故同型）。子项逐个判定，virtualenvs 与
+    // 任何清单管理/含清单后代的子目录一律不进候选。
     let poetry_cache = {
         #[cfg(target_os = "macos")]
         {
@@ -1188,18 +1197,39 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
             home.join(".cache/pypoetry")
         }
     };
-    if let Ok(size) = dir_size_checked(&poetry_cache) {
-        if size > 0 {
+    if let Ok(rd) = std::fs::read_dir(&poetry_cache) {
+        let mut safe_dirs: Vec<String> = Vec::new();
+        let mut poetry_size: u64 = 0;
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if name == "virtualenvs"
+                || crate::safety::is_manifest_managed_path(&p)
+                || crate::safety::contains_manifest_managed_descendant(&p)
+            {
+                continue;
+            }
+            if let Ok(size) = dir_size_checked(&p) {
+                if size > 0 {
+                    poetry_size += size;
+                    safe_dirs.push(p.to_string_lossy().to_string());
+                }
+            }
+        }
+        if !safe_dirs.is_empty() {
             items.push(ScanItem {
-                path: poetry_cache.to_string_lossy().to_string(),
-                size_bytes: size,
+                path: format!("{} 个 Poetry 缓存子目录", safe_dirs.len()),
+                size_bytes: poetry_size,
                 category: "Poetry缓存".to_string(),
                 selected: false,
                 deletable: true,
                 undeletable_reason: String::new(),
-                batch_paths: Vec::new(),
+                batch_paths: safe_dirs,
                 recommend: Recommend::Safe,
-                description: "Poetry 依赖缓存，可安全删除".to_string(),
+                description: "Poetry 依赖缓存（不含 virtualenvs 项目环境），可安全删除".to_string(),
             });
         }
     }

@@ -111,6 +111,13 @@ pub fn check_deletable(path: &str) -> (bool, String) {
 ///
 /// macOS: 调用 NSWorkspace.recycleURLs 或 fallback 到 rm
 /// Windows: 调用 SHFileOperation FO_DELETE + FOF_ALLOWUNDO
+/// AppleScript 双引号字符串字面量转义。必须先转义 `\` 再转义 `"`，
+/// 否则引号转义产生的反斜杠会被二次处理。
+#[cfg(any(target_os = "macos", test))]
+fn applescript_string_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 pub fn move_to_trash(path: &str) -> bool {
     let p = Path::new(path);
     if !p.exists() && p.symlink_metadata().is_err() {
@@ -120,9 +127,12 @@ pub fn move_to_trash(path: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         // macOS: 尝试 osascript 调用 Finder 移到废纸篓
+        // AppleScript 字符串字面量里 \ 和 " 都有特殊含义，必须都转义。
+        // 只转义 " 时，文件名含 \" （macOS 合法）就能闭合字面量并注入后续
+        // AppleScript 语句 —— Finder 常具完全磁盘访问，注入即越权删除。
         let script = format!(
             "tell application \"Finder\" to delete (POSIX file \"{}\" as alias)",
-            path.replace('"', "\\\"")
+            applescript_string_literal(path)
         );
         let status = std::process::Command::new("osascript")
             .arg("-e")
@@ -173,11 +183,10 @@ pub fn move_to_trash(path: &str) -> bool {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        if p.is_dir() {
-            std::fs::remove_dir_all(p).is_ok()
-        } else {
-            std::fs::remove_file(p).is_ok()
-        }
+        // 本平台没有可用的废纸篓实现。绝不能伪装成"已移入废纸篓"直接
+        // remove —— 调用方（use_trash 链路）承诺失败即保留文件。
+        let _ = p;
+        false
     }
 }
 
@@ -246,5 +255,33 @@ pub fn disk_info() -> (u64, u64) {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         (0, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::applescript_string_literal;
+
+    #[test]
+    fn applescript_literal_cannot_be_closed_by_filename() {
+        // 历史漏洞：只转义 " 不转义 \。文件名 `a\" & (do shell script "rm -rf …") & "`
+        // 里的 \" 会吃掉引号转义、闭合字面量并注入语句。
+        assert_eq!(applescript_string_literal(r#"plain"d"#), r#"plain\"d"#);
+        assert_eq!(applescript_string_literal(r#"back\slash"#), r#"back\\slash"#);
+        // 关键回归：注入样本转义后，字符串里不存在未配对的可闭合引号
+        let evil = r#"x\" & (do shell script "rm -rf /") & ""#;
+        let out = applescript_string_literal(evil);
+        // 每个字面 " 前必是转义它的 \（即 \\ 或 \" 形式），首尾无裸引号
+        assert!(out.starts_with("x\\\\"), "got {}", out);
+        let bytes: Vec<char> = out.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == '"' {
+                assert!(i > 0 && bytes[i - 1] == '\\', "裸引号可闭合字面量: pos {}", i);
+                i += 1;
+            } else {
+                i += 1;
+            }
+        }
     }
 }

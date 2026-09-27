@@ -418,6 +418,12 @@ fn scan_app_support_caches() -> Vec<ScanItem> {
         }
 
         let path = entry.path().to_path_buf();
+        // 清单管理目录（venv/site-packages/node_modules 等）永不进候选，
+        // 与 safety 第 4.6 层同判定 —— 缓存名匹配（log/tmp/T）可能撞上
+        // App Support 下存放的项目环境，删掉即毁环境。
+        if crate::safety::is_manifest_managed_path(&path) {
+            continue;
+        }
         let size = dir_size(&path);
 
         // 只展示 >10MB 的缓存目录

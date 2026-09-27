@@ -2929,7 +2929,7 @@ impl UninstallResidual {
 /// 在 %APPDATA% 和 %LOCALAPPDATA% 下查找与应用名匹配的残留目录。
 /// 所有找到的目录都标记为可删除（用户目录下无需管理员权限）。
 /// 注意：这里列出的每一项在 UI 上都标记为 `deletable: true`，
-/// 用户勾选后直接调用 `delete_filesystem_residual` → `remove_dir_all`。
+/// 用户勾选后调用 `delete_filesystem_residual`（中心 safety 复检 + 回收站优先）。
 pub fn scan_filesystem_residual(app_name: &str) -> Vec<FilesystemResidual> {
     let home = home_dir();
     let mut residuals = Vec::new();
@@ -2953,8 +2953,9 @@ pub fn scan_filesystem_residual(app_name: &str) -> Vec<FilesystemResidual> {
         if let Ok(entries) = std::fs::read_dir(base) {
             for entry in entries.flatten() {
                 let dir_name = entry.file_name().to_string_lossy().to_string();
-                // 注意这里是 `remove_dir_all` 的唯一入口（见 delete_filesystem_residual）：
-                // 没有确认框、不进回收站。误判 = 直接丢数据，所以走严格匹配。
+                // 注意这里是旁路删除出口 delete_filesystem_residual 的唯一候选来源：
+                // 那里有中心 safety 复检 + 回收站优先，但误判仍意味着用户数据被搬走，
+                // 所以扫描侧继续走严格匹配。
                 if is_residual_dir(&dir_name, &name_lower) {
                     let path = entry.path();
                     let size = dir_size(&path);
@@ -2998,10 +2999,26 @@ pub fn delete_filesystem_residual(path: &str) -> (bool, String) {
         }
     }
 
-    match std::fs::remove_dir_all(p) {
-        Ok(_) => (true, format!("已删除: {}", path)),
-        Err(e) => (false, format!("删除失败 {}: {}", path, e)),
+    // 中心 safety 复检：本函数是 ops::start_delete 之外的旁路删除出口，
+    // 不在这里过 check_path_safety_with_category，第 4.6 层清单管理目录
+    // 与 home 黑名单就整体失防（site-packages 事故同型：%APPDATA%\Python
+    // 下挂着 pip 用户级 site-packages，卸载 "Python 3.11" 会连根删掉）。
+    if let crate::safety::SafetyCheck::Danger(reason) =
+        crate::safety::check_path_safety_with_category(path, "卸载残留")
+    {
+        crate::safety::log_deletion(path, "卸载残留", false, Some(&reason));
+        return (false, reason);
     }
+
+    // 回收站优先：残留判定是扫描时刻的名称启发式，误判即删用户数据，
+    // 必须可挽回。回收站失败时保留文件并报错，绝不降级为直删（P0-3）。
+    if crate::ops::move_to_trash(path) {
+        crate::safety::log_deletion(path, "卸载残留", true, None);
+        return (true, format!("已移入回收站: {}", path));
+    }
+    let msg = format!("移入回收站失败，已保留文件: {}", path);
+    crate::safety::log_deletion(path, "卸载残留", false, Some(&msg));
+    (false, msg)
 }
 
 /// 扫描注册表残留

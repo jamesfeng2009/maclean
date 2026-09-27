@@ -332,24 +332,84 @@ pub fn is_manifest_managed_path(path: &Path) -> bool {
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
-    for (i, c) in comps.iter().enumerate() {
-        if c == "site-packages" || c == "dist-packages" || c == "node_modules" || c == ".terraform"
-        {
+    (0..comps.len()).any(|i| manifest_marker_hit(&comps, i))
+}
+
+/// 单组件清单标记判定（第 4.6 层与后代深扫共用）。
+/// `comps[i]` 为当前组件，部分标记需结合后续组件（go/pkg/mod、
+/// *.app/Contents、.venv+数字）。
+fn manifest_marker_hit(comps: &[String], i: usize) -> bool {
+    let c = &comps[i];
+    if c == "site-packages" || c == "dist-packages" || c == "node_modules" || c == ".terraform"
+        // 无点前缀的 venv 命名（python -m venv venv）与 virtualenv 聚合目录
+        // （virtualenvs / .virtualenvs）：事故后必须补上的常见形态
+        || c == "venv" || c == "virtualenvs" || c == ".virtualenvs"
+    {
+        return true;
+    }
+    // .venv* 只匹配虚拟环境命名（.venv / .venv2 / .venv311 等数字后缀），
+    // 避免把 .venvista 这类普通目录误伤。
+    if c.starts_with(".venv") && (c.len() == 5 || c[5..].chars().all(|ch| ch.is_ascii_digit())) {
+        return true;
+    }
+    if c == "go"
+        && comps.get(i + 1).map(|s| s.as_str()) == Some("pkg")
+        && comps.get(i + 2).map(|s| s.as_str()) == Some("mod")
+    {
+        return true;
+    }
+    if c.ends_with(".app") && comps.get(i + 1).map(|s| s.as_str()) == Some("Contents") {
+        return true;
+    }
+    false
+}
+
+/// 仅按目录名判断清单标记（不含需要后续组件的形态）。
+/// 供后代深扫使用：那里只能看到单个条目名。
+fn manifest_marker_name_only(name: &str) -> bool {
+    name == "site-packages"
+        || name == "dist-packages"
+        || name == "node_modules"
+        || name == ".terraform"
+        || name == "venv"
+        || name == "virtualenvs"
+        || name == ".virtualenvs"
+        || (name.starts_with(".venv")
+            && (name.len() == 5 || name[5..].chars().all(|ch| ch.is_ascii_digit())))
+}
+
+/// 目录的**后代**中是否存在清单管理结构 —— 拦截"删清单树祖先目录"。
+///
+/// 第 4.6 层原本只看被删路径自身的组件，删 `~/Library/Caches/pypoetry`
+/// （Poetry 默认虚拟环境就在其 virtualenvs/ 子树下）完全绕防。判定信号：
+/// 子目录名命中清单标记，或出现 `pyvenv.cfg`（虚拟环境签名文件）。
+///
+/// 刻意**不含** `*.app/Contents` 与 `go/pkg/mod`：否则"删一个含 app bundle
+/// 的目录"（卸载功能的主路径）会被误伤。有界遍历（深度 ≤ 8、条目 ≤ 2 万）
+/// 控制删除链延迟；配合"默认全部进废纸篓"，预算耗尽漏判仍可挽回。
+pub fn contains_manifest_managed_descendant(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    const MAX_DEPTH: usize = 8;
+    const MAX_ENTRIES: usize = 20_000;
+    let mut visited = 0usize;
+    for entry in walkdir::WalkDir::new(path)
+        .min_depth(1)
+        .max_depth(MAX_DEPTH)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        visited += 1;
+        if visited > MAX_ENTRIES {
+            break;
+        }
+        let ft = entry.file_type();
+        if ft.is_file() && entry.file_name() == "pyvenv.cfg" {
             return true;
         }
-        // .venv* 只匹配虚拟环境命名（.venv / .venv2 / .venv311 等数字后缀），
-        // 避免把 .venvista 这类普通目录误伤。
-        if c.starts_with(".venv") && (c.len() == 5 || c[5..].chars().all(|ch| ch.is_ascii_digit()))
-        {
-            return true;
-        }
-        if c == "go"
-            && comps.get(i + 1).map(|s| s.as_str()) == Some("pkg")
-            && comps.get(i + 2).map(|s| s.as_str()) == Some("mod")
-        {
-            return true;
-        }
-        if c.ends_with(".app") && comps.get(i + 1).map(|s| s.as_str()) == Some("Contents") {
+        if ft.is_dir() && manifest_marker_name_only(&entry.file_name().to_string_lossy()) {
             return true;
         }
     }
@@ -501,6 +561,14 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     if is_manifest_managed_path(&canonical) {
         return SafetyCheck::Danger(format!(
             "清单管理目录（site-packages/.venv/node_modules 等），拒绝删除: {}",
+            canonical_str
+        ));
+    }
+    // 删清单树的祖先目录同样阻断（例：~/Library/Caches/pypoetry，其
+    // virtualenvs/ 子树下就是各项目的完整环境）。
+    if contains_manifest_managed_descendant(&canonical) {
+        return SafetyCheck::Danger(format!(
+            "目录内部含清单管理结构（venv/site-packages 等），拒绝删除祖先目录: {}",
             canonical_str
         ));
     }
@@ -1422,6 +1490,13 @@ pub fn path_is_acl_protected(path: &str) -> bool {
     dir_has_acl_deny(path)
 }
 
+/// 非 macOS 平台没有"扩展 ACL deny 优先于 root"这一概念：
+/// Windows 的权限不足由删除时的 EPERM 失败归类兜住，这里一律判否。
+#[cfg(not(target_os = "macos"))]
+pub fn path_is_acl_protected(_path: &str) -> bool {
+    false
+}
+
 /// 检测路径是否受系统级访问控制保护（如 TCC 隐私保护目录）。
 /// 这类目录即使权限位正常、无 ACL deny，非系统进程也无法读取/遍历
 /// （read_dir 报 EPERM），因此任何权限（含 root / Touch ID）都无法删除。
@@ -1560,6 +1635,49 @@ mod tests {
                 p
             );
         }
+    }
+
+    #[test]
+    fn manifest_markers_cover_dotless_venv_and_virtualenvs_roots() {
+        // python -m venv venv / ~/.virtualenvs / Poetry 的 virtualenvs/ 都是
+        // 事故后补上的常见形态；此前只认 .venv* 导致这些树整棵失防。
+        for p in [
+            "/Users/u/proj/venv/lib/python3.11/site-packages/x.bin",
+            "/Users/u/.virtualenvs/envA/bin/y.bin",
+            "/Users/u/proj/envs/../virtualenvs/envB/z.bin",
+        ] {
+            assert!(
+                is_manifest_managed_path(Path::new(p)),
+                "判定源应命中: {}",
+                p
+            );
+        }
+        // 名字里带 venv 字样的普通目录不受影响（virtualenvs 是精确组件匹配）
+        assert!(!is_manifest_managed_path(Path::new("/Users/u/venvtools/a.bin")));
+    }
+
+    #[test]
+    fn deleting_ancestor_of_manifest_tree_is_blocked() {
+        // 4.6 层的历史缺口：被删路径自身不含标记组件、但整棵树是清单树。
+        // 复现事故同型场景：~/Library/Caches/pypoetry 下挂 virtualenvs/。
+        let tmp = std::env::temp_dir().join(format!("maclean_46_{}", std::process::id()));
+        let venv_root = tmp.join("virtualenvs/proj-py311");
+        std::fs::create_dir_all(venv_root.join("lib/python3.11/site-packages/pkg")).unwrap();
+        std::fs::write(
+            venv_root.join("pyvenv.cfg"),
+            "home = /usr/bin\n",
+        )
+        .unwrap();
+        assert!(
+            contains_manifest_managed_descendant(&tmp),
+            "祖先目录含 virtualenvs/pyvenv.cfg 必须被识别"
+        );
+
+        // 纯缓存目录不受影响；含 .app bundle 的目录刻意不拦（卸载主路径）
+        let clean = tmp.join("clean_cache");
+        std::fs::create_dir_all(clean.join("some/app/Contents/MacOS")).unwrap();
+        assert!(!contains_manifest_managed_descendant(&clean));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ---------- P0: 规则根模板校验 + 受保护根判定 ----------

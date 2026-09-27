@@ -1023,6 +1023,11 @@ pub(crate) struct SimRuntimeInfo {
 /// 解析失败时**拒绝删除**（fail-closed），不再退化为"全删"。
 #[cfg(target_os = "macos")]
 pub(crate) fn resolve_simulator_uuids(path: &str) -> Result<Vec<String>, String> {
+    // fail-closed：空路径会让归属前缀退化成 "/"，把全部 runtime 判成"属于本项"
+    // —— 与"只删勾选归属项"的设计矛盾，直接拒绝。
+    if path.trim().is_empty() || path.trim() == "/" {
+        return Err("resolve_simulator_uuids: 归属路径为空，拒绝解析".to_string());
+    }
     let output = std::process::Command::new("xcrun")
         .args(["simctl", "runtime", "list", "-j"])
         .output()
@@ -1987,7 +1992,7 @@ pub(crate) fn start_sudo_delete(
         let mut remaining_items: Vec<(String, String)> = Vec::new();
         for (path, category) in &failed_items {
             if category == "模拟器镜像" || category == "模拟器Cryptex" {
-                // 用 sudo xcrun simctl runtime delete 删除所有运行时
+                // 用 sudo xcrun simctl runtime delete 删除本项归属的运行时
                 // P1：只删归属于本项、且系统标记 deletable 的 runtime。
                 // 旧脚本在 root 下遍历"所有" runtime 逐个删除，勾选一项会连锅端。
                 let sim_uuids: Vec<String> = resolve_simulator_uuids(path)
@@ -2439,12 +2444,30 @@ pub(crate) fn start_sudo_delete_touchid(
                     App::tf_lang(lang_en, "log_touchid_prepare_xcrun", &[category])
                 )));
 
-                let script = r#"#!/bin/bash
+                // P1（对齐密码分支 1993+）：只删归属于本勾选项、且系统标记
+                // deletable 的 runtime。旧脚本在 root 下遍历"全部" runtime 逐个
+                // 删除 —— 勾一个 Cryptex 会连锅端掉全机模拟器运行时。
+                let sim_uuids: Vec<String> = resolve_simulator_uuids(path)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|u| u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+                    .collect();
+                if sim_uuids.is_empty() {
+                    // 没有可删目标：保留该项，交给后续 sudo rm 清理残留目录
+                    remaining_items.push((path.clone(), category.clone()));
+                    continue;
+                }
+                let uuid_list = sim_uuids
+                    .iter()
+                    .map(|u| format!("'{}'", u))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let script = format!(
+                    r#"#!/bin/bash
 set +e
-uuids=$(xcrun simctl runtime list 2>/dev/null | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | sort -u)
 count=0
 fail=0
-for uuid in $uuids; do
+for uuid in {}; do
     xcrun simctl runtime delete "$uuid" 2>/dev/null
     rc=$?
     if [ $rc -eq 0 ]; then
@@ -2456,10 +2479,12 @@ done
 echo "xcrun_deleted:$count"
 echo "xcrun_failed:$fail"
 exit 0
-"#;
+"#,
+                    uuid_list
+                );
                 // P0-2：固定路径脚本可被本地进程预先占位或替换 → sudo 以 root 执行任意内容。
                 // 改用不可预测文件名 + O_EXCL + 0600；脚本交给 /bin/bash 执行，不需要 +x。
-                let Some(xcrun_script) = write_private_temp_file("maclean_xcrun", "sh", script)
+                let Some(xcrun_script) = write_private_temp_file("maclean_xcrun", "sh", &script)
                 else {
                     crate::logger::error("无法安全创建临时脚本，跳过 xcrun 删除");
                     remaining_items.push((path.clone(), category.clone()));
