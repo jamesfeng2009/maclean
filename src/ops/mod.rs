@@ -60,6 +60,8 @@ pub(crate) enum DeleteMessage {
 pub(crate) fn start_scan(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<ScanMessage>>) {
     let tab = app.tab;
     let tab_idx = app.tab_index();
+    // 扫描开始时清空删除日志：扫描中不再展示上次的「已删除 …」记录
+    app.logs.clear();
     app.scan_states[tab_idx] = ScanState::Scanning;
     app.scan_progress = 0.0;
     // 清空上一次扫描结果，为增量显示做准备
@@ -309,6 +311,8 @@ pub(crate) fn start_scan_all(app: &mut App, scan_rx: &mut Option<mpsc::Receiver<
     // 必须与 start_scan 一样 clear()：PartialItems 走 extend，
     // 不清空的话二次「扫描全部」时列表是旧+新叠加，概览统计翻倍；
     // 若某 Tab 扫描 panic 没发 Done，重复项还会固化下来。
+    // 扫描开始时清空删除日志，扫描中不展示上次的「已删除 …」记录
+    app.logs.clear();
     app.reset_for_full_scan();
 
     // 重置用户取消标志（全量扫描可被用户取消）

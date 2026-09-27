@@ -918,6 +918,9 @@ pub(crate) fn build_uninstall_groups(
 ) -> Vec<(String, Vec<usize>)> {
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     let mut group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // 无主残留（提不出应用名，如 App残留/残留缓存/废纸篓残留等）合并为
+    // 一个可展开的聚合组，避免每个残留独立成行占满列表。
+    let mut orphan_indices: Vec<usize> = Vec::new();
     for &idx in filtered_indices {
         let item = &items[idx];
         if let Some(app_name) = extract_app_name(&item.category) {
@@ -927,8 +930,11 @@ pub(crate) fn build_uninstall_groups(
             });
             groups[gidx].1.push(idx);
         } else {
-            groups.push((item.category.clone(), vec![idx]));
+            orphan_indices.push(idx);
         }
+    }
+    if !orphan_indices.is_empty() {
+        groups.push(("App残留".to_string(), orphan_indices));
     }
     groups
 }
@@ -1164,13 +1170,22 @@ pub(crate) fn render_app_uninstall_group_card(
 
                         ui.add_space(8.0);
 
-                        // 应用名 + 路径
+                        // 应用名 + 路径（点击应用名也可展开/收起整个卡片）
                         ui.vertical(|ui| {
                             ui.set_min_width(120.0);
-                            ui.colored_label(
-                                theme::text(),
-                                egui::RichText::new(group_name).size(13.0).strong(),
+                            let name_resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(group_name).size(13.0).strong(),
+                                )
+                                .sense(egui::Sense::click()),
                             );
+                            if name_resp.clicked() {
+                                if is_expanded {
+                                    app.expanded_app_groups.remove(group_name);
+                                } else {
+                                    app.expanded_app_groups.insert(group_name.to_string());
+                                }
+                            }
                             let bundle_idx = indices
                                 .iter()
                                 .find(|&&i| app.results[tab_idx][i].category.ends_with(" (卸载)"));

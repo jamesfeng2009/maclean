@@ -280,6 +280,8 @@ fn format_timestamp(time: SystemTime) -> String {
 /// Unix 时间戳转日期 (年, 月, 日)
 ///
 /// 使用算法：https://howardhinnant.github.io/date_algorithms.html
+/// 仅非 Unix 平台回退路径与测试引用，Unix 走 localtime_r。
+#[cfg_attr(unix, allow(dead_code))]
 fn secs_to_date(secs: u64) -> (u32, u32, u32) {
     let days = (secs / 86400) as i64;
 
@@ -302,6 +304,8 @@ fn secs_to_date(secs: u64) -> (u32, u32, u32) {
 ///
 /// 注意：使用本地时区（localtime_r）。日志时间戳若用 UTC，
 /// 用户看到的日志会比真实时间慢 8 小时，误以为日志未写入。
+/// 仅非 Unix 平台回退路径与测试引用，Unix 走 localtime_r。
+#[cfg_attr(unix, allow(dead_code))]
 fn secs_to_time(secs: u64) -> (u32, u32, u32) {
     let (_, _, _, hour, minute, second) = localtime_fields(secs);
     (hour, minute, second)
