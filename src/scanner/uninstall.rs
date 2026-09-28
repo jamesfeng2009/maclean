@@ -29,7 +29,10 @@ use rayon::prelude::*;
 
 use crate::app_protection::{self, ProtectionLevel};
 
-use super::{dir_size, home_dir, read_dir_with_timeout, Recommend, ScanItem, ScanResult, Scanner};
+use super::{
+    dir_size, dir_size_impl, home_dir, read_dir_with_timeout, Recommend, ScanItem, ScanResult,
+    Scanner,
+};
 
 /// macOS 系统自带应用名称（不应卸载）
 ///
@@ -1420,7 +1423,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 // 普通残留目录：只要有文件就展示
                 // ACL deny 规则保护的路径（如 FamilyCircle）：任何权限都删不掉，
                 // 扫描时直接标记为不可删除，避免用户勾选后反复授权重试。
-                let size = dir_size(&path);
+                let (size, size_skipped) = dir_size_impl(&path);
                 let path_str = path.to_string_lossy().to_string();
                 let sys_blocked = crate::safety::path_is_inaccessible(&path_str);
                 let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
@@ -1432,6 +1435,10 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 } else {
                     String::new()
                 };
+                let mut description = format!("{} 的残留数据（App 可能已卸载）", name);
+                if size_skipped {
+                    description.push_str("（上次遍历卡死，大小可能不准）");
+                }
                 items.push(ScanItem {
                     path: path_str,
                     size_bytes: size,
@@ -1441,7 +1448,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend: Recommend::Advanced,
-                    description: format!("{} 的残留数据（App 可能已卸载）", name),
+                    description,
                 });
             }
         }
@@ -1485,7 +1492,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
 
                 // 普通残留缓存：只要有文件就展示
                 // ACL deny 规则保护的路径：任何权限都删不掉，扫描时直接标记。
-                let size = dir_size(&path);
+                let (size, size_skipped) = dir_size_impl(&path);
                 let path_str = path.to_string_lossy().to_string();
                 let sys_blocked = crate::safety::path_is_inaccessible(&path_str);
                 let acl_blocked = crate::safety::path_is_acl_protected(&path_str);
@@ -1497,6 +1504,11 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 } else {
                     String::new()
                 };
+                let mut description =
+                    format!("{} 的残留缓存，删除后无影响（App 可能已卸载）", name);
+                if size_skipped {
+                    description.push_str("（上次遍历卡死，大小可能不准）");
+                }
                 items.push(ScanItem {
                     path: path_str,
                     size_bytes: size,
@@ -1506,7 +1518,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     undeletable_reason,
                     batch_paths: Vec::new(),
                     recommend: Recommend::CacheOnly,
-                    description: format!("{} 的残留缓存，删除后无影响（App 可能已卸载）", name),
+                    description,
                 });
             }
         }
@@ -1779,7 +1791,7 @@ fn scan_vendor_subdir_leftovers(
             continue;
         }
 
-        let size = dir_size(&sub_path);
+        let (size, size_skipped) = dir_size_impl(&sub_path);
         if size > min_size {
             let sub_str = sub_path.to_string_lossy().to_string();
             let sys_blocked = crate::safety::path_is_inaccessible(&sub_str);
@@ -1792,6 +1804,13 @@ fn scan_vendor_subdir_leftovers(
             } else {
                 String::new()
             };
+            let mut description = format!(
+                "{} 中 {} 的残留数据（App 可能已卸载）",
+                vendor_name, sub_name
+            );
+            if size_skipped {
+                description.push_str("（上次遍历卡死，大小可能不准）");
+            }
             items.push(ScanItem {
                 path: sub_str,
                 size_bytes: size,
@@ -1801,10 +1820,7 @@ fn scan_vendor_subdir_leftovers(
                 undeletable_reason,
                 batch_paths: Vec::new(),
                 recommend,
-                description: format!(
-                    "{} 中 {} 的残留数据（App 可能已卸载）",
-                    vendor_name, sub_name
-                ),
+                description,
             });
         }
     }

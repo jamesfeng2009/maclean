@@ -1335,9 +1335,7 @@ impl App {
                 let item = &self.results[*tab_idx][*item_idx];
                 let use_trash = match item.recommend {
                     // Caution 档含 root 属主系统缓存，用户废纸篓搬不动，维持直删
-                    crate::scanner::Recommend::Caution => {
-                        !Self::path_is_root_owned(&item.path)
-                    }
+                    crate::scanner::Recommend::Caution => !Self::path_is_root_owned(&item.path),
                     // Safe/CacheOnly/Advanced：一律废纸篓 —— 误判可挽回
                     _ => true,
                 };
@@ -2712,12 +2710,19 @@ mod tests {
         let batch = app.confirm_delete();
         assert_eq!(batch.len(), 4);
         // confirm_delete 按 rev() 收集：batch[0]=caution_root, 其后依次倒序
-        assert!(!batch[0].3, "root 属主的 Caution 系统缓存维持永久删除，否则清理功能瘫痪");
-        assert!(batch[1..].iter().all(|b| b.3), "Safe/CacheOnly/非root Caution 必须走废纸篓");
+        assert!(
+            !batch[0].3,
+            "root 属主的 Caution 系统缓存维持永久删除，否则清理功能瘫痪"
+        );
+        assert!(
+            batch[1..].iter().all(|b| b.3),
+            "Safe/CacheOnly/非root Caution 必须走废纸篓"
+        );
     }
 
     #[test]
-    fn delete_batch_stays_a_five_field_tuple() {        // 钉住签名：(path, category, batch_paths, use_trash, size_bytes)。
+    fn delete_batch_stays_a_five_field_tuple() {
+        // 钉住签名：(path, category, batch_paths, use_trash, size_bytes)。
         // 有人改回 4 元组，编译能过，但清单从此拿不到大小 —— 静默退化，
         // 只能靠源码断言拦住。
         assert!(include_str!("app.rs").contains(

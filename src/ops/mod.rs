@@ -538,6 +538,14 @@ pub(crate) fn send_items_in_batches(
     items: &[ScanItem],
     tab_idx: u64,
 ) {
+    // App 卸载页不做增量：该页目录多、单目录又慢，增量追加会让列表在扫描
+    // 尾部持续"长高/跳动"（用户已确认扫描完成后仍有抖动观感）。
+    // 一次性出结果（调用方随后发 Done 携带完整列表），结果稳定不抖。
+    // AppUninstall 在 Tab::all() 中的下标为 5（与 app::Tab::tab_index 一致）。
+    if tab_idx == 5 {
+        return;
+    }
+
     // 按大小降序排序，让用户先看到最大的项
     let mut sorted: Vec<ScanItem> = items.to_vec();
     sorted.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
@@ -1390,7 +1398,7 @@ pub(crate) fn start_delete(
                                             App::tf_lang(
                                                 lang_en,
                                                 "log_skipped",
-                                                &[bp, &App::t_lang(lang_en, "already_cleaned")]
+                                                &[bp, App::t_lang(lang_en, "already_cleaned")]
                                             )
                                         ),
                                         bp.clone(),
@@ -1590,7 +1598,7 @@ pub(crate) fn start_delete(
                                     App::tf_lang(
                                         lang_en,
                                         "log_skipped",
-                                        &[&path, &App::t_lang(lang_en, "already_cleaned")]
+                                        &[&path, App::t_lang(lang_en, "already_cleaned")]
                                     )
                                 ),
                                 path.clone(),
@@ -3773,6 +3781,59 @@ pub(crate) fn cli_sudo_delete_touchid(items: Vec<(String, String)>) -> CliSudoRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- 抖动修复：App 卸载页一次性出结果 ----------
+
+    fn mk_item(path: &str, size: u64) -> ScanItem {
+        ScanItem {
+            path: path.to_string(),
+            size_bytes: size,
+            category: "App残留".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
+            recommend: crate::scanner::Recommend::Advanced,
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn send_items_in_batches_skips_incremental_for_app_uninstall() {
+        // App 卸载页一次性出结果：tab_idx=5（AppUninstall）不得发任何增量消息
+        let (tx, rx) = std::sync::mpsc::channel::<ScanMessage>();
+        let items = vec![
+            mk_item("/tmp/a", 100),
+            mk_item("/tmp/b", 200),
+            mk_item("/tmp/c", 50),
+        ];
+        send_items_in_batches(&tx, &items, 5);
+        drop(tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "AppUninstall 不应发送增量消息（否则列表扫描尾部持续跳动）"
+        );
+    }
+
+    #[test]
+    fn send_items_in_batches_still_sends_incremental_for_other_tabs() {
+        // 其它 Tab 保持原有增量行为（分批 + CurrentPath）
+        let (tx, rx) = std::sync::mpsc::channel::<ScanMessage>();
+        let items = vec![
+            mk_item("/tmp/a", 100),
+            mk_item("/tmp/b", 200),
+            mk_item("/tmp/c", 50),
+        ];
+        send_items_in_batches(&tx, &items, 1);
+        drop(tx);
+        let mut got_partial = false;
+        while let Ok(msg) = rx.try_recv() {
+            if matches!(msg, ScanMessage::PartialItems(_, _)) {
+                got_partial = true;
+            }
+        }
+        assert!(got_partial, "其它 Tab 应发送增量消息");
+    }
 
     // ---------- P1: 删除失败归因 ----------
 

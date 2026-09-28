@@ -1053,12 +1053,14 @@ pub(crate) fn render_app_uninstall_panel(
     render_app_uninstall_action_bar(ui, app, &groups);
     ui.add_space(10.0);
 
-    let content_height = ui.available_height();
+    // 不再用 set_min_height(视口高度-2)：内容高度恰在滚动条出现临界点时，
+    // 滚动条出现→宽度变窄→内容重排变高→滚动条消失→宽度变宽……每帧循环，
+    // 正是"扫描完成后列表仍抖动"的渲染层来源。去掉临界写法后，内容高度
+    // 即真实高度：内容超视口时滚动条恒定（宽度稳定），不足时自适应。
     egui::ScrollArea::vertical()
         .id_salt("app_uninstall_list")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
-            ui.set_min_height(content_height - 2.0);
             for (group_name, indices) in &groups {
                 render_app_uninstall_group_card(ui, app, group_name, &indices.clone());
                 ui.add_space(12.0);

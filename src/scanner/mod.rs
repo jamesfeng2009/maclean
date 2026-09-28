@@ -260,7 +260,48 @@ pub fn clear_blocked_dirs() {
     let _ = std::fs::remove_file(blocked_dirs_file());
 }
 
-/// 递归计算目录大小（字节）
+/// 目录大小缓存文件：最近一次成功统计的大小（~/.maclean/dir_size_cache.json）
+///
+/// 黑名单目录（上次遍历卡死）不再返回 0，而是回退到最近一次成功统计的大小：
+/// 跨扫描结果稳定，避免"这次统计到、下次跳过"造成的列表大小/排序抖动。
+fn dir_size_cache_file() -> PathBuf {
+    home_dir().join(".maclean/dir_size_cache.json")
+}
+
+/// 读取目录大小缓存（dir → 最近一次成功统计的字节数）
+fn load_dir_size_cache() -> std::collections::HashMap<PathBuf, u64> {
+    let mut cache = std::collections::HashMap::new();
+    let path = dir_size_cache_file();
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if let Ok(list) = serde_json::from_str::<Vec<(String, u64)>>(&s) {
+            for (p, size) in list {
+                cache.insert(PathBuf::from(p), size);
+            }
+        }
+    }
+    cache
+}
+
+/// 持久化目录大小缓存
+fn save_dir_size_cache(cache: &std::collections::HashMap<PathBuf, u64>) {
+    let list: Vec<(String, u64)> = cache
+        .iter()
+        .map(|(p, size)| (p.to_string_lossy().to_string(), *size))
+        .collect();
+    if let Ok(s) = serde_json::to_string(&list) {
+        let file = dir_size_cache_file();
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&file, s);
+    }
+}
+
+/// 递归计算目录大小（字节），并返回该次统计是否因黑名单/超时而不完整。
+///
+/// 返回 (大小, skipped)：skipped=true 表示统计过程中有黑名单目录被跳过或
+/// 目录遍历超时，该大小可能是上次成功值或缺失。扫描器可用它给对应项
+/// 追加"统计跳过（上次遍历卡死）"标记，让用户知道数值可能不准。
 ///
 /// 目录级隔离：每个目录的枚举放到独立线程，主循环用超时等待。
 /// 当某个目录磁盘 IO 卡死（APFS 异常 / 网络卷挂起，readdir/stat 在内核
@@ -268,9 +309,12 @@ pub fn clear_blocked_dirs() {
 /// 一个坏目录不再拖垮整个扫描，也不会让 UI 长时间停在同一个路径。
 ///
 /// 遇到无法访问的文件/目录时直接跳过，不报错。
-pub fn dir_size(path: &Path) -> u64 {
+pub fn dir_size_impl(path: &Path) -> (u64, bool) {
     let blocked = load_blocked_dirs();
+    let mut cache = load_dir_size_cache();
     let mut total: u64 = 0;
+    let mut skipped = false;
+    let mut entry_timeout = false;
     let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
     queue.push_back((path.to_path_buf(), 0));
 
@@ -278,10 +322,15 @@ pub fn dir_size(path: &Path) -> u64 {
         if depth > DIR_MAX_DEPTH {
             continue;
         }
-        // 黑名单目录：上次遍历卡死，直接跳过
+        // 黑名单目录：上次遍历卡死，跳过并回退最近一次成功统计的大小
+        // （无缓存则为 0）—— 结果跨扫描稳定，不再"这次有、下次没有"地跳。
         if blocked.contains(&dir) {
+            skipped = true;
+            let cached = cache.get(&dir).copied().unwrap_or(0);
+            total += cached;
             crate::logger::warn(&format!(
-                "[dir_size] 跳过黑名单目录（上次遍历卡死）: {}",
+                "[dir_size] 跳过黑名单目录（上次遍历卡死），使用上次统计大小 {}: {}",
+                cached,
                 dir.display()
             ));
             continue;
@@ -329,7 +378,11 @@ pub fn dir_size(path: &Path) -> u64 {
                 }
             }
             Err(_) => {
-                // 该目录遍历超时（IO 卡死）：跳过并记入黑名单
+                // 该目录遍历超时（IO 卡死）：跳过并记入黑名单，保留旧缓存
+                skipped = true;
+                if dir.as_path() == path {
+                    entry_timeout = true;
+                }
                 crate::logger::warn(&format!(
                     "[dir_size] 目录遍历超时（IO 卡死），跳过并加入黑名单: {}",
                     dir.display()
@@ -339,7 +392,19 @@ pub fn dir_size(path: &Path) -> u64 {
         }
     }
 
-    total
+    // 入口成功统计（即使部分子目录被跳过）都记录最近值：黑名单清空前，
+    // 后续扫描会得到同样的值，跨扫描结果稳定。入口本身超时不覆盖旧值。
+    if !entry_timeout {
+        cache.insert(path.to_path_buf(), total);
+        save_dir_size_cache(&cache);
+    }
+
+    (total, skipped)
+}
+
+/// 递归计算目录大小（字节），见 [`dir_size_impl`]
+pub fn dir_size(path: &Path) -> u64 {
+    dir_size_impl(path).0
 }
 
 /// 获取当前用户的 home 目录

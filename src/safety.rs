@@ -320,6 +320,7 @@ fn check_home_paths_for_platform(
 /// 5. 用户关键目录黑名单（Keychains, Mail, Messages 等）
 /// 6. 白名单校验（只允许已知安全路径模式）
 /// 7. 敏感文件名检测（.env, id_rsa, credentials 等）
+///
 /// 路径任意层级是否命中清单管理的包目录标记（site-packages / dist-packages /
 /// node_modules / .venv* / .terraform / go/pkg/mod / *.app/Contents）。
 ///
@@ -1653,7 +1654,9 @@ mod tests {
             );
         }
         // 名字里带 venv 字样的普通目录不受影响（virtualenvs 是精确组件匹配）
-        assert!(!is_manifest_managed_path(Path::new("/Users/u/venvtools/a.bin")));
+        assert!(!is_manifest_managed_path(Path::new(
+            "/Users/u/venvtools/a.bin"
+        )));
     }
 
     #[test]
@@ -1663,11 +1666,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("maclean_46_{}", std::process::id()));
         let venv_root = tmp.join("virtualenvs/proj-py311");
         std::fs::create_dir_all(venv_root.join("lib/python3.11/site-packages/pkg")).unwrap();
-        std::fs::write(
-            venv_root.join("pyvenv.cfg"),
-            "home = /usr/bin\n",
-        )
-        .unwrap();
+        std::fs::write(venv_root.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
         assert!(
             contains_manifest_managed_descendant(&tmp),
             "祖先目录含 virtualenvs/pyvenv.cfg 必须被识别"

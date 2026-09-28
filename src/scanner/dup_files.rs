@@ -285,7 +285,6 @@ fn find_duplicate_groups(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 /// 清单管理目录判定统一走 safety::is_manifest_managed_path（第 4.6 层）。
 /// 命中即该路径（或该子树）不参与重复检测，也与删除阶段共用同一判定。
-
 /// 提质：推断副本所属的"包根"（管理目录标记的完整前缀）
 ///
 /// 与 is_manifest_managed_path 同源标记；此处用于组内分桶 ——

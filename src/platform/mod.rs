@@ -267,7 +267,10 @@ mod tests {
         // 历史漏洞：只转义 " 不转义 \。文件名 `a\" & (do shell script "rm -rf …") & "`
         // 里的 \" 会吃掉引号转义、闭合字面量并注入语句。
         assert_eq!(applescript_string_literal(r#"plain"d"#), r#"plain\"d"#);
-        assert_eq!(applescript_string_literal(r#"back\slash"#), r#"back\\slash"#);
+        assert_eq!(
+            applescript_string_literal(r#"back\slash"#),
+            r#"back\\slash"#
+        );
         // 关键回归：注入样本转义后，字符串里不存在未配对的可闭合引号
         let evil = r#"x\" & (do shell script "rm -rf /") & ""#;
         let out = applescript_string_literal(evil);
@@ -277,7 +280,11 @@ mod tests {
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] == '"' {
-                assert!(i > 0 && bytes[i - 1] == '\\', "裸引号可闭合字面量: pos {}", i);
+                assert!(
+                    i > 0 && bytes[i - 1] == '\\',
+                    "裸引号可闭合字面量: pos {}",
+                    i
+                );
                 i += 1;
             } else {
                 i += 1;
