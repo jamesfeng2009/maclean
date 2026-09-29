@@ -78,13 +78,17 @@ pub fn check_deletable(path: &str) -> (bool, String) {
 
     #[cfg(target_os = "macos")]
     {
-        // CoreSimulator 运行时镜像
-        if path.starts_with("/Library/Developer/CoreSimulator/Volumes") {
-            return (true, String::new());
-        }
-        // CoreSimulator/Caches
-        if path.starts_with("/Library/Developer/CoreSimulator/Caches") {
-            return (true, String::new());
+        // SIP/系统保护路径（/System、/usr、/Library/Developer/CoreSimulator 等）：
+        // 任何权限（含管理员/Touch ID）都无法删除。扫描期直接标记不可删，
+        // 默认不出现在清理列表（show_protected 开关打开时才可见、标不可删），
+        // 避免"勾选 → 授权 → 删除失败(SIP) → 再弹窗"的循环。
+        // 判定与删除入口 safety::is_critical_system_path 共用同一张表，
+        // 保证"扫不出来"与"删不掉"永远一致。
+        if crate::safety::is_critical_system_path(path) {
+            return (
+                false,
+                "SIP保护: 此路径受 macOS 系统保护，任何权限均无法删除".to_string(),
+            );
         }
 
         // 检查属主（unix 专属）
@@ -260,7 +264,42 @@ pub fn disk_info() -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::applescript_string_literal;
+    use super::{applescript_string_literal, check_deletable};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn check_deletable_marks_sip_protected_paths_undeletable() {
+        // SIP/系统保护路径（含 CoreSimulator）：任何权限都删不掉，
+        // 扫描期必须标不可删 —— 否则用户勾选 → 授权 → 删除失败(SIP) → 弹窗循环。
+        for p in [
+            "/Library/Developer/CoreSimulator/Volumes/runtime",
+            "/Library/Developer/CoreSimulator/Caches/iOS",
+            "/System/Library/Frameworks",
+            "/usr/bin",
+            "/Library/LaunchDaemons/com.example.plist",
+        ] {
+            let (deletable, reason) = check_deletable(p);
+            assert!(!deletable, "SIP 路径不应可删: {p}");
+            assert!(!reason.is_empty(), "SIP 路径应有不可删原因: {p}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn check_deletable_keeps_user_paths_deletable() {
+        // 用户目录/缓存不在系统保护表内，仍可删（走废纸篓或提权）
+        let home = crate::scanner::home_dir();
+        for p in [
+            home.join("Library/Caches/com.example")
+                .to_string_lossy()
+                .to_string(),
+            home.join("Downloads/tmp").to_string_lossy().to_string(),
+            home.join(".npm/_cacache").to_string_lossy().to_string(),
+        ] {
+            let (deletable, _) = check_deletable(&p);
+            assert!(deletable, "用户路径应可删: {p}");
+        }
+    }
 
     #[test]
     fn applescript_literal_cannot_be_closed_by_filename() {
