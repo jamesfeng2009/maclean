@@ -2897,6 +2897,22 @@ pub(crate) fn open_url(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
+/// 在后台线程执行系统优化任务，结果通过 channel 回传。
+///
+/// 原实现（`execute_optimize_task` 被 UI 主线程直接调用）会同步执行
+/// `chmod -R ~/Library`（user_permissions_repair）、`diskutil verifyVolume /`
+/// （startup_disk_verify）等耗时数分钟的命令，`.output()` 阻塞 egui 事件循环，
+/// 界面完全冻结、无法点取消。改为 spawn 线程 + mpsc 回传结果，
+/// GUI 每帧 poll 收结果写日志。
+pub(crate) fn start_optimize_task(task_name: String, lang_en: bool) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = execute_optimize_task(&task_name, lang_en);
+        let _ = tx.send(result);
+    });
+    rx
+}
+
 /// 执行单个优化任务
 pub(crate) fn execute_optimize_task(task_name: &str, lang_en: bool) -> String {
     let timestamp = std::time::SystemTime::now()

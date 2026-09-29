@@ -12,7 +12,7 @@ use eframe::egui;
 use crate::app::{App, ConfirmState, ScanState, Tab};
 use crate::icons;
 use crate::ops::{
-    execute_optimize_task, open_url, start_delete, start_scan, start_scan_all, start_sudo_delete,
+    open_url, start_delete, start_optimize_task, start_scan, start_scan_all, start_sudo_delete,
     DeleteMessage, ScanMessage,
 };
 // Touch ID 提权删除是 macOS 专属 DRM 机制，Windows/Linux 上该函数不存在
@@ -252,6 +252,36 @@ impl Gui {
         theme::apply_visuals(ctx, self.app.theme_mode());
         self.app.load_current_tab_cache();
         self.menubar.init();
+    }
+
+    /// 轮询后台系统优化任务结果（耗时任务线程化后，GUI 不再冻结）。
+    ///
+    /// 原实现把 `chmod -R ~/Library`（修复权限）/`diskutil verifyVolume /`
+    /// （校验启动盘）等耗时数分钟的命令直接同步跑在 egui 主线程里，
+    /// `.output()` 阻塞事件循环，界面定格、无法点取消。线程化后这里
+    /// 每帧 try_recv 收结果写日志，并复位运行状态。
+    fn poll_optimize(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = self.app.optimize_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(log) => {
+                    self.app.logs.push(log);
+                    self.app.optimize_running = None;
+                    self.app.optimize_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // 仍在执行，保持运行态；持续请求重绘让按钮显示「执行中…」
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // 发送端已释放（线程提前退出/panic）：如实复位，不留死状态
+                    self.app
+                        .logs
+                        .push(App::t_lang(self.app.lang_en, "optimize_aborted").to_string());
+                    self.app.optimize_running = None;
+                    self.app.optimize_rx = None;
+                }
+            }
+        }
     }
 
     /// 轮询菜单栏事件：托盘动作 + 点击图标展开/收起 HUD
@@ -754,6 +784,7 @@ impl eframe::App for Gui {
         self.poll_tray_releasable();
         self.poll_scan();
         self.poll_delete();
+        self.poll_optimize(ctx);
         self.handle_shortcuts(ctx);
 
         // 磁盘监控：每 5 秒轮询磁盘空间
@@ -6084,17 +6115,26 @@ pub(crate) fn render_optimize_panel(
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            let run_text =
-                                                if app.lang_en { "Run" } else { "执行" };
-                                            if widgets::button(
+                                            // 该任务正在后台执行：按钮禁用并显示「执行中…」。
+                                            // 耗时任务线程化后 GUI 不冻结，但同一时刻只跑一个。
+                                            let is_running = app.optimize_running.as_deref()
+                                                == Some(item.path.as_str());
+                                            let run_text = if is_running {
+                                                app.t("optimize_running").to_string()
+                                            } else if app.lang_en {
+                                                "Run".to_string()
+                                            } else {
+                                                "执行".to_string()
+                                            };
+                                            let run_btn = widgets::button_enabled(
                                                 ui,
+                                                !is_running,
                                                 Some(icons::Icon::ChevronRight),
-                                                run_text,
+                                                &run_text,
                                                 widgets::Btn::Secondary,
                                                 BTN_H,
-                                            )
-                                            .clicked()
-                                            {
+                                            );
+                                            if run_btn.clicked() && app.optimize_running.is_none() {
                                                 // P1：Advanced 级维护任务先确认再执行
                                                 if item.recommend
                                                     == crate::scanner::Recommend::Advanced
@@ -6133,7 +6173,10 @@ pub(crate) fn render_optimize_panel(
 
     // P1：高风险维护任务确认弹窗
     if let Some(pending_idx) = app.pending_optimize_task {
-        if let Some(pending_item) = items.get(pending_idx) {
+        // 已有任务在后台执行时不再弹新确认（避免重复执行/状态错乱）
+        if app.optimize_running.is_some() {
+            app.pending_optimize_task = None;
+        } else if let Some(pending_item) = items.get(pending_idx) {
             egui::Window::new("confirm_optimize_modal")
                 .title_bar(false)
                 .collapsible(false)
@@ -6215,8 +6258,19 @@ pub(crate) fn render_optimize_panel(
                 };
                 app.logs.push(text.to_string());
             }
-            let log = execute_optimize_task(&item.path, app.lang_en);
-            app.logs.push(log);
+            // 耗时任务（chmod -R ~/Library / diskutil verifyVolume / 等）一律
+            // 后台线程执行：GUI 主线程同步跑 `.output()` 会阻塞 egui 事件循环，
+            // 界面冻结、无法点取消（历史 bug）。结果经 optimize_rx 回传写日志。
+            if app.optimize_running.is_none() {
+                let rx = start_optimize_task(item.path.clone(), app.lang_en);
+                app.optimize_rx = Some(rx);
+                app.optimize_running = Some(item.path.clone());
+                app.logs
+                    .push(App::t_lang(app.lang_en, "optimize_running").to_string());
+            } else {
+                app.logs
+                    .push(App::t_lang(app.lang_en, "optimize_busy").to_string());
+            }
         }
     }
 }

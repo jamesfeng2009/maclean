@@ -266,6 +266,14 @@ pub struct App {
     /// P1：用户点击 Advanced 级维护任务（如修复权限/校验启动盘）时不直接执行，
     /// 先弹确认框，确认后才进入执行。
     pub pending_optimize_task: Option<usize>,
+    /// 系统优化 Tab：正在后台执行的任务名（None=空闲）。
+    ///
+    /// 耗时任务（修复权限/校验启动盘等）必须在后台线程跑，否则 GUI 主线程
+    /// 同步阻塞在 `.output()` 上，界面冻结、无法取消。执行期间该任务按钮
+    /// 显示「执行中…」并禁用，结果经 optimize_rx 回传后写日志。
+    pub optimize_running: Option<String>,
+    /// 系统优化任务结果通道（后台线程 → GUI）
+    pub optimize_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// 启动项 Tab：当前启动项列表（P3，macOS）
     pub startup_items: Vec<crate::scanner::startup::StartupItem>,
     /// 启动项备份根目录（禁用时 plist 移到这里，可逆）
@@ -555,6 +563,8 @@ impl App {
             scan_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             logs: Vec::new(),
             pending_optimize_task: None,
+            optimize_running: None,
+            optimize_rx: None,
             startup_items: Vec::new(),
             startup_backup_root: std::path::PathBuf::from(
                 std::env::var("HOME").unwrap_or_default(),
@@ -1836,6 +1846,9 @@ impl App {
                 "optimize_confirm_body" => "This task changes user-level settings and may take a while. Continue?",
                 "optimize_confirm_yes" => "Continue",
                 "optimize_confirm_no" => "Cancel",
+                "optimize_running" => "Running…",
+                "optimize_busy" => "Another task is already running",
+                "optimize_aborted" => "⚠ Optimization task exited abnormally",
                 // Windows 优化任务
                 "optimize_win_dns_flush" => "Flush DNS Cache",
                 "optimize_win_temp_cleanup" => "Clean Temp Files",
@@ -2293,6 +2306,9 @@ impl App {
                 "optimize_confirm_body" => "该任务会修改用户级设置，可能需要一段时间。是否继续？",
                 "optimize_confirm_yes" => "继续",
                 "optimize_confirm_no" => "取消",
+                "optimize_running" => "执行中…",
+                "optimize_busy" => "已有任务正在执行，请稍候",
+                "optimize_aborted" => "⚠ 优化任务异常退出",
                 // Windows 优化任务
                 "optimize_win_dns_flush" => "DNS 缓存刷新",
                 "optimize_win_temp_cleanup" => "临时文件清理",
