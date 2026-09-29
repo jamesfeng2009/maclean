@@ -142,54 +142,35 @@ impl Scanner for DuplicateFileScanner {
 
         // 4. 组装 ScanItem（每组一个聚合项）
         let mut items: Vec<ScanItem> = Vec::new();
-        for mut group in candidates.into_iter().take(MAX_GROUPS) {
-            if group.len() < 2 {
+        for group in candidates.into_iter().take(MAX_GROUPS) {
+            // 安全判定在 select_duplicate_keep 内：包根分桶 / git 项目边界 /
+            // 保留者选择（返回 None = 整组不呈现）。
+            let Some((keep, batch_paths)) = select_duplicate_keep(group, &home) else {
                 continue;
-            }
-            // 提质：按包根分桶 —— 同一包根下出现 ≥2 份副本说明是包内镜像/
-            // 硬链接场景，宁可不省空间，整组不呈现（删任一份都可能破坏包
-            // 一致性）。
-            let mut buckets: std::collections::HashMap<PathBuf, usize> =
-                std::collections::HashMap::new();
-            for p in &group {
-                if let Some(b) = package_bucket(p) {
-                    *buckets.entry(b).or_insert(0) += 1;
-                }
-            }
-            if buckets.values().any(|&c| c >= 2) {
-                continue;
-            }
-            // 跨包根（或普通副本）：保留 mtime 最新的一份 —— 用户最近触碰的
-            // 更可能是"正在用"的原始文件；平局按路径较短者优先（更可能是根）。
-            group.sort_by(|a, b| {
-                let mt_a = a
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                let mt_b = b
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                mt_b.cmp(&mt_a).then_with(|| {
-                    a.to_string_lossy()
-                        .len()
-                        .cmp(&b.to_string_lossy().len())
-                        .then(a.cmp(b))
-                })
-            });
-            let keep = group.remove(0);
-            let total_dup: u64 = group
+            };
+            let total_dup: u64 = batch_paths
                 .iter()
                 .map(|p| p.metadata().map(|m| m.len()).unwrap_or(0))
                 .sum();
-            let batch: Vec<String> = group
-                .into_iter()
+            let batch: Vec<String> = batch_paths
+                .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
             let keep_name = keep
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            // 对齐 + 提质：文案与行为一致（强制走废纸篓，可恢复），
+            // 并完整写"保留了谁、删了谁"供用户核对。保留者选择：
+            // 项目代码目录（.git 祖先）内文件优先保留；全项目外时保留
+            // mtime 最新的一份。
+            let mut git_cache2: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+            let keep_in_project = git_root_cached(&keep, &home, &mut git_cache2).is_some();
+            let keep_brief = if keep_in_project {
+                format!("{}（项目内，优先保留）", keep_name)
+            } else {
+                format!("{}（mtime 最新）", keep_name)
+            };
             items.push(ScanItem {
                 path: keep.to_string_lossy().into_owned(),
                 size_bytes: total_dup,
@@ -198,12 +179,10 @@ impl Scanner for DuplicateFileScanner {
                 deletable: true,
                 undeletable_reason: String::new(),
                 recommend: Recommend::Safe,
-                // 对齐 + 提质：文案与行为一致（强制走废纸篓，可恢复），
-                // 并完整写"保留了谁、删了谁"供用户核对。
                 description: format!(
-                    "发现 {} 个相同文件，保留 {}（mtime 最新），其余 {} 个副本移入废纸篓（可恢复）：{}",
+                    "发现 {} 个相同文件，保留 {}，其余 {} 个副本移入废纸篓（可恢复）：{}",
                     batch.len() + 1,
-                    keep_name,
+                    keep_brief,
                     batch.len(),
                     batch.join(", ")
                 ),
@@ -330,6 +309,123 @@ fn package_bucket(path: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 向上查找最近的 git 项目根（含 `.git` 的目录），以 home 为边界。
+///
+/// 用于重复文件分组的安全判定：**项目代码/数据文件（有 .git 祖先）绝不能
+/// 当作"副本"被删除** —— 用户对跨项目误删零容忍（历史事故：onlineStudy
+/// 项目 21 个数据文件被当重复副本删掉，全靠 git 恢复）。
+/// 结果按路径缓存，避免对组内多文件重复 stat。
+fn git_root_cached(
+    path: &Path,
+    home: &Path,
+    cache: &mut HashMap<PathBuf, Option<PathBuf>>,
+) -> Option<PathBuf> {
+    if let Some(r) = cache.get(path) {
+        return r.clone();
+    }
+    let mut cur = path.parent();
+    let mut result = None;
+    while let Some(dir) = cur {
+        if dir == home || dir == Path::new("/") {
+            break;
+        }
+        if dir.join(".git").exists() {
+            result = Some(dir.to_path_buf());
+            break;
+        }
+        cur = dir.parent();
+    }
+    cache.insert(path.to_path_buf(), result.clone());
+    result
+}
+
+/// 从重复组中选择保留者，返回 (保留路径, 待删副本列表)。
+///
+/// 返回 `None` = 整组不呈现（安全判定为"不能安全删任何一份"）：
+/// - 同包根 ≥2 份（node_modules/.venv 等包内镜像/硬链接，删任一份都可能
+///   破坏包完整性校验）
+/// - 跨 ≥2 个 git 项目（两个项目可能都在用各自的那份，无法判定谁是副本）
+/// - 单一 git 项目内 ≥2 份（项目内自重复：生成物/迁移快照/脚本输出，
+///   删任一份都可能破坏项目生成链路）
+///
+/// 保留者选择：项目代码目录（.git 祖先）内文件强制保留，项目外的才是
+/// 可删副本；全项目外（缓存/下载/散落文件）时保留 mtime 最新的一份
+/// （用户最近触碰的更可能是"正在用"的原始文件，平局按路径较短者优先）。
+pub(crate) fn select_duplicate_keep(
+    group: Vec<PathBuf>,
+    home: &Path,
+) -> Option<(PathBuf, Vec<PathBuf>)> {
+    if group.len() < 2 {
+        return None;
+    }
+    // 包根分桶：同包根 ≥2 份 → 不呈现
+    let mut buckets: HashMap<PathBuf, usize> = HashMap::new();
+    for p in &group {
+        if let Some(b) = package_bucket(p) {
+            *buckets.entry(b).or_insert(0) += 1;
+        }
+    }
+    if buckets.values().any(|&c| c >= 2) {
+        return None;
+    }
+    // git 项目分桶（项目边界保护，历史事故：onlineStudy 项目 21 个数据文件
+    // 被当副本删除）
+    let mut git_cache: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+    let mut proj_buckets: HashMap<PathBuf, usize> = HashMap::new();
+    for p in &group {
+        if let Some(r) = git_root_cached(p, home, &mut git_cache) {
+            *proj_buckets.entry(r).or_insert(0) += 1;
+        }
+    }
+    if proj_buckets.len() >= 2 {
+        // 跨项目重复：不删任何一份
+        return None;
+    }
+    if proj_buckets.values().any(|&c| c >= 2) {
+        // 项目内自重复：不删任何一份
+        return None;
+    }
+    let project_keep = proj_buckets.keys().next().cloned();
+    let mut group = group;
+    let keep = match project_keep {
+        // 唯一项目内文件强制保留：项目外的才是副本
+        Some(proj_root) => group
+            .iter()
+            .position(|p| {
+                git_root_cached(p, home, &mut git_cache).as_deref() == Some(proj_root.as_path())
+            })
+            .map(|idx| group.remove(idx))
+            .unwrap_or_else(|| {
+                group.sort_by(keep_order);
+                group.remove(0)
+            }),
+        // 全项目外（缓存/下载/散落文件）：保留 mtime 最新的一份
+        None => {
+            group.sort_by(keep_order);
+            group.remove(0)
+        }
+    };
+    Some((keep, group))
+}
+
+/// 全项目外重复的保留者顺序：mtime 最新优先，平局路径较短者优先。
+fn keep_order(a: &PathBuf, b: &PathBuf) -> std::cmp::Ordering {
+    let mt_a = a
+        .metadata()
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let mt_b = b
+        .metadata()
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    mt_b.cmp(&mt_a).then_with(|| {
+        a.to_string_lossy()
+            .len()
+            .cmp(&b.to_string_lossy().len())
+            .then(a.cmp(b))
+    })
 }
 
 /// 前 N 字节哈希（预筛）
@@ -461,6 +557,123 @@ mod tests {
         assert!(result.contains(&a));
         assert!(result.contains(&b));
         assert!(!result.contains(&c));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn git_root_finds_project_upward_and_stops_at_home() {
+        let tmp = std::env::temp_dir().join(format!("maclean_dup_gitroot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj/src/data")).unwrap();
+        std::fs::create_dir_all(tmp.join("other")).unwrap();
+        std::fs::write(tmp.join("proj/.git"), b"").unwrap();
+        let home = &tmp;
+        let mut cache = HashMap::new();
+        let p = tmp.join("proj/src/data/x.ts");
+        assert_eq!(
+            git_root_cached(&p, home, &mut cache),
+            Some(tmp.join("proj")),
+            "应向上找到 .git 项目根"
+        );
+        assert_eq!(
+            git_root_cached(&tmp.join("other/y.bin"), home, &mut cache),
+            None,
+            "无 .git 祖先 → 非项目文件"
+        );
+        // home 自身边界：即使 home 下有 .git，home 不算项目根
+        std::fs::write(tmp.join(".git"), b"").unwrap();
+        assert_eq!(
+            git_root_cached(&tmp.join("other/z.bin"), home, &mut cache),
+            None,
+            "home 是边界，不算项目根"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn project_file_is_always_kept_over_outside_copy() {
+        // 项目内 1 份 + 项目外 1 份（内容相同）→ 保留项目内的，删项目外的。
+        // 历史事故复盘：onlineStudy 21 个数据文件被当"副本"删除 ——
+        // 此规则保证项目内文件永不成为被删方。
+        let tmp = std::env::temp_dir().join(format!("maclean_dup_projkeep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(proj.join("src/data")).unwrap();
+        std::fs::create_dir_all(tmp.join("cache")).unwrap();
+        std::fs::write(proj.join(".git"), b"").unwrap();
+        let proj_file = proj.join("src/data/data.ts");
+        let outside = tmp.join("cache/copy.ts");
+        std::fs::write(&proj_file, vec![9u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&outside, vec![9u8; 2 * 1024 * 1024]).unwrap();
+        let (keep, batch) =
+            select_duplicate_keep(vec![proj_file.clone(), outside.clone()], &tmp).unwrap();
+        assert_eq!(keep, proj_file, "项目内文件必须保留");
+        assert_eq!(batch, vec![outside], "项目外副本才是可删项");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn cross_project_group_is_never_presented() {
+        // 两个不同 git 项目各有 1 份相同内容 → 无法判定谁是副本，整组不呈现
+        let tmp =
+            std::env::temp_dir().join(format!("maclean_dup_crossproj_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let p1 = tmp.join("p1");
+        let p2 = tmp.join("p2");
+        std::fs::create_dir_all(p1.join("src")).unwrap();
+        std::fs::create_dir_all(p2.join("src")).unwrap();
+        std::fs::write(p1.join(".git"), b"").unwrap();
+        std::fs::write(p2.join(".git"), b"").unwrap();
+        let f1 = p1.join("src/data.bin");
+        let f2 = p2.join("src/data.bin");
+        std::fs::write(&f1, vec![3u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&f2, vec![3u8; 2 * 1024 * 1024]).unwrap();
+        assert!(
+            select_duplicate_keep(vec![f1, f2], &tmp).is_none(),
+            "跨项目重复必须整组不呈现"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn intra_project_duplicates_are_never_presented() {
+        // 同一项目内 2 份相同内容（生成物/迁移快照）→ 删任一份都可能破坏
+        // 生成链路，整组不呈现
+        let tmp =
+            std::env::temp_dir().join(format!("maclean_dup_intraproj_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(proj.join("a")).unwrap();
+        std::fs::create_dir_all(proj.join("b")).unwrap();
+        std::fs::write(proj.join(".git"), b"").unwrap();
+        let f1 = proj.join("a/gen.sql");
+        let f2 = proj.join("b/migration.sql");
+        std::fs::write(&f1, vec![5u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&f2, vec![5u8; 2 * 1024 * 1024]).unwrap();
+        assert!(
+            select_duplicate_keep(vec![f1, f2], &tmp).is_none(),
+            "项目内自重复必须整组不呈现"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn outside_only_duplicates_still_cleaned() {
+        // 全项目外重复（缓存/下载散落文件）→ 仍正常清理（保留 mtime 最新）
+        let tmp = std::env::temp_dir().join(format!("maclean_dup_outside_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("a")).unwrap();
+        std::fs::create_dir_all(tmp.join("b")).unwrap();
+        let f1 = tmp.join("a/dup.bin");
+        let f2 = tmp.join("b/dup.bin");
+        std::fs::write(&f1, vec![11u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&f2, vec![11u8; 2 * 1024 * 1024]).unwrap();
+        let r = select_duplicate_keep(vec![f1.clone(), f2.clone()], &tmp);
+        assert!(r.is_some(), "项目外重复应正常清理");
+        let (keep, batch) = r.unwrap();
+        assert!(keep == f1 || keep == f2, "保留其中一份");
+        assert_eq!(batch.len(), 1);
+        assert_ne!(batch[0], keep);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
