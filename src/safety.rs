@@ -441,6 +441,17 @@ const NON_RECREATABLE_EXTS: &[&str] = &[
     "zip", "rar", "7z", "tar", "gz", "tgz", "ttf", "otf", "woff", "woff2",
 ];
 
+/// 路径组件中是否出现指定名称（任意层级，组件精确相等）。
+///
+/// 用于 4.6 层对 Monorepo依赖 类目的 node_modules 精确豁免 —— 只放行
+/// 组件就叫 node_modules 的目录，`node_modulesx` 之类相似名不命中。
+fn canonical_has_component(path: &Path, name: &str) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(n) => n.to_string_lossy() == name,
+        _ => false,
+    })
+}
+
 /// 单组件清单标记判定（第 4.6 层与后代深扫共用）。
 /// `comps[i]` 为当前组件，部分标记需结合后续组件（go/pkg/mod、
 /// *.app/Contents、.venv+数字）。
@@ -664,15 +675,27 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // site-packages、波及 20+ 个 venv）。这些是「项目文件」而非缓存，
     // 任何类目、任何删除入口都硬阻断 —— 与候选收集共用同一判定，
     // 保证「扫不进」与「删不掉」永远一致。
-    if is_manifest_managed_path(&canonical) {
+    //
+    // 唯一例外（精确豁免）：Monorepo依赖 类目的目标就是 node_modules
+    // —— 它由 npm/pnpm/yarn 清单管理、`npm install` 可再生，删除走废纸篓
+    // 可恢复，是开发者缓存清理的设计意图，不是误删。仅当「类目 ==
+    // Monorepo依赖」且路径组件含 node_modules 时放行；重复文件等其它
+    // 类目遇到 node_modules 仍无条件拦截。
+    if is_manifest_managed_path(&canonical)
+        && !(category == "Monorepo依赖" && canonical_has_component(&canonical, "node_modules"))
+    {
         return SafetyCheck::Danger(format!(
             "清单管理目录（site-packages/.venv/node_modules 等），拒绝删除: {}",
             canonical_str
         ));
     }
     // 删清单树的祖先目录同样阻断（例：~/Library/Caches/pypoetry，其
-    // virtualenvs/ 子树下就是各项目的完整环境）。
-    if contains_manifest_managed_descendant(&canonical) {
+    // virtualenvs/ 子树下就是各项目的完整环境）。Monorepo依赖 豁免
+    // node_modules 时一并豁免此层：npm 嵌套 node_modules 是常态，删
+    // 整棵 node_modules 树正是该类目的目标。
+    if contains_manifest_managed_descendant(&canonical)
+        && !(category == "Monorepo依赖" && canonical_has_component(&canonical, "node_modules"))
+    {
         return SafetyCheck::Danger(format!(
             "目录内部含清单管理结构（venv/site-packages 等），拒绝删除祖先目录: {}",
             canonical_str
@@ -1733,6 +1756,63 @@ mod tests {
     use super::*;
 
     // ---------- 第 4.6 层: 清单管理目录保护 ----------
+
+    #[test]
+    fn monorepo_category_node_modules_is_precisely_exempted() {
+        // Monorepo依赖 类目的目标就是 node_modules（npm install 可再生、
+        // 删除走废纸篓可恢复）—— 4.6 层精确豁免，删除不再"扫得出删不掉"。
+        let nm = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/node_modules";
+        let r = check_path_safety_with_category(nm, "Monorepo依赖");
+        assert!(
+            matches!(r, SafetyCheck::Safe),
+            "Monorepo依赖 + node_modules 应放行: {:?}",
+            r
+        );
+        // 子包 node_modules 同样放行
+        let nm2 = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/voice-tutor-worker/node_modules";
+        assert!(matches!(
+            check_path_safety_with_category(nm2, "Monorepo依赖"),
+            SafetyCheck::Safe
+        ));
+        // 精确性：豁免只匹配组件名为 node_modules 的目录；相似名
+        // （node_modulesx）不命中清单标记，走普通路径、不享受豁免。
+        let nm3 = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/node_modulesx";
+        assert!(!canonical_has_component(Path::new(nm3), "node_modules"));
+        assert!(canonical_has_component(Path::new(nm), "node_modules"));
+        // 非 Monorepo 类目遇到 node_modules 仍无条件拦截（防重复文件误删）
+        assert!(matches!(
+            check_path_safety_with_category(nm, "重复文件"),
+            SafetyCheck::Danger(_)
+        ));
+        // Monorepo依赖 遇到其它清单目录（site-packages 等）仍拦截
+        let sp = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/.venv/lib/python3.13/site-packages/x";
+        assert!(matches!(
+            check_path_safety_with_category(sp, "Monorepo依赖"),
+            SafetyCheck::Danger(_)
+        ));
+    }
+
+    #[test]
+    #[ignore = "真实路径验证，手动运行（cargo test --bin maclean monorepo_real -- --ignored）"]
+    fn monorepo_real_path_is_exempted() {
+        // 端到端验证：用户机器上真实存在的 monorepo node_modules，
+        // Monorepo依赖 类目下删除期判定必须放行（可删、走废纸篓）。
+        for p in [
+            "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/node_modules",
+            "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/voice-tutor-worker/node_modules",
+        ] {
+            if !std::path::Path::new(p).exists() {
+                continue;
+            }
+            let r = check_path_safety_with_category(p, "Monorepo依赖");
+            assert!(
+                matches!(r, SafetyCheck::Safe),
+                "真实 monorepo node_modules 应放行: {} (got {:?})",
+                p,
+                r
+            );
+        }
+    }
 
     #[test]
     fn manifest_managed_dirs_are_never_deletable() {

@@ -1514,7 +1514,12 @@ pub(crate) fn start_delete(
                             let _ = tx.send(DeleteMessage::Log(
                                 format!("✓ {}", App::tf_lang(lang_en, "log_deleted", &[&category, &path, &success_count.to_string(), &fail_count.to_string()])),
                                 path.clone(), category.clone(), fail_count == 0));
-                            safety::log_deletion(&path, &category, fail_count == 0, None);
+                            // 聚合伪路径（如 "Monorepo: xxx (N 个子包)"）不是真实文件，
+                            // 不落 delete.log —— 否则每轮必记一条 FAIL 虚高失败数、
+                            // 弹窗报"失败 N 项"误导用户。真实路径仍正常记录。
+                            if std::path::Path::new(&path).exists() {
+                                safety::log_deletion(&path, &category, fail_count == 0, None);
+                            }
                             continue;
                         }
 

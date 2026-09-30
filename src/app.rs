@@ -982,6 +982,22 @@ impl App {
                 safety::SafetyCheck::Danger(msg) => {
                     item.deletable = false;
                     item.undeletable_reason = msg;
+                    continue;
+                }
+            }
+            // 批量子项逐个检查：任一子项被判定 Danger，整项标记不可删 ——
+            // 否则用户在删除时才发现失败（历史：Monorepo 主路径是伪路径，
+            // 检查必然通过，真实子项 node_modules 却在删除时被 4.6 拦截，
+            // 每轮固定报"失败 N 项"）。扫描完成后即标灰，不进入删除队列。
+            if !item.batch_paths.is_empty() {
+                for bp in &item.batch_paths {
+                    if let safety::SafetyCheck::Danger(msg) =
+                        safety::check_path_safety_with_category(bp, &item.category)
+                    {
+                        item.deletable = false;
+                        item.undeletable_reason = msg;
+                        break;
+                    }
                 }
             }
         }
@@ -1359,6 +1375,13 @@ impl App {
                 // 重复文件永远可恢复：即使属主异常也不允许直删（description 承诺
                 // "移入废纸篓（可恢复）"，行为必须与文案一致）。
                 let use_trash = if item.category == "重复文件" {
+                    true
+                } else {
+                    use_trash
+                };
+                // Monorepo依赖 同样强制废纸篓：node_modules 可再生，删错也能
+                // 从废纸篓拖回；绝不永久删除。
+                let use_trash = if item.category == "Monorepo依赖" {
                     true
                 } else {
                     use_trash

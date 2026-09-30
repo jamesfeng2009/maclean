@@ -281,6 +281,9 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     // 4. 模拟器镜像 (系统级目录，通过 xcrun simctl runtime delete 安全删除)
     // 如果模拟器相关服务（Xcode/Simulator/CoreSimulatorService/simdiskimaged）
     // 在运行，runtime 镜像会被锁定，直接不展示；如果大小为 0，也没有清理价值，不展示。
+    // /Library/Developer/CoreSimulator 受系统保护：直接删除必然失败（SIP/
+    // 权限），扫描时标记为不可删除，不进删除队列 —— 与结果弹窗文案
+    // "此类路径已在扫描时标记为不可删除"保持一致。
     let sim_volumes = PathBuf::from("/Library/Developer/CoreSimulator/Volumes");
     if sim_volumes.is_dir() && !safety::is_simulator_running() {
         let size = get_simulator_runtime_size().unwrap_or(0);
@@ -290,17 +293,18 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 size_bytes: size,
                 category: "模拟器镜像".to_string(),
                 selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
-                recommend: Recommend::Caution,
-                description: "iOS 模拟器运行时镜像，将通过 xcrun simctl runtime delete 安全删除"
+                deletable: false,
+                undeletable_reason: "受 macOS 系统保护（/Library/Developer/CoreSimulator），无法通过本应用删除；如需清理请使用 Xcode 的模拟器管理"
                     .to_string(),
+                recommend: Recommend::Caution,
+                description: "iOS 模拟器运行时镜像，受系统保护不可删除".to_string(),
                 batch_paths: Vec::new(),
             });
         }
     }
 
     // 5. 模拟器缓存（root 属主，sudo rm -rf 可删，内容为可重建的缓存）
+    // 同上：受系统保护，扫描时标记为不可删除。
     let sim_caches = PathBuf::from("/Library/Developer/CoreSimulator/Caches");
     if sim_caches.is_dir() && !safety::is_simulator_running() {
         let size = dir_size(&sim_caches);
@@ -310,16 +314,19 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 size_bytes: size,
                 category: "模拟器缓存".to_string(),
                 selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
+                deletable: false,
+                undeletable_reason:
+                    "受 macOS 系统保护（/Library/Developer/CoreSimulator），无法通过本应用删除"
+                        .to_string(),
                 recommend: Recommend::Caution,
-                description: "模拟器系统缓存，删除后自动重建，需管理员权限".to_string(),
+                description: "模拟器系统缓存，受系统保护不可删除".to_string(),
                 batch_paths: Vec::new(),
             });
         }
     }
 
     // 6. 模拟器 Cryptex（系统级运行时扩展，与 Volumes 同级）
+    // 同上：受系统保护，扫描时标记为不可删除。
     let sim_cryptex = PathBuf::from("/Library/Developer/CoreSimulator/Cryptex");
     if sim_cryptex.is_dir() && !safety::is_simulator_running() {
         // 优先使用 /usr/bin/du -sk 获取真实大小。普通 dir_size() 也能得到近似
@@ -331,11 +338,12 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                 size_bytes: size,
                 category: "模拟器Cryptex".to_string(),
                 selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
+                deletable: false,
+                undeletable_reason:
+                    "受 macOS 系统保护（/Library/Developer/CoreSimulator），无法通过本应用删除"
+                        .to_string(),
                 recommend: Recommend::Caution,
-                description: "模拟器运行时 Cryptex 扩展，通过 xcrun simctl runtime delete 安全删除"
-                    .to_string(),
+                description: "模拟器运行时 Cryptex 扩展，受系统保护不可删除".to_string(),
                 batch_paths: Vec::new(),
             });
         }
