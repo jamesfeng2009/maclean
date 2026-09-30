@@ -36,7 +36,14 @@ const PREFIX_LEN: u64 = 64 * 1024;
 const MAX_GROUPS: usize = 200;
 
 /// 跳过的主目录子树（相对 home）
+///
+/// 历史事故复盘（9-30）：重复文件扫描把 ~/Downloads 用户文档（docx/pdf/
+/// pptx）、OrbStack Docker 镜像内文件、各编辑器扩展组件（.vscode/.cursor/
+/// .codebuddycn/.windsurf/.trae-cn/.net/.workbuddy/.lingma）当"副本"删除。
+/// 这些位置都不是"可再生的缓存"：项目/文档/镜像/应用组件绝不参与重复判定。
 const SKIP_REL: &[&str] = &[
+    "Downloads",
+    "OrbStack",
     "Library/Containers",
     "Library/Application Support",
     "Library/Developer/CoreSimulator",
@@ -49,6 +56,14 @@ const SKIP_REL: &[&str] = &[
     "go/pkg/mod",
     ".rustup",
     ".cargo/registry",
+    ".codebuddycn",
+    ".vscode",
+    ".cursor",
+    ".windsurf",
+    ".trae-cn",
+    ".net",
+    ".workbuddy",
+    ".lingma",
 ];
 
 /// 跳过的主目录直接子项名（如应用包）
@@ -557,6 +572,51 @@ mod tests {
         assert!(result.contains(&a));
         assert!(result.contains(&b));
         assert!(!result.contains(&c));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn duplicate_scan_skips_user_docs_docker_and_editor_dirs() {
+        // 9-30 事故：~/Downloads 用户文档、OrbStack Docker 镜像、各编辑器
+        // 扩展组件被当"重复副本"删除。这些位置必须整棵跳过，绝不参与重复判定。
+        let tmp = std::env::temp_dir().join(format!("maclean_dup_skip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        for rel in [
+            "Downloads",
+            "Downloads/myproject/x",
+            "OrbStack",
+            "OrbStack/docker/images/img/app/src/a.ts",
+            ".vscode",
+            ".vscode/extensions/e/dist/x.js",
+            ".cursor/extensions/e",
+            ".codebuddycn/extensions/e",
+            ".windsurf/extensions/e",
+            ".trae-cn/extensions/e",
+            ".workbuddy/blobs/e",
+            ".net/CursorPro/e",
+        ] {
+            let p = tmp.join(rel);
+            std::fs::create_dir_all(&p).unwrap();
+            let entry = walkdir::WalkDir::new(&p)
+                .min_depth(0)
+                .max_depth(0)
+                .into_iter()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert!(should_skip_dir(&entry, &tmp), "应整棵跳过: {}", rel);
+        }
+        // 普通目录仍参与扫描（回归：不能把正常位置误跳过）
+        let keep = tmp.join("keep/x");
+        std::fs::create_dir_all(&keep).unwrap();
+        let entry = walkdir::WalkDir::new(&keep)
+            .min_depth(0)
+            .max_depth(0)
+            .into_iter()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert!(!should_skip_dir(&entry, &tmp), "缓存目录不应跳过");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

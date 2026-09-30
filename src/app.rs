@@ -1383,7 +1383,12 @@ impl App {
             Vec::new()
         };
 
-        self.delete_total = to_delete.len();
+        // 进度分母 = 展开后的子项总数（主路径 1 条日志 + batch 子项最多各 1 条），
+        // 否则批量项会让 delete_done 超过 delete_total（历史 bug：240/185，进度 129%）。
+        self.delete_total = to_delete
+            .iter()
+            .map(|(_, _, batch, _, _)| 1 + batch.len())
+            .sum::<usize>();
         self.delete_done = 0;
         self.logs.clear();
         self.deleted_paths.clear();

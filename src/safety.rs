@@ -336,6 +336,24 @@ pub fn is_manifest_managed_path(path: &Path) -> bool {
     (0..comps.len()).any(|i| manifest_marker_hit(&comps, i))
 }
 
+/// 路径是否位于某个 git 项目工作区内（向上找 `.git`，以受保护 home 为界）。
+///
+/// 供第 4.7 层（重复文件类目删除硬闸门）使用：项目代码/数据文件
+/// （.git 祖先）在重复组里只能是保留方，绝不删除。home 自身不算项目根。
+pub fn is_inside_git_project(path: &Path, homes: &[PathBuf]) -> bool {
+    let mut cur = path.parent();
+    while let Some(dir) = cur {
+        if dir == Path::new("/") || homes.iter().any(|h| dir == h.as_path()) {
+            break;
+        }
+        if dir.join(".git").exists() {
+            return true;
+        }
+        cur = dir.parent();
+    }
+    false
+}
+
 /// 单组件清单标记判定（第 4.6 层与后代深扫共用）。
 /// `comps[i]` 为当前组件，部分标记需结合后续组件（go/pkg/mod、
 /// *.app/Contents、.venv+数字）。
@@ -570,6 +588,22 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     if contains_manifest_managed_descendant(&canonical) {
         return SafetyCheck::Danger(format!(
             "目录内部含清单管理结构（venv/site-packages 等），拒绝删除祖先目录: {}",
+            canonical_str
+        ));
+    }
+
+    // ================================================================
+    //  第 4.7 层: git 项目工作区文件保护（仅"重复文件"类目）
+    // ================================================================
+    // 重复文件扫描把"内容相同"的文件当副本删除，会误删项目代码/数据文件
+    // （历史事故：onlineStudy 21 个、9-30 用户文档/镜像/扩展 76 个）。
+    // 删除期硬闸门：项目工作区文件（.git 祖先，home 为界）在重复组里
+    // 只能是保留方，绝不删除 —— 即使扫描结果来自旧缓存/旧版本也拦得住。
+    // 其它类目不启用（node 依赖清理等本就清理项目内 node_modules，
+    // 由第 4.6 层按清单目录另行判定）。
+    if category == "重复文件" && is_inside_git_project(&canonical, &homes) {
+        return SafetyCheck::Danger(format!(
+            "git 项目工作区文件，重复文件类目拒绝删除: {}",
             canonical_str
         ));
     }
@@ -1618,6 +1652,46 @@ mod tests {
                 r
             );
         }
+    }
+
+    #[test]
+    fn git_project_worktree_never_deleted_in_duplicate_category() {
+        // 第 4.7 层：重复文件类目删除 git 项目工作区文件必须被硬阻断。
+        // 历史事故：onlineStudy 21 个 + 9-30 误删 76 个（用户文档/镜像/扩展）。
+        // 即使扫描结果来自旧缓存/旧版本，删除期也拦得住。
+        let tmp = std::env::temp_dir().join(format!("maclean_safety_git_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(proj.join(".git"), b"").unwrap();
+        let f = proj.join("src/data.ts");
+        std::fs::write(&f, b"x").unwrap();
+        let r = check_path_safety_with_category(f.to_str().unwrap(), "重复文件");
+        assert!(
+            matches!(r, SafetyCheck::Danger(_)),
+            "重复文件类目必须拒绝项目工作区文件: {:?}",
+            r
+        );
+        // 其它类目不启用 4.7：项目文件本身不是危险路径，由各自类目规则负责
+        let r2 = check_path_safety_with_category(f.to_str().unwrap(), "App残留");
+        assert!(
+            !matches!(r2, SafetyCheck::Danger(_)),
+            "其它类目不应被 4.7 误拦: {:?}",
+            r2
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn git_project_detection_stops_at_home() {
+        let tmp = std::env::temp_dir().join(format!("maclean_safety_git2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("p/x")).unwrap();
+        std::fs::write(tmp.join("p/.git"), b"").unwrap();
+        let homes = vec![tmp.clone()];
+        assert!(is_inside_git_project(&tmp.join("p/x/a.bin"), &homes));
+        assert!(!is_inside_git_project(&tmp.join("other/a.bin"), &homes));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
