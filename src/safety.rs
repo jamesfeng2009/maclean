@@ -378,6 +378,26 @@ pub fn is_inside_git_project_cached(path: &Path, homes: &[PathBuf]) -> bool {
     }
 }
 
+/// 重复文件类目"候选可删"判定（扫描期与删除期 4.8 层共用的唯一判定源）。
+///
+/// 语义 = 第 4.8 层 Danger 的精确补集：
+/// `allowed = 位于缓存目录白名单 && 扩展名不在不可再生列表`。
+/// 扫描期用它过滤候选（不满足的不进列表），删除期用它拦截（不满足的
+/// Danger）—— 两处共用同一函数，杜绝"扫得出、删不掉"或"删得掉、扫不出"
+/// 的规则漂移。
+pub(crate) fn duplicate_candidate_allowed(path: &Path) -> bool {
+    if !is_repeat_cache_dir(path) {
+        return false;
+    }
+    if let Some(ext) = path.extension() {
+        let ext_l = ext.to_string_lossy().to_ascii_lowercase();
+        if NON_RECREATABLE_EXTS.contains(&ext_l.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// 重复文件类目（扫描 + 删除共用）的**目录白名单**：只处理明确缓存目录
 /// 内的副本。
 ///
@@ -681,9 +701,9 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // 第 4.7 层只保护 git 项目内文件；无 git 的用户文档（docx/pdf/jpg）、
     // 项目外代码、数据库在旧缓存/旧扫描结果进入删除队列时仍会被删。
     // 双闸门：目录白名单（只删缓存目录内副本）+ 扩展名黑名单（缓存
-    // 目录内命中用户数据扩展名也拒删）。与扫描期共用 is_repeat_cache_dir，
-    // 保证"扫不进"与"删不掉"永远一致。
-    if category == "重复文件" {
+    // 目录内命中用户数据扩展名也拒删）。与扫描期共用
+    // duplicate_candidate_allowed —— 保证"扫不进"与"删不掉"永远一致。
+    if category == "重复文件" && !duplicate_candidate_allowed(&canonical) {
         if !is_repeat_cache_dir(&canonical) {
             return SafetyCheck::Danger(format!(
                 "非缓存目录（Library/Caches 等），重复文件类目拒绝删除: {}",
@@ -699,6 +719,10 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
                 ));
             }
         }
+        return SafetyCheck::Danger(format!(
+            "重复文件类目拒绝删除（目录白名单/扩展名保护）: {}",
+            canonical_str
+        ));
     }
 
     // ================================================================
@@ -1855,6 +1879,44 @@ mod tests {
                 r
             );
         }
+    }
+
+    #[test]
+    fn candidate_allowed_equals_layer48_complement() {
+        // 扫描允许判定（duplicate_candidate_allowed）与删除期 4.8 层必须
+        // 精确互补：allowed=false ⟺ 重复文件类目 Danger。扫描按它过滤，
+        // 删除按它拦截 —— "扫得出的都能删、删不掉的都不扫"。
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        // 缓存目录内、无用户扩展名 → allowed，删除期不 Danger
+        let ok = Path::new(&home)
+            .join("Library/Caches/app/video.mp4")
+            .to_string_lossy()
+            .into_owned();
+        assert!(duplicate_candidate_allowed(Path::new(&ok)));
+        assert!(!matches!(
+            check_path_safety_with_category(&ok, "重复文件"),
+            SafetyCheck::Danger(_)
+        ));
+        // 缓存目录内、命中不可再生扩展名 → 不允许，删除期 Danger
+        let code = Path::new(&home)
+            .join("Library/Caches/x/code.ts")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!duplicate_candidate_allowed(Path::new(&code)));
+        assert!(matches!(
+            check_path_safety_with_category(&code, "重复文件"),
+            SafetyCheck::Danger(_)
+        ));
+        // 非缓存目录 → 不允许，删除期 Danger
+        let user = Path::new(&home)
+            .join("Documents/report.pdf")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!duplicate_candidate_allowed(Path::new(&user)));
+        assert!(matches!(
+            check_path_safety_with_category(&user, "重复文件"),
+            SafetyCheck::Danger(_)
+        ));
     }
 
     #[test]

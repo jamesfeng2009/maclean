@@ -137,11 +137,10 @@ impl Scanner for DuplicateFileScanner {
             if is_manifest_managed_path(path) {
                 continue;
             }
-            // P0-1：重复文件类目只处理缓存目录内的副本（与删除期第 4.8 层
-            // 共用 is_repeat_cache_dir，保证"扫不进"与"删不掉"永远一致）。
-            // 用户文档、项目数据、ComfyUI 输出、IDE 扩展即使内容重复，
-            // 也一律不进候选 —— 宁可少省空间也不误删。
-            if !crate::safety::is_repeat_cache_dir(path) {
+            // P0-1：重复文件类目只处理"能删得掉"的候选 —— 与删除期第 4.8
+            // 层共用 duplicate_candidate_allowed（缓存目录白名单 + 不可再生
+            // 扩展名），扫描出的每一项删除期都放行；删不掉的一律不进列表。
+            if !crate::safety::duplicate_candidate_allowed(path) {
                 continue;
             }
             // 提质：用户可配置忽略名单（子串匹配路径，命中即跳过）
