@@ -63,8 +63,29 @@ impl BackupManifest {
 }
 
 /// 清单目录：~/.maclean/backups
+///
+/// 测试钩子：单测通过 `set_test_backup_dir` 把目录指向临时位置，
+/// 绝不碰真实 backups（那里存着历史删除的还原清单）。
 fn backup_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Ok(guard) = TEST_BACKUP_DIR.lock() {
+            if let Some(d) = guard.as_ref() {
+                return d.clone();
+            }
+        }
+    }
     crate::platform::app_data_dir().join("backups")
+}
+
+#[cfg(test)]
+static TEST_BACKUP_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_test_backup_dir(d: PathBuf) {
+    if let Ok(mut guard) = TEST_BACKUP_DIR.lock() {
+        *guard = Some(d);
+    }
 }
 
 fn now_secs() -> u64 {
@@ -130,6 +151,60 @@ pub fn record(entries: Vec<BackupEntry>) -> Option<String> {
     }
 }
 
+/// 记录**待删快照**（P0-2）：删除开始前把计划清单落盘。
+///
+/// 历史事故（9-30）：删除中途 GUI 终止，`record()` 从未执行，事后
+/// backups/ 里没有任何记录，只能靠 delete.log 拼凑。本函数在 worker
+/// 开始前就把"计划删什么"写进 `<id>.pending.json`；删除正常完成后再
+/// 由 `finalize_pending` 清除 —— 一旦删除中断/崩溃，快照留存，
+/// 审计能完整还原"当时打算删什么"。
+pub fn record_pending(entries: Vec<BackupEntry>) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let dir = backup_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        crate::logger::warn("备份清单目录创建失败，待删快照不记录");
+        return None;
+    }
+    let now = now_secs();
+    let id = make_id(now);
+    let manifest = BackupManifest {
+        id: id.clone(),
+        created_at: now,
+        platform: std::env::consts::OS.to_string(),
+        entries,
+    };
+    let path = dir.join(format!("{}.pending.json", id));
+    match serde_json::to_string_pretty(&manifest) {
+        Ok(s) => match std::fs::write(&path, s) {
+            Ok(_) => Some(id),
+            Err(e) => {
+                crate::logger::warn(&format!("待删快照写入失败: {}", e));
+                None
+            }
+        },
+        Err(e) => {
+            crate::logger::warn(&format!("待删快照序列化失败: {}", e));
+            None
+        }
+    }
+}
+
+/// 删除正常完成后清除待删快照（P0-2）。
+///
+/// 实际清单已由 `record()` 落盘为 `<id>.json`；快照只服务"中断兜底"，
+/// 正常结束就删掉，避免 list() 里出现重复条目。删除失败也不 panic。
+pub fn finalize_pending(id: &str) {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return;
+    }
+    let p = backup_dir().join(format!("{}.pending.json", id));
+    if std::fs::remove_file(p).is_err() {
+        crate::logger::warn(&format!("待删快照清除失败（可手动删除）: {}", id));
+    }
+}
+
 /// 列出所有清单（按时间倒序，最近的在前）
 pub fn list() -> Vec<BackupManifest> {
     let dir = backup_dir();
@@ -138,7 +213,13 @@ pub fn list() -> Vec<BackupManifest> {
     };
     let mut out: Vec<BackupManifest> = rd
         .flatten()
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+        // 只认正式清单 `<id>.json`；`<id>.pending.json` 是删除中断时的
+        // 待删快照，不混进"可还原"列表（它代表计划而非事实）。
+        .filter(|e| {
+            let fname = e.file_name();
+            let name = fname.to_string_lossy();
+            name.ends_with(".json") && !name.ends_with(".pending.json")
+        })
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| serde_json::from_str::<BackupManifest>(&s).ok())
         .collect();
@@ -370,6 +451,46 @@ mod tests {
     fn empty_delete_does_not_create_a_manifest() {
         // 删了 0 项不该留下一个空清单污染列表
         assert!(record(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn pending_snapshot_lifecycle() {
+        // P0-2：待删快照完整生命周期 —— 写入 → list() 排除 → 空 entries 不写
+        // → finalize 清除 → 正式清单照常列出 → 路径穿越防护。目录注入到临时
+        // 位置，不碰真实 backups；合并为单测，避免全局测试钩子并行互相覆盖。
+        let tmp =
+            std::env::temp_dir().join(format!("maclean_backup_pending_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        set_test_backup_dir(tmp.clone());
+
+        // 写入待删快照
+        let id =
+            record_pending(vec![entry("/Users/u/Caches/x.bin", true)]).expect("待删快照应写入成功");
+        assert!(
+            tmp.join(format!("{}.pending.json", id)).exists(),
+            "待删快照文件应存在"
+        );
+        // list() 必须排除 pending 快照（正式清单还没有 → 列表为空）
+        assert!(list().is_empty(), "pending 快照不得混入清单列表");
+        // 空 entries 不写快照
+        assert!(record_pending(Vec::new()).is_none());
+        // finalize 后清除
+        finalize_pending(&id);
+        assert!(
+            !tmp.join(format!("{}.pending.json", id)).exists(),
+            "finalize 后 pending 快照应被清除"
+        );
+        // 正式清单落盘后正常出现在列表
+        let real_id = record(vec![entry("/Users/u/Caches/x.bin", true)]).unwrap();
+        let listed = list();
+        assert_eq!(listed.len(), 1, "正式清单应出现在列表");
+        assert_eq!(listed[0].id, real_id);
+        // 路径穿越防护：含分隔符的 id 直接忽略
+        finalize_pending("../../etc/passwd");
+
+        set_test_backup_dir(std::path::PathBuf::new());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

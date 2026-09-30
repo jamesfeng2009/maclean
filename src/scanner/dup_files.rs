@@ -44,11 +44,14 @@ const MAX_GROUPS: usize = 200;
 const SKIP_REL: &[&str] = &[
     "Downloads",
     "OrbStack",
-    "Library/Containers",
+    // 注：Library/Caches 与 Library/Containers 不在整棵排除名单 ——
+    // P0-1 起重复文件只处理缓存目录内的副本，由 is_repeat_cache_dir
+    // 精确放行 Containers/*/Data/Library/Caches 等缓存子路径；若在此
+    // 整棵排除，重复文件扫描会退化为空扫。其它 Containers/App Support
+    // 路径仍由 P0-1 扫描过滤拦截（不进候选）。
     "Library/Application Support",
     "Library/Developer/CoreSimulator",
     "Library/Developer/Xcode/DerivedData",
-    "Library/Caches",
     "Library/WebKit",
     "node_modules",
     ".Trash",
@@ -73,9 +76,10 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "Movies",
     "Pictures",
     "Music",
-    "Library",
+    // 注：Library 与 .cache 不在整棵排除名单 —— 缓存目录白名单
+    // （~/Library/Caches、~/.cache）在它们之下，整棵剪掉会令重复扫描
+    // 空转；进入遍历后由 SKIP_REL + is_repeat_cache_dir 文件级精确过滤。
     ".Trash",
-    ".cache",
     ".local",
     ".npm",
     ".cargo",
@@ -131,6 +135,13 @@ impl Scanner for DuplicateFileScanner {
             // 任意层级硬排除 —— 这些目录由 RECORD / package-lock.json /
             // go.sum 等清单管理，删任一份副本都会破坏完整性校验。
             if is_manifest_managed_path(path) {
+                continue;
+            }
+            // P0-1：重复文件类目只处理缓存目录内的副本（与删除期第 4.8 层
+            // 共用 is_repeat_cache_dir，保证"扫不进"与"删不掉"永远一致）。
+            // 用户文档、项目数据、ComfyUI 输出、IDE 扩展即使内容重复，
+            // 也一律不进候选 —— 宁可少省空间也不误删。
+            if !crate::safety::is_repeat_cache_dir(path) {
                 continue;
             }
             // 提质：用户可配置忽略名单（子串匹配路径，命中即跳过）
@@ -216,6 +227,27 @@ impl Scanner for DuplicateFileScanner {
 }
 
 /// 是否应跳过该目录子树（安全 + 效率）
+/// SKIP_REL 组件级匹配（P1-1）：名单里的每一项按 `/` 拆段，与相对路径的
+/// 前导组件**逐一相等**才算命中。
+///
+/// 旧实现 `rel_str.starts_with(s)` 是前缀匹配：`.git` 会误匹配 `.gitignore`、
+/// `.net` 会误匹配 `.netsomething`。组件相等杜绝这类误伤 —— 只有完整的
+/// `Library/Developer/Xcode/DerivedData` 组件序列才命中，`Library/Developer/
+/// Xcode/DerivedDataExtra` 不会。
+fn skip_rel_component_hit(rel: &Path, s: &str) -> bool {
+    let mut comps = rel.components().filter_map(|c| match c {
+        std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+        _ => None,
+    });
+    for part in s.split('/') {
+        match comps.next() {
+            Some(c) if c == part => continue,
+            _ => return false,
+        }
+    }
+    true
+}
+
 fn should_skip_dir(entry: &walkdir::DirEntry, home: &Path) -> bool {
     if !entry.file_type().is_dir() {
         return false;
@@ -229,18 +261,24 @@ fn should_skip_dir(entry: &walkdir::DirEntry, home: &Path) -> bool {
         return true;
     }
     let rel = path.strip_prefix(home).unwrap_or(path);
-    let rel_str = rel.to_string_lossy();
-    if SKIP_REL.iter().any(|s| rel_str.starts_with(s)) {
+    if SKIP_REL.iter().any(|s| skip_rel_component_hit(rel, s)) {
         return true;
     }
-    if rel.components().count() == 1
-        && SKIP_DIR_NAMES
-            .iter()
-            .any(|d| rel_str == *d || rel_str.starts_with(&format!("{}/", d)))
+    if rel.components().count() == 1 && SKIP_DIR_NAMES.iter().any(|d| rel_str_first_equals(rel, d))
     {
         return true;
     }
     false
+}
+
+/// 主目录直接子项名匹配（组件相等，杜绝 `.cache` 匹配 `.cacheextra`）
+fn rel_str_first_equals(rel: &Path, d: &str) -> bool {
+    let name = rel
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name == d
 }
 
 /// 组内找重复：先预筛（前 64KB），再全量哈希
@@ -617,6 +655,58 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!should_skip_dir(&entry, &tmp), "缓存目录不应跳过");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn skip_rel_matches_full_components_only() {
+        // P1-1：SKIP_REL 组件级匹配 —— 前缀匹配会误伤（.git 匹配 .gitignore、
+        // .net 匹配 .netsomething），组件逐一相等才命中。
+        let tmp = std::env::temp_dir().join(format!("maclean_dup_comp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // 命中（完整组件序列）
+        for rel in [
+            "Downloads",
+            "Downloads/x",
+            ".git",
+            ".git/config",
+            ".net/CursorPro/e",
+            "Library/Developer/Xcode/DerivedData",
+            "Library/Developer/Xcode/DerivedData/x/y",
+            "go/pkg/mod/github.com/x/y",
+        ] {
+            let p = tmp.join(rel);
+            std::fs::create_dir_all(&p).unwrap();
+            let entry = walkdir::WalkDir::new(&p)
+                .min_depth(0)
+                .max_depth(0)
+                .into_iter()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert!(should_skip_dir(&entry, &tmp), "应命中: {}", rel);
+        }
+        // 不命中（相似但非相等组件 —— 旧前缀匹配会误伤）
+        for rel in [
+            ".gitignore",
+            ".gitignored-dir",
+            ".netsomething",
+            ".netx",
+            "Library/Developer/Xcode/DerivedDataExtra",
+            "go/pkg/modx/y",
+            "DownloadsExtra",
+        ] {
+            let p = tmp.join(rel);
+            std::fs::create_dir_all(&p).unwrap();
+            let entry = walkdir::WalkDir::new(&p)
+                .min_depth(0)
+                .max_depth(0)
+                .into_iter()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert!(!should_skip_dir(&entry, &tmp), "不应命中: {}", rel);
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

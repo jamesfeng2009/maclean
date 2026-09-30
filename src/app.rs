@@ -259,6 +259,9 @@ pub struct App {
     pub disk_free: u64,
     /// 用户取消扫描标志：UI 点「取消扫描」后置 true，扫描线程在各 Tab 间检查后提前退出
     pub scan_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// P0-3：删除取消标志（后台删除线程在子项边界检查）。
+    /// confirm_delete 时复位为 false；UI 点「停止」置 true。
+    pub delete_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 清理日志
     pub logs: Vec<String>,
     /// 系统优化 Tab：待用户确认的高风险任务索引（None=无待确认项）
@@ -561,6 +564,7 @@ impl App {
             disk_total,
             disk_free,
             scan_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            delete_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             logs: Vec::new(),
             pending_optimize_task: None,
             optimize_running: None,
@@ -608,7 +612,7 @@ impl App {
             delete_summary: None,
             failed_paths: Vec::new(),
             show_permission_guide: !Self::check_full_disk_access(),
-            show_preview: false,
+            show_preview: true,
             sudo_password_input: String::new(),
             sudo_password: None,
             sudo_failed_items: Vec::new(),
@@ -1323,6 +1327,9 @@ impl App {
     ///   事后追溯用的，扫描值够用；真要看准确数字，用户看删除结果摘要。
     pub fn confirm_delete(&mut self) -> Vec<(String, String, Vec<String>, bool, u64)> {
         self.confirm = ConfirmState::Deleting;
+        // P0-3：新删除任务开始前复位取消标志（上一轮遗留的 true 会立刻停掉本轮）
+        self.delete_cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         // 收集要删除的路径和类别（跳过不可删除的项）
         // 策略：默认一律移至废纸篓（可恢复）。唯一例外是 Caution 档里 root 属主
@@ -1390,6 +1397,12 @@ impl App {
             .map(|(_, _, batch, _, _)| 1 + batch.len())
             .sum::<usize>();
         self.delete_done = 0;
+
+        // P2-1：重复文件类目强制展开删除预览 —— 用户必须看到"将删什么、
+        // 保留哪份"再动手；其它类目沿用全局默认（初始化即展开）。
+        if to_delete.iter().any(|(_, c, _, _, _)| c == "重复文件") {
+            self.show_preview = true;
+        }
         self.logs.clear();
         self.deleted_paths.clear();
         self.delete_summary = None;
@@ -1814,6 +1827,8 @@ impl App {
                 "progress_background_run" => "Run in background",
                 "progress_authorize" => "Authorize and continue",
                 "deleting_subtitle" => "Completed {0} / {1} items",
+                "deleting_stop" => "Stop",
+                "log_delete_cancelled" => "Deletion stopped; unprocessed items were kept",
                 // 系统优化
                 "optimize_click_to_scan" => "Click Scan to view available optimization tasks",
                 "optimize_safe_hint" => "Optimization tasks are safe and will not affect system stability",
@@ -2274,6 +2289,8 @@ impl App {
                 "progress_background_run" => "后台运行",
                 "progress_authorize" => "授权并继续",
                 "deleting_subtitle" => "已完成 {0} / {1} 项",
+                "deleting_stop" => "停止",
+                "log_delete_cancelled" => "删除已停止，未处理项已保留",
                 // 系统优化
                 "optimize_click_to_scan" => "点击扫描查看可用的优化任务",
                 "optimize_safe_hint" => "优化任务安全可执行，不会影响系统稳定性",

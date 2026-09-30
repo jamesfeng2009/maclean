@@ -354,6 +354,73 @@ pub fn is_inside_git_project(path: &Path, homes: &[PathBuf]) -> bool {
     false
 }
 
+/// P2-2：进程级 git 判定缓存。删除期每个子项都过 4.7 层向上找 `.git`，
+/// 几百项时重复磁盘 stat；同一删除任务内路径集合稳定，缓存按 canonical
+/// 路径缓存"是否在 git 项目内"，命中即免 IO。缓存失败（锁毒化）退化为
+/// 无缓存直算，绝不影响判定正确性。
+static GIT_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, bool>>> =
+    std::sync::OnceLock::new();
+
+fn git_cache() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, bool>> {
+    GIT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn is_inside_git_project_cached(path: &Path, homes: &[PathBuf]) -> bool {
+    if let Ok(mut cache) = git_cache().lock() {
+        if let Some(&v) = cache.get(path) {
+            return v;
+        }
+        let v = is_inside_git_project(path, homes);
+        cache.insert(path.to_path_buf(), v);
+        v
+    } else {
+        is_inside_git_project(path, homes)
+    }
+}
+
+/// 重复文件类目（扫描 + 删除共用）的**目录白名单**：只处理明确缓存目录
+/// 内的副本。
+///
+/// 历史事故（9-30）：用户文档（Downloads）、项目数据（onlineStudy）、
+/// ComfyUI 生成图、IDE 扩展组件只要内容重复就被移入废纸篓。第 4.7 层
+/// 拦截 git 项目内文件，但无 git 的用户数据（docx/pdf/jpg 等）仍漏网。
+/// 本函数把"重复文件"的扫描与删除都钉死在缓存目录家族 —— 缓存目录外
+/// 一律拒绝，宁可少省空间也不误删（用户明确接受的保守原则）。
+pub(crate) fn is_repeat_cache_dir(path: &Path) -> bool {
+    let p = path.to_string_lossy();
+    for h in protected_homes() {
+        let h = h.to_string_lossy();
+        if p.starts_with(&format!("{}/Library/Caches", h))
+            || p.starts_with(&format!("{}/.cache", h))
+        {
+            return true;
+        }
+    }
+    if p.starts_with("/Library/Caches") {
+        return true;
+    }
+    // 沙盒容器缓存：~/Library/Containers/<bundle-id>/Data/Library/Caches
+    if p.contains("/Library/Containers/") && p.contains("/Data/Library/Caches") {
+        return true;
+    }
+    false
+}
+
+/// 缓存目录内也拒绝删除的"用户数据/不可再生"扩展名（仅重复文件类目）。
+///
+/// 文档、代码、数据库、压缩包、字体即使出现在缓存目录中，也极可能是被
+/// 同步/备份工具误放的用户数据，删任一份即破坏。图片/音视频/无扩展名
+/// 二进制不入列 —— 它们是缓存清理的价值所在，且目录白名单已保护用户区。
+const NON_RECREATABLE_EXTS: &[&str] = &[
+    // 文档
+    "doc", "docx", "pdf", "ppt", "pptx", "xls", "xlsx", "txt", "md",
+    // 代码 / 配置 / 数据
+    "ts", "tsx", "js", "jsx", "mjs", "py", "go", "rs", "java", "c", "cc", "cpp", "h", "hpp", "sql",
+    "json", "yaml", "yml", "toml", "ipynb", "sh", "vue", "css", "scss", // 数据库
+    "db", "sqlite", "sqlite3", // 压缩包 / 字体
+    "zip", "rar", "7z", "tar", "gz", "tgz", "ttf", "otf", "woff", "woff2",
+];
+
 /// 单组件清单标记判定（第 4.6 层与后代深扫共用）。
 /// `comps[i]` 为当前组件，部分标记需结合后续组件（go/pkg/mod、
 /// *.app/Contents、.venv+数字）。
@@ -601,11 +668,37 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // 只能是保留方，绝不删除 —— 即使扫描结果来自旧缓存/旧版本也拦得住。
     // 其它类目不启用（node 依赖清理等本就清理项目内 node_modules，
     // 由第 4.6 层按清单目录另行判定）。
-    if category == "重复文件" && is_inside_git_project(&canonical, &homes) {
+    if category == "重复文件" && is_inside_git_project_cached(&canonical, &homes) {
         return SafetyCheck::Danger(format!(
             "git 项目工作区文件，重复文件类目拒绝删除: {}",
             canonical_str
         ));
+    }
+
+    // ================================================================
+    //  第 4.8 层: 重复文件类目 —— 目录白名单 + 不可再生扩展名保护
+    // ================================================================
+    // 第 4.7 层只保护 git 项目内文件；无 git 的用户文档（docx/pdf/jpg）、
+    // 项目外代码、数据库在旧缓存/旧扫描结果进入删除队列时仍会被删。
+    // 双闸门：目录白名单（只删缓存目录内副本）+ 扩展名黑名单（缓存
+    // 目录内命中用户数据扩展名也拒删）。与扫描期共用 is_repeat_cache_dir，
+    // 保证"扫不进"与"删不掉"永远一致。
+    if category == "重复文件" {
+        if !is_repeat_cache_dir(&canonical) {
+            return SafetyCheck::Danger(format!(
+                "非缓存目录（Library/Caches 等），重复文件类目拒绝删除: {}",
+                canonical_str
+            ));
+        }
+        if let Some(ext) = canonical.extension() {
+            let ext_l = ext.to_string_lossy().to_ascii_lowercase();
+            if NON_RECREATABLE_EXTS.contains(&ext_l.as_str()) {
+                return SafetyCheck::Danger(format!(
+                    "用户数据文件（*.{}），重复文件类目拒绝删除: {}",
+                    ext_l, canonical_str
+                ));
+            }
+        }
     }
 
     // ================================================================
@@ -1638,7 +1731,9 @@ mod tests {
                 r
             );
         }
-        // 普通用户文件仍可正常删除（回归：保护不能误伤普通路径）
+        // P0-1 4.8 层语义（取代旧的"普通路径不拒"回归）：重复文件类目只允许
+        // 删除缓存目录内的副本 —— 缓存目录外的用户数据/项目文件/散落文件
+        // 即使内容重复也一律拒绝（宁可少省空间也不误删）。
         for p in [
             "/Users/u/Downloads/a.bin",
             "/Users/u/proj/src/h.bin",
@@ -1646,12 +1741,144 @@ mod tests {
         ] {
             let r = check_path_safety_with_category(p, "重复文件");
             assert!(
-                !matches!(r, SafetyCheck::Danger(_)),
-                "不应拒绝普通路径: {} (got {:?})",
+                matches!(r, SafetyCheck::Danger(_)),
+                "非缓存目录在重复文件类目下应被拒绝: {} (got {:?})",
                 p,
                 r
             );
         }
+        // 其它类目不受 4.6/4.8 影响（回归：保护不能误伤其它类目的正常路径）
+        for p in ["/Users/u/proj/src/h.bin", "/Users/u/.venvista/i.bin"] {
+            let r = check_path_safety_with_category(p, "App残留");
+            assert!(
+                !matches!(r, SafetyCheck::Danger(_)),
+                "非重复文件类目不应被 4.6/4.8 误拦: {} (got {:?})",
+                p,
+                r
+            );
+        }
+    }
+
+    // ---------- 第 4.8 层: 重复文件类目目录白名单 + 扩展名保护 ----------
+
+    #[test]
+    fn duplicate_category_denies_non_cache_dir_without_git() {
+        // 4.8 层兜底：无 git 的用户文档/项目外代码一旦进入删除队列必须被拦。
+        // 目录白名单是"非缓存目录全拒"，不依赖 .git 祖先是否存在。
+        let tmp = std::env::temp_dir().join(format!("maclean_safety_48a_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let user_doc = tmp.join("docs/report.pdf");
+        std::fs::create_dir_all(user_doc.parent().unwrap()).unwrap();
+        std::fs::write(&user_doc, b"%PDF-1.4 fake").unwrap();
+        let r = check_path_safety_with_category(user_doc.to_str().unwrap(), "重复文件");
+        assert!(
+            matches!(r, SafetyCheck::Danger(_)),
+            "非缓存目录的重复候选必须被拒: {:?}",
+            r
+        );
+        // 同一路径在其它类目不受 4.8 影响
+        let r2 = check_path_safety_with_category(user_doc.to_str().unwrap(), "系统缓存");
+        assert!(
+            !matches!(r2, SafetyCheck::Danger(_)),
+            "其它类目不应被 4.8 误拦: {:?}",
+            r2
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn duplicate_category_allows_cache_dir_plain_file() {
+        // 缓存目录内、无"用户数据扩展名"的副本允许删除（清理价值保留）。
+        // is_repeat_cache_dir 用 protected_homes（真实 HOME）判定，
+        // 测试路径必须以真实 home 构造，否则目录白名单命中不了。
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        // 4.8 目录白名单形态判定：
+        let cache_p1 = Path::new(&home).join("Library/Caches/app/video.mp4");
+        assert!(
+            is_repeat_cache_dir(&cache_p1),
+            "~/Library/Caches 应命中白名单"
+        );
+        let cache_p2 = Path::new(&home).join(".cache/tool/x.bin");
+        assert!(is_repeat_cache_dir(&cache_p2), "~/.cache 应命中白名单");
+        assert!(
+            is_repeat_cache_dir(Path::new("/Library/Caches/sys/x.bin")),
+            "/Library/Caches 应命中白名单"
+        );
+        let cache_p3 =
+            Path::new(&home).join("Library/Containers/com.app/Data/Library/Caches/x.bin");
+        assert!(is_repeat_cache_dir(&cache_p3), "沙盒容器缓存应命中白名单");
+        let cache_p4 = Path::new(&home).join("Library/Application Support/app/x.bin");
+        assert!(
+            !is_repeat_cache_dir(&cache_p4),
+            "App Support 不应命中白名单"
+        );
+        let cache_p5 = Path::new(&home).join("Downloads/x.bin");
+        assert!(!is_repeat_cache_dir(&cache_p5), "Downloads 不应命中白名单");
+        // mp4 不在不可再生扩展名列表 → 缓存目录内可删（无 Danger 命中即非 Danger）
+        let cache_p = Path::new(&home)
+            .join("Library/Caches/app/video.mp4")
+            .to_string_lossy()
+            .into_owned();
+        let r = check_path_safety_with_category(&cache_p, "重复文件");
+        assert!(
+            !matches!(r, SafetyCheck::Danger(_)),
+            "缓存目录内普通媒体副本应允许删除: {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn duplicate_category_denies_user_doc_extension_in_cache() {
+        // 缓存目录内命中"用户数据扩展名"（文档/代码/数据库/压缩包/字体）
+        // 也拒绝 —— 极可能是同步/备份工具误放的用户数据。
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        let cases = [
+            ("report.pdf", "pdf"),
+            ("code.ts", "ts"),
+            ("data.json", "json"),
+            ("db.sqlite", "sqlite"),
+            ("backup.zip", "zip"),
+            ("font.ttf", "ttf"),
+            ("REPORT.DOCX", "DOCX 大写"),
+        ];
+        for (fname, label) in cases {
+            let p = Path::new(&home)
+                .join(format!("Library/Caches/x/{}", fname))
+                .to_string_lossy()
+                .into_owned();
+            let r = check_path_safety_with_category(&p, "重复文件");
+            assert!(
+                matches!(r, SafetyCheck::Danger(_)),
+                "缓存目录内 {} 也应被拒: {} (got {:?})",
+                label,
+                p,
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn git_cache_matches_uncached_judgement() {
+        // P2-2：缓存版判定与无缓存版一致（缓存只是 IO 优化，不能改变结论）。
+        let tmp = std::env::temp_dir().join(format!("maclean_safety_48c_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("p/x")).unwrap();
+        std::fs::write(tmp.join("p/.git"), b"").unwrap();
+        let homes = vec![tmp.clone()];
+        let in_proj = tmp.join("p/x/a.bin");
+        let outside = tmp.join("other/a.bin");
+        // 第一次（写缓存）
+        assert!(is_inside_git_project_cached(&in_proj, &homes));
+        assert!(!is_inside_git_project_cached(&outside, &homes));
+        // 第二次（读缓存）
+        assert!(is_inside_git_project_cached(&in_proj, &homes));
+        assert!(!is_inside_git_project_cached(&outside, &homes));
+        // 与无缓存版一致
+        assert_eq!(
+            is_inside_git_project_cached(&in_proj, &homes),
+            is_inside_git_project(&in_proj, &homes)
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

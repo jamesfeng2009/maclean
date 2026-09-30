@@ -111,6 +111,42 @@ pub fn check_deletable(path: &str) -> (bool, String) {
     (true, String::new())
 }
 
+/// 目标是否位于只读卷（P1-2）
+///
+/// OrbStack 挂载卷、APFS 快照等只读卷上，Finder 无法把文件移入废纸篓，
+/// 调用 osascript 只会弹"Some files can't be processed"对话框且**无法静音**。
+/// 删除前预先探测：命中只读卷直接记失败跳过，不触发系统弹窗。
+///
+/// 探测失败（路径不可解析、statvfs 出错）一律返回 false —— 宁可让 Finder
+/// 弹窗，也不因误判把可删文件跳过。
+pub fn path_on_readonly_volume(path: &str) -> bool {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        let _ = path;
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            let Ok(c_path) = CString::new(path) else {
+                return false;
+            };
+            let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+            if unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) } != 0 {
+                return false;
+            }
+            (buf.f_flag & libc::ST_RDONLY) != 0
+        }
+        #[cfg(windows)]
+        {
+            false
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// 移动文件/目录到废纸篓（跨平台）
 ///
 /// macOS: 调用 NSWorkspace.recycleURLs 或 fallback 到 rm
@@ -130,6 +166,16 @@ pub fn move_to_trash(path: &str) -> bool {
 
     #[cfg(target_os = "macos")]
     {
+        // P1-2：只读卷（OrbStack 挂载、APFS 快照等）上 Finder 无法回收，
+        // 调用只会弹"Some files can't be processed"且无法静音。预先探测，
+        // 命中直接记失败跳过，不触发系统对话框。
+        if crate::platform::path_on_readonly_volume(path) {
+            crate::logger::warn(&format!(
+                "目标位于只读卷，跳过废纸篓（不触发 Finder 弹窗）: {}",
+                path
+            ));
+            return false;
+        }
         // macOS: 尝试 osascript 调用 Finder 移到废纸篓
         // AppleScript 字符串字面量里 \ 和 " 都有特殊含义，必须都转义。
         // 只转义 " 时，文件名含 \" （macOS 合法）就能闭合字面量并注入后续

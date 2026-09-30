@@ -441,6 +441,7 @@ impl Gui {
                                         &mut self.delete_rx,
                                         app.settings_auto_restore_point,
                                         app.settings_prefer_official_uninstaller,
+                                        app.delete_cancel.clone(),
                                     );
                                 } else {
                                     log_scan_step(app.t("log_quickclean_none"));
@@ -620,6 +621,20 @@ impl Gui {
                         // Touch ID 分支会把新线程的 receiver 写进 self.delete_rx，
                         // 此时清掉会导致消息无人接收、confirm 永久卡在 SudoWithTouchId。
                         clear_delete_rx = !started_new_delete;
+                        break;
+                    }
+                    Ok(DeleteMessage::Cancelled) => {
+                        // P0-3：用户中途停止。已删项已记录清单；未处理项未动。
+                        if let Some(app) = Some(&mut self.app) {
+                            app.sudo_password = None;
+                            app.sudo_password_input.clear();
+                            app.finish_delete();
+                            app.logs.push(
+                                crate::app::App::t_lang(app.lang_en, "log_delete_cancelled")
+                                    .to_string(),
+                            );
+                        }
+                        clear_delete_rx = true;
                         break;
                     }
                     Ok(DeleteMessage::Done) => {
@@ -3546,6 +3561,7 @@ pub(crate) fn show_confirm_window(
                         delete_rx,
                         app.settings_auto_restore_point,
                         app.settings_prefer_official_uninstaller,
+                        app.delete_cancel.clone(),
                     );
                 }
                 let cancel_label = app.t("cancel").to_string();
@@ -4152,6 +4168,21 @@ pub(crate) fn show_deleting_window(ctx: &egui::Context, app: &mut App) {
                     if auth_btn.clicked() && can_authorize {
                         app.sudo_failed_items = app.failed_paths.clone();
                         app.confirm = ConfirmState::NeedSudoPassword;
+                    }
+
+                    ui.add_space(8.0);
+
+                    // P0-3：停止删除 —— 置取消标志，后台线程在子项边界优雅退出，
+                    // 已删项照常落清单，未处理项原地保留。
+                    let stop_btn = ui.add(
+                        egui::Button::new(egui::RichText::new(app.t("deleting_stop")).size(13.0))
+                            .fill(theme::surface())
+                            .stroke(egui::Stroke::new(1.0_f32, theme::danger()))
+                            .rounding(egui::Rounding::same(8.0)),
+                    );
+                    if stop_btn.clicked() {
+                        app.delete_cancel
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                     }
 
                     ui.add_space(8.0);

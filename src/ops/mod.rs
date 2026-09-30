@@ -38,6 +38,8 @@ pub(crate) enum DeleteMessage {
     Info(String),
     /// 普通删除完成，部分项需要管理员权限
     NeedPassword(Vec<(String, String)>),
+    /// 删除被用户中途取消（P0-3）：已删项照常记录清单，未处理项未动
+    Cancelled,
     /// 全部删除完成
     Done,
     /// 本次删除已写入备份清单（M-2）
@@ -1216,6 +1218,9 @@ pub(crate) fn start_delete(
     auto_restore: bool,
     // 卸载 .app 时优先交给厂商自带的官方卸载器（M-1，仅 macOS 有意义）
     prefer_official_uninstaller: bool,
+    // P0-3：删除取消标志。UI 点「停止」置 true，worker 在子项边界检查，
+    // 未处理的项原地保留，已删项照常落清单。
+    delete_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let (tx, rx) = mpsc::channel();
     *delete_rx = Some(rx);
@@ -1228,8 +1233,37 @@ pub(crate) fn start_delete(
         // 否则用户会以为还能还原一个从没被删过的东西。
         let backup_entries: std::sync::Mutex<Vec<crate::backup::BackupEntry>> =
             std::sync::Mutex::new(Vec::new());
+        // P0-3：是否被用户中途取消（任一 worker 置位）
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         logger::info(&format!("删除任务开始: {} 项", to_delete.len()));
+
+        // P0-2：删除开始前落"待删快照"（<id>.pending.json）。
+        // 9-30 事故：删除中途 GUI 终止，正式清单（record）从未写入，
+        // 事后完全无法还原"当时计划删什么"。快照先行 —— 正常结束由
+        // finalize_pending 清除，中断/崩溃则留存供审计。
+        let pending_id: Option<String> = {
+            let mut pending: Vec<crate::backup::BackupEntry> = Vec::new();
+            for (path, category, batch_paths, use_trash, size_bytes) in &to_delete {
+                let restorable =
+                    crate::backup::is_restorable_by_move(*use_trash, std::env::consts::OS);
+                pending.push(crate::backup::BackupEntry {
+                    path: path.clone(),
+                    size_bytes: *size_bytes,
+                    category: category.clone(),
+                    restorable,
+                });
+                for bp in batch_paths {
+                    pending.push(crate::backup::BackupEntry {
+                        path: bp.clone(),
+                        size_bytes: *size_bytes,
+                        category: category.clone(),
+                        restorable,
+                    });
+                }
+            }
+            crate::backup::record_pending(pending)
+        };
 
         // P1-1: Windows 批次删除前自动创建系统还原点（20h 频率限制，开关控制）
         #[cfg(not(target_os = "windows"))]
@@ -1268,7 +1302,15 @@ pub(crate) fn start_delete(
                 s.spawn(|| {
                     loop {
                         let i = idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if i >= to_delete.len() { break; }
+                        if i >= to_delete.len() {
+                            break;
+                        }
+                        // P0-3：用户中途取消 —— 未处理的项原地保留，不再删除。
+                        // 其余 worker 下一轮也会在此退出；scope 等待全部退出。
+                        if delete_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
                         let (path, category, batch_paths, use_trash, size_bytes) = &to_delete[i];
                         let path = path.to_string();
                         let category = category.to_string();
@@ -1695,8 +1737,17 @@ pub(crate) fn start_delete(
         let backup_entries: Vec<crate::backup::BackupEntry> = backup_entries
             .into_inner()
             .unwrap_or_else(|e| e.into_inner());
+        let cancelled = cancelled.load(std::sync::atomic::Ordering::Relaxed);
 
-        logger::info(&format!("阶段1删除完成, 失败 {} 项", failed_items.len()));
+        logger::info(&format!(
+            "阶段1删除完成, 失败 {} 项{}",
+            failed_items.len(),
+            if cancelled {
+                ", 用户中途取消"
+            } else {
+                ""
+            }
+        ));
 
         // M-2：落清单。写盘失败只记日志、绝不影响删除结果 ——
         // 清单是事后追溯手段，不能因为它存不进去就把已删掉的东西说成没删。
@@ -1712,6 +1763,10 @@ pub(crate) fn start_delete(
                 total: backup_entries.len(),
             });
         }
+        // P0-2：正式清单已落盘，清除待删快照（正常路径）。
+        if let Some(id) = pending_id {
+            crate::backup::finalize_pending(&id);
+        }
 
         // 普通删除完成后，若还有失败项，通知 GUI 弹出 egui 内置密码输入框
         if !failed_items.is_empty() {
@@ -1720,6 +1775,12 @@ pub(crate) fn start_delete(
                 App::tf_lang(lang_en, "log_need_sudo", &[&failed_items.len().to_string()])
             )));
             let _ = tx.send(DeleteMessage::NeedPassword(failed_items));
+            return;
+        }
+
+        // P0-3：用户中途取消 —— 与正常完成区分，UI 据此提示"已停止，未处理项未动"
+        if cancelled {
+            let _ = tx.send(DeleteMessage::Cancelled);
             return;
         }
 
