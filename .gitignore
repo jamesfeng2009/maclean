@@ -23,4 +23,6 @@ target/
 # Build artifacts
 *.dmg
 *.pkg
+*.zip
+/installers/
 homebrew/.DS_Store

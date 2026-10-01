@@ -15,3 +15,11 @@ pnpm-debug.log*
 !.vscode/extensions.json
 .idea/
 .DS_Store
+
+# tauri icon 生成的移动端/Windows 冗余图标（桌面仅用 32/128/128@2x/icns/ico；
+# 全套可用 `npm run tauri icon ../assets/icon/maclean_icon_1024.png` 再生）
+src-tauri/icons/ios/
+src-tauri/icons/android/
+src-tauri/icons/64x64.png
+src-tauri/icons/Square*Logo.png
+src-tauri/icons/StoreLogo.png
