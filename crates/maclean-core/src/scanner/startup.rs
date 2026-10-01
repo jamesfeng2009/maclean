@@ -72,7 +72,7 @@ pub fn scan_startup_items() -> Vec<StartupItem> {
 }
 
 /// 读取 plist 中的 Label（兼容 XML 与二进制 plist）
-pub(crate) fn read_label(path: &Path) -> Option<String> {
+pub fn read_label(path: &Path) -> Option<String> {
     // 优先原生解析：文件为 XML 时直接读 <key>Label</key>
     if let Ok(bytes) = std::fs::read(path) {
         if let Ok(text) = String::from_utf8(bytes.clone()) {

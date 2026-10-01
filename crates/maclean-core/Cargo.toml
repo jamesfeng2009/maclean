@@ -1,0 +1,25 @@
+[package]
+name = "maclean-core"
+version = "0.2.0"
+edition = "2021"
+description = "maclean 核心逻辑：扫描 / 安全闸门 / 删除执行 / 调度（UI 无关）"
+
+# UI 无关的核心 crate。egui 壳（maclean bin）与 Tauri 壳（maclean-tauri）
+# 都只通过本 crate 的公开 API 触达文件系统；任何删除都必须经过 safety 闸门。
+# 本 crate 不依赖任何窗口 / Web 技术，可在 CI / 容器中独立编译测试。
+[dependencies]
+walkdir = "2.5"
+rayon = "1.10"
+dirs = "5.0"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[features]
+# 开发模式透传：与 maclean bin 的 dev-mode 对齐，核心额度/限制类逻辑共用。
+dev-mode = []
+
+[lib]
+name = "maclean_core"
+path = "src/lib.rs"

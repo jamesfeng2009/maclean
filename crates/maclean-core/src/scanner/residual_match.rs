@@ -63,10 +63,10 @@
 /// 低于这个长度的名字（"Go" / "R" / "V"）做子串匹配会命中大量无关目标：
 /// `"google".contains("go") == true`，于是卸载 Go 会连 Chrome 用户数据一起
 /// `remove_dir_all` 删掉。
-pub(crate) const MIN_MATCH_LEN: usize = 4;
+pub const MIN_MATCH_LEN: usize = 4;
 
 /// 归一化用于比对的名称：转小写，只保留字母数字
-pub(crate) fn normalize_residual_name(s: &str) -> String {
+pub fn normalize_residual_name(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
@@ -77,7 +77,7 @@ pub(crate) fn normalize_residual_name(s: &str) -> String {
 ///
 /// 这些目录一旦被删，损失的不只是被卸载的那个应用 —— 比如 `Tencent`
 /// 同时装着微信和 QQ，`Google` 装着 Chrome 全部 profile（含保存的密码）。
-pub(crate) const PROTECTED_APPDATA_ROOTS: &[&str] = &[
+pub const PROTECTED_APPDATA_ROOTS: &[&str] = &[
     "microsoft",
     "microsoftcorporation",
     "microsoftwindows",
@@ -100,7 +100,7 @@ pub(crate) const PROTECTED_APPDATA_ROOTS: &[&str] = &[
 ];
 
 /// 共享厂商的注册表顶级键，永不作为残留删除
-pub(crate) const PROTECTED_REG_ROOTS: &[&str] = &[
+pub const PROTECTED_REG_ROOTS: &[&str] = &[
     "microsoft",
     "microsoftcorporation",
     "microsoftwindows",
@@ -131,7 +131,7 @@ pub(crate) const PROTECTED_REG_ROOTS: &[&str] = &[
 /// "Python 3.11" → ["python311", "python"]。注意坑在这里：原实现会额外取
 /// "第一个词"，那正是 "Microsoft Edge" 命中 `Microsoft` 键的来源。
 /// "Go" 这类短名没有版本后缀可去，变体仍是 2 字符，会被长度门槛挡下。
-pub(crate) fn search_name_variants(app_name: &str) -> Vec<String> {
+pub fn search_name_variants(app_name: &str) -> Vec<String> {
     let normalized = normalize_residual_name(app_name);
     if normalized.is_empty() {
         return Vec::new();
@@ -155,7 +155,7 @@ pub(crate) fn search_name_variants(app_name: &str) -> Vec<String> {
 /// 与 `search_name_variants` 的区别：后者把名字压成纯字母数字，适合比较
 /// 目录名/键名；这里要拿去和 `C:\Program Files\...` 这种带分隔符的字符串比，
 /// 压平反而匹配不上。同样不带首词提取，且一律过长度门槛。
-pub(crate) fn display_name_variants(app_name: &str) -> Vec<String> {
+pub fn display_name_variants(app_name: &str) -> Vec<String> {
     let full = app_name.to_lowercase();
     let mut variants = vec![full.clone()];
 
@@ -200,7 +200,7 @@ fn matches_variant(target_name: &str, app_name: &str) -> bool {
 ///
 /// 三条门槛全过才返回 true：非共享容器、至少一个变体达到长度要求、
 /// 且**折叠后精确相等**（绝不部分匹配，也不反向包含）。
-pub(crate) fn is_residual_dir(dir_name: &str, app_name: &str) -> bool {
+pub fn is_residual_dir(dir_name: &str, app_name: &str) -> bool {
     let dir_key = normalize_residual_name(dir_name);
     if dir_key.is_empty() || PROTECTED_APPDATA_ROOTS.contains(&dir_key.as_str()) {
         return false;
@@ -212,7 +212,7 @@ pub(crate) fn is_residual_dir(dir_name: &str, app_name: &str) -> bool {
 /// 注册表顶级键是否可以作为该应用的残留被删除
 ///
 /// 与 `is_residual_dir` 同构，区别只是换成注册表保护名单。
-pub(crate) fn is_residual_reg_key(key_name: &str, app_name: &str) -> bool {
+pub fn is_residual_reg_key(key_name: &str, app_name: &str) -> bool {
     let key = normalize_residual_name(key_name);
     if key.is_empty() || PROTECTED_REG_ROOTS.contains(&key.as_str()) {
         return false;
@@ -241,7 +241,7 @@ pub(crate) fn is_residual_reg_key(key_name: &str, app_name: &str) -> bool {
 /// 1 层就是厂商共享容器本身（`SOFTWARE\JavaSoft`），整棵砍掉是灾难；
 /// 2 层（`JavaSoft\Java Runtime Environment`）一般还是产品线容器，也要挡。
 /// 真正能安全删的是版本节点那一层，正好卡在这个值以上。
-pub(crate) const MIN_REG_KEY_DEPTH: usize = 3;
+pub const MIN_REG_KEY_DEPTH: usize = 3;
 
 /// 从安装目录叶名里提取版本串
 ///
@@ -250,7 +250,7 @@ pub(crate) const MIN_REG_KEY_DEPTH: usize = 3;
 /// 两个过滤条件是精度的来源：
 /// - 版本段必须含 `.` 或 `_`，否则 `Python311` 这种纯单词会被当成版本；
 /// - 版本段之前至少两个字母，排除 `v2.1` 之类的噪声前缀。
-pub(crate) fn install_dir_version_token(location: &str) -> Option<String> {
+pub fn install_dir_version_token(location: &str) -> Option<String> {
     let leaf = location
         .trim()
         .trim_matches('"')
@@ -330,7 +330,7 @@ fn reg_path_segments(full_key: &str) -> Option<Vec<String>> {
 /// - 没有 hive / 找不到 SOFTWARE ⇒ 不是完整键路径
 /// - 末段是共享厂商容器（保护名单）
 /// - 末段是空的（形如 `HKCU\SOFTWARE\`）
-pub(crate) fn is_deletable_reg_key_basic(full_key: &str) -> bool {
+pub fn is_deletable_reg_key_basic(full_key: &str) -> bool {
     let segs = match reg_path_segments(full_key) {
         Some(s) => s,
         None => return false,
@@ -354,7 +354,7 @@ pub(crate) fn is_deletable_reg_key_basic(full_key: &str) -> bool {
 /// - SOFTWARE 之下层级不够（厂商容器、产品线容器）
 /// - 末段落在保护名单里
 /// - 末段不含数字：这类键大多带版本号，纯单词的叶子更可能是别的东西
-pub(crate) fn is_deletable_reg_path(full_key: &str) -> bool {
+pub fn is_deletable_reg_path(full_key: &str) -> bool {
     let segs = match reg_path_segments(full_key) {
         Some(s) => s,
         None => return false,
@@ -384,7 +384,7 @@ pub(crate) fn is_deletable_reg_path(full_key: &str) -> bool {
 /// - 空路径、盘符根、只有一段的路径
 /// - `AppData\<Roaming|Local|LocalLow>\<共享厂商容器>` 这一层
 ///   （`...\AppData\Roaming\Microsoft` 下装着同厂商所有产品）
-pub(crate) fn is_deletable_fs_path(path: &str) -> bool {
+pub fn is_deletable_fs_path(path: &str) -> bool {
     let p = path.trim().trim_matches('"');
     if p.is_empty() {
         return false;
@@ -427,7 +427,7 @@ pub(crate) fn is_deletable_fs_path(path: &str) -> bool {
 /// 都必须保持拒绝而不是凑合：
 /// - 0 个命中：没有可下的钻，宁可漏；
 /// - 多个命中：归属判断不了，比不删更危险，直接放弃。
-pub(crate) fn version_scoped_subkey(subkeys: &[String], version: &str) -> Option<String> {
+pub fn version_scoped_subkey(subkeys: &[String], version: &str) -> Option<String> {
     if version.is_empty() {
         return None;
     }
@@ -466,7 +466,7 @@ pub(crate) fn version_scoped_subkey(subkeys: &[String], version: &str) -> Option
 /// 于是这里取宽松语义：折叠后双向包含即可，也不设 4 字门槛。
 /// 过度保护的后果只是「这个应用本工具不帮你卸」，可以接受；代价由调用方的
 /// 50MB 体积阈值兜着 —— 名字再像，凑不出 50MB 也不会触发保护。
-pub(crate) fn resembles_app_dir(dir_name: &str, app_name: &str) -> bool {
+pub fn resembles_app_dir(dir_name: &str, app_name: &str) -> bool {
     let dir_key = normalize_residual_name(dir_name);
     let app_key = normalize_residual_name(app_name);
     if dir_key.is_empty() || app_key.is_empty() {

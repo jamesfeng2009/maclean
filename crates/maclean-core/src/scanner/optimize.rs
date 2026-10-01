@@ -357,12 +357,13 @@ mod tests {
 
     #[test]
     fn every_windows_task_has_an_i18n_label() {
-        // 同理：app.rs 里必须有 optimize_<任务名> 的中英文案
-        let app_src = include_str!("../app.rs");
+        // 同理：i18n 翻译表里必须有 optimize_<任务名> 的中英文案。
+        // 阶段 0 后翻译表随 i18n 模块一起在 maclean-core 内（原在 app.rs）。
+        let i18n_src = include_str!("../i18n.rs");
         for item in windows_optimize_tasks() {
             let key = format!("optimize_{}", item.path);
             assert!(
-                app_src.contains(&format!("\"{}\"", key)),
+                i18n_src.contains(&format!("\"{}\"", key)),
                 "缺少文案 key: {}",
                 key
             );

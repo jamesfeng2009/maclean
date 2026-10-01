@@ -287,19 +287,82 @@ pub fn system_prefers_dark() -> bool {
     }
 }
 
-/// 获取磁盘信息 (total, used)
+/// 获取磁盘信息 (macOS 实现) → (total, used)
 ///
-/// macOS: 调用 statvfs
-/// Windows: 调用 GetDiskFreeSpaceEx
+/// 用 `df -k /` 读根卷容量 / 可用量（阶段 0 从 bin 的 main.rs 原样下沉，
+/// 供 egui 壳与 Tauri 壳共用同一份实现）。
+#[cfg(target_os = "macos")]
+fn get_disk_info_macos() -> (u64, u64) {
+    let output = std::process::Command::new("df").arg("-k").arg("/").output();
+
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                if let (Ok(total_kb), Ok(free_kb)) =
+                    (parts[1].parse::<u64>(), parts[3].parse::<u64>())
+                {
+                    return (total_kb * 1024, free_kb * 1024);
+                }
+            }
+        }
+    }
+
+    (0, 0)
+}
+
+/// 获取磁盘信息 (Windows 实现) → (total, free)
+///
+/// 用 PowerShell `Get-PSDrive C` 读系统盘（阶段 0 从 main.rs 原样下沉）。
+#[cfg(target_os = "windows")]
+fn get_disk_info_windows() -> (u64, u64) {
+    // Windows: 用 fsutil 或 wmic 获取磁盘信息
+    // 这里用 PowerShell 调用 Get-PSDrive
+    let output = std::process::Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg("Get-PSDrive C | Select-Object Used,Free | ConvertTo-Json")
+        .output();
+
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 解析 JSON: {"Used":123,"Free":456}
+        let mut used: u64 = 0;
+        let mut free: u64 = 0;
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.starts_with("\"Used\"") {
+                if let Some(val) = line.split(':').nth(1) {
+                    let val = val.trim().trim_end_matches(',').trim();
+                    used = val.parse::<u64>().unwrap_or(0);
+                }
+            } else if line.starts_with("\"Free\"") {
+                if let Some(val) = line.split(':').nth(1) {
+                    let val = val.trim().trim_end_matches(',').trim();
+                    free = val.parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        return (used + free, free);
+    }
+
+    (0, 0)
+}
+
+/// 获取磁盘信息 (total, free)
+///
+/// macOS: `df -k /`；Windows: PowerShell `Get-PSDrive C`。
 pub fn disk_info() -> (u64, u64) {
     #[cfg(target_os = "macos")]
     {
-        crate::get_disk_info_macos()
+        get_disk_info_macos()
     }
 
     #[cfg(target_os = "windows")]
     {
-        crate::get_disk_info_windows()
+        get_disk_info_windows()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

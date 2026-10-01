@@ -12,27 +12,25 @@
 // 全仓零引用。提权删除现已统一走 touchid.rs 的
 // `osascript do shell script ... with administrator privileges`（macOS 14+ 官方推荐）。
 // AEWP 自 macOS 10.7 起被 Apple 标记为 deprecated，恢复请从 git 历史取回。
+// 阶段 0（2026-10）：核心逻辑（扫描 / 安全闸门 / 删除 / 备份 / 启动项 /
+// 优化 / 调度 / 平台抽象 / i18n）已抽到独立 crate `maclean-core`。
+// 这里把 core 的模块在 crate root 做同名再导入，bin 内历史路径
+// `crate::logger` / `crate::scanner` / `crate::safety` 等全部继续可用。
+// 注意 `ops` 不在此列：bin 有本地薄壳模块 `src/ops/mod.rs`（re-export
+// core::ops 全部 + 保留 App 耦合的扫描编排）。
+#[allow(unused_imports)]
+use maclean_core::{
+    app_protection, backup, config, i18n, logger, platform, rules, safety, scanner, scheduler,
+};
+
 mod app;
-mod app_protection;
-mod backup;
 mod cli;
-mod config;
-mod i18n;
 mod license;
-mod logger;
 mod ops;
-mod platform;
-mod rules;
-mod safety;
-mod scanner;
-mod scheduler;
-#[cfg(target_os = "macos")]
-mod sudo_keepalive;
-#[cfg(target_os = "macos")]
 mod touchid;
 mod updater;
 
-// GUI 壳（egui/eframe/菜单栏）：默认启用；`--no-default-features` 裁剪为纯 CLI。
+// GUI 壳（egui/eframe）：默认启用；`--no-default-features` 裁剪为纯 CLI。
 #[cfg(feature = "gui")]
 mod icons;
 #[cfg(feature = "gui")]
@@ -44,10 +42,17 @@ mod ui;
 #[cfg(feature = "gui")]
 mod widgets;
 
+// macOS 专属：sudo 保活（core 不依赖，但 bin 删除流程会经 core ops 回调到它）。
+#[cfg(target_os = "macos")]
+mod sudo_keepalive;
+
 #[cfg(feature = "gui")]
 use crate::ui::Gui;
 
 /// 写入扫描日志（用于追踪扫描进度，崩溃时定位问题）
+///
+/// bin 壳入口，实际记录由 `maclean_core::logger` 完成；core 内扫描器
+/// 使用的是 `maclean_core::log_scan_step`，两条路径写同一个日志文件。
 pub fn log_scan_step(msg: &str) {
     logger::info(msg);
 }
@@ -129,66 +134,10 @@ fn run_gui() {
     }
 }
 
-/// 获取磁盘信息 (macOS 实现)
-#[cfg(target_os = "macos")]
-fn get_disk_info_macos() -> (u64, u64) {
-    let output = std::process::Command::new("df").arg("-k").arg("/").output();
-
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                if let (Ok(total_kb), Ok(free_kb)) =
-                    (parts[1].parse::<u64>(), parts[3].parse::<u64>())
-                {
-                    return (total_kb * 1024, free_kb * 1024);
-                }
-            }
-        }
-    }
-
-    (0, 0)
-}
-
-/// 获取磁盘信息 (Windows 实现)
-#[cfg(target_os = "windows")]
-fn get_disk_info_windows() -> (u64, u64) {
-    // Windows: 用 fsutil 或 wmic 获取磁盘信息
-    // 这里用 PowerShell 调用 Get-PSDrive
-    let output = std::process::Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg("Get-PSDrive C | Select-Object Used,Free | ConvertTo-Json")
-        .output();
-
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // 解析 JSON: {"Used":123,"Free":456}
-        let mut used: u64 = 0;
-        let mut free: u64 = 0;
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.starts_with("\"Used\"") {
-                if let Some(val) = line.split(':').nth(1) {
-                    let val = val.trim().trim_end_matches(',').trim();
-                    used = val.parse::<u64>().unwrap_or(0);
-                }
-            } else if line.starts_with("\"Free\"") {
-                if let Some(val) = line.split(':').nth(1) {
-                    let val = val.trim().trim_end_matches(',').trim();
-                    free = val.parse::<u64>().unwrap_or(0);
-                }
-            }
-        }
-        return (used + free, free);
-    }
-
-    (0, 0)
-}
-
 /// 获取磁盘信息（跨平台入口）
+///
+/// 阶段 0 后平台实现已下沉到 `maclean_core::platform`（df / PowerShell），
+/// bin 内历史调用路径保留。
 fn get_disk_info() -> (u64, u64) {
     platform::disk_info()
 }

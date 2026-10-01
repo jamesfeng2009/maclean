@@ -122,7 +122,7 @@ pub trait Scanner {
 /// 或超时一律返回 `None`，不炸线程。
 ///
 /// 返回 `Some(result)` 表示正常完成；`None` 表示超时或 panic。
-pub(crate) fn scan_with_timeout<R, F>(timeout: Duration, f: F) -> Option<R>
+pub fn scan_with_timeout<R, F>(timeout: Duration, f: F) -> Option<R>
 where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,

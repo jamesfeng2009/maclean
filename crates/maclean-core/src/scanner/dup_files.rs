@@ -405,10 +405,7 @@ fn git_root_cached(
 /// 保留者选择：项目代码目录（.git 祖先）内文件强制保留，项目外的才是
 /// 可删副本；全项目外（缓存/下载/散落文件）时保留 mtime 最新的一份
 /// （用户最近触碰的更可能是"正在用"的原始文件，平局按路径较短者优先）。
-pub(crate) fn select_duplicate_keep(
-    group: Vec<PathBuf>,
-    home: &Path,
-) -> Option<(PathBuf, Vec<PathBuf>)> {
+pub fn select_duplicate_keep(group: Vec<PathBuf>, home: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
     if group.len() < 2 {
         return None;
     }

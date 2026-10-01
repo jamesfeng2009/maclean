@@ -4,7 +4,15 @@ version = "0.2.0"
 edition = "2021"
 description = "macOS 磁盘清理 GUI 工具 - 专注开发者缓存与深度清理"
 
+# UI 改造阶段 0（2026-10）：核心逻辑抽到独立 crate `maclean-core`
+# （ops / safety / scanner / scheduler 及其支撑模块），egui 壳与未来的
+# Tauri 壳都只依赖 core，删除安全闸门只有一份实现。
+[workspace]
+resolver = "2"
+members = ["crates/maclean-core"]
+
 [dependencies]
+maclean-core = { path = "crates/maclean-core", version = "0.2.0" }
 # GUI 层：默认启用。`--no-default-features` 构建出纯 CLI 二进制
 # （服务器 / CI / 容器场景，不链接任何窗口系统依赖）。
 eframe = { version = "0.29", optional = true }
