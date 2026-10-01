@@ -2096,6 +2096,7 @@ pub(crate) fn start_sudo_delete(
     password: String,
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+    delete_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     if failed_items.is_empty() {
         return;
@@ -2108,6 +2109,16 @@ pub(crate) fn start_sudo_delete(
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
+        // P0-3：sudo 阶段同样尊重「停止」——已置取消标志则不再提权删除，
+        // 失败项原地保留（后续可手动处理）。加上脚本内每项 20s 超时
+        // （perl alarm），即使某个路径 IO 卡死也不会无限挂起。
+        if delete_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = tx.send(DeleteMessage::Info(
+                App::t_lang(lang_en, "log_delete_cancelled").to_string(),
+            ));
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        }
         // 先播报被安全校验拦截的项，避免用户以为软件没干活
         for (path, category, reason) in &rejected {
             let _ = tx.send(DeleteMessage::Log(
@@ -2298,12 +2309,12 @@ exit 0
         script_content.push_str("  local path=\"$2\"\n");
         script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
         script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
-        script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /usr/bin/perl -e \'alarm shift; exec @ARGV\' 10 /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
         script_content.push_str("  /usr/sbin/chown -R '");
         script_content.push_str(&current_user.replace("'", "'\\''"));
         script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
         script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
-        script_content.push_str("  /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
+        script_content.push_str("  /usr/bin/perl -e \'alarm shift; exec @ARGV\' 20 /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
         script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
         script_content.push_str("}\n\n");
 
@@ -2551,6 +2562,7 @@ pub(crate) fn start_sudo_delete_touchid(
     failed_items: Vec<(String, String)>,
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+    delete_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> bool {
     if failed_items.is_empty() {
         return false;
@@ -2564,6 +2576,13 @@ pub(crate) fn start_sudo_delete_touchid(
     let started = true;
 
     std::thread::spawn(move || {
+        if delete_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = tx.send(DeleteMessage::Info(
+                App::t_lang(lang_en, "log_delete_cancelled").to_string(),
+            ));
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        }
         for (path, category, reason) in &rejected {
             let _ = tx.send(DeleteMessage::Log(
                 format!(
@@ -2815,12 +2834,12 @@ exit 0
         script_content.push_str("  local path=\"$2\"\n");
         script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
         script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
-        script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
+        script_content.push_str("  /usr/bin/perl -e \'alarm shift; exec @ARGV\' 10 /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
         script_content.push_str("  /usr/sbin/chown -R '");
         script_content.push_str(&current_user.replace("'", "'\\''"));
         script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
         script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
-        script_content.push_str("  /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
+        script_content.push_str("  /usr/bin/perl -e \'alarm shift; exec @ARGV\' 20 /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
         script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
         script_content.push_str("}\n\n");
 
@@ -3624,6 +3643,7 @@ pub(crate) fn start_sudo_delete(
     password: String,
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+    delete_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Windows 不做命令行密码，交给 UAC
     let _ = password;
@@ -3639,6 +3659,16 @@ pub(crate) fn start_sudo_delete(
     *delete_rx = Some(rx);
 
     std::thread::spawn(move || {
+        // P0-3：sudo 阶段同样尊重「停止」——已置取消标志则不再提权删除，
+        // 失败项原地保留（后续可手动处理）。加上脚本内每项 20s 超时
+        // （perl alarm），即使某个路径 IO 卡死也不会无限挂起。
+        if delete_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = tx.send(DeleteMessage::Info(
+                App::t_lang(lang_en, "log_delete_cancelled").to_string(),
+            ));
+            let _ = tx.send(DeleteMessage::Done);
+            return;
+        }
         // 先播报被安全校验拦截的项，避免用户以为软件没干活
         for (path, category, reason) in rejected {
             let line = App::tf_lang(lang_en, "log_sudo_rejected", &[&path, &reason]);
@@ -3772,6 +3802,7 @@ pub(crate) fn start_sudo_delete(
     password: String,
     lang_en: bool,
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
+    delete_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let _ = password;
     if failed_items.is_empty() {
@@ -3848,12 +3879,12 @@ pub(crate) fn cli_sudo_delete_touchid(items: Vec<(String, String)>) -> CliSudoRe
     script_content.push_str("  local path=\"$2\"\n");
     script_content.push_str("  local out=\"$workdir/${idx}.out\"\n");
     script_content.push_str("  echo \">MACLEAN_BEGIN:$path\" > \"$out\"\n");
-    script_content.push_str("  /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
+    script_content.push_str("  /usr/bin/perl -e \'alarm shift; exec @ARGV\' 10 /usr/bin/chflags -R nouchg \"$path\" 2>/dev/null\n");
     script_content.push_str("  /usr/sbin/chown -R '");
     script_content.push_str(&current_user.replace("'", "'\\''"));
     script_content.push_str(":staff' \"$path\" 2>/dev/null\n");
     script_content.push_str("  /bin/chmod -R u+w \"$path\" 2>/dev/null\n");
-    script_content.push_str("  /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
+    script_content.push_str("  /usr/bin/perl -e \'alarm shift; exec @ARGV\' 20 /bin/rm -rf \"$path\" >> \"$out\" 2>&1\n");
     script_content.push_str("  echo \">MACLEAN_EXIT:$path:$?\" >> \"$out\"\n");
     script_content.push_str("}\n\n");
 

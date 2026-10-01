@@ -776,7 +776,7 @@ pub(crate) fn route_and_start_elevated_delete(
         app.delete_done = 0;
         app.delete_total = items.len();
         let lang_en = app.lang_en;
-        start_sudo_delete_touchid(items, lang_en, delete_rx)
+        start_sudo_delete_touchid(items, lang_en, delete_rx, app.delete_cancel.clone())
     } else if touch_id_available && !clamshell_closed {
         // Touch ID 可用但未启用：提示用户是否启用
         app.confirm = ConfirmState::OfferTouchIdSetup;
@@ -3763,7 +3763,12 @@ pub(crate) fn show_sudo_password_window(
                                     let items = std::mem::take(&mut app.sudo_failed_items);
                                     app.delete_done = 0;
                                     app.delete_total = items.len();
-                                    start_sudo_delete_touchid(items, app.lang_en, delete_rx);
+                                    start_sudo_delete_touchid(
+                                        items,
+                                        app.lang_en,
+                                        delete_rx,
+                                        app.delete_cancel.clone(),
+                                    );
                                 }
                                 Ok(false) => {
                                     // 已启用，直接走 Touch ID 删除
@@ -3774,7 +3779,12 @@ pub(crate) fn show_sudo_password_window(
                                     let items = std::mem::take(&mut app.sudo_failed_items);
                                     app.delete_done = 0;
                                     app.delete_total = items.len();
-                                    start_sudo_delete_touchid(items, app.lang_en, delete_rx);
+                                    start_sudo_delete_touchid(
+                                        items,
+                                        app.lang_en,
+                                        delete_rx,
+                                        app.delete_cancel.clone(),
+                                    );
                                 }
                                 Err(e) => {
                                     app.sudo_error = Some(e);
@@ -3789,7 +3799,13 @@ pub(crate) fn show_sudo_password_window(
                                 let items = std::mem::take(&mut app.sudo_failed_items);
                                 app.delete_done = 0;
                                 app.delete_total = items.len();
-                                start_sudo_delete(items, password, app.lang_en, delete_rx);
+                                start_sudo_delete(
+                                    items,
+                                    password,
+                                    app.lang_en,
+                                    delete_rx,
+                                    app.delete_cancel.clone(),
+                                );
                             }
                         } else {
                             app.confirm = ConfirmState::Deleting;
@@ -3797,7 +3813,13 @@ pub(crate) fn show_sudo_password_window(
                             let items = std::mem::take(&mut app.sudo_failed_items);
                             app.delete_done = 0;
                             app.delete_total = items.len();
-                            start_sudo_delete(items, password, app.lang_en, delete_rx);
+                            start_sudo_delete(
+                                items,
+                                password,
+                                app.lang_en,
+                                delete_rx,
+                                app.delete_cancel.clone(),
+                            );
                         }
                     }
 
