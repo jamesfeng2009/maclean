@@ -1386,6 +1386,15 @@ impl App {
                 } else {
                     use_trash
                 };
+                // 模型类目（ComfyUI/MiniMax）：用户资产，只走废纸篓删除，
+                // 可恢复；同时默认不勾选（selected=false + Caution），
+                // Maclean 绝不自动决定删除模型。
+                let use_trash = if item.category == "ComfyUI模型" || item.category == "MiniMax模型"
+                {
+                    true
+                } else {
+                    use_trash
+                };
                 (
                     item.path.clone(),
                     item.category.clone(),
@@ -1841,6 +1850,7 @@ impl App {
                 "confirm_safe" => "Safe",
                 "confirm_caution" => "Caution",
                 "confirm_advanced" => "Advanced",
+                "confirm_official_cmd" => "将执行官方 CLI 清理（范围由 Docker/OrbStack 决定，非逐项可恢复）:",
                 "confirm_admin_required" => "Administrator privileges",
                 "confirm_admin_yes" => "Required (contains root/SIP items)",
                 "confirm_admin_no" => "Not required",
@@ -2303,6 +2313,7 @@ impl App {
                 "confirm_safe" => "Safe",
                 "confirm_caution" => "Caution",
                 "confirm_advanced" => "Advanced",
+                "confirm_official_cmd" => "将执行官方 CLI 清理（范围由 Docker/OrbStack 决定，非逐项可恢复）:",
                 "confirm_admin_required" => "管理员权限",
                 "confirm_admin_yes" => "需要（含 root/SIP 项目）",
                 "confirm_admin_no" => "不需要",

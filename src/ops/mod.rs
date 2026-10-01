@@ -1208,6 +1208,73 @@ pub(crate) fn run_docker_prune(lang_en: bool) -> Result<String, String> {
     Ok(App::tf_lang(lang_en, "log_docker_done", &[&reclaimed]))
 }
 
+/// 执行 OrbStack 清理（orbctl 官方命令通道）。
+///
+/// 与 Docker 同理：OrbStack 的虚拟机/镜像文件是数据库结构，直接删文件
+/// 会破坏镜像元数据（9-30 事故教训）。只走 orbctl 官方命令：
+/// `orbctl delete <machine>` 逐个删除**已停止**的虚拟机（running 的一律
+/// 跳过，避免中断服务）。orbctl **没有 prune 命令**（实测），reset 会
+/// 删除全部 Linux/Docker 数据（太危险，绝不自动执行）。任何失败如实归因。
+pub(crate) fn run_orbctl_clean(lang_en: bool) -> Result<String, String> {
+    // 1. 先检查 orbctl 可用（orbctl 无 --version 标志，用 status 探测）
+    let status_check = std::process::Command::new("orbctl")
+        .arg("status")
+        .output()
+        .map_err(|e| format!("{}: {}", App::t_lang(lang_en, "log_unknown"), e))?;
+    if !status_check.status.success() {
+        return Err("orbctl 不可用，请确认 OrbStack 已安装并启动".to_string());
+    }
+
+    let mut logs: Vec<String> = Vec::new();
+    let mut deleted_any = false;
+
+    // 2. 解析 orbctl list（空格分隔文本，非 JSON）：
+    //    name  status  distro  version  arch  size  ip
+    let list = std::process::Command::new("orbctl").arg("list").output();
+    if let Ok(out) = list {
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            for line in stdout.lines() {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 2 || cols[1] != "stopped" {
+                    continue; // 只删 stopped；running 跳过
+                }
+                let name = cols[0];
+                if name.is_empty() || name == "NAME" {
+                    continue;
+                }
+                let rm = std::process::Command::new("orbctl")
+                    .args(["delete", name])
+                    .output();
+                match rm {
+                    Ok(r) if r.status.success() => {
+                        deleted_any = true;
+                        logs.push(format!("已删除虚拟机: {}", name));
+                    }
+                    Ok(r) => {
+                        logs.push(format!(
+                            "删除虚拟机失败 {}: {}",
+                            name,
+                            String::from_utf8_lossy(&r.stderr).trim()
+                        ));
+                    }
+                    Err(e) => {
+                        logs.push(format!("删除虚拟机失败 {}: {}", name, e));
+                    }
+                }
+            }
+        }
+    }
+
+    if logs.is_empty() {
+        Ok("OrbStack 没有可清理的已停止虚拟机".to_string())
+    } else if deleted_any {
+        Ok(logs.join("；"))
+    } else {
+        Err(logs.join("；"))
+    }
+}
+
 /// 启动后台删除线程（两阶段自动删除）
 /// 阶段1: 普通删除（多线程并行 rm -rf）
 /// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
@@ -1618,6 +1685,24 @@ pub(crate) fn start_delete(
                         // Docker 清理 — 通过 docker system prune 命令清理
                         if category == "Docker清理" {
                             match run_docker_prune(lang_en) {
+                                Ok(msg) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✓ {}", msg), path.clone(), category.clone(), true));
+                                    safety::log_deletion(&path, &category, true, None);
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("✗ {}", App::tf_lang(lang_en, "log_docker_failed", &[&e])), path.clone(), category.clone(), false));
+                                    safety::log_deletion(&path, &category, false, Some(&e));
+                                }
+                            }
+                            continue;
+                        }
+
+                        // OrbStack 清理 — 通过 orbctl 命令清理（同 Docker 原则：
+                        // 绝不直接删容器数据文件，走官方 CLI）
+                        if category == "OrbStack清理" {
+                            match run_orbctl_clean(lang_en) {
                                 Ok(msg) => {
                                     let _ = tx.send(DeleteMessage::Log(
                                         format!("✓ {}", msg), path.clone(), category.clone(), true));

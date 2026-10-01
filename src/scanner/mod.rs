@@ -310,6 +310,7 @@ fn save_dir_size_cache(cache: &std::collections::HashMap<PathBuf, u64>) {
 ///
 /// 遇到无法访问的文件/目录时直接跳过，不报错。
 pub fn dir_size_impl(path: &Path) -> (u64, bool) {
+    use rayon::prelude::*;
     let blocked = load_blocked_dirs();
     let mut cache = load_dir_size_cache();
     let mut total: u64 = 0;
@@ -318,76 +319,118 @@ pub fn dir_size_impl(path: &Path) -> (u64, bool) {
     let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
     queue.push_back((path.to_path_buf(), 0));
 
-    while let Some((dir, depth)) = queue.pop_front() {
-        if depth > DIR_MAX_DEPTH {
-            continue;
-        }
-        // 黑名单目录：上次遍历卡死，跳过并回退最近一次成功统计的大小
-        // （无缓存则为 0）—— 结果跨扫描稳定，不再"这次有、下次没有"地跳。
-        if blocked.contains(&dir) {
-            skipped = true;
-            let cached = cache.get(&dir).copied().unwrap_or(0);
-            total += cached;
-            crate::logger::warn(&format!(
-                "[dir_size] 跳过黑名单目录（上次遍历卡死），使用上次统计大小 {}: {}",
-                cached,
-                dir.display()
-            ));
-            continue;
-        }
-        // 跳过 Photos Library 等问题 bundle（与原 WalkDir filter_entry 一致）
-        if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
-            let lower = name.to_lowercase();
-            if lower.ends_with(".photoslibrary")
-                || lower.ends_with(".musiclibrary")
-                || lower.ends_with(".tvlibrary")
-            {
-                continue;
-            }
-        }
+    while !queue.is_empty() {
+        let batch: Vec<(PathBuf, usize)> = queue.drain(..).collect();
+        // 并行 BFS：同一批目录同时枚举（rayon 池并发 = CPU 核数）。
+        // 每个目录仍是独立线程 + 超时 watchdog —— 一个坏目录只跳过自身，
+        // 不阻塞同批其它目录（历史：Telegram 目录 readdir 卡死拖死整轮
+        // 扫描、进度条冻结；串行逐目录等待是扫描慢的主因之一）。
+        // 黑名单/缓存读取只做不可变借用，写入回到主循环串行处理。
+        type DirScanResult = (
+            usize,           // depth
+            bool,            // skipped（深度/黑名单/photos/超时）
+            u64,             // files_size
+            Vec<PathBuf>,    // subdirs
+            Option<PathBuf>, // 超时目录（需入黑名单）
+            Option<PathBuf>, // 黑名单命中目录
+        );
+        let results: Vec<DirScanResult> = batch
+            .into_par_iter()
+            .map(|(dir, depth)| {
+                if depth > DIR_MAX_DEPTH {
+                    return (depth, true, 0, Vec::new(), None, None);
+                }
+                // 黑名单目录：上次遍历卡死，跳过并回退最近一次成功统计的大小
+                // （无缓存则为 0）—— 结果跨扫描稳定，不再"这次有、下次没有"地跳。
+                if blocked.contains(&dir) {
+                    let cached = cache.get(&dir).copied().unwrap_or(0);
+                    return (depth, true, cached, Vec::new(), None, Some(dir));
+                }
+                // 跳过 Photos Library 等问题 bundle（与原 WalkDir filter_entry 一致）
+                if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+                    let lower = name.to_lowercase();
+                    if lower.ends_with(".photoslibrary")
+                        || lower.ends_with(".musiclibrary")
+                        || lower.ends_with(".tvlibrary")
+                    {
+                        return (depth, true, 0, Vec::new(), None, None);
+                    }
+                }
 
-        // 每个目录在独立线程枚举，主循环超时等待（可中断的目录级 watchdog）
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let dir_task = dir.clone();
-        std::thread::spawn(move || {
-            let mut files_size: u64 = 0;
-            let mut subdirs: Vec<PathBuf> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&dir_task) {
-                for e in entries.flatten() {
-                    // file_type() 是 lstat 语义：目录符号链接 is_dir()=false，
-                    // 天然不跟随链接（与 follow_links(false) 一致）
-                    if let Ok(ft) = e.file_type() {
-                        if ft.is_dir() {
-                            subdirs.push(e.path());
-                        } else if ft.is_file() {
-                            if let Ok(meta) = e.metadata() {
-                                files_size += meta.len();
+                // 每个目录在独立线程枚举，超时等待（可中断的目录级 watchdog）
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let dir_task = dir.clone();
+                std::thread::spawn(move || {
+                    let mut files_size: u64 = 0;
+                    let mut subdirs: Vec<PathBuf> = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(&dir_task) {
+                        for e in entries.flatten() {
+                            // file_type() 是 lstat 语义：目录符号链接 is_dir()=false，
+                            // 天然不跟随链接（与 follow_links(false) 一致）
+                            if let Ok(ft) = e.file_type() {
+                                if ft.is_dir() {
+                                    subdirs.push(e.path());
+                                } else if ft.is_file() {
+                                    if let Ok(meta) = e.metadata() {
+                                        // 用 st_blocks×512（实际磁盘占用）而非 len()
+                                        // （逻辑大小）：APFS 稀疏文件（VM 镜像、
+                                        // Docker/OrbStack 磁盘）len() 会虚高——
+                                        // 实测 OrbStack 容器目录按 len 算 995G，
+                                        // 超过整机磁盘 926G，明显是稀疏文件误计。
+                                        #[cfg(unix)]
+                                        {
+                                            use std::os::unix::fs::MetadataExt;
+                                            files_size += meta.blocks() * 512;
+                                        }
+                                        #[cfg(not(unix))]
+                                        {
+                                            files_size += meta.len();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-            let _ = tx.send((files_size, subdirs));
-        });
+                    let _ = tx.send((files_size, subdirs));
+                });
 
-        match rx.recv_timeout(DIR_SCAN_TIMEOUT) {
-            Ok((files_size, subdirs)) => {
-                total += files_size;
-                for sub in subdirs {
-                    queue.push_back((sub, depth + 1));
+                match rx.recv_timeout(DIR_SCAN_TIMEOUT) {
+                    Ok((files_size, subdirs)) => (depth, false, files_size, subdirs, None, None),
+                    Err(_) => (depth, true, 0, Vec::new(), Some(dir), None),
                 }
-            }
-            Err(_) => {
+            })
+            .collect();
+
+        for (depth, skipped_this, files_size, subdirs, timed_out, blocked_hit) in results {
+            if let Some(bdir) = timed_out {
                 // 该目录遍历超时（IO 卡死）：跳过并记入黑名单，保留旧缓存
                 skipped = true;
-                if dir.as_path() == path {
+                if bdir.as_path() == path {
                     entry_timeout = true;
                 }
                 crate::logger::warn(&format!(
                     "[dir_size] 目录遍历超时（IO 卡死），跳过并加入黑名单: {}",
-                    dir.display()
+                    bdir.display()
                 ));
-                add_blocked_dir(&dir);
+                add_blocked_dir(&bdir);
+                continue;
+            }
+            if skipped_this {
+                if let Some(bdir) = blocked_hit {
+                    skipped = true;
+                    let cached = cache.get(&bdir).copied().unwrap_or(0);
+                    crate::logger::warn(&format!(
+                        "[dir_size] 跳过黑名单目录（上次遍历卡死），使用上次统计大小 {}: {}",
+                        cached,
+                        bdir.display()
+                    ));
+                }
+                // 深度超限 / Photos 跳过：无警告，正常继续
+                continue;
+            }
+            total += files_size;
+            for sub in subdirs {
+                queue.push_back((sub, depth + 1));
             }
         }
     }

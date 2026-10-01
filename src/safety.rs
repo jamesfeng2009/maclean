@@ -578,7 +578,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     }
 
     // Docker prune 特殊路径标记，通过外部命令清理而非文件删除
-    if path.starts_with("docker:") {
+    if path.starts_with("docker:") || path.starts_with("orbstack:") {
         return SafetyCheck::Safe;
     }
 
@@ -625,6 +625,21 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // ================================================================
     if is_critical_system_path(&canonical_str) {
         return SafetyCheck::Danger(format!("拒绝删除系统关键目录: {}", canonical_str));
+    }
+
+    // ================================================================
+    //  第 3.5 层: 容器数据目录（Docker Desktop / OrbStack）绝对红线
+    // ================================================================
+    // Docker Desktop 的镜像层/容器/卷是数据库结构，直接删文件 = 破坏镜像
+    // 元数据（9-30 事故：maclean 删了 Docker 容器内文件，Docker Desktop
+    // 直接损坏）。OrbStack 同理。任何类目、任何删除入口一律 Danger——
+    // 只允许通过官方 CLI（docker prune / orbctl delete）清理，绝不直接
+    // 删容器数据文件。与删除端同源，扫描期由 precheck_deletability 过滤。
+    if is_container_data_path(&canonical) {
+        return SafetyCheck::Danger(format!(
+            "容器数据目录（Docker/OrbStack 镜像与卷），禁止直接删除，请通过官方命令清理: {}",
+            canonical_str
+        ));
     }
 
     // 根目录本身绝对禁止
@@ -1112,6 +1127,31 @@ fn is_windows_critical_path(path: &str) -> bool {
 /// 参考 Mole 的 _mole_is_critical_deletion_path，包含 50+ 保护路径
 ///
 /// 跨平台：POSIX 黑名单（macOS/Linux）之外，先过一遍 Windows 黑名单。
+/// 容器数据目录判定（Docker Desktop / OrbStack）。
+///
+/// Docker Desktop 的镜像层/容器/卷在 `~/Library/Containers/com.docker.docker/
+/// Data` 下，OrbStack 在 `~/.orbstack` 与
+/// `~/Library/Group Containers/HUAQ24HBR6.dev.orbstack` 下 —— 都是数据库
+/// 结构，直接删文件 = 破坏镜像元数据（9-30 事故）。任何类目任何入口一律
+/// Danger，只允许通过官方 CLI（docker prune / orbctl delete）清理。
+/// 与删除端同源：precheck_deletability 扫描期即标不可删。
+pub(crate) fn is_container_data_path(path: &Path) -> bool {
+    let p = path.to_string_lossy();
+    for h in protected_homes() {
+        let h = h.to_string_lossy();
+        if p.starts_with(&format!("{}/Library/Containers/com.docker.docker/Data", h))
+            || p.starts_with(&format!("{}/.orbstack", h))
+            || p.starts_with(&format!(
+                "{}/Library/Group Containers/HUAQ24HBR6.dev.orbstack",
+                h
+            ))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn is_critical_system_path(path: &str) -> bool {
     // Windows 形态先交给 Windows 那张表（POSIX 路径命中不了它，故此处不限 cfg）
     if is_windows_critical_path(path) {
@@ -1812,6 +1852,57 @@ mod tests {
                 r
             );
         }
+    }
+
+    #[test]
+    fn container_data_paths_are_never_deletable() {
+        // 容器数据目录（Docker Desktop / OrbStack 镜像与卷）是数据库结构，
+        // 直接删文件破坏镜像元数据（9-30 事故）。任何类目任何入口都 Danger。
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        for p in [
+            format!(
+                "{}/Library/Containers/com.docker.docker/Data/vms/0/docker.raw",
+                home
+            ),
+            format!("{}/Library/Containers/com.docker.docker/Data/cache", home),
+            format!("{}/.orbstack/vm/0.img", home),
+            format!(
+                "{}/Library/Group Containers/HUAQ24HBR6.dev.orbstack/config.json",
+                home
+            ),
+        ] {
+            for cat in ["重复文件", "Docker虚拟机", "大文件", "安装包"] {
+                let r = check_path_safety_with_category(&p, cat);
+                assert!(
+                    matches!(r, SafetyCheck::Danger(_)),
+                    "容器数据目录应拒绝删除: {} ({}), got {:?}",
+                    p,
+                    cat,
+                    r
+                );
+            }
+        }
+        // Docker 构建缓存（~/.docker/buildx/cache）不是容器数据目录，
+        // 但即使被更早的用户关键目录层拦截也是既有保护行为，此处只确认
+        // 容器闸门本身不误伤普通缓存路径（~/.npm 等常规可删缓存）。
+        let npm_cache = format!("{}/.npm/_cacache/data", home);
+        let r = check_path_safety_with_category(&npm_cache, "npm缓存");
+        assert!(
+            !matches!(r, SafetyCheck::Danger(_)),
+            "普通缓存路径不应被容器闸门拦截: {:?}",
+            r
+        );
+        // Docker 命令伪路径不拦（走命令删除通道）
+        let cmd = "docker:system-prune";
+        assert!(matches!(
+            check_path_safety_with_category(cmd, "Docker清理"),
+            SafetyCheck::Safe
+        ));
+        let orb = "orbstack:system-clean";
+        assert!(matches!(
+            check_path_safety_with_category(orb, "OrbStack清理"),
+            SafetyCheck::Safe
+        ));
     }
 
     #[test]

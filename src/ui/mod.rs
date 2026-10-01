@@ -3331,10 +3331,26 @@ pub(crate) fn show_confirm_window(
     let mut advanced_cnt = 0usize;
     let mut advanced_sz = 0u64;
     let mut needs_admin = false;
+    // P1 强确认：命令类目（Docker/OrbStack 清理）走官方 CLI，范围由官方
+    // 命令决定（docker system prune -a / orbctl delete），不可逐文件恢复，
+    // 确认弹窗必须显式点名。
+    let mut cmd_cnt = 0usize;
+    let mut cmd_names: Vec<String> = Vec::new();
 
     for item in app.pending_items() {
         if !item.deletable {
             continue;
+        }
+        if item.category == "Docker清理" || item.category == "OrbStack清理" {
+            cmd_cnt += 1;
+            let n = if item.category == "Docker清理" {
+                "docker system prune"
+            } else {
+                "orbctl delete/prune"
+            };
+            if !cmd_names.iter().any(|c| c == n) {
+                cmd_names.push(n.to_string());
+            }
         }
         match item.recommend {
             crate::scanner::Recommend::Safe | crate::scanner::Recommend::CacheOnly => {
@@ -3457,6 +3473,14 @@ pub(crate) fn show_confirm_window(
                                 app.t("items"),
                                 format_size(advanced_sz)
                             ),
+                            theme::danger(),
+                        );
+                    }
+                    if cmd_cnt > 0 {
+                        render_confirm_row(
+                            ui,
+                            app.t("confirm_official_cmd"),
+                            &format!("{} · {}", cmd_cnt, cmd_names.join(" + ")),
                             theme::danger(),
                         );
                     }

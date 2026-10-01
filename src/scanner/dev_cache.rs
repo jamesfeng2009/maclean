@@ -1275,31 +1275,11 @@ fn dir_size_checked(path: &Path) -> Result<u64, String> {
     if !path.is_dir() {
         return Ok(0);
     }
-    let mut total: u64 = 0;
-    for entry in WalkDir::new(path)
-        .follow_links(false)
-        .max_depth(50)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.depth() > 0 && e.file_type().is_dir() {
-                std::fs::metadata(e.path()).is_ok()
-            } else {
-                true
-            }
-        })
-    {
-        match entry {
-            Ok(entry) => {
-                if entry.file_type().is_file() {
-                    if let Ok(metadata) = entry.metadata() {
-                        total += metadata.len();
-                    }
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-    Ok(total)
+    // 统一走 dir_size_impl：并行 BFS（rayon）+ 黑名单 + 目录级超时 watchdog
+    // + st_blocks×512 实际磁盘占用（稀疏文件——Docker/OrbStack VM 镜像——
+    // 按 len() 逻辑大小会虚高：实测 OrbStack 容器目录按 len 算 995G，
+    // 超过整机 926G；du 实际 22G）。与 UI 主扫描同源，数值一致。
+    Ok(crate::scanner::dir_size_impl(path).0)
 }
 
 /// 扫描构建产物目录（dist/.next/.nuxt/.turbo/.svelte-kit/.astro/.remix/.gradle）
@@ -1764,6 +1744,63 @@ fn is_docker_available() -> bool {
         .unwrap_or(false)
 }
 
+/// OrbStack CLI 是否可用（orbctl 存在且守护进程可达）
+///
+/// 注意：orbctl **没有 --version 标志**（实测 `orbctl --version` 直接报错），
+/// 用 `orbctl status` 检测可用性。
+fn is_orbstack_available() -> bool {
+    Command::new("orbctl")
+        .arg("status")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// 估算 OrbStack 可回收空间（字节）：只统计 **已停止** 的虚拟机。
+///
+/// `orbctl list` 输出示例（空格分隔，第 6 字段为磁盘占用）:
+/// ```text
+/// ubuntu  running  ubuntu  noble  arm64  2.4 GB  192.168.139.195
+/// debian  stopped  debian  bookworm  arm64  800 MB  -
+/// ```
+/// 只有 stopped 的 VM 才能被 `orbctl delete` 安全回收；running 的 VM
+/// 删除会中断服务，绝不统计。拿不到时返回 0（不展示该项，避免虚标）。
+fn get_orbstack_reclaimable_size() -> u64 {
+    let out = Command::new("orbctl").arg("list").output();
+    let Ok(out) = out else { return 0 };
+    if !out.status.success() {
+        return 0;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut total: u64 = 0;
+    for line in stdout.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // name status distro version arch size ip
+        if cols.len() >= 6 && cols[1] == "stopped" {
+            total += parse_orb_size(cols[5]);
+        }
+    }
+    total
+}
+
+/// 解析 OrbStack size 字段（"2.4 GB" / "800 MB"）为字节（1000 进制）
+fn parse_orb_size(s: &str) -> u64 {
+    let s = s.trim();
+    let (num, mult) = if s.ends_with("GB") {
+        (s.trim_end_matches("GB").trim(), 1_000_000_000u64)
+    } else if s.ends_with("MB") {
+        (s.trim_end_matches("MB").trim(), 1_000_000u64)
+    } else if s.ends_with("KB") {
+        (s.trim_end_matches("KB").trim(), 1_000u64)
+    } else if s.ends_with('B') {
+        (s.trim_end_matches('B').trim(), 1u64)
+    } else {
+        return 0;
+    };
+    let v: f64 = num.parse().unwrap_or(0.0);
+    (v * mult as f64) as u64
+}
+
 /// 解析 `docker system df` 输出，获取可回收空间（字节）
 ///
 /// 输出格式示例:
@@ -1961,6 +1998,8 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     }
 
     // 3. ~/Library/Containers/com.docker.docker/Data/vms (Docker Desktop 虚拟机数据)
+    //    直接删文件 = 破坏镜像元数据（9-30 事故教训），仅展示大小并标不可删，
+    //    清理只能走 Docker Desktop / docker system prune。
     let docker_vms = home.join("Library/Containers/com.docker.docker/Data/vms");
     if let Ok(size) = dir_size_checked(&docker_vms) {
         if size > 0 {
@@ -1969,16 +2008,17 @@ fn scan_docker_caches() -> Vec<ScanItem> {
                 size_bytes: size,
                 category: "Docker虚拟机".to_string(),
                 selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
+                deletable: false,
+                undeletable_reason: "容器数据目录，禁止直接删除；请用 Docker Desktop 或 docker system prune 清理镜像".to_string(),
                 batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
-                description: "Docker Desktop 虚拟机数据，删除前请先退出 Docker Desktop".to_string(),
+                description: "Docker Desktop 虚拟机数据（只展示，不直接删除；清理请走 Docker Desktop/CLI）".to_string(),
             });
         }
     }
 
     // 4. ~/Library/Containers/com.docker.docker/Data/cache (Docker Desktop 缓存)
+    //    同样位于容器数据目录下，只展示不直接删（safety 第 3.5 层会拦）。
     let docker_cache = home.join("Library/Containers/com.docker.docker/Data/cache");
     if let Ok(size) = dir_size_checked(&docker_cache) {
         if size > 0 {
@@ -1987,11 +2027,67 @@ fn scan_docker_caches() -> Vec<ScanItem> {
                 size_bytes: size,
                 category: "Docker缓存".to_string(),
                 selected: false,
+                deletable: false,
+                undeletable_reason: "容器数据目录，禁止直接删除；请用 Docker Desktop 清理"
+                    .to_string(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: "Docker Desktop 缓存数据（只展示，不直接删除）".to_string(),
+            });
+        }
+    }
+
+    // 5. OrbStack（~/.orbstack + Group Containers 容器数据）
+    //    直接删文件同样破坏容器镜像（与 Docker 同理），只展示大小；
+    //    清理走 orbctl delete / orbctl reset（命令删除通道）。
+    let orbstack_dirs: Vec<(PathBuf, &str)> = vec![
+        (home.join(".orbstack"), "OrbStack数据"),
+        (
+            home.join("Library/Group Containers/HUAQ24HBR6.dev.orbstack"),
+            "OrbStack容器",
+        ),
+    ];
+    for (odir, cat) in orbstack_dirs {
+        if let Ok(size) = dir_size_checked(&odir) {
+            if size > 0 {
+                let desc = if cat == "OrbStack容器" {
+                    "OrbStack 容器/虚拟机数据（只展示，不直接删除；清理请用 orbctl）".to_string()
+                } else {
+                    "OrbStack 数据（只展示，不直接删除；清理请用 orbctl）".to_string()
+                };
+                items.push(ScanItem {
+                    path: odir.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: cat.to_string(),
+                    selected: false,
+                    deletable: false,
+                    undeletable_reason: "容器数据目录，禁止直接删除；请用 orbctl delete/reset 清理"
+                        .to_string(),
+                    batch_paths: Vec::new(),
+                    recommend: Recommend::Advanced,
+                    description: desc,
+                });
+            }
+        }
+    }
+
+    // 6. OrbStack 镜像可回收量（orbctl 只读查询，命令删除通道可清）
+    if is_orbstack_available() {
+        let reclaimable = get_orbstack_reclaimable_size();
+        if reclaimable > 0 {
+            items.push(ScanItem {
+                path: "orbstack:system-clean".to_string(),
+                size_bytes: reclaimable,
+                category: "OrbStack清理".to_string(),
+                selected: false,
                 deletable: true,
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
-                recommend: Recommend::Caution,
-                description: "Docker Desktop 缓存数据".to_string(),
+                recommend: Recommend::Advanced,
+                description: format!(
+                    "执行 orbctl 清理未使用的 OrbStack 虚拟机/镜像，可回收约 {}；清理后需重新创建/拉取镜像",
+                    crate::scanner::format_size(reclaimable)
+                ),
             });
         }
     }
@@ -2168,10 +2264,66 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
         }
     }
 
+    // 7. ComfyUI 模型目录（checkpoints/loras/vae/controlnet 等，按子目录拆分）
+    //    模型是用户资产（可再生但需重新下载），Caution + 默认不勾选 +
+    //    删除强制废纸篓 —— Maclean 绝不自动决定删除模型。
+    let comfyui_models = home.join("Downloads/myproject/ComfyUI/models");
+    if comfyui_models.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&comfyui_models) {
+            let mut model_dirs: Vec<(PathBuf, u64)> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| {
+                    let p = e.path();
+                    let size = dir_size(&p);
+                    (p, size)
+                })
+                .filter(|(_, s)| *s > 100 * 1024 * 1024) // > 100MB 才展示
+                .collect();
+            model_dirs.sort_by_key(|a| std::cmp::Reverse(a.1));
+            for (p, size) in model_dirs {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                items.push(ScanItem {
+                    path: p.to_string_lossy().to_string(),
+                    size_bytes: size,
+                    category: "ComfyUI模型".to_string(),
+                    selected: false,
+                    deletable: true,
+                    undeletable_reason: String::new(),
+                    batch_paths: Vec::new(),
+                    recommend: Recommend::Caution,
+                    description: format!(
+                        "ComfyUI {} 模型，删除后需重新下载（移入废纸篓可恢复）",
+                        name
+                    ),
+                });
+            }
+        }
+    }
+
+    // 8. MiniMax-H3 模型目录（聚合展示）
+    let minimax_dir = home.join("Downloads/myproject/MiniMax-H3");
+    if let Ok(size) = dir_size_checked(&minimax_dir) {
+        if size > 100 * 1024 * 1024 {
+            items.push(ScanItem {
+                path: minimax_dir.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "MiniMax模型".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: "MiniMax-H3 模型，删除后需重新下载（移入废纸篓可恢复）".to_string(),
+            });
+        }
+    }
+
     items
 }
-
-/// 统计 Ollama 已安装的模型数量
 ///
 /// 通过解析 ~/.ollama/models/manifests 目录结构获取
 fn count_ollama_models(home: &Path) -> usize {
