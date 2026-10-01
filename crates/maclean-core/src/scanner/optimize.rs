@@ -47,7 +47,23 @@ impl Scanner for OptimizeScanner {
 /// 前 8 项为常规优化；后 6 项为系统维护，对标 MangoDisk system_maintenance：
 /// 低风险（icon-cache/finder-service/audio-service/legacy-overrides）直接可用，
 /// 高风险（user-permissions/startup-disk）需用户确认后执行。
-fn macos_optimize_tasks() -> Vec<ScanItem> {
+/// 当前平台的系统维护任务清单（Tauri/CLI 统一入口）。
+pub fn current_platform_tasks() -> Vec<ScanItem> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_optimize_tasks()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_optimize_tasks()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
+
+pub fn macos_optimize_tasks() -> Vec<ScanItem> {
     vec![
         make_task(
             "dns_cache_flush",
@@ -127,7 +143,7 @@ fn macos_optimize_tasks() -> Vec<ScanItem> {
 ///
 /// 参考 Win11Debloat (https://github.com/Raphire/Win11Debloat) 设计，
 /// 聚焦清理、隐私、性能三类安全优化，不涉及系统关键服务。
-fn windows_optimize_tasks() -> Vec<ScanItem> {
+pub fn windows_optimize_tasks() -> Vec<ScanItem> {
     vec![
         make_task(
             "win_dns_flush",

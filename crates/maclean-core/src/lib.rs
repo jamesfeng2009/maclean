@@ -13,6 +13,7 @@
 pub mod app_protection;
 pub mod backup;
 pub mod config;
+pub mod design_tokens;
 pub mod i18n;
 pub mod logger;
 pub mod ops;
