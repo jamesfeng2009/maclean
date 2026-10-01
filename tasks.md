@@ -14,17 +14,17 @@
 | **B. 迁移 Tauri** | Rust 核心抽 crate + Web 前端重写 | 大（6-10 周） | 中，UI 全重写 | 交互稿 ~100%（Web 全能力） |
 
 - [ ] 路线 A：egui 精修（**推荐起步**——9 轮事故沉淀的安全逻辑零风险复用，单二进制分发不变；效果不足再叠加路线 B 只换壳）
-- [ ] 路线 B：迁移 Tauri（核心逻辑先完成「阶段 0」的 crate 抽取，换壳成本才可控）
+- [x] 路线 B：迁移 Tauri（核心逻辑先完成「阶段 0」的 crate 抽取，换壳成本才可控）——**本轮已选，交付阶段 0 + Tauri 骨架**
 
 ---
 
 ## 阶段 0：前置（两条路线共享）
 
-- [ ] **P0** 创建备份基线：`git tag ui-baseline-252314c`，确认 worktree 干净
-- [ ] **P0** 核心逻辑抽独立 crate：`maclean-core`（ops / safety / scanner / scheduler），UI 层只依赖它
+- [x] **P0** 创建备份基线：`git tag ui-baseline-252314c`，确认 worktree 干净（annotated tag 指向 6edac80）
+- [x] **P0** 核心逻辑抽独立 crate：`maclean-core`（ops / safety / scanner / scheduler），UI 层只依赖它（workspace 化，commit 2bb20ea，380 tests 全绿）
   - 验收：`cargo test` 全绿；`maclean` bin 引用 `maclean-core` 后行为不变
 - [ ] **P0** 全量截图基线：当前 8 个 Tab 各截一张 `_shots/baseline/*.png`，改造后逐一对比
-- [ ] **P1** 交互稿设计 token 落地为共享常量（色板 / 圆角 / 间距 / 阴影），egui 与未来 Web 侧同源
+- [x] **P1** 交互稿设计 token 落地为共享常量（色板 / 圆角 / 间距 / 阴影），egui 与未来 Web 侧同源（`maclean-core::design_tokens`，含钉值测试；前端 tokens.css 同源）
 
 ---
 
@@ -76,16 +76,16 @@
 ## 路线 B：Tauri 迁移任务（如选）
 
 ### B-P0 工程
-- [ ] 新建 `tauri/` 目录：`tauri@2` + Rust 后端复用 `maclean-core`
-- [ ] IPC 契约设计：`list_categories / scan / clean_preview / clean_execute / list_startups / toggle_startup` 等，全部走白名单 command
-- [ ] 安全边界：**所有删除必须过 `maclean-core::safety` 再经 IPC 暴露**，前端拿不到裸文件句柄
-- [ ] 打包链：保留 dmg/pkg；引入 Tauri bundler（体积目标 ≤ 15MB）
+- [x] 新建 `tauri/` 目录：`tauri@2` + Rust 后端复用 `maclean-core`（`tauri/src-tauri`，path 依赖 maclean-core）
+- [x] IPC 契约设计：`disk_info / scan / clean_preview / clean_execute / startups_list / startup_set_enabled / optimize_list / optimize_run / settings_get / settings_set / palette`，全部走白名单 command（事件：scan-progress / clean-log）
+- [x] 安全边界：**所有删除必须过 `maclean-core::safety` 再经 IPC 暴露**，前端拿不到裸文件句柄（clean_execute 复用 core `ops::start_delete`，其三个删除出口内建 safety 闸门；启动项只移 plist 不删文件）
+- [ ] 打包链：保留 dmg/pkg；引入 Tauri bundler（体积目标 ≤ 15MB）——骨架阶段未做，`cargo build -p maclean-tauri` 与 `npm run tauri dev` 已验证可运行
 
 ### B-P1 前端
-- [ ] 用交互稿 `maclean-tauri-ui/maclean-Tauri-UI交互稿.html` 作为骨架直接工程化（React 或 Svelte）
-- [ ] 逐页落地：概览 / 磁盘分析 / 智能清理 / 重复文件 / 应用卸载 / 启动项 / 系统优化 / 设置
-- [ ] 深色模式：CSS 变量 + `prefers-color-scheme` 跟随
-- [ ] 动效：扫描进度、确认弹窗、toast 全部真实化（交互稿是模拟，这里接真数据）
+- [x] 用交互稿 `maclean-tauri-ui/maclean-Tauri-UI交互稿.html` 作为骨架直接工程化（React 18 + Vite 5 + TS strict，CSS/图标/SVG 1:1 移植）
+- [x] 逐页落地：概览 / 磁盘分析 / 智能清理 / 重复文件 / 应用卸载 / 启动项 / 系统优化 / 设置（概览/清理/启动项/优化/设置已运行时接真数据验证；分析/重复/卸载复用同一套 scan IPC）
+- [x] 深色模式：CSS 变量 + 首次启动 `prefers-color-scheme` 跟随，手动切换即时生效并持久化
+- [x] 动效：扫描进度、确认弹窗、toast 全部真实化（scan-progress 事件 / 危险确认 modal / 右上 toast，接真数据）
 
 ### B-P2 双轨并行
 - [ ] 迁移期保留 egui 版本可回退：`cargo build --features legacy-egui`
@@ -108,8 +108,8 @@
 
 | # | 任务 | 优先级 | 路线 | 状态 | 备注 |
 |---|------|--------|------|------|------|
-| 1 | 备份基线 + crate 抽取 | P0 | 共享 | ☐ | |
-| 2 | 截图基线 | P0 | 共享 | ☐ | |
+| 1 | 备份基线 + crate 抽取 | P0 | 共享 | ☑ | tag ui-baseline-252314c；commit 2bb20ea |
+| 2 | 截图基线 | P0 | 共享 | ☐ | 本轮骨架范围未做 |
 | 3 | 视觉 token 落地 | P0 | A | ☐ | theme.rs |
 | 4 | 布局骨架（rail/顶栏） | P1 | A | ☐ | ui/mod.rs |
 | 5 | 概览页 | P2 | A | ☐ | |
@@ -122,8 +122,8 @@
 | 12 | 设置页 | P2 | A | ☐ | |
 | 13 | 扫描遮罩 + 确认弹窗 | P3 | A | ☐ | |
 | 14 | Toast + 主题切换 + 动效 | P3 | A | ☐ | |
-| 15 | Tauri 工程 + IPC（如选 B） | P0 | B | ☐ | |
-| 16 | 前端页面工程化（如选 B） | P1 | B | ☐ | |
+| 15 | Tauri 工程 + IPC（如选 B） | P0 | B | ☑ | 11 个白名单 command + 2 事件；cargo clippy -D warnings 干净 |
+| 16 | 前端页面工程化（如选 B） | P1 | B | ☑ | React+Vite+TS strict，8 页，tsc+vite build 通过，5 页运行时真数据验证 |
 
 ---
 

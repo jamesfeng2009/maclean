@@ -1,0 +1,27 @@
+[package]
+name = "maclean-tauri"
+version = "0.3.0"
+description = "maclean Tauri 壳：Web UI + maclean-core 安全清理内核"
+authors = ["fengyu"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "maclean_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "maclean-tauri"
+path = "src/main.rs"
+
+[dependencies]
+maclean-core = { path = "../../crates/maclean-core", version = "0.2.0" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# 注：workspace 模式下 [profile.release] 必须声明在根 Cargo.toml，
+# 放在子包会被忽略并产生警告；骨架阶段先不开启 lto/panic=abort 等发布调优。

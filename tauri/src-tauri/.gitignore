@@ -1,0 +1,2 @@
+# Tauri build 生成产物（target 由 workspace 根统一忽略）
+/gen
