@@ -3385,7 +3385,7 @@ pub(crate) fn show_confirm_window(
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(widgets::modal_frame())
+        .frame(widgets::modal_danger_frame())
         .show(ctx, |ui| {
             ui.set_min_width(MODAL_W);
             ui.set_max_width(MODAL_W);
@@ -3400,6 +3400,11 @@ pub(crate) fn show_confirm_window(
                 &title,
                 app.t("confirm_subtitle"),
             );
+
+            ui.add_space(10.0);
+
+            // 危险警示条：不可逆操作一眼可辨（红色描边 + 红底警示条）
+            widgets::danger_banner(ui, app.t("confirm_irreversible"));
 
             ui.add_space(12.0);
 

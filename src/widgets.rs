@@ -394,6 +394,46 @@ pub fn modal_frame() -> egui::Frame {
         })
 }
 
+/// 危险操作确认弹窗外框：在普通弹窗基础上加红色描边，视觉上明显区别于
+/// 普通弹窗（删除确认这类不可逆操作必须一眼可辨）。
+pub fn modal_danger_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(theme::surface())
+        .rounding(theme::r(theme::R_LG))
+        .stroke(egui::Stroke::new(2.0, theme::danger()))
+        .inner_margin(egui::Margin::symmetric(theme::S5, theme::S4))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 12.0),
+            blur: 48.0,
+            spread: 0.0,
+            color: egui::Color32::from_rgba_premultiplied(200, 30, 40, 60),
+        })
+}
+
+/// 危险操作警示条：红底白字横条，用于确认弹窗标题下强调不可逆性。
+/// 文字在 480 宽弹窗内单行即可放下，不做换行处理。
+pub fn danger_banner(ui: &mut egui::Ui, text: &str) {
+    let width = ui.available_width();
+    let height = 34.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let bg_rect = rect.shrink(4.0);
+    ui.painter()
+        .rect_filled(bg_rect, theme::r(theme::R_MD), theme::danger_50());
+    // 左侧警示图标
+    let ir = egui::Rect::from_center_size(
+        egui::pos2(bg_rect.min.x + 20.0, bg_rect.center().y),
+        egui::vec2(18.0, 18.0),
+    );
+    icons::paint(ui.painter(), ir, Icon::Alert, theme::danger());
+    ui.painter().text(
+        egui::pos2(bg_rect.min.x + 36.0, bg_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(12.5),
+        theme::text(),
+    );
+}
+
 /// 弹窗标题区：36×36 图标块 + 标题 + 副标题
 pub fn modal_header(
     ui: &mut egui::Ui,
