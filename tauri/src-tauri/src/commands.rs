@@ -120,6 +120,69 @@ fn run_all_scanners(app: &AppHandle) -> Vec<ScanItem> {
     all
 }
 
+/// 全量体检：顺序跑完 缓存/应用数据 → 大文件 → 重复文件 → 已安装应用。
+///
+/// 与 [`run_all_scanners`] 的差别：每完成一个**模块**就通过 `scan-module`
+/// 事件把该模块结果推给前端，前端按模块即时入库。用户在概览点一次
+/// 「开始扫描」即可让所有页面复用这一份结果，且无需等全部跑完——
+/// 哪个模块先完成，对应页面立刻可看；扫描在后台进行，可自由切换页面。
+/// 全程只读，单个扫描器 panic 被隔离，不拖垮其余模块。
+#[cfg(target_os = "macos")]
+fn run_full_scan(app: &AppHandle) -> Vec<ScanItem> {
+    fn safe_run(key: &str) -> Vec<ScanItem> {
+        std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(key))).unwrap_or_default()
+    }
+    let emit_pct = |pct: u8, label: &str| {
+        let _ = app.emit(
+            "scan-progress",
+            serde_json::json!({ "stage": "full", "label": label, "pct": pct }),
+        );
+    };
+    let emit_module = |key: &str, items: &[ScanItem]| {
+        let _ = app.emit(
+            "scan-module",
+            serde_json::json!({ "scope": key, "items": items }),
+        );
+    };
+
+    let mut all: Vec<ScanItem> = Vec::new();
+
+    // 模块 all = 开发者缓存 + 应用缓存 + 应用数据与残留（概览 / 智能清理共用）
+    emit_pct(6, "开发者缓存");
+    let dev = safe_run("dev_cache");
+    emit_pct(34, "应用缓存");
+    let appc = safe_run("app_cache");
+    emit_pct(58, "应用数据与残留");
+    let appd = safe_run("app_data");
+    let cache_items: Vec<ScanItem> = dev.into_iter().chain(appc).chain(appd).collect();
+    emit_pct(66, "完成缓存扫描");
+    emit_module("all", &cache_items);
+    all.extend(cache_items);
+
+    // 模块 large = 磁盘分析（大文件 / 大目录）
+    emit_pct(72, "正在分析磁盘大文件");
+    let large = safe_run("large");
+    emit_pct(84, "完成大文件分析");
+    emit_module("large", &large);
+    all.extend(large);
+
+    // 模块 dup = 重复文件
+    emit_pct(88, "正在比对重复文件");
+    let dup = safe_run("dup");
+    emit_pct(96, "完成重复文件比对");
+    emit_module("dup", &dup);
+    all.extend(dup);
+
+    // 模块 apps = 已安装应用
+    emit_pct(98, "正在枚举已安装应用");
+    let apps = safe_run("apps");
+    emit_pct(100, "完成");
+    emit_module("apps", &apps);
+    all.extend(apps);
+
+    all
+}
+
 /// 扫描命令（后台线程，进度经 `scan-progress` 事件推送）。
 ///
 /// scope: dev_cache / app_cache / app_data / large / dup / apps / all
@@ -131,7 +194,23 @@ pub async fn scan(scope: String, app: AppHandle) -> Result<Vec<ScanItem>, String
             serde_json::json!({ "stage": &scope, "label": "准备扫描", "pct": 2 }),
         );
 
-        let items = if scope == "all" {
+        let items = if scope == "full" {
+            // 全量体检：逐模块经 scan-module 事件回传结果（后台渐进式）
+            #[cfg(target_os = "macos")]
+            {
+                run_full_scan(&app)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // 全量体检目前仅在 macOS 提供五模块；其它平台退化为开发者缓存
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    let mut r = scanner::dev_cache::DevCacheScanner::new().scan();
+                    post_check(&mut r.items);
+                    r.items
+                }))
+                .unwrap_or_default()
+            }
+        } else if scope == "all" {
             #[cfg(target_os = "macos")]
             {
                 run_all_scanners(&app)

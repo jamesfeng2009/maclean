@@ -7,6 +7,7 @@ import type {
   DiskInfo,
   PreviewItem,
   ScanItem,
+  ScanModuleEvent,
   ScanProgress,
   ScanScope,
   StartupItem,
@@ -19,21 +20,29 @@ import type {
 export const ipc = {
   diskInfo: () => invoke<DiskInfo>("disk_info"),
 
-  /** 运行扫描（只读），进度经 onProgress 回调推送 */
+  /** 运行扫描（只读），进度经 onProgress 回调推送；全量体检时每个模块结果经 onModule 推送 */
   scan: async (
     scope: ScanScope,
-    onProgress?: (p: ScanProgress) => void
+    onProgress?: (p: ScanProgress) => void,
+    onModule?: (m: ScanModuleEvent) => void
   ): Promise<ScanItem[]> => {
-    let unlisten: UnlistenFn | undefined;
+    let unlistenP: UnlistenFn | undefined;
+    let unlistenM: UnlistenFn | undefined;
     if (onProgress) {
-      unlisten = await listen<ScanProgress>("scan-progress", (e) =>
+      unlistenP = await listen<ScanProgress>("scan-progress", (e) =>
         onProgress(e.payload)
+      );
+    }
+    if (onModule) {
+      unlistenM = await listen<ScanModuleEvent>("scan-module", (e) =>
+        onModule(e.payload)
       );
     }
     try {
       return await invoke<ScanItem[]>("scan", { scope });
     } finally {
-      unlisten?.();
+      unlistenP?.();
+      unlistenM?.();
     }
   },
 

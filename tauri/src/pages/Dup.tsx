@@ -1,28 +1,46 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
-import type { CleanItemReq, ScanItem } from "../lib/types";
+import type { CleanItemReq } from "../lib/types";
 import { useApp } from "../lib/store";
 import { Icon } from "../components/Icon";
 import { Empty, PageHeader } from "../components/ui";
 
 export function Dup() {
-  const { startScan, scanning, confirm, toast, langEn } = useApp();
-  const [items, setItems] = useState<ScanItem[]>([]);
+  const {
+    startScan,
+    scanning,
+    fullRunning,
+    confirm,
+    toast,
+    langEn,
+    results,
+    ready,
+    scanTick,
+    lastScope,
+    startFullScan,
+    removePaths,
+  } = useApp();
+  // 复用全局缓存的 dup 模块
+  const items = results.dup;
+  const hasScanned = ready.dup;
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  const [hasScanned, setHasScanned] = useState(false);
 
-  // 不做挂载自动扫描，仅按钮触发
+  // 页头「重新扫描」只刷新重复文件模块
   const refresh = useCallback(() => {
-    startScan("dup", (its) => {
-      setItems(its);
-      setHasScanned(true);
-      // dup 组默认勾选（Safe；扫描器保证保留最新/项目内副本）
-      setChecked(new Set(its.filter((i) => i.deletable).map((i) => i.path)));
-    });
+    void startScan("dup");
   }, [startScan]);
+
+  // dup 模块结果写入后默认勾选全部可清理组（扫描器保证保留最新/项目内副本）
+  useEffect(() => {
+    if (lastScope === "dup" && results.dup.length > 0) {
+      setChecked(new Set(results.dup.filter((i) => i.deletable).map((i) => i.path)));
+    }
+    // 仅以扫描完成计数为触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanTick]);
 
   const toggle = (set: Set<string>, k: string) => {
     const n = new Set(set);
@@ -77,9 +95,9 @@ export function Dup() {
             "success",
             `已删除 ${rep.deleted} 组副本${rep.intercepted ? `，拦截 ${rep.intercepted} 个` : ""}`
           );
-          // 本地移除已删组，不再自动重扫；需要最新结果请手动重新扫描
+          // 从全局缓存移除已删组，不自动重扫；需要最新列表请手动重新扫描
           const removed = new Set(finalReqs.map((r) => r.path));
-          setItems((prev) => prev.filter((i) => !removed.has(i.path)));
+          removePaths("dup", removed);
           setChecked(new Set());
         } catch (e) {
           toast("warn", "去重失败：" + String(e));
@@ -96,7 +114,11 @@ export function Dup() {
         title="重复文件"
         sub="相同内容的文件只保留 1 份（最新 / 项目内优先），其余移入废纸篓"
         action={
-          <button className="btn-secondary" onClick={refresh} style={{ height: 34 }}>
+          <button
+            className="btn-secondary"
+            onClick={hasScanned ? refresh : startFullScan}
+            style={{ height: 34 }}
+          >
             <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
           </button>
         }
@@ -106,15 +128,17 @@ export function Dup() {
         <Empty
           icon="dup"
           text={
-            scanning
-              ? "正在查找重复文件…"
-              : hasScanned
-                ? "没有发现重复文件"
-                : "尚未扫描，点击下方按钮查找重复文件（只读扫描）"
+            hasScanned
+              ? "没有发现重复文件"
+              : scanning
+                ? fullRunning
+                  ? "正在全盘体检，重复文件模块完成后自动呈现…"
+                  : "正在查找重复文件…"
+                : "尚未扫描，点击下方按钮开始一次全盘体检（只读扫描）"
           }
           action={
             !scanning && !hasScanned ? (
-              <button className="btn-primary" onClick={refresh}>
+              <button className="btn-primary" onClick={startFullScan}>
                 <Icon name="zap" size={15} /> 开始扫描
               </button>
             ) : undefined
@@ -192,7 +216,7 @@ export function Dup() {
             已选 <b>{selected.length}</b> 组 · 可回收 <b>{fmt(selectedSize)}</b>
           </span>
           <div className="grow" />
-          <button className="btn-primary danger" onClick={runDedup} disabled={busy}>
+          <button className="btn-primary danger" onClick={runDedup} disabled={busy || scanning}>
             <Icon name="trash" size={16} /> {busy ? "正在删除…" : "删除重复副本"}
           </button>
         </div>

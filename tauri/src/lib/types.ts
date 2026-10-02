@@ -84,10 +84,23 @@ export type ScanScope =
   | "large"
   | "dup"
   | "apps"
-  | "all";
+  | "all"
+  | "full";
+
+/**
+ * 可被页面复用、按模块缓存的扫描结果键。
+ * 全量体检（scope=full）会依次产出 all / large / dup / apps 四个模块。
+ */
+export type ResultScope = "all" | "large" | "dup" | "apps";
 
 export interface ScanProgress {
   stage: string;
   label: string;
   pct: number;
+}
+
+/** 全量体检中单个模块扫描完成的事件载荷（事件名 scan-module） */
+export interface ScanModuleEvent {
+  scope: ResultScope;
+  items: ScanItem[];
 }

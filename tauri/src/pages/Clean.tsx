@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq, ScanItem } from "../lib/types";
@@ -80,22 +80,46 @@ function groupIcon(name: string): string {
 }
 
 export function Clean() {
-  const { startScan, scanning, confirm, toast, langEn } = useApp();
-  const [items, setItems] = useState<ScanItem[]>([]);
+  const {
+    startScan,
+    scanning,
+    fullRunning,
+    confirm,
+    toast,
+    langEn,
+    results,
+    ready,
+    scanTick,
+    lastScope,
+    startFullScan,
+    removePaths,
+  } = useApp();
+  // 数据来自全局缓存的 all 模块：全量体检或单模块重新扫描写入后，本页直接复用
+  const items = results.all;
+  const hasScanned = ready.all;
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  const [hasScanned, setHasScanned] = useState(false);
 
-  // 不做任何挂载自动扫描：只有用户点击「开始/重新扫描」才扫描
+  // 页头「重新扫描」只刷新智能清理所属的 all 模块；首次空态按钮走全量体检
   const refresh = useCallback(() => {
-    startScan("all", (its) => {
-      setItems(its);
-      setHasScanned(true);
-      // 默认勾选：仅“整组都安全/缓存”的分类；含注意/高级的组默认不勾，避免默认带入风险项
-      setChecked(new Set(groupItems(its).filter(isPureSafe).map((g) => g.name)));
-    });
+    void startScan("all");
   }, [startScan]);
+
+  // 每次 all 模块结果写入（全量体检到达该模块 / 手动重新扫描）后，默认仅勾选纯安全组。
+  // 仅以扫描完成计数 scanTick 为触发：删除/卸载更新缓存不应重置用户勾选。
+  useEffect(() => {
+    if (lastScope === "all" && results.all.length > 0) {
+      setChecked(
+        new Set(
+          groupItems(results.all)
+            .filter(isPureSafe)
+            .map((g) => g.name)
+        )
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanTick]);
 
   const groups = useMemo(() => groupItems(items), [items]);
 
@@ -196,9 +220,9 @@ export function Clean() {
                 rep.need_password ? `，${rep.need_password} 项需要管理员权限（请用桌面版）` : ""
               }`
             );
-            // 本地移除已清理项，不再自动触发扫描；需要最新结果请用户手动重新扫描
+            // 从全局缓存移除已清理项，不自动重扫；需要最新结果请用户手动重新扫描
             const removed = new Set(finalReqs.map((r) => r.path));
-            setItems((prev) => prev.filter((i) => !removed.has(i.path)));
+            removePaths("all", removed);
             setChecked(new Set());
           }
         } catch (e) {
@@ -216,7 +240,11 @@ export function Clean() {
         title="智能清理"
         sub="选择要清理的分类；所有删除都会过安全闸门并优先移入废纸篓"
         action={
-          <button className="btn-secondary" onClick={refresh} style={{ height: 34 }}>
+          <button
+            className="btn-secondary"
+            onClick={hasScanned ? refresh : startFullScan}
+            style={{ height: 34 }}
+          >
             <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
           </button>
         }
@@ -226,15 +254,17 @@ export function Clean() {
         <Empty
           icon="clean"
           text={
-            scanning
-              ? "正在扫描可清理项…"
-              : hasScanned
-                ? "暂未发现可清理项"
-                : "尚未扫描，点击下方按钮开始（只读扫描，不会删除文件）"
+            hasScanned
+              ? "暂未发现可清理项"
+              : scanning
+                ? fullRunning
+                  ? "正在全盘体检，缓存与应用数据模块完成后自动呈现…"
+                  : "正在重新扫描可清理项…"
+                : "尚未扫描，点击下方按钮开始一次全盘体检（只读扫描，不会删除文件）"
           }
           action={
             !scanning && !hasScanned ? (
-              <button className="btn-primary" onClick={refresh}>
+              <button className="btn-primary" onClick={startFullScan}>
                 <Icon name="zap" size={15} /> 开始扫描
               </button>
             ) : undefined
@@ -396,7 +426,7 @@ export function Clean() {
             </span>
           )}
           <div className="grow" />
-          <button className="btn-primary danger" onClick={runClean} disabled={busy}>
+          <button className="btn-primary danger" onClick={runClean} disabled={busy || scanning}>
             <Icon name="trash" size={16} />
             {busy ? "正在清理…" : `安全清理 ${fmt(selectedSize)}`}
           </button>

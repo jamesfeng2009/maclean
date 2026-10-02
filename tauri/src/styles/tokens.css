@@ -51,7 +51,8 @@ body{
   width:var(--rail-w); flex:0 0 var(--rail-w);
   background:var(--rail-bg); border-right:1px solid var(--line);
   display:flex;flex-direction:column;align-items:center;
-  padding:14px 0; gap:4px;
+  /* 顶部 52px 避让 macOS Overlay 标题栏的红绿灯（关闭/最小化/全屏），避免与 Logo 重叠 */
+  padding:52px 0 14px; gap:4px;
   transition:background .35s var(--ease),border-color .35s var(--ease);
 }
 .rail .logo{
@@ -202,20 +203,31 @@ body{
 .recent .ic svg{width:15px;height:15px}
 
 /* ===== 扫描进度 ===== */
-.scanoverlay{
-  position:fixed;inset:0;background:rgba(15,18,22,.45);backdrop-filter:blur(4px);
-  display:none;align-items:center;justify-content:center;z-index:90;
-}
-.scanoverlay.show{display:flex;animation:fadeIn .2s var(--ease)}
-.scanbox{
-  width:420px;background:var(--panel);border-radius:20px;box-shadow:var(--shadow-lg);
-  padding:26px;border:1px solid var(--line);
-  animation:popIn .3s var(--ease);
-}
-.scanbox .pbar{height:10px;border-radius:99px;background:var(--line);overflow:hidden;margin:16px 0 12px}
-.scanbox .pbar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--brand),#7C3AED);width:0%;transition:width .3s var(--ease)}
-.scanbox .pnum{font-size:22px;font-weight:800;letter-spacing:-.02em}
-.scanbox .pcurrent{font-size:13px;color:var(--text-3);font-family:ui-monospace,"SF Mono",Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 后台扫描进度（非阻断：顶部细条 + 右下浮动卡，不拦截点击，扫描中可切页） */
+.scanprog{position:fixed;top:0;left:var(--rail-w);right:0;height:3px;background:transparent;z-index:80;pointer-events:none;opacity:0;transition:opacity .2s var(--ease)}
+.scanprog.show{opacity:1}
+.scanprog i{display:block;height:100%;background:linear-gradient(90deg,var(--brand),#7C3AED);width:0%;transition:width .3s var(--ease)}
+.scancard{position:fixed;right:18px;bottom:18px;width:272px;z-index:80;pointer-events:none;
+  background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);padding:14px 15px;display:flex;flex-direction:column;gap:11px;animation:popIn .25s var(--ease)}
+.sc-head{display:flex;align-items:center;gap:10px}
+.sc-spin{width:32px;height:32px;border-radius:9px;background:var(--brand-50);color:var(--brand);display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sc-title{font-size:13.5px;font-weight:700}
+.sc-sub{font-size:11px;color:var(--text-3);margin-top:1px}
+.sc-pct{font-size:17px;font-weight:800;letter-spacing:-.02em;color:var(--brand)}
+.sc-mods{display:flex;flex-direction:column;gap:6px}
+.sc-mod{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-3)}
+.sc-ic{width:16px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sc-mod.done{color:var(--text-2)}
+.sc-mod.done .sc-ic{color:var(--safe)}
+.sc-mod.run{color:var(--text)}
+.sc-mod.run .sc-ic{color:var(--brand)}
+.sc-state{font-size:11px;color:var(--text-3)}
+.sc-mod.run .sc-state{color:var(--brand)}
+.sc-dot{width:8px;height:8px;border-radius:50%;background:var(--brand);animation:scpulse 1s ease-in-out infinite}
+.sc-dim{width:7px;height:7px;border-radius:50%;background:var(--line-2)}
+.sc-current{font-size:12px;color:var(--text-3);font-family:ui-monospace,"SF Mono",Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@keyframes scpulse{0%,100%{opacity:.35}50%{opacity:1}}
 
 /* ===== 磁盘分析 ===== */
 .analysis-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px}

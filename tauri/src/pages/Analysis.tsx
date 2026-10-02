@@ -1,6 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
 import { fmt, shortPath } from "../lib/format";
-import type { ScanItem } from "../lib/types";
 import { useApp } from "../lib/store";
 import { Icon } from "../components/Icon";
 import { Badge, Empty, PageHeader } from "../components/ui";
@@ -15,17 +14,15 @@ interface Seg {
 }
 
 export function Analysis() {
-  const { startScan, scanning } = useApp();
-  const [items, setItems] = useState<ScanItem[]>([]);
+  const { startScan, scanning, fullRunning, results, ready, startFullScan } = useApp();
+  // 复用全局缓存的 large 模块
+  const items = results.large;
+  const hasScanned = ready.large;
   const [open, setOpen] = useState<Set<string>>(new Set());
-  const [hasScanned, setHasScanned] = useState(false);
 
-  // 不做挂载自动扫描，仅按钮触发
+  // 页头「重新扫描」只刷新磁盘大文件模块
   const refresh = useCallback(() => {
-    void startScan("large", (its) => {
-      setItems(its);
-      setHasScanned(true);
-    });
+    void startScan("large");
   }, [startScan]);
 
   const total = items.reduce((s, i) => s + i.size_bytes, 0);
@@ -70,7 +67,11 @@ export function Analysis() {
         title="磁盘分析"
         sub="大文件与大目录空间占用（按顶层分类聚合）"
         action={
-          <button className="btn-secondary" onClick={refresh} style={{ height: 34 }}>
+          <button
+            className="btn-secondary"
+            onClick={hasScanned ? refresh : startFullScan}
+            style={{ height: 34 }}
+          >
             <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
           </button>
         }
@@ -80,15 +81,17 @@ export function Analysis() {
         <Empty
           icon="analysis"
           text={
-            scanning
-              ? "正在分析磁盘占用…"
-              : hasScanned
-                ? "暂未发现大文件"
-                : "尚未扫描，点击下方按钮分析磁盘占用（只读扫描）"
+            hasScanned
+              ? "暂未发现大文件"
+              : scanning
+                ? fullRunning
+                  ? "正在全盘体检，磁盘大文件模块完成后自动呈现…"
+                  : "正在分析磁盘占用…"
+                : "尚未扫描，点击下方按钮开始一次全盘体检（只读扫描）"
           }
           action={
             !scanning && !hasScanned ? (
-              <button className="btn-primary" onClick={refresh}>
+              <button className="btn-primary" onClick={startFullScan}>
                 <Icon name="zap" size={15} /> 开始扫描
               </button>
             ) : undefined
