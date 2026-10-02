@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq, ScanItem } from "../lib/types";
@@ -12,15 +12,17 @@ export function Dup() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [hasScanned, setHasScanned] = useState(false);
 
+  // 不做挂载自动扫描，仅按钮触发
   const refresh = useCallback(() => {
     startScan("dup", (its) => {
       setItems(its);
+      setHasScanned(true);
       // dup 组默认勾选（Safe；扫描器保证保留最新/项目内副本）
       setChecked(new Set(its.filter((i) => i.deletable).map((i) => i.path)));
     });
   }, [startScan]);
-  useEffect(refresh, [refresh]);
 
   const toggle = (set: Set<string>, k: string) => {
     const n = new Set(set);
@@ -75,7 +77,10 @@ export function Dup() {
             "success",
             `已删除 ${rep.deleted} 组副本${rep.intercepted ? `，拦截 ${rep.intercepted} 个` : ""}`
           );
-          refresh();
+          // 本地移除已删组，不再自动重扫；需要最新结果请手动重新扫描
+          const removed = new Set(finalReqs.map((r) => r.path));
+          setItems((prev) => prev.filter((i) => !removed.has(i.path)));
+          setChecked(new Set());
         } catch (e) {
           toast("warn", "去重失败：" + String(e));
         } finally {
@@ -92,13 +97,29 @@ export function Dup() {
         sub="相同内容的文件只保留 1 份（最新 / 项目内优先），其余移入废纸篓"
         action={
           <button className="btn-secondary" onClick={refresh} style={{ height: 34 }}>
-            <Icon name="refresh" size={14} /> 重新扫描
+            <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
           </button>
         }
       />
 
       {items.length === 0 ? (
-        <Empty icon="dup" text={scanning ? "正在查找重复文件…" : "没有发现重复文件"} />
+        <Empty
+          icon="dup"
+          text={
+            scanning
+              ? "正在查找重复文件…"
+              : hasScanned
+                ? "没有发现重复文件"
+                : "尚未扫描，点击下方按钮查找重复文件（只读扫描）"
+          }
+          action={
+            !scanning && !hasScanned ? (
+              <button className="btn-primary" onClick={refresh}>
+                <Icon name="zap" size={15} /> 开始扫描
+              </button>
+            ) : undefined
+          }
+        />
       ) : (
         items.map((it) => {
           const k = it.path;

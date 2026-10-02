@@ -35,16 +35,22 @@ export function Overview() {
   const { startScan, scanning, setPage, toast } = useApp();
   const [disk, setDisk] = useState<DiskInfo | null>(null);
   const [items, setItems] = useState<ScanItem[]>([]);
+  const [hasScanned, setHasScanned] = useState(false);
 
-  const refresh = useCallback(() => {
+  // 启动仅读取磁盘容量（只读系统信息），绝不自动扫描；扫描必须由用户点击触发
+  useEffect(() => {
     ipc
       .diskInfo()
       .then(setDisk)
       .catch((e) => toast("warn", "读取磁盘信息失败：" + e));
-    startScan("all", setItems);
-  }, [startScan, toast]);
+  }, [toast]);
 
-  useEffect(refresh, [refresh]);
+  const rescan = useCallback(() => {
+    startScan("all", (its) => {
+      setItems(its);
+      setHasScanned(true);
+    });
+  }, [startScan]);
 
   const cats = useMemo(() => aggregate(items), [items]);
   const top = cats.slice(0, 4);
@@ -113,7 +119,7 @@ export function Overview() {
                 </span>
                 <span>
                   <i style={{ background: "var(--safe)" }} />
-                  可清理 {fmt(reclaim)}
+                  可清理 {hasScanned ? fmt(reclaim) : "—"}
                 </span>
               </div>
             </div>
@@ -122,13 +128,24 @@ export function Overview() {
           <div>
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
               <div className="h3">可回收空间（按类别）</div>
-              <button className="btn-secondary" onClick={refresh} style={{ height: 30, fontSize: 12.5 }}>
-                <Icon name="refresh" size={13} /> 重新扫描
+              <button className="btn-secondary" onClick={rescan} style={{ height: 30, fontSize: 12.5 }}>
+                <Icon name="refresh" size={13} /> {hasScanned ? "重新扫描" : "开始扫描"}
               </button>
             </div>
             {top.length === 0 ? (
               <div className="card empty" style={{ padding: 26 }}>
-                {scanning ? "正在扫描…" : "暂未发现可清理项"}
+                {scanning ? (
+                  "正在扫描…"
+                ) : hasScanned ? (
+                  "暂未发现可清理项"
+                ) : (
+                  <div style={{ display: "grid", gap: 12, justifyItems: "center" }}>
+                    <span>尚未扫描，点击开始（只读扫描，不会删除任何文件）</span>
+                    <button className="btn-primary" onClick={rescan}>
+                      <Icon name="zap" size={14} /> 开始扫描
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="reclaim-grid">
@@ -195,28 +212,28 @@ export function Overview() {
                 <Icon name="file" size={15} />
               </span>
               <span style={{ flex: 1 }}>发现项目</span>
-              <b>{items.length}</b>
+              <b>{hasScanned ? items.length : "—"}</b>
             </div>
             <div className="row-item">
               <span className="ic" style={{ background: "var(--safe-50)", color: "var(--safe)" }}>
                 <Icon name="check" size={15} />
               </span>
               <span style={{ flex: 1 }}>安全可清理</span>
-              <b>{safeCount}</b>
+              <b>{hasScanned ? safeCount : "—"}</b>
             </div>
             <div className="row-item">
               <span className="ic" style={{ background: "var(--cache-50)", color: "var(--cache)" }}>
                 <Icon name="folder" size={15} />
               </span>
               <span style={{ flex: 1 }}>类别数</span>
-              <b>{cats.length}</b>
+              <b>{hasScanned ? cats.length : "—"}</b>
             </div>
             <div className="row-item">
               <span className="ic" style={{ background: "var(--caution-50)", color: "var(--caution)" }}>
                 <Icon name="zap" size={15} />
               </span>
               <span style={{ flex: 1 }}>预计可回收</span>
-              <b style={{ color: "var(--brand)" }}>{fmt(reclaim)}</b>
+              <b style={{ color: "var(--brand)" }}>{hasScanned ? fmt(reclaim) : "—"}</b>
             </div>
           </div>
         </div>

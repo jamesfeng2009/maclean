@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq, ScanItem } from "../lib/types";
@@ -18,13 +18,15 @@ export function Uninstall() {
   const [items, setItems] = useState<ScanItem[]>([]);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [hasScanned, setHasScanned] = useState(false);
 
+  // 不做挂载自动扫描，仅按钮触发
   const refresh = useCallback(() => {
-    void startScan("apps", setItems);
+    void startScan("apps", (its) => {
+      setItems(its);
+      setHasScanned(true);
+    });
   }, [startScan]);
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
 
   const selected = useMemo(
     () => items.filter((i) => sel.has(i.path) && i.deletable),
@@ -73,8 +75,10 @@ export function Uninstall() {
           if (blocked) toast("info", `${blocked} 项未通过安全检查，已排除`);
           const rep = await ipc.cleanExecute(finalReqs, langEn);
           toast("success", `完成 ${rep.deleted} 项${rep.intercepted ? `，拦截 ${rep.intercepted} 项` : ""}`);
+          // 本地移除已处理项，不再自动重扫；需要最新列表请手动重新扫描
+          const removed = new Set(finalReqs.map((r) => r.path));
+          setItems((prev) => prev.filter((i) => !removed.has(i.path)));
           setSel(new Set());
-          refresh();
         } catch (e) {
           toast("warn", "卸载失败：" + String(e));
         } finally {
@@ -91,13 +95,29 @@ export function Uninstall() {
         sub="应用本体、缓存、数据与卸载残留；删除前逐项过安全闸门"
         action={
           <button className="btn-secondary" onClick={refresh} style={{ height: 34 }}>
-            <Icon name="refresh" size={14} /> 重新扫描
+            <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
           </button>
         }
       />
 
       {items.length === 0 ? (
-        <Empty icon="uninstall" text={scanning ? "正在扫描已安装应用…" : "未发现可卸载的应用"} />
+        <Empty
+          icon="uninstall"
+          text={
+            scanning
+              ? "正在扫描已安装应用…"
+              : hasScanned
+                ? "未发现可卸载的应用"
+                : "尚未扫描，点击下方按钮扫描已安装应用（只读扫描）"
+          }
+          action={
+            !scanning && !hasScanned ? (
+              <button className="btn-primary" onClick={refresh}>
+                <Icon name="zap" size={15} /> 开始扫描
+              </button>
+            ) : undefined
+          }
+        />
       ) : (
         <div className="app-grid">
           {items.map((it) => {

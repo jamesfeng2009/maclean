@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq, ScanItem } from "../lib/types";
@@ -33,10 +33,13 @@ export function Clean() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [hasScanned, setHasScanned] = useState(false);
 
+  // 不做任何挂载自动扫描：只有用户点击「开始/重新扫描」才扫描
   const refresh = useCallback(() => {
     startScan("all", (its) => {
       setItems(its);
+      setHasScanned(true);
       // 默认勾选：安全/缓存组（与 core default_selected 一致）
       const g = new Map<string, boolean>();
       for (const it of its) {
@@ -45,8 +48,6 @@ export function Clean() {
       setChecked(new Set(g.keys()));
     });
   }, [startScan]);
-
-  useEffect(refresh, [refresh]);
 
   const groups = useMemo<Group[]>(() => {
     const m = new Map<string, Group>();
@@ -142,7 +143,10 @@ export function Clean() {
                 rep.need_password ? `，${rep.need_password} 项需要管理员权限（请用桌面版）` : ""
               }`
             );
-            refresh();
+            // 本地移除已清理项，不再自动触发扫描；需要最新结果请用户手动重新扫描
+            const removed = new Set(finalReqs.map((r) => r.path));
+            setItems((prev) => prev.filter((i) => !removed.has(i.path)));
+            setChecked(new Set());
           }
         } catch (e) {
           toast("warn", "清理失败：" + String(e));
@@ -160,13 +164,29 @@ export function Clean() {
         sub="选择要清理的分类；所有删除都会过安全闸门并优先移入废纸篓"
         action={
           <button className="btn-secondary" onClick={refresh} style={{ height: 34 }}>
-            <Icon name="refresh" size={14} /> 重新扫描
+            <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
           </button>
         }
       />
 
       {groups.length === 0 ? (
-        <Empty icon="clean" text={scanning ? "正在扫描可清理项…" : "暂未发现可清理项"} />
+        <Empty
+          icon="clean"
+          text={
+            scanning
+              ? "正在扫描可清理项…"
+              : hasScanned
+                ? "暂未发现可清理项"
+                : "尚未扫描，点击下方按钮开始（只读扫描，不会删除文件）"
+          }
+          action={
+            !scanning && !hasScanned ? (
+              <button className="btn-primary" onClick={refresh}>
+                <Icon name="zap" size={15} /> 开始扫描
+              </button>
+            ) : undefined
+          }
+        />
       ) : (
         <div className="cat-list">
           {groups.map((g) => {

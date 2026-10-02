@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { fmt, shortPath } from "../lib/format";
 import type { ScanItem } from "../lib/types";
 import { useApp } from "../lib/store";
@@ -18,13 +18,15 @@ export function Analysis() {
   const { startScan, scanning } = useApp();
   const [items, setItems] = useState<ScanItem[]>([]);
   const [open, setOpen] = useState<Set<string>>(new Set());
+  const [hasScanned, setHasScanned] = useState(false);
 
+  // 不做挂载自动扫描，仅按钮触发
   const refresh = useCallback(() => {
-    void startScan("large", setItems);
+    void startScan("large", (its) => {
+      setItems(its);
+      setHasScanned(true);
+    });
   }, [startScan]);
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
 
   const total = items.reduce((s, i) => s + i.size_bytes, 0);
 
@@ -69,13 +71,29 @@ export function Analysis() {
         sub="大文件与大目录空间占用（按顶层分类聚合）"
         action={
           <button className="btn-secondary" onClick={refresh} style={{ height: 34 }}>
-            <Icon name="refresh" size={14} /> 重新扫描
+            <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
           </button>
         }
       />
 
       {items.length === 0 ? (
-        <Empty icon="analysis" text={scanning ? "正在分析磁盘占用…" : "暂未发现大文件"} />
+        <Empty
+          icon="analysis"
+          text={
+            scanning
+              ? "正在分析磁盘占用…"
+              : hasScanned
+                ? "暂未发现大文件"
+                : "尚未扫描，点击下方按钮分析磁盘占用（只读扫描）"
+          }
+          action={
+            !scanning && !hasScanned ? (
+              <button className="btn-primary" onClick={refresh}>
+                <Icon name="zap" size={15} /> 开始扫描
+              </button>
+            ) : undefined
+          }
+        />
       ) : (
         <div className="analysis-grid">
           <div className="card donut-wrap">
