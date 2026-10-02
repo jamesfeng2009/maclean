@@ -99,8 +99,10 @@ export interface ScanProgress {
   pct: number;
 }
 
-/** 全量体检中单个模块扫描完成的事件载荷（事件名 scan-module） */
+/** 全量体检中单个模块的状态事件（事件名 scan-module） */
 export interface ScanModuleEvent {
   scope: ResultScope;
+  /** start=模块开始扫描（items 为空）；done=模块完成并带回结果。缺省按 done 处理 */
+  status?: "start" | "done";
   items: ScanItem[];
 }

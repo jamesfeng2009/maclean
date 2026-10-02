@@ -10,7 +10,6 @@ export function Dup() {
   const {
     startScan,
     scanning,
-    fullRunning,
     confirm,
     toast,
     langEn,
@@ -18,7 +17,6 @@ export function Dup() {
     ready,
     scanTick,
     lastScope,
-    startFullScan,
     removePaths,
   } = useApp();
   // 复用全局缓存的 dup 模块
@@ -116,7 +114,7 @@ export function Dup() {
         action={
           <button
             className="btn-secondary"
-            onClick={hasScanned ? refresh : startFullScan}
+            onClick={refresh}
             style={{ height: 34 }}
           >
             <Icon name="refresh" size={14} /> {hasScanned ? "重新扫描" : "开始扫描"}
@@ -131,14 +129,12 @@ export function Dup() {
             hasScanned
               ? "没有发现重复文件"
               : scanning
-                ? fullRunning
-                  ? "正在全盘体检，重复文件模块完成后自动呈现…"
-                  : "正在查找重复文件…"
-                : "尚未扫描，点击下方按钮开始一次全盘体检（只读扫描）"
+                ? "正在查找重复文件（逐文件比对，文件较多时可能需要几分钟）…"
+                : "重复文件需逐文件内容比对，计算较重、耗时较长，建议在需要时单独扫描（只读扫描）"
           }
           action={
             !scanning && !hasScanned ? (
-              <button className="btn-primary" onClick={startFullScan}>
+              <button className="btn-primary" onClick={refresh}>
                 <Icon name="zap" size={15} /> 开始扫描
               </button>
             ) : undefined

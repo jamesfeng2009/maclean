@@ -263,6 +263,22 @@ body{
 .dir-row .mini{width:90px;height:6px;border-radius:99px;background:var(--line);overflow:hidden;flex:0 0 90px}
 .dir-row .mini i{display:block;height:100%;border-radius:99px}
 .dir-children{margin-left:22px;border-left:1px dashed var(--line-2);padding-left:14px}
+/* 磁盘分析：行内勾选 + 展开箭头分控，选中/受保护态 */
+.dir-row .chek{
+  width:18px;height:18px;border-radius:5px;border:1.5px solid var(--line-2);flex:0 0 18px;
+  display:flex;align-items:center;justify-content:center;color:#fff;background:var(--panel);
+  transition:all .15s;cursor:pointer;
+}
+.dir-row .chek svg{width:11px;height:11px;opacity:0;transition:opacity .15s}
+.dir-row .chek.on{background:var(--brand);border-color:var(--brand)}
+.dir-row .chek.on svg{opacity:1}
+.dir-row .chek.disabled{cursor:not-allowed;border-style:dashed;color:var(--text-3);background:transparent}
+.dir-row .chek.disabled svg{opacity:1;width:10px;height:10px}
+.dir-row.checked{background:var(--brand-50)}
+.dir-row.checked .nm{color:var(--brand);font-weight:600}
+.dir-row.disabled{opacity:.6;cursor:default}
+.dir-row.disabled:hover{background:transparent}
+.dir-row .chev-click{display:flex;align-items:center;flex:0 0 14px}
 
 /* ===== 清理列表 ===== */
 .cat-list{display:flex;flex-direction:column;gap:10px}

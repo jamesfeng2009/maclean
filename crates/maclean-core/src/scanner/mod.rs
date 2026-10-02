@@ -283,7 +283,15 @@ fn load_dir_size_cache() -> std::collections::HashMap<PathBuf, u64> {
 }
 
 /// 持久化目录大小缓存
+///
+/// 采用「写同目录临时文件 → rename 原子替换」：磁盘分析等扫描器会在 rayon
+/// 线程里并行统计多个目录，非原子的直接覆写在并发/崩溃时可能留下被截断的
+/// JSON（下次加载静默回退空缓存）。rename 在同一卷上是原子的，读者要么
+/// 看到旧文件、要么看到完整新文件。
 fn save_dir_size_cache(cache: &std::collections::HashMap<PathBuf, u64>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
     let list: Vec<(String, u64)> = cache
         .iter()
         .map(|(p, size)| (p.to_string_lossy().to_string(), *size))
@@ -293,7 +301,18 @@ fn save_dir_size_cache(cache: &std::collections::HashMap<PathBuf, u64>) {
         if let Some(parent) = file.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&file, s);
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("dir_size_cache.json");
+        // 每个并发写者使用独立临时名，避免彼此截断；写完原子改名
+        let tmp = file.with_file_name(format!(
+            ".{name}.{}.{}.tmp",
+            std::process::id(),
+            WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        if std::fs::write(&tmp, s).is_ok() {
+            if std::fs::rename(&tmp, &file).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
     }
 }
 

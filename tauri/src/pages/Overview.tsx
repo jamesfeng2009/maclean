@@ -94,7 +94,7 @@ export function Overview() {
     results,
     ready,
     fullRunning,
-    runningScope,
+    runningScopes,
     singleScope,
     startFullScan,
   } = useApp();
@@ -280,7 +280,7 @@ export function Overview() {
               const list = results[m.scope];
               const isReady = ready[m.scope];
               const isRun =
-                (fullRunning && runningScope === m.scope) ||
+                (fullRunning && runningScopes.includes(m.scope)) ||
                 (!fullRunning && singleScope === m.scope && scanning);
               const pending = fullRunning && !isReady && !isRun;
               // all 行右侧展示「默认可安全回收」，与磁盘卡口径一致；其余模块展示相关占用体量

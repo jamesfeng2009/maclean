@@ -8,7 +8,7 @@ import { Icon } from "./Icon";
  *   哪个模块先完成，对应页面立刻可看。
  */
 export function ScanOverlay() {
-  const { scanning, scanPct, scanLabel, fullRunning, runningScope, singleScope, ready } =
+  const { scanning, scanPct, scanLabel, fullRunning, runningScopes, singleScope, ready } =
     useApp();
 
   return (
@@ -25,7 +25,11 @@ export function ScanOverlay() {
             </span>
             <div className="grow">
               <div className="sc-title">
-                {fullRunning ? "全盘体检中" : `正在重新扫描${singleScope ? "·" + FULL_MODULE_LABEL[singleScope] : ""}`}
+                {fullRunning
+                  ? runningScopes.length > 1
+                    ? `全盘体检中 · ${runningScopes.length} 个模块并行`
+                    : "全盘体检中"
+                  : `正在重新扫描${singleScope ? "·" + FULL_MODULE_LABEL[singleScope] : ""}`}
               </div>
               <div className="sc-sub">只读扫描，不会删除任何文件 · 可继续浏览其它页面</div>
             </div>
@@ -36,7 +40,7 @@ export function ScanOverlay() {
             <div className="sc-mods">
               {FULL_SEQUENCE.map((s) => {
                 const done = ready[s];
-                const run = runningScope === s;
+                const run = runningScopes.includes(s);
                 return (
                   <div key={s} className={`sc-mod ${done ? "done" : run ? "run" : "pending"}`}>
                     <span className="sc-ic">

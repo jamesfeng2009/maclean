@@ -120,67 +120,132 @@ fn run_all_scanners(app: &AppHandle) -> Vec<ScanItem> {
     all
 }
 
-/// 全量体检：顺序跑完 缓存/应用数据 → 大文件 → 重复文件 → 已安装应用。
+/// 全量体检各模块在整体进度中的权重（合计 100，反映相对耗时；large 最重）。
+#[cfg(target_os = "macos")]
+fn module_weight(key: &str) -> u8 {
+    match key {
+        "all" => 40,
+        "large" => 25,
+        "dup" => 20,
+        "apps" => 15,
+        _ => 0,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn module_bit(key: &str) -> u32 {
+    match key {
+        "all" => 1,
+        "large" => 2,
+        "dup" => 4,
+        "apps" => 8,
+        _ => 0,
+    }
+}
+
+/// 在全量体检中运行单个模块：开始 / 完成各发一次 `scan-module` 状态事件，
+/// 整体进度按已完成模块权重**单调累加**（模块并行完成顺序不定也不会回退）。
+/// panic 按模块隔离，不拖垮其它线程。
+#[cfg(target_os = "macos")]
+fn run_module<F: FnOnce() -> Vec<ScanItem>>(
+    app: &AppHandle,
+    done_bits: &std::sync::atomic::AtomicU32,
+    key: &str,
+    label: &str,
+    f: F,
+) -> Vec<ScanItem> {
+    use std::sync::atomic::Ordering;
+    // 按已完成模块位图计算整体进度（权重合计，最小 2%），模块并行完成顺序不定也不回退
+    let pct_of = |bits: u32| -> u8 {
+        ["all", "large", "dup", "apps"]
+            .iter()
+            .filter(|k| bits & module_bit(k) != 0)
+            .map(|k| module_weight(k))
+            .sum::<u8>()
+            .max(2)
+    };
+    let _ = app.emit(
+        "scan-module",
+        serde_json::json!({ "scope": key, "status": "start", "items": [] }),
+    );
+    let _ = app.emit(
+        "scan-progress",
+        serde_json::json!({ "stage": "full", "label": format!("正在扫描：{label}"), "pct": pct_of(done_bits.load(Ordering::Relaxed)) }),
+    );
+
+    let items = std::panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_default();
+
+    let _ = app.emit(
+        "scan-module",
+        serde_json::json!({ "scope": key, "status": "done", "items": items }),
+    );
+    let bits = done_bits.fetch_or(module_bit(key), Ordering::AcqRel) | module_bit(key);
+    let _ = app.emit(
+        "scan-progress",
+        serde_json::json!({ "stage": "full", "label": format!("已完成：{label}"), "pct": pct_of(bits) }),
+    );
+    items
+}
+
+/// 全量体检：**三个核心模块并行**扫描，扫描在后台进行、可自由切页。
 ///
-/// 与 [`run_all_scanners`] 的差别：每完成一个**模块**就通过 `scan-module`
-/// 事件把该模块结果推给前端，前端按模块即时入库。用户在概览点一次
-/// 「开始扫描」即可让所有页面复用这一份结果，且无需等全部跑完——
-/// 哪个模块先完成，对应页面立刻可看；扫描在后台进行，可自由切换页面。
-/// 全程只读，单个扫描器 panic 被隔离，不拖垮其余模块。
+/// 包含：缓存与应用数据（`all`）、磁盘大文件（`large`）、已安装应用（`apps`）。
+/// **刻意不含重复文件（`dup`）**：重复文件要对候选文件逐个做内容哈希
+/// （SHA256），是天然重计算，真机实测在重开发机上单模块就要数百秒；纳入
+/// 全量会长时间拖住"体检完成"，并与缓存扫描争抢磁盘 IO。因此 dup 仅在
+/// 「重复文件」页按需单独扫描（`run_scanner("dup")`，结果同样跨页复用）。
+///
+/// 真机实测补充：`all` 内部（dev/app 缓存与应用数据）若再做激进的顶层多线程
+/// 并行，会在 IO bound 的海量小文件场景互相争抢，反而把本可秒级完成的 `apps`
+/// 拖到数百秒；因此 `all` 内部维持原有串行（其目录大小统计 `dir_size_impl`
+/// 自身已是分层 rayon 并行 BFS），只在**模块级**并行，让较快的 large/apps
+/// 藏进 all 的长尾，墙钟 ≈ max(三者) 而非三段相加。
+///
+/// 每完成一个模块就通过 `scan-module` 事件把结果推给前端，前端按模块即时入库；
+/// 全程只读，单模块 panic 被隔离，不影响其余模块。
 #[cfg(target_os = "macos")]
 fn run_full_scan(app: &AppHandle) -> Vec<ScanItem> {
-    fn safe_run(key: &str) -> Vec<ScanItem> {
-        std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(key))).unwrap_or_default()
-    }
-    let emit_pct = |pct: u8, label: &str| {
-        let _ = app.emit(
-            "scan-progress",
-            serde_json::json!({ "stage": "full", "label": label, "pct": pct }),
-        );
-    };
-    let emit_module = |key: &str, items: &[ScanItem]| {
-        let _ = app.emit(
-            "scan-module",
-            serde_json::json!({ "scope": key, "items": items }),
-        );
-    };
+    use std::sync::atomic::AtomicU32;
+    let done_bits = AtomicU32::new(0);
+    let _ = app.emit(
+        "scan-progress",
+        serde_json::json!({ "stage": "full", "label": "开始全盘体检", "pct": 2 }),
+    );
 
-    let mut all: Vec<ScanItem> = Vec::new();
+    let mut out: Vec<ScanItem> = Vec::new();
+    std::thread::scope(|scope| {
+        // 模块 all = 开发者缓存 + 应用缓存 + 应用数据与残留。
+        // 三段内部维持串行（见函数文档：激进并行在 IO bound 场景无收益）。
+        let h_all = scope.spawn(|| {
+            run_module(app, &done_bits, "all", "缓存与应用数据", || {
+                let mut all = Vec::new();
+                for key in ["dev_cache", "app_cache", "app_data"] {
+                    all.extend(run_scanner(key));
+                }
+                all
+            })
+        });
+        // 模块 large = 磁盘大文件 / 大目录
+        let h_large = scope.spawn(|| {
+            run_module(app, &done_bits, "large", "磁盘大文件", || run_scanner("large"))
+        });
+        // 模块 apps = 已安装应用
+        let h_apps = scope.spawn(|| {
+            run_module(app, &done_bits, "apps", "已安装应用", || run_scanner("apps"))
+        });
 
-    // 模块 all = 开发者缓存 + 应用缓存 + 应用数据与残留（概览 / 智能清理共用）
-    emit_pct(6, "开发者缓存");
-    let dev = safe_run("dev_cache");
-    emit_pct(34, "应用缓存");
-    let appc = safe_run("app_cache");
-    emit_pct(58, "应用数据与残留");
-    let appd = safe_run("app_data");
-    let cache_items: Vec<ScanItem> = dev.into_iter().chain(appc).chain(appd).collect();
-    emit_pct(66, "完成缓存扫描");
-    emit_module("all", &cache_items);
-    all.extend(cache_items);
+        for h in [h_all, h_large, h_apps] {
+            if let Ok(part) = h.join() {
+                out.extend(part);
+            }
+        }
+    });
 
-    // 模块 large = 磁盘分析（大文件 / 大目录）
-    emit_pct(72, "正在分析磁盘大文件");
-    let large = safe_run("large");
-    emit_pct(84, "完成大文件分析");
-    emit_module("large", &large);
-    all.extend(large);
-
-    // 模块 dup = 重复文件
-    emit_pct(88, "正在比对重复文件");
-    let dup = safe_run("dup");
-    emit_pct(96, "完成重复文件比对");
-    emit_module("dup", &dup);
-    all.extend(dup);
-
-    // 模块 apps = 已安装应用
-    emit_pct(98, "正在枚举已安装应用");
-    let apps = safe_run("apps");
-    emit_pct(100, "完成");
-    emit_module("apps", &apps);
-    all.extend(apps);
-
-    all
+    let _ = app.emit(
+        "scan-progress",
+        serde_json::json!({ "stage": "done", "label": "完成", "pct": 100 }),
+    );
+    out
 }
 
 /// 扫描命令（后台线程，进度经 `scan-progress` 事件推送）。

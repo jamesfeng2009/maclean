@@ -13,10 +13,21 @@ import type { ResultScope, ScanItem, ScanProgress, ScanScope } from "./types";
 import type { IconName } from "../components/Icon";
 
 /**
- * 全量体检（scope=full）的模块产出顺序。
- * 点一次全量扫描，结果按此顺序逐模块写入全局缓存，所有页面复用同一份数据。
+ * 可模块化扫描、结果写入全局缓存并跨页复用的全部模块。
+ * 单页「重新扫描」时用它判断 scope 是否为模块（含重复文件）。
  */
-export const FULL_SEQUENCE: ResultScope[] = ["all", "large", "dup", "apps"];
+export const MODULE_SCOPES: readonly ResultScope[] = ["all", "large", "dup", "apps"];
+
+/**
+ * 一键「全量体检」（scope=full）实际并行执行的模块。
+ *
+ * 刻意不含 `dup`（重复文件）：重复文件需对候选文件逐个做内容哈希（SHA256），
+ * 是天然的重计算，真机实测在重开发机上单独就要跑数百秒；把它塞进全量会
+ * 长期拖住"体检完成"，并与缓存扫描争抢磁盘 IO。主流清理工具也把"重复文件"
+ * 作为独立工具按需运行。因此全量只跑 缓存/大文件/应用 三个核心模块，
+ * 重复文件请在「重复文件」页点「开始扫描」单独触发（结果同样全局复用）。
+ */
+export const FULL_SEQUENCE: ResultScope[] = ["all", "large", "apps"];
 
 export const FULL_MODULE_LABEL: Record<ResultScope, string> = {
   all: "缓存与应用数据",
@@ -78,8 +89,8 @@ interface AppState {
   scanLabel: string;
   /** 是否正在跑全量体检（false 表示单模块扫描或空闲） */
   fullRunning: boolean;
-  /** 全量体检当前进行中的模块 */
-  runningScope: ResultScope | null;
+  /** 全量体检中**当前正在并行扫描**的模块（可多个同时进行） */
+  runningScopes: ResultScope[];
   /** 单模块重新扫描时的目标模块 */
   singleScope: ResultScope | null;
   /** 各模块扫描结果（跨页面共享、切页复用） */
@@ -144,7 +155,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [scanPct, setScanPct] = useState(0);
   const [scanLabel, setScanLabel] = useState("正在准备…");
   const [fullRunning, setFullRunning] = useState(false);
-  const [runningScope, setRunningScope] = useState<ResultScope | null>(null);
+  const [runningScopes, setRunningScopes] = useState<ResultScope[]>([]);
   const [singleScope, setSingleScope] = useState<ResultScope | null>(null);
   const [results, setResults] = useState<Record<ResultScope, ScanItem[]>>(emptyResults);
   const [ready, setReady] = useState<Record<ResultScope, boolean>>(emptyReady);
@@ -187,7 +198,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const startScan = useCallback(
     async (scope: ScanScope, onDone?: (items: ScanItem[]) => void) => {
       if (scanning) return;
-      const isModule = (FULL_SEQUENCE as readonly string[]).includes(scope);
+      const isModule = (MODULE_SCOPES as readonly string[]).includes(scope);
       setScanning(true);
       setFullRunning(false);
       setSingleScope(isModule ? (scope as ResultScope) : null);
@@ -195,7 +206,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setScanLabel("正在准备…");
       try {
         const items = await ipc.scan(scope, (p: ScanProgress) => {
-          setScanPct(Math.max(2, Math.min(99, p.pct)));
+          // 单调不减：并行/事件乱序时进度条不回退（下一轮扫描开始时重置为 2）
+          setScanPct((prev) => Math.max(prev, Math.max(2, Math.min(99, p.pct))));
           setScanLabel(p.label || p.stage);
         });
         setScanPct(100);
@@ -213,32 +225,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [toast, putModule, scanning]
   );
 
-  /** 全量体检：一次扫描全部模块，结果逐模块入库，扫描中可切换页面 */
+  /** 全量体检：后端并行扫描各模块，结果逐模块入库；扫描中可自由切换页面 */
   const startFullScan = useCallback(async () => {
     if (scanning) return;
-    // 新一轮体检：清空旧结果，逐模块重新填入
+    // 新一轮体检：清空旧结果与运行态，逐模块重新填入
     setResults(emptyResults());
     setReady(emptyReady());
     setLastScope(null);
+    setRunningScopes([]);
     setFullRunning(true);
     setSingleScope(null);
-    setRunningScope("all");
     setScanning(true);
     setScanPct(2);
-    setScanLabel("开发者缓存");
+    setScanLabel("开始全盘体检");
     try {
       await ipc.scan(
         "full",
         (p: ScanProgress) => {
-          setScanPct(Math.max(2, Math.min(99, p.pct)));
+          setScanPct((prev) => Math.max(prev, Math.max(2, Math.min(100, p.pct))));
           setScanLabel(p.label || p.stage);
         },
         (m) => {
-          putModule(m.scope, m.items);
-          const idx = FULL_SEQUENCE.indexOf(m.scope);
-          setRunningScope(
-            idx >= 0 && idx + 1 < FULL_SEQUENCE.length ? FULL_SEQUENCE[idx + 1] : null
-          );
+          if (m.status === "start") {
+            // 模块进入扫描中（并行时可能多个同时进行）
+            setRunningScopes((prev) =>
+              prev.includes(m.scope) ? prev : [...prev, m.scope]
+            );
+          } else {
+            // 模块完成：入库并移出运行中集合（缺省 status 也按完成处理）
+            putModule(m.scope, m.items);
+            setRunningScopes((prev) => prev.filter((s) => s !== m.scope));
+          }
         }
       );
       setScanPct(100);
@@ -248,7 +265,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setTimeout(() => {
         setScanning(false);
         setFullRunning(false);
-        setRunningScope(null);
+        setRunningScopes([]);
       }, 300);
     }
   }, [scanning, putModule, toast]);
@@ -280,7 +297,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       scanPct,
       scanLabel,
       fullRunning,
-      runningScope,
+      runningScopes,
       singleScope,
       results,
       ready,
@@ -304,7 +321,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       scanPct,
       scanLabel,
       fullRunning,
-      runningScope,
+      runningScopes,
       singleScope,
       results,
       ready,

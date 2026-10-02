@@ -7,23 +7,23 @@
 //! - 旧版：只列出主目录下 >100MB 的顶层大文件
 //! - 新版：列出当前目录下所有子项（不论大小），支持进入子目录继续浏览
 //!
-//! 安全机制：
+//! 安全 / 性能：
 //! - 跳过 TCC 保护目录（Library/Pictures/Music/Movies/Documents/Desktop/Downloads）
 //! - 跳过 Media Library bundles（.photoslibrary 等）
 //! - 跳过 .app/.bundle/.pkg/.dmg 等特殊 bundle
-//! - 单目录遍历超时 10 秒
+//! - 目录大小统一走 [`super::dir_size_impl`]：分层并行 BFS（rayon）、
+//!   st_blocks×512 真实占用（APFS 稀疏镜像不虚高）、单目录 10s 看门狗
+//!   与黑名单——不再使用本文件早期的「逐目录串行 WalkDir + len()」实现
+//!   （串行遍历 OrbStack / node_modules 等巨型目录是磁盘分析偏慢的主因）。
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rayon::prelude::*;
-use walkdir::WalkDir;
 
-use super::{has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{dir_size_impl, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 
-/// 单目录遍历超时 10 秒
-const DIR_TIMEOUT: Duration = Duration::from_secs(10);
 /// 最小展示大小：1MB（小于此值的文件不展示，避免列表过长）
 const MIN_DISPLAY_SIZE: u64 = 1024 * 1024;
 
@@ -152,7 +152,8 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
 
             let size = catch_unwind(AssertUnwindSafe(|| {
                 if is_dir {
-                    dir_size_with_timeout(path)
+                    // 统一走并行 BFS + st_blocks + 看门狗/黑名单（见模块文档）
+                    dir_size_impl(path).0
                 } else {
                     path.symlink_metadata().map(|m| m.len()).unwrap_or(0)
                 }
@@ -212,46 +213,4 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
         total_size,
         scan_time_ms,
     }
-}
-
-/// 带超时的目录大小计算
-fn dir_size_with_timeout(path: &Path) -> u64 {
-    let start = Instant::now();
-    let mut total: u64 = 0;
-
-    for entry in WalkDir::new(path)
-        .follow_links(false)
-        .max_depth(50)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.depth() > 0 {
-                if e.file_type().is_dir() && std::fs::metadata(e.path()).is_err() {
-                    return false;
-                }
-                if let Some(name) = e.file_name().to_str() {
-                    if is_problematic_path(name) {
-                        return false;
-                    }
-                }
-            }
-            true
-        })
-    {
-        if start.elapsed() > DIR_TIMEOUT {
-            return total;
-        }
-
-        match entry {
-            Ok(entry) => {
-                if entry.file_type().is_file() {
-                    if let Ok(metadata) = entry.metadata() {
-                        total += metadata.len();
-                    }
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-
-    total
 }

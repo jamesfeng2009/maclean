@@ -36,7 +36,13 @@ impl Scanner for DevCacheScanner {
         let start = Instant::now();
         let mut items = Vec::new();
 
-        // 依次扫描各类开发者缓存（跨平台）
+        // 各类开发者缓存在此维持**串行**调度。真机实测：这些子扫描的耗时主要
+        // 在海量小文件的目录枚举/stat（IO bound），若顶层再开十几个线程并行，
+        // 在与 app_cache/app_data 及其它全量模块并发时会互相争抢磁盘元数据，
+        // 反而把本可秒级完成的轻量模块拖到数百秒，总墙钟没有收益。
+        // 真正的并行放在两处、且都有界：①全量体检在「模块级」并行
+        // （all/large/apps）；②每个目录大小统计 dir_size_impl 内部用分层
+        // rayon BFS（活跃枚举线程数≈CPU 核数）。
         items.extend(scan_rust_caches());
         // Xcode 缓存仅 macOS
         #[cfg(target_os = "macos")]
