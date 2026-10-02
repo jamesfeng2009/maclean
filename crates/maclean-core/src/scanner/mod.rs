@@ -469,6 +469,67 @@ pub fn dir_size(path: &Path) -> u64 {
     dir_size_impl(path).0
 }
 
+/// 取一个路径占用的磁盘大小：普通文件取其长度，目录/其它递归统计。
+/// 仅用于在“从聚合项中剔除个别危险成员”时回减大小（罕见路径）。
+fn path_disk_size(p: &Path) -> u64 {
+    match p.symlink_metadata() {
+        Ok(m) if m.is_file() => m.len(),
+        Ok(_) => dir_size(p),
+        Err(_) => 0,
+    }
+}
+
+/// 把字符串中**第一段**连续阿拉伯数字替换为 `n`（用于同步聚合项描述里的成员计数，
+/// 如 “~/ 下的 .DS_Store 文件 (11 个)” → “(10 个)”）。没有数字则原样不动。
+fn replace_first_usize(s: &mut String, n: usize) {
+    let bytes = s.as_bytes();
+    let Some(start) = bytes.iter().position(|c| c.is_ascii_digit()) else {
+        return;
+    };
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    s.replace_range(start..end, &n.to_string());
+}
+
+/// 净化聚合扫描项：只保留能通过 `safety` 安全闸门的 `batch_paths` 成员。
+///
+/// 这是“安全清理零拦截”不变量在扫描阶段的落点——凡是会被默认勾选的安全聚合项
+/// （.DS_Store / __pycache__ / Monorepo 子包等），其展示数量、大小与真实删除成员
+/// 必须全部已通过安全检查；命中保护规则的个别成员在扫描期就剔除，而不是先放进
+/// 篮子、等到删除阶段再弹“已安全拦截 N 项”。
+///
+/// - 有成员被剔除时：回减该项大小，并把描述中的计数同步为新成员数；
+/// - 净化后一个可删成员都不剩：返回 `false`，调用方应整条移除。
+///
+/// 注意：单项（`batch_paths` 为空）不在此处理，原样返回其 `deletable`。
+pub fn retain_safe_batch_members(item: &mut ScanItem) -> bool {
+    if item.batch_paths.is_empty() {
+        return item.deletable;
+    }
+    let before = item.batch_paths.len();
+    let mut removed_bytes: u64 = 0;
+    item.batch_paths.retain(|bp| {
+        match crate::safety::check_path_safety_with_category(bp, &item.category) {
+            crate::safety::SafetyCheck::Safe => true,
+            // Danger / Warning 在执行层都会被跳过；扫描期就不应把它们算作可清理成员
+            _ => {
+                removed_bytes = removed_bytes.saturating_add(path_disk_size(Path::new(bp)));
+                false
+            }
+        }
+    });
+    if item.batch_paths.is_empty() {
+        return false;
+    }
+    if item.batch_paths.len() != before {
+        item.size_bytes = item.size_bytes.saturating_sub(removed_bytes);
+        replace_first_usize(&mut item.path, item.batch_paths.len());
+    }
+    true
+}
+
 /// 获取当前用户的 home 目录
 ///
 /// 使用 dirs crate 获取，若获取失败则返回**空路径**（而不是 "/"）。
@@ -508,6 +569,48 @@ mod tests {
         assert!(Recommend::CacheOnly.default_selected());
         assert!(!Recommend::Caution.default_selected());
         assert!(!Recommend::Advanced.default_selected());
+    }
+
+    #[test]
+    fn retain_safe_batch_members_drops_guarded_and_resyncs() {
+        let root = home_dir().join(format!("maclean_retain_test_{}", std::process::id()));
+        let safe1 = root.join("a/.DS_Store");
+        let safe2 = root.join("b/.DS_Store");
+        // node_modules 属“清单管理目录”，其内成员会被第 4.6 层拦（与 go/pkg/mod 同源）
+        let bad = root.join("proj/node_modules/.DS_Store");
+        for (p, n) in [(&safe1, 10u64), (&safe2, 20), (&bad, 30)] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, vec![b'x'; n as usize]).unwrap();
+        }
+
+        let mk = |paths: Vec<&std::path::Path>, size: u64| ScanItem {
+            path: format!("~/ 下的 .DS_Store 文件 ({} 个)", paths.len()),
+            size_bytes: size,
+            category: "DS_Store".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            recommend: Recommend::Safe,
+            description: String::new(),
+            batch_paths: paths.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+        };
+
+        // 3 个成员（2 安全 + 1 受保护）→ 剔除受保护成员，计数/大小同步
+        let mut item = mk(vec![&safe1, &bad, &safe2], 60);
+        assert!(retain_safe_batch_members(&mut item), "仍有安全成员应保留该项");
+        assert_eq!(item.batch_paths.len(), 2);
+        assert!(
+            !item.batch_paths.iter().any(|p| p.contains("node_modules")),
+            "受保护成员必须被剔除"
+        );
+        assert_eq!(item.size_bytes, 30, "应回减被剔除成员的 30 字节");
+        assert!(item.path.contains("(2 个)"), "计数应同步为 2: {}", item.path);
+
+        // 全部受保护 → 返回 false，调用方整条移除
+        let mut all_bad = mk(vec![&bad], 30);
+        assert!(!retain_safe_batch_members(&mut all_bad), "无安全成员应整条丢弃");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

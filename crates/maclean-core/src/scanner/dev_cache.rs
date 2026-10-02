@@ -2770,9 +2770,20 @@ fn scan_ds_store_files() -> Vec<ScanItem> {
         if entry.file_type().is_file() {
             let name = entry.file_name().to_string_lossy();
             if name == ".DS_Store" {
+                let full = entry.path().to_string_lossy().to_string();
+                // 安全闸门前移到扫描期：只纳入通过 safety 检查的成员。
+                // 位于清单管理目录（go/pkg/mod、node_modules 等）内的 .DS_Store
+                // 会被判 Danger，必须在这里就排除——否则它进入聚合项后，用户点
+                // “安全清理”时仍会在删除阶段被拦（违背“安全项=必可删”的约定）。
+                if !matches!(
+                    crate::safety::check_path_safety_with_category(&full, "DS_Store"),
+                    crate::safety::SafetyCheck::Safe
+                ) {
+                    continue;
+                }
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                 total_size += size;
-                ds_store_paths.push(entry.path().to_string_lossy().to_string());
+                ds_store_paths.push(full);
             }
         }
     }

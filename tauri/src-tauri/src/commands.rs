@@ -57,14 +57,44 @@ pub fn disk_info() -> DiskInfoDto {
 /// 扫描后处理：与 egui 壳 `start_scan` 完全一致的可删除性二次判定。
 ///
 /// 扫得出 ≠ 删得了：扫描阶段的判定在这里按当前文件系统实况复核一遍，
-/// 删不掉的项标 `deletable=false` 并带原因，前端只展示不可勾选态。
-fn post_check(items: &mut [ScanItem]) {
-    for item in items.iter_mut() {
-        let (deletable, reason) = scanner::check_deletable(&item.path);
-        item.deletable = deletable && item.deletable;
-        if !item.deletable && !reason.is_empty() {
-            item.undeletable_reason = reason;
+/// 扫描结果出口的统一校验（每个扫描器的结果都经过这里）：
+///
+/// 保证“会被『安全清理』默认勾选的项，执行删除时 100% 通过安全闸门”——
+/// 用户点安全清理后不应再看到“已安全拦截 N 项”。
+/// 1. 聚合项：逐个成员过闸，命中保护规则的成员在扫描期就剔除并回减大小/计数，
+///    全部成员都受保护时整条移除（`scanner::retain_safe_batch_members`）；
+/// 2. 会被默认勾选的单项（Safe/CacheOnly）：自身必须通过闸门，否则标不可删；
+/// 3. 既有：SIP/属主等系统可删性检查，删不掉的项标 `deletable=false` 并带原因。
+fn post_check(items: &mut Vec<ScanItem>) {
+    let mut i = 0;
+    while i < items.len() {
+        if !items[i].batch_paths.is_empty() {
+            // 聚合项：净化掉未过闸的成员；一个可删成员都不剩则整条丢弃
+            if !scanner::retain_safe_batch_members(&mut items[i]) {
+                items.remove(i);
+                continue;
+            }
+        } else if matches!(
+            items[i].recommend,
+            Recommend::Safe | Recommend::CacheOnly
+        ) {
+            // 默认可选单项：必须过 safety 闸门，否则不进安全清理集合
+            if let SafetyCheck::Danger(r) | SafetyCheck::Warning(r) =
+                safety::check_path_safety_with_category(&items[i].path, &items[i].category)
+            {
+                items[i].deletable = false;
+                if items[i].undeletable_reason.is_empty() {
+                    items[i].undeletable_reason = r;
+                }
+            }
         }
+
+        let (deletable, reason) = scanner::check_deletable(&items[i].path);
+        items[i].deletable = deletable && items[i].deletable;
+        if !items[i].deletable && !reason.is_empty() {
+            items[i].undeletable_reason = reason;
+        }
+        i += 1;
     }
 }
 
@@ -948,5 +978,55 @@ mod tests {
         let out = clean_preview(vec![item]);
         assert!(!out[0].allowed, "SIP 系统保护路径必须拦截");
         assert!(!out[0].reason.is_empty(), "应给出拦截原因");
+    }
+
+    fn scan_item(path: &str, batch: Vec<&str>) -> ScanItem {
+        ScanItem {
+            path: path.to_string(),
+            size_bytes: 1,
+            category: "DS_Store".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            recommend: Recommend::Safe,
+            description: String::new(),
+            batch_paths: batch.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// post_check 是扫描结果出口：聚合项中未过闸的成员必须在扫描期剔除，
+    /// 全部受保护时整条移除——保证安全清理执行阶段零拦截。
+    #[test]
+    fn post_check_purges_guarded_members_and_drops_empty() {
+        let root = home_tmp("pc");
+        let safe1 = root.join("a/.DS_Store");
+        let bad = root.join("proj/node_modules/.DS_Store");
+        touch(&safe1);
+        touch(&bad);
+
+        let mut items = vec![scan_item(
+            "~/ 下的 .DS_Store 文件 (2 个)",
+            vec![safe1.to_str().unwrap(), bad.to_str().unwrap()],
+        )];
+        post_check(&mut items);
+        assert_eq!(items.len(), 1, "仍有安全成员时整条保留");
+        assert_eq!(items[0].batch_paths.len(), 1, "受保护成员应被剔除");
+        assert!(items[0].batch_paths[0].ends_with("a/.DS_Store"));
+        assert!(items[0].deletable);
+
+        let mut only_bad = vec![scan_item("x (1 个)", vec![bad.to_str().unwrap()])];
+        post_check(&mut only_bad);
+        assert!(only_bad.is_empty(), "成员全部受保护时应整条移除");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 默认可选单项若未过闸（SIP 系统路径），post_check 必须标为不可删。
+    #[test]
+    fn post_check_marks_unsafe_single_item_undeletable() {
+        let mut items = vec![scan_item("/System/Library/Frameworks", vec![])];
+        post_check(&mut items);
+        assert!(!items[0].deletable, "SIP 单项必须不可删");
+        assert!(!items[0].undeletable_reason.is_empty());
     }
 }
