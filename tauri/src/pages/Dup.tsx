@@ -10,6 +10,7 @@ export function Dup() {
   const {
     startScan,
     scanning,
+    runningScopes,
     confirm,
     toast,
     langEn,
@@ -22,6 +23,8 @@ export function Dup() {
   // 复用全局缓存的 dup 模块
   const items = results.dup;
   const hasScanned = ready.dup;
+  // 仅在重复文件模块自身扫描时禁用勾选/删除；其它模块的后台扫描不影响本页
+  const dupBusy = runningScopes.includes("dup");
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -47,13 +50,20 @@ export function Dup() {
     return n;
   };
 
+  const selectable = useMemo(() => items.filter((i) => i.deletable), [items]);
   const selected = useMemo(
     () => items.filter((i) => checked.has(i.path) && i.deletable),
     [items, checked]
   );
   const selectedSize = selected.reduce((s, i) => s + i.size_bytes, 0);
+  // 勾选项里将被删除的「副本」文件总数（每组 = batch_paths 数量，保留 1 份）
+  const selectedCopyCount = selected.reduce((n, i) => n + i.batch_paths.length, 0);
 
-  const runDedup = () => {
+  const selectAll = () =>
+    setChecked(new Set(selectable.map((i) => i.path)));
+  const clearAll = () => setChecked(new Set());
+
+  const runDedup = async () => {
     const reqs: CleanItemReq[] = selected.map((i) => ({
       path: i.path,
       category: i.category,
@@ -61,42 +71,53 @@ export function Dup() {
       size_bytes: i.size_bytes,
       recommend: i.recommend,
     }));
-    const copyPaths = reqs.flatMap((r) => r.batch_paths);
+
+    // Rust 侧 dry-run 复核：safety 闸门 + 当前可删除性（与磁盘分析一致，预检在前）
+    let preview;
+    try {
+      preview = await ipc.cleanPreview(reqs);
+    } catch (e) {
+      toast("warn", "安全预检失败：" + String(e));
+      return;
+    }
+    const blocked = preview.filter((p) => !p.allowed);
+    const allowed = preview.filter((p) => p.allowed);
+    if (allowed.length === 0) {
+      toast("warn", "所选重复组均未通过安全检查，未执行删除");
+      return;
+    }
+    const byKey = new Map(allowed.map((p) => [p.path + "|" + p.category, p]));
+    const finalReqs = reqs.filter((x) => byKey.has(x.path + "|" + x.category));
+    // 仅汇总通过预检组的副本路径
+    const copyPaths = finalReqs.flatMap((r) => r.batch_paths);
+    const copySize = finalReqs.reduce((s, r) => s + r.size_bytes, 0);
+    if (blocked.length > 0) {
+      toast("info", `${blocked.length} 组未通过安全检查，已自动排除`);
+    }
+
     confirm({
-      title: "确认删除重复副本？",
-      sub: `将删除 ${copyPaths.length} 个重复副本，每组保留 1 份最新文件（移入废纸篓，可恢复）。`,
-      warn: "core 只会删除 batch_paths 中的副本，保留每组标记为「保留」的文件。",
+      title: `删除选中的 ${finalReqs.length} 组重复副本？`,
+      sub: `将删除 ${copyPaths.length} 个重复副本、回收约 ${fmt(
+        copySize
+      )}；每组保留 1 份最新 / 项目内文件，副本移入废纸篓，误删可恢复。`,
+      warn: "只会删除下列「副本」文件，每组标记为「保留」的那一份不会动。请确认保留的是你需要的版本后再继续。",
       items: copyPaths,
-      confirmText: `删除副本 ${fmt(selectedSize)}`,
+      confirmText: `删除副本 ${fmt(copySize)}`,
       onConfirm: async () => {
         setBusy(true);
         try {
-          let preview;
-          try {
-            preview = await ipc.cleanPreview(reqs);
-          } catch (e) {
-            toast("warn", "安全预检失败：" + String(e));
-            return;
-          }
-          const okKeys = new Set(
-            preview.filter((p) => p.allowed).map((p) => p.path + "|" + p.category)
-          );
-          const finalReqs = reqs.filter((r) =>
-            okKeys.has(r.path + "|" + r.category)
-          );
-          if (finalReqs.length === 0) {
-            toast("warn", "副本均未通过安全检查，未执行");
-            return;
-          }
           const rep = await ipc.cleanExecute(finalReqs, langEn);
-          toast(
-            "success",
-            `已删除 ${rep.deleted} 组副本${rep.intercepted ? `，拦截 ${rep.intercepted} 个` : ""}`
-          );
-          // 从全局缓存移除已删组，不自动重扫；需要最新列表请手动重新扫描
-          const removed = new Set(finalReqs.map((r) => r.path));
-          removePaths("dup", removed);
-          setChecked(new Set());
+          if (rep.cancelled) {
+            toast("warn", "已取消");
+          } else {
+            toast(
+              "success",
+              `已删除 ${rep.deleted} 组副本${rep.intercepted ? `，拦截 ${rep.intercepted} 个` : ""}`
+            );
+            // 从全局缓存移除已删组，不自动重扫；需要最新列表请手动重新扫描
+            removePaths("dup", new Set(finalReqs.map((r) => r.path)));
+            setChecked(new Set());
+          }
         } catch (e) {
           toast("warn", "去重失败：" + String(e));
         } finally {
@@ -141,79 +162,115 @@ export function Dup() {
           }
         />
       ) : (
-        items.map((it) => {
-          const k = it.path;
-          const isOn = checked.has(k);
-          const isOpen = open.has(k);
-          return (
-            <div
-              key={k}
-              className={`dup-group${!it.deletable ? " disabled" : ""}`}
-              style={!it.deletable ? { opacity: 0.55 } : undefined}
-            >
-              <div
-                className={`dup-head${isOpen ? " open" : ""}`}
-                onClick={() => setOpen((s) => toggle(s, k))}
+        <>
+          {selectable.length > 0 && (
+            <div className="select-bar">
+              <span className="select-info">
+                {selectable.length} 个可清理重复组 · 已选 {selected.length} 组 ·{" "}
+                {selectedCopyCount} 个副本 · 可回收 {fmt(selectedSize)}
+              </span>
+              <div className="grow" />
+              <button
+                className="btn-secondary select-btn"
+                onClick={selectAll}
+                disabled={dupBusy || busy}
+                title="勾选全部可清理重复组（每组仍保留 1 份）"
               >
-                <Icon name="chev" size={13} className="chev" />
-                <span
-                  className="chek"
-                  style={{
-                    width: 18,
-                    height: 18,
-                    borderRadius: 5,
-                    border: "1.5px solid var(--line-2)",
-                    display: "flex",
-                    alignItems: "center",
-                    color: "#fff",
-                    background: isOn ? "var(--brand)" : "transparent",
-                    borderColor: isOn ? "var(--brand)" : "var(--line-2)",
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (it.deletable) setChecked((s) => toggle(s, k));
-                  }}
-                >
-                  <Icon name="check" size={11} />
-                </span>
-                <span className="nm" title={it.path}>
-                  {shortPath(it.path).split("/").pop()}
-                </span>
-                <span className="badge ghost">{it.batch_paths.length + 1} 个副本</span>
-                <span style={{ fontWeight: 700, fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13 }}>
-                  {fmt(it.size_bytes)}
-                </span>
-              </div>
-              <div className="dup-body" style={{ display: isOpen ? "flex" : "none" }}>
-                <div className="dup-file">
-                  <span className="fp" title={it.path}>
-                    {shortPath(it.path)}
-                  </span>
-                  <span className="keep">保留</span>
-                  <span className="sz">{fmt(it.size_bytes / (it.batch_paths.length + 1))}</span>
-                </div>
-                {it.batch_paths.map((bp) => (
-                  <div key={bp} className="dup-file">
-                    <span className="fp" title={bp}>
-                      {shortPath(bp)}
-                    </span>
-                    <span className="sz">副本 · 删除</span>
-                  </div>
-                ))}
-              </div>
+                全选
+              </button>
+              <button
+                className="btn-secondary select-btn"
+                onClick={clearAll}
+                disabled={dupBusy || busy || checked.size === 0}
+              >
+                清空
+              </button>
             </div>
-          );
-        })
+          )}
+
+          {items.map((it) => {
+            const k = it.path;
+            const isOn = checked.has(k);
+            const isOpen = open.has(k);
+            return (
+              <div
+                key={k}
+                className={`dup-group${!it.deletable ? " disabled" : ""}`}
+              >
+                <div
+                  className={`dup-head${isOpen ? " open" : ""}`}
+                  onClick={() => setOpen((s) => toggle(s, k))}
+                >
+                  <Icon name="chev" size={13} className="chev" />
+                  {it.deletable ? (
+                    <span
+                      className={`chek${isOn ? " on" : ""}`}
+                      title="选择后可删除多余副本（每组保留 1 份）"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setChecked((s) => toggle(s, k));
+                      }}
+                    >
+                      <Icon name="check" size={11} />
+                    </span>
+                  ) : (
+                    <span
+                      className="chek disabled"
+                      title={it.undeletable_reason || "受保护，不可删除"}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Icon name="lock" size={10} />
+                    </span>
+                  )}
+                  <span className="nm" title={it.path}>
+                    {shortPath(it.path).split("/").pop()}
+                  </span>
+                  <span className="badge ghost">{it.batch_paths.length + 1} 个副本</span>
+                  <span style={{ fontWeight: 700, fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13 }}>
+                    {fmt(it.size_bytes)}
+                  </span>
+                </div>
+                <div className="dup-body" style={{ display: isOpen ? "flex" : "none" }}>
+                  <div className="dup-file">
+                    <span className="fp" title={it.path}>
+                      {shortPath(it.path)}
+                    </span>
+                    <span className="keep">保留</span>
+                    <span className="sz">{fmt(it.size_bytes / (it.batch_paths.length + 1))}</span>
+                  </div>
+                  {it.batch_paths.map((bp) => (
+                    <div key={bp} className="dup-file">
+                      <span className="fp" title={bp}>
+                        {shortPath(bp)}
+                      </span>
+                      <span className="sz">副本 · 删除</span>
+                    </div>
+                  ))}
+                  {!it.deletable && (
+                    <div className="dup-reason">
+                      {it.undeletable_reason || "受系统保护，该组不可删除"}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </>
       )}
 
       {selected.length > 0 && (
         <div className="summary-bar">
           <span className="sel">
-            已选 <b>{selected.length}</b> 组 · 可回收 <b>{fmt(selectedSize)}</b>
+            已选 <b>{selected.length}</b> 组 · <b>{selectedCopyCount}</b> 个副本 · 可回收{" "}
+            <b>{fmt(selectedSize)}</b>
+          </span>
+          <span className="sel-risk">
+            <Icon name="warning" size={14} />
+            每组保留 1 份最新 / 项目内文件，仅删除多余副本并移入废纸篓，可恢复
           </span>
           <div className="grow" />
-          <button className="btn-primary danger" onClick={runDedup} disabled={busy || scanning}>
-            <Icon name="trash" size={16} /> {busy ? "正在删除…" : "删除重复副本"}
+          <button className="btn-primary danger" onClick={runDedup} disabled={busy || dupBusy}>
+            <Icon name="trash" size={16} /> {busy ? "正在删除…" : `删除副本 ${fmt(selectedSize)}`}
           </button>
         </div>
       )}

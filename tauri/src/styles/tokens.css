@@ -363,6 +363,18 @@ body{
 .dup-file .keep{color:var(--safe);font-size:11px;font-weight:600;background:var(--safe-50);padding:2px 7px;border-radius:6px;white-space:nowrap}
 .dup-file .sz{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:nowrap}
 .dup-file .fp{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46%}
+.dup-head .chek{
+  width:18px;height:18px;border-radius:5px;border:1.5px solid var(--line-2);
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  background:transparent;color:#fff;flex:none;transition:background .15s,border-color .15s;
+}
+.dup-head .chek svg{width:11px;height:11px;opacity:0;transition:opacity .15s}
+.dup-head .chek.on{background:var(--brand);border-color:var(--brand)}
+.dup-head .chek.on svg{opacity:1}
+.dup-head .chek.disabled{cursor:not-allowed;border-style:dashed;color:var(--text-3);background:transparent}
+.dup-head .chek.disabled svg{opacity:1;width:10px;height:10px}
+.dup-group.disabled{opacity:.6}
+.dup-reason{font-size:11.5px;color:var(--caution);padding:6px 16px 8px 44px}
 
 /* ===== 应用卸载 ===== */
 .app-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
