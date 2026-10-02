@@ -6,7 +6,7 @@ import { useApp } from "../lib/store";
 import { Icon } from "../components/Icon";
 import { Badge, Empty, PageHeader } from "../components/ui";
 
-type GroupRisk = "safe" | "caution" | "advanced";
+type GroupRisk = "safe" | "caution" | "advanced" | "protected";
 
 interface Group {
   name: string;
@@ -20,8 +20,11 @@ interface Group {
   advancedCount: number;
 }
 
-/** 组内最高风险：高级 > 注意 > 安全 */
+/** 组内最高风险：受保护(整组不可清理) > 高级 > 注意 > 安全 */
 function groupRisk(g: Group): GroupRisk {
+  // 整组没有任何可删除项（如微信聊天数据、Docker 虚拟机磁盘）：不是“安全可清理”，
+  // 而是“受保护不可删”，徽章与竖条用中性品牌色，避免绿色“安全”误导用户去删。
+  if (g.deletableCount === 0 && g.protectedCount > 0) return "protected";
   if (g.advancedCount > 0) return "advanced";
   if (g.cautionCount > 0) return "caution";
   return "safe";
@@ -426,7 +429,9 @@ export function Clean() {
                       <div className="t">
                         {g.name}
                         <span className="cat-tags">
-                          {risk === "advanced" ? (
+                          {risk === "protected" ? (
+                            <Badge r="Protected" />
+                          ) : risk === "advanced" ? (
                             <Badge r="Advanced" />
                           ) : risk === "caution" ? (
                             <Badge r="Caution" />
@@ -474,7 +479,7 @@ export function Clean() {
                           }`}
                           style={{ paddingLeft: 10, opacity: it.deletable ? 1 : 0.55 }}
                         >
-                          <Badge r={it.recommend} />
+                          {it.deletable ? <Badge r={it.recommend} /> : <Badge r="Protected" />}
                           <span className="fp" title={it.path}>
                             {shortPath(it.path)}
                           </span>

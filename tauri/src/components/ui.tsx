@@ -8,6 +8,7 @@ export function Badge({ r }: { r: Recommend | string }) {
     CacheOnly: { cls: "cache", t: "缓存" },
     Caution: { cls: "caution", t: "注意" },
     Advanced: { cls: "danger", t: "高级" },
+    Protected: { cls: "protected", t: "受保护" },
   };
   const m = map[r] ?? { cls: "ghost", t: r };
   return <span className={`badge ${m.cls}`}>{m.t}</span>;

@@ -131,6 +131,7 @@ body{
 .badge.danger{background:var(--danger-50);color:var(--danger)}
 .badge.cache,.badge.cache_only{background:var(--cache-50);color:var(--cache)}
 .badge.advanced{background:var(--danger-50);color:var(--danger)}
+.badge.protected{background:var(--brand-50);color:var(--brand)}
 .badge.ghost{background:transparent;color:var(--text-3);border:1px solid var(--line-2)}
 .btn-primary{
   height:38px;padding:0 20px;border:none;border-radius:10px;cursor:pointer;
@@ -335,6 +336,7 @@ body{
 .cat-card.risk-safe::before{background:var(--safe)}
 .cat-card.risk-caution::before{background:var(--caution)}
 .cat-card.risk-advanced::before{background:var(--danger)}
+.cat-card.risk-protected::before{background:var(--brand)}
 
 /* 展开的文件项：风险底色 + 描述截断 */
 .cat-items{padding:0;overflow:hidden;margin:2px 0 6px}
