@@ -131,3 +131,19 @@ export interface LogFile {
   name: string;
   size_bytes: number;
 }
+
+/** IM 只读占用分析中的一个分类（im_breakdown） */
+export interface ImPart {
+  key: string;
+  label: string;
+  size_bytes: number;
+}
+
+/** IM Documents 的只读占用构成（im_breakdown，核心 im_data::ImBreakdown） */
+export interface ImBreakdown {
+  app_name: string;
+  storage_hint: string;
+  root: string;
+  total_bytes: number;
+  parts: ImPart[];
+}

@@ -6,8 +6,9 @@
 mod commands;
 
 use commands::{
-    clean_execute, clean_preview, disk_info, logs_list, logs_read, logs_reveal, optimize_list,
-    optimize_run, palette, scan, settings_get, settings_set, startup_set_enabled, startups_list,
+    app_open, clean_execute, clean_preview, disk_info, im_breakdown, logs_list, logs_read,
+    logs_reveal, optimize_list, optimize_run, palette, scan, settings_get, settings_set,
+    startup_set_enabled, startups_list,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,6 +33,8 @@ pub fn run() {
             logs_list,
             logs_read,
             logs_reveal,
+            app_open,
+            im_breakdown,
         ])
         .setup(|_app| Ok(()))
         .run(tauri::generate_context!())

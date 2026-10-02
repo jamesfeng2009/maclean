@@ -15,6 +15,7 @@ pub mod backup;
 pub mod config;
 pub mod design_tokens;
 pub mod i18n;
+pub mod im_data;
 pub mod logger;
 pub mod ops;
 pub mod platform;

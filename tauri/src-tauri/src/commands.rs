@@ -712,6 +712,59 @@ pub fn logs_reveal() -> Result<(), String> {
     }
 }
 
+/* ======================= IM 保护：打开应用 / 只读占用分析 ======================= */
+
+/// 按 bundle id 打开本机应用（IM 数据受保护，引导用户去 App 内清理时使用）。
+///
+/// 只读/启动型操作，不触碰任何数据。bundle id 做严格字符白名单校验，
+/// 且通过 `open -b` 参数传递、不经 shell，杜绝注入。
+#[tauri::command]
+pub fn app_open(bundle_id: String) -> Result<(), String> {
+    if bundle_id.is_empty()
+        || bundle_id.len() > 255
+        || !bundle_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err("非法的应用标识".to_string());
+    }
+
+    if cfg!(target_os = "macos") {
+        let status = std::process::Command::new("open")
+            .arg("-b")
+            .arg(&bundle_id)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("无法启动打开操作: {e}"))?;
+        if status.success() {
+            maclean_core::log_scan_step(&format!("已请求打开应用: {}", bundle_id));
+            Ok(())
+        } else {
+            Err(format!("应用未安装或无法打开（{bundle_id}）"))
+        }
+    } else {
+        Err("当前系统暂不支持直接打开应用".to_string())
+    }
+}
+
+/// 对 IM（微信/QQ/企业微信）的 Documents 根做**只读**占用分析。
+///
+/// 入参路径必须严格位于 `~/Library/Containers/<受支持IM>/Data/Documents`，
+/// 否则拒绝；全程只统计目录大小，不删除、不修改任何内容。
+#[tauri::command]
+pub fn im_breakdown(path: String) -> Result<maclean_core::im_data::ImBreakdown, String> {
+    let p = std::path::Path::new(&path);
+    let app = maclean_core::im_data::im_app_for_docs_path(p)
+        .ok_or_else(|| "该路径不是受支持 IM 的数据目录，已拒绝分析".to_string())?;
+    maclean_core::log_scan_step(&format!(
+        "IM 占用分析（只读）: {} — {}",
+        app.name, path
+    ));
+    Ok(maclean_core::im_data::analyze(p))
+}
+
 /* ============================== 设置 ============================== */
 
 #[tauri::command]

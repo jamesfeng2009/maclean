@@ -363,6 +363,30 @@ body{
 .dup-file .keep{color:var(--safe);font-size:11px;font-weight:600;background:var(--safe-50);padding:2px 7px;border-radius:6px;white-space:nowrap}
 .dup-file .sz{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:nowrap}
 .dup-file .fp{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46%}
+
+/* IM（微信/QQ/企业微信）受保护数据：只引导到 App 内清理，不提供删除 */
+.im-guard{padding:10px 16px 11px 44px;background:var(--brand-50);border-bottom:1px solid var(--line)}
+.im-guard-bar{display:flex;align-items:center;gap:10px}
+.im-guard-ico{color:var(--brand);display:flex;align-items:center;flex:0 0 auto}
+.im-guard-tip{font-size:12px;color:var(--text-2);line-height:1.45;min-width:0}
+.im-guard-bar .grow{flex:1}
+.im-btn{height:28px;padding:0 12px;font-size:12px;border-radius:8px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.im-breakdown{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line-2)}
+.im-parts-hint{font-size:12px;color:var(--text-2);margin-bottom:8px}
+.im-part{display:flex;align-items:center;gap:10px;padding:3px 0;font-size:12px;color:var(--text-2)}
+.im-part-label{width:172px;flex:0 0 172px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.im-part-track{flex:1;height:7px;min-width:40px;border-radius:99px;background:var(--line);overflow:hidden}
+.im-part-fill{display:block;height:100%;border-radius:99px;background:var(--brand)}
+.im-part-size{width:72px;flex:0 0 72px;text-align:right;font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.im-part-pct{width:40px;flex:0 0 40px;text-align:right;color:var(--text-3);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+.fill-db{background:var(--danger)}
+.fill-video{background:var(--caution)}
+.fill-image{background:var(--brand)}
+.fill-file{background:#0EA5E9}
+.fill-cache{background:var(--safe)}
+.fill-backup{background:var(--text-3)}
+.fill-other{background:var(--line-2)}
+@media(max-width:760px){.im-guard{padding-left:16px}.im-part-label{width:120px;flex-basis:120px}.im-guard-bar{flex-wrap:wrap}}
 .dup-head .chek{
   width:18px;height:18px;border-radius:5px;border:1.5px solid var(--line-2);
   display:flex;align-items:center;justify-content:center;cursor:pointer;

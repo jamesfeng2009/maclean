@@ -7,6 +7,7 @@ import type {
   CleanProgress,
   CleanReport,
   DiskInfo,
+  ImBreakdown,
   LogFile,
   PreviewItem,
   ScanItem,
@@ -94,6 +95,11 @@ export const ipc = {
   logsList: () => invoke<LogFile[]>("logs_list"),
   logsRead: (name?: string) => invoke<string>("logs_read", { name: name ?? null }),
   logsReveal: () => invoke<void>("logs_reveal"),
+
+  /** 按 bundle id 打开本机应用（引导去微信/QQ 内清理，不触碰数据） */
+  appOpen: (bundleId: string) => invoke<void>("app_open", { bundleId }),
+  /** 对 IM 的 Documents 根做只读占用分析 */
+  imBreakdown: (path: string) => invoke<ImBreakdown>("im_breakdown", { path }),
 };
 
 export type { UnlistenFn };

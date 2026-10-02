@@ -10,6 +10,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use super::{dir_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use crate::im_data;
 
 /// 50MB 阈值
 const CONTAINER_MIN: u64 = 50 * 1024 * 1024;
@@ -91,8 +92,12 @@ impl Scanner for AppCacheScanner {
 
 /// 扫描应用容器缓存
 ///
-/// 通用方案：对每个容器，分别扫描缓存（Data/Library/Caches）和数据（Data/Documents），
-/// 不针对任何特定 App 做特殊处理。缓存标记为 Safe，数据标记为 Advanced，由用户自行决定。
+/// 按 macOS 沙盒目录语义分别处理：
+/// - `Data/Library/Caches`：可重建缓存，标记 Safe 可清理；
+/// - `Data/Documents`：用户数据，**一律标记为受保护、不可删除**（通用止血，
+///   不针对特定 App）——历史上它被当作"高级可删整目录"，对 IM 会连同聊天记录、
+///   收发文件一起删掉，风险不可接受。识别为微信/QQ/企业微信等 IM 时，文案额外
+///   引导到 App 内的存储空间管理，并在前端提供"打开应用"。
 fn scan_containers() -> Vec<ScanItem> {
     let home = home_dir();
     let containers_dir = home.join("Library/Containers");
@@ -111,47 +116,51 @@ fn scan_containers() -> Vec<ScanItem> {
         .collect();
 
     // 并行计算每个容器的缓存和数据大小
-    // 返回: (container_path, caches_path, caches_size, docs_path, docs_size, app_name)
-    let sized: Vec<(PathBuf, PathBuf, u64, PathBuf, u64, String)> = container_paths
-        .par_iter()
-        .filter_map(|container_path| {
-            let caches_dir = container_path.join("Data/Library/Caches");
-            let caches_size = if caches_dir.is_dir() {
-                dir_size(&caches_dir)
-            } else {
-                0
-            };
+    // 返回: (container_path, caches_path, caches_size, docs_path, docs_size, app_name, im_name)
+    let sized: Vec<(PathBuf, PathBuf, u64, PathBuf, u64, String, Option<&'static str>)> =
+        container_paths
+            .par_iter()
+            .filter_map(|container_path| {
+                let caches_dir = container_path.join("Data/Library/Caches");
+                let caches_size = if caches_dir.is_dir() {
+                    dir_size(&caches_dir)
+                } else {
+                    0
+                };
 
-            let docs_dir = container_path.join("Data/Documents");
-            let docs_size = if docs_dir.is_dir() {
-                dir_size(&docs_dir)
-            } else {
-                0
-            };
+                let docs_dir = container_path.join("Data/Documents");
+                let docs_size = if docs_dir.is_dir() {
+                    dir_size(&docs_dir)
+                } else {
+                    0
+                };
 
-            // 至少有一个超过阈值才展示
-            if caches_size < CONTAINER_MIN && docs_size < CONTAINER_MIN {
-                return None;
-            }
+                // 至少有一个超过阈值才展示
+                if caches_size < CONTAINER_MIN && docs_size < CONTAINER_MIN {
+                    return None;
+                }
 
-            let container_name = container_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            let app_name = bundle_id_to_display_name(container_name);
+                let container_name = container_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                let app_name = bundle_id_to_display_name(container_name);
+                // IM（微信/QQ/企业微信）识别成功时给出中文显示名
+                let im_name = im_data::im_app(container_name).map(|a| a.name);
 
-            Some((
-                container_path.clone(),
-                caches_dir,
-                caches_size,
-                docs_dir,
-                docs_size,
-                app_name,
-            ))
-        })
-        .collect();
+                Some((
+                    container_path.clone(),
+                    caches_dir,
+                    caches_size,
+                    docs_dir,
+                    docs_size,
+                    app_name,
+                    im_name,
+                ))
+            })
+            .collect();
 
-    for (_, caches_path, caches_size, docs_path, docs_size, app_name) in sized {
+    for (_, caches_path, caches_size, docs_path, docs_size, app_name, im_name) in sized {
         // 缓存项（Safe — 可自动重建）
         if caches_size >= CONTAINER_MIN {
             items.push(ScanItem {
@@ -166,21 +175,40 @@ fn scan_containers() -> Vec<ScanItem> {
                 description: format!("{} 的应用缓存，删除后自动重建", app_name),
             });
         }
-        // 数据项（Advanced — 用户自行判断）
+        // 数据项（Documents —— 通用受保护，不可删除；IM 给应用内清理引导）
         if docs_size >= CONTAINER_MIN {
+            let (category, description, undeletable_reason) = if let Some(im) = im_name {
+                (
+                    format!("{} 聊天数据（受保护）", im),
+                    format!(
+                        "{}的聊天记录、图片/视频与收到的文件保存在此。建议在{}「设置 → 通用 → 存储空间」中按会话管理；maclean 只做只读分析，不直接删除这些数据。",
+                        im, im
+                    ),
+                    format!(
+                        "{}聊天数据受保护，直接删除会丢失聊天记录与收发文件且难以恢复，请到{}内清理",
+                        im, im
+                    ),
+                )
+            } else {
+                (
+                    format!("{} 应用数据（受保护）", app_name),
+                    format!(
+                        "{}的文档与应用数据（可能含账号状态、下载的文件等），删除可能丢失数据并需要重新登录，建议在应用内管理。",
+                        app_name
+                    ),
+                    "应用数据目录受保护，maclean 不直接删除，请在应用内清理".to_string(),
+                )
+            };
             items.push(ScanItem {
                 path: docs_path.to_string_lossy().to_string(),
                 size_bytes: docs_size,
-                category: format!("{} 数据", app_name),
+                category,
                 selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
+                deletable: false,
+                undeletable_reason,
                 batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
-                description: format!(
-                    "{} 的应用数据（含文档、聊天记录等），删除可能导致数据丢失",
-                    app_name
-                ),
+                description,
             });
         }
     }

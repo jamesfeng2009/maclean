@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
-import type { CleanItemReq, ScanItem } from "../lib/types";
+import type { CleanItemReq, ImBreakdown, ScanItem } from "../lib/types";
 import { useApp } from "../lib/store";
 import { Icon } from "../components/Icon";
 import { Badge, Empty, PageHeader } from "../components/ui";
@@ -79,6 +79,53 @@ function groupIcon(name: string): string {
   return "folder";
 }
 
+/**
+ * 受支持 IM 的 bundle id → 中文名。须与 maclean-core `im_data::IM_APPS`
+ * 保持同步：仅用于 UI 层从扫描项路径识别"这是 IM"，权威判定仍在 Rust 侧。
+ */
+const IM_BUNDLES: Record<string, string> = {
+  "com.tencent.xinWeChat": "微信",
+  "com.tencent.qq": "QQ",
+  "com.tencent.WeWorkMac": "企业微信",
+  "com.tencent.workbuddy.mac": "企业微信",
+};
+
+/** 若扫描项路径是某 IM 的沙盒 Documents 根，返回其 bundle 与中文名 */
+function imFromPath(path: string): { bundle: string; name: string } | null {
+  const m = path.match(/\/Library\/Containers\/([^/]+)\/Data\/Documents\/?$/);
+  if (!m) return null;
+  const name = IM_BUNDLES[m[1]];
+  return name ? { bundle: m[1], name } : null;
+}
+
+/** IM 只读占用构成（消息库/视频/图片/文件/缓存… 占比条） */
+function ImBreakdownPanel({ b }: { b: ImBreakdown }) {
+  const pctOf = (n: number) => (b.total_bytes > 0 ? Math.round((n / b.total_bytes) * 100) : 0);
+  return (
+    <div className="im-parts">
+      <div className="im-parts-hint">
+        共 <b>{fmt(b.total_bytes)}</b> · 请在{b.app_name}内清理（{b.storage_hint}），maclean 不直接删除
+      </div>
+      {b.parts.map((p) => {
+        const pct = pctOf(p.size_bytes);
+        return (
+          <div className="im-part" key={p.key}>
+            <span className="im-part-label">{p.label}</span>
+            <span className="im-part-track">
+              <span
+                className={`im-part-fill fill-${p.key}`}
+                style={{ width: `${Math.max(p.size_bytes > 0 ? 2 : 0, pct)}%` }}
+              />
+            </span>
+            <span className="im-part-size">{fmt(p.size_bytes)}</span>
+            <span className="im-part-pct">{pct}%</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Clean() {
   const {
     startScan,
@@ -100,6 +147,49 @@ export function Clean() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+
+  // IM 受保护项：按需只读分析占用、打开应用
+  const [imOpen, setImOpen] = useState<Set<string>>(new Set());
+  const [imData, setImData] = useState<Record<string, ImBreakdown>>({});
+  const [imBusy, setImBusy] = useState<string | null>(null);
+  const [imErr, setImErr] = useState<Record<string, string>>({});
+
+  const toggleIm = useCallback(
+    async (it: ScanItem) => {
+      if (imOpen.has(it.path)) {
+        setImOpen((s) => {
+          const n = new Set(s);
+          n.delete(it.path);
+          return n;
+        });
+        return;
+      }
+      setImOpen((s) => new Set(s).add(it.path));
+      if (!imData[it.path] && imBusy !== it.path) {
+        setImBusy(it.path);
+        try {
+          const b = await ipc.imBreakdown(it.path);
+          setImData((d) => ({ ...d, [it.path]: b }));
+        } catch (e) {
+          setImErr((x) => ({ ...x, [it.path]: String(e) }));
+        } finally {
+          setImBusy(null);
+        }
+      }
+    },
+    [imOpen, imData, imBusy]
+  );
+
+  const openImApp = useCallback(
+    async (bundle: string, name: string) => {
+      try {
+        await ipc.appOpen(bundle);
+      } catch (e) {
+        toast("warn", `打开${name}失败：` + String(e));
+      }
+    },
+    [toast]
+  );
 
   // 页头「重新扫描」只刷新智能清理所属的 all 模块；首次空态按钮走全量体检
   const refresh = useCallback(() => {
@@ -368,9 +458,11 @@ export function Clean() {
 
                   {isOpen && (
                     <div className="card cat-items">
-                      {g.items.map((it) => (
+                      {g.items.map((it) => {
+                        const im = !it.deletable ? imFromPath(it.path) : null;
+                        return (
+                        <Fragment key={it.path}>
                         <div
-                          key={it.path}
                           className={`dup-file risk-${
                             it.deletable
                               ? it.recommend === "Advanced"
@@ -394,14 +486,55 @@ export function Clean() {
                               {it.description}
                             </span>
                           )}
-                          {!it.deletable && (
+                          {!it.deletable && !im && (
                             <span className="muted" style={{ fontSize: 11 }}>
                               {it.undeletable_reason || "受保护"}
                             </span>
                           )}
                           <span className="sz">{fmt(it.size_bytes)}</span>
                         </div>
-                      ))}
+
+                        {im && (
+                          <div className="im-guard">
+                            <div className="im-guard-bar">
+                              <span className="im-guard-ico">
+                                <Icon name="shield" size={14} />
+                              </span>
+                              <span className="im-guard-tip">{it.undeletable_reason}</span>
+                              <span className="grow" />
+                              <button
+                                type="button"
+                                className="btn-secondary im-btn"
+                                onClick={() => void toggleIm(it)}
+                              >
+                                {imOpen.has(it.path) ? "收起占用" : "查看占用构成"}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-primary im-btn"
+                                onClick={() => void openImApp(im.bundle, im.name)}
+                              >
+                                打开{im.name}
+                              </button>
+                            </div>
+                            {imOpen.has(it.path) && (
+                              <div className="im-breakdown">
+                                {imBusy === it.path ? (
+                                  <span className="muted">
+                                    正在只读统计占用，目录较大时可能需要几十秒…
+                                  </span>
+                                ) : imErr[it.path] ? (
+                                  <span className="muted">分析失败：{imErr[it.path]}</span>
+                                ) : imData[it.path] ? (
+                                  <ImBreakdownPanel b={imData[it.path]} />
+                                ) : null}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        </Fragment>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
