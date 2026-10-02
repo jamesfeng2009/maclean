@@ -533,6 +533,56 @@ pub fn contains_manifest_managed_descendant(path: &Path) -> bool {
     false
 }
 
+/// 公认可再生缓存根的**精确相对路径**（相对 home）。
+///
+/// 这些目录本质是包管理器的下载 / 内容寻址缓存，整目录删除等同于
+/// `npm cache clean --force`、`pip cache purge`、清空 pnpm store 等标准操作，
+/// 随时可重新下载生成；其内部出现 node_modules / site-packages / 打包依赖是
+/// 常态而非"项目环境"。因此第 4.6 层的「后代含清单结构就拒删祖先」对它们豁免。
+const RECLAIMABLE_CACHE_ROOT_REL: &[&str] = &[
+    ".npm",                    // npm 内容寻址缓存
+    ".cache/pip",              // pip 缓存（XDG）
+    "Library/Caches/pip",      // pip 缓存（macOS 常见位置）
+    "Library/Caches/Yarn",     // Yarn 缓存（macOS）
+    ".cache/yarn",             // Yarn 缓存（XDG）
+    "Library/pnpm/store",      // pnpm content-addressable store（macOS）
+    ".local/share/pnpm/store", // pnpm store（XDG）
+];
+
+/// 判定某路径是否为可整目录回收的缓存根（home 由调用方注入，便于单测）。
+///
+/// 刻意保持精确白名单，**不**做宽泛前缀：
+/// - 只接受白名单中的精确相对路径；
+/// - Squirrel / Mac AutoUpdate 更新器残留只认 `Library/Caches/<name>.ShipIt`
+///   这一个直接子项（中断的升级临时目录，整目录是垃圾，如
+///   `com.microsoft.VSCode.ShipIt`）。
+///
+/// `~/Library/Caches/pypoetry/virtualenvs` 这类真实虚拟环境宿主**不在**名单，
+/// 仍由后代深扫拦截。系统关键目录 / 容器数据 / .git 等红线也不受本豁免影响。
+fn reclaimable_cache_root_with_homes(path: &Path, homes: &[PathBuf]) -> bool {
+    for home in homes {
+        let Ok(rel) = path.strip_prefix(home) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy();
+        if RECLAIMABLE_CACHE_ROOT_REL.contains(&rel.as_ref()) {
+            return true;
+        }
+        // 更新器残留：Library/Caches 下的直接子项且名字以 .ShipIt 结尾
+        if let Some(name) = rel.strip_prefix("Library/Caches/") {
+            if !name.contains('/') && name.ends_with(".ShipIt") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 判定某路径是否为可整目录回收的缓存根（生产环境用受保护 home 集合）。
+fn is_reclaimable_cache_root(path: &Path) -> bool {
+    reclaimable_cache_root_with_homes(path, &protected_homes())
+}
+
 pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyCheck {
     // 当前策略对所有分类一视同仁（category 预留给后续按场景细化，如"大文件"放宽白名单）。
     // 先显式消费掉，避免误删参数后调用方悄悄失配。
@@ -708,8 +758,16 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // virtualenvs/ 子树下就是各项目的完整环境）。Monorepo依赖 豁免
     // node_modules 时一并豁免此层：npm 嵌套 node_modules 是常态，删
     // 整棵 node_modules 树正是该类目的目标。
+    //
+    // 再一个精确豁免：公认可再生的包管理器/更新器缓存根（~/.npm、
+    // ~/Library/Caches/*.ShipIt、pip/yarn/pnpm store 等）——这些目录内部
+    // 本就含解包依赖，整目录删除就是清缓存、可重新生成；不豁免会把
+    // `npm cache clean` 同类的标准清理目标（实测 ~/.npm 与 VSCode.ShipIt
+    // 更新残留共约 0.9GB）误判为危险。名单精确到路径，pypoetry virtualenvs
+    // 等真实环境宿主不在其列、仍被拦截。
     if contains_manifest_managed_descendant(&canonical)
         && !(category == "Monorepo依赖" && canonical_has_component(&canonical, "node_modules"))
+        && !is_reclaimable_cache_root(&canonical)
     {
         return SafetyCheck::Danger(format!(
             "目录内部含清单管理结构（venv/site-packages 等），拒绝删除祖先目录: {}",
@@ -2211,6 +2269,37 @@ mod tests {
         std::fs::create_dir_all(clean.join("some/app/Contents/MacOS")).unwrap();
         assert!(!contains_manifest_managed_descendant(&clean));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reclaimable_cache_roots_whitelist_boundaries() {
+        use std::path::PathBuf;
+        let h = PathBuf::from("/Users/tester");
+        let f = |rel: &str| reclaimable_cache_root_with_homes(&h.join(rel), &[h.clone()]);
+
+        // 公认可再生缓存根：放行（内部含 node_modules/site-packages 也不拦）
+        assert!(f(".npm"), "~/.npm 必须放行（npm cache clean）");
+        assert!(f(".cache/pip"));
+        assert!(f("Library/Caches/pip"));
+        assert!(f("Library/Caches/Yarn"));
+        assert!(f(".cache/yarn"));
+        assert!(f("Library/pnpm/store"));
+        assert!(f(".local/share/pnpm/store"));
+        // Squirrel 更新器残留：仅 Caches 直接子项、.ShipIt 结尾
+        assert!(f("Library/Caches/com.microsoft.VSCode.ShipIt"));
+
+        // 真实虚拟环境宿主 / 普通目录：不在名单，继续受后代深扫保护
+        assert!(!f("Library/Caches/pypoetry/virtualenvs"));
+        assert!(!f("Library/Caches/pypoetry"));
+        // .ShipIt 必须是 Caches 直接子项；嵌套或其它后缀不放行
+        assert!(!f("Library/Caches/com.microsoft.VSCode.ShipIt/sub"));
+        assert!(!f("Library/Caches/SomeShipIt"));
+        assert!(!f("Downloads/x.ShipIt"));
+        // home 之外的同名目录不放行
+        assert!(!reclaimable_cache_root_with_homes(
+            &PathBuf::from("/Volumes/External/.npm"),
+            &[h.clone()]
+        ));
     }
 
     // ---------- P0: 规则根模板校验 + 受保护根判定 ----------

@@ -13,12 +13,12 @@ export function Dup() {
     runningScopes,
     confirm,
     toast,
-    langEn,
     results,
     ready,
     scanTick,
     lastScope,
     removePaths,
+    executeClean,
   } = useApp();
   // 复用全局缓存的 dup 模块
   const items = results.dup;
@@ -106,7 +106,7 @@ export function Dup() {
       onConfirm: async () => {
         setBusy(true);
         try {
-          const rep = await ipc.cleanExecute(finalReqs, langEn);
+          const rep = await executeClean(finalReqs);
           if (rep.cancelled) {
             toast("warn", "已取消");
           } else {

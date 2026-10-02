@@ -25,8 +25,8 @@ export function Analysis() {
     startFullScan,
     confirm,
     toast,
-    langEn,
     removePaths,
+    executeClean,
   } = useApp();
   // 复用全局缓存的 large 模块
   const items = results.large;
@@ -137,7 +137,7 @@ export function Analysis() {
       onConfirm: async () => {
         setBusy(true);
         try {
-          const rep = await ipc.cleanExecute(finalReqs, langEn);
+          const rep = await executeClean(finalReqs);
           if (rep.cancelled) {
             toast("warn", "已取消");
           } else {

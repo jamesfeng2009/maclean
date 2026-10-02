@@ -3,6 +3,7 @@ import { ipc } from "../lib/ipc";
 import type { AppSettings } from "../lib/types";
 import { useApp } from "../lib/store";
 import { PageHeader } from "../components/ui";
+import { LogViewer } from "../components/LogViewer";
 
 function Switch({
   on,
@@ -45,6 +46,7 @@ function Row({
 export function Settings() {
   const { langEn, setLangEn, toast } = useApp();
   const [cfg, setCfg] = useState<AppSettings | null>(null);
+  const [showLog, setShowLog] = useState(false);
 
   useEffect(() => {
     ipc.settingsGet().then(setCfg).catch((e) => toast("warn", "读取设置失败：" + e));
@@ -127,9 +129,23 @@ export function Settings() {
         </Row>
       </div>
 
+      <div className="set-group">
+        <div className="sgh">日志与诊断</div>
+        <Row
+          title="查看运行日志"
+          desc="扫描、删除的安全拦截与成功记录都写入 ~/.maclean/logs；遇到误拦或异常时可据此排查"
+        >
+          <button className="btn-secondary" onClick={() => setShowLog(true)}>
+            查看日志
+          </button>
+        </Row>
+      </div>
+
       <div className="sub" style={{ textAlign: "center", padding: "8px 0 4px" }}>
         maclean Tauri 骨架 · 所有删除均经 maclean-core safety 闸门
       </div>
+
+      <LogViewer open={showLog} onClose={() => setShowLog(false)} />
     </div>
   );
 }

@@ -522,6 +522,13 @@ pub async fn clean_execute(
 
         let cancel = Arc::new(AtomicBool::new(false));
         let mut delete_rx: Option<std::sync::mpsc::Receiver<DeleteMessage>> = None;
+        // 进度总数需在 to_delete 被 start_delete 取走所有权之前算好：
+        // 每个顶层项 + 其 batch_paths 各算一个待处理路径。
+        let total_paths: usize = to_delete
+            .iter()
+            .map(|t| 1usize + t.2.len())
+            .sum::<usize>()
+            .max(1);
         ops::start_delete(
             to_delete,
             lang_en,
@@ -532,8 +539,28 @@ pub async fn clean_execute(
         );
 
         let mut report = CleanReport::default();
+        let mut done_paths: usize = 0;
         if let Some(rx) = delete_rx {
+            let emit_progress =
+                |app: &AppHandle, done: usize, total: usize, rep: &CleanReport, path: &str, ok: bool| {
+                    let _ = app.emit(
+                        "clean-progress",
+                        serde_json::json!({
+                            "done": done,
+                            "total": total,
+                            "pct": ((done as f64 / total as f64) * 100.0).round().min(100.0),
+                            "deleted": rep.deleted,
+                            "intercepted": rep.intercepted,
+                            "skipped": rep.skipped,
+                            "path": path,
+                            "ok": ok,
+                        }),
+                    );
+                };
             while let Ok(msg) = rx.recv() {
+                let mut last_path = String::new();
+                let mut last_ok = true;
+                let mut tick = false;
                 match msg {
                     DeleteMessage::Log(line, path, _, ok) => {
                         let _ = app.emit(
@@ -545,12 +572,20 @@ pub async fn clean_execute(
                         } else {
                             report.intercepted += 1;
                         }
+                        done_paths += 1;
+                        last_path = path;
+                        last_ok = ok;
+                        tick = true;
                     }
                     DeleteMessage::Skip(..) | DeleteMessage::Info(_) => {
                         report.skipped += 1;
+                        done_paths += 1;
+                        tick = true;
                     }
                     DeleteMessage::NeedPassword(v) => {
                         report.need_password += v.len();
+                        done_paths += v.len();
+                        tick = true;
                     }
                     DeleteMessage::BackupRecorded {
                         id,
@@ -564,12 +599,117 @@ pub async fn clean_execute(
                     DeleteMessage::Cancelled => report.cancelled = true,
                     DeleteMessage::Done => break,
                 }
+                if tick {
+                    emit_progress(
+                        &app,
+                        done_paths.min(total_paths),
+                        total_paths,
+                        &report,
+                        &last_path,
+                        last_ok,
+                    );
+                }
             }
         }
         Ok(report)
     })
     .await
     .map_err(|e| format!("清理任务异常: {e}"))?
+}
+
+/* ============================== 日志 ============================== */
+
+#[derive(Debug, Serialize)]
+pub struct LogFileDto {
+    pub name: String,
+    pub size_bytes: u64,
+}
+
+/// 列出日志目录下的 maclean_*.log（新→旧）。
+#[tauri::command]
+pub fn logs_list() -> Vec<LogFileDto> {
+    let dir = maclean_core::logger::log_dir();
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("maclean_") && name.ends_with(".log") {
+                let size_bytes = e.metadata().map(|m| m.len()).unwrap_or(0);
+                out.push(LogFileDto { name, size_bytes });
+            }
+        }
+    }
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    out
+}
+
+/// 只接受日志目录内的合法日志文件名，拒绝路径穿越 / 任意文件读取。
+fn resolve_log_file(name: Option<&str>) -> Option<PathBuf> {
+    let dir = maclean_core::logger::log_dir();
+    if let Some(name) = name {
+        if name.contains('/')
+            || name.contains('\\')
+            || name.contains("..")
+            || !name.starts_with("maclean_")
+            || !name.ends_with(".log")
+        {
+            return None;
+        }
+        let p = dir.join(name);
+        return if p.is_file() { Some(p) } else { None };
+    }
+    maclean_core::logger::latest_log_file()
+}
+
+/// 读取日志尾部（最多约 512KB），避免超大日志一次性灌入 WebView。
+/// 截断时从下一个换行开始，避免切到半行。
+#[tauri::command]
+pub fn logs_read(name: Option<String>) -> Result<String, String> {
+    let path = resolve_log_file(name.as_deref()).ok_or("没有可查看的日志文件")?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取日志失败: {e}"))?;
+    const MAX: usize = 512 * 1024;
+    let text = if bytes.len() > MAX {
+        let mut start = bytes.len() - MAX;
+        while start < bytes.len() && bytes[start] != b'\n' {
+            start += 1;
+        }
+        if start < bytes.len() {
+            start += 1;
+        }
+        String::from_utf8_lossy(&bytes[start..]).to_string()
+    } else {
+        String::from_utf8_lossy(&bytes).to_string()
+    };
+    Ok(text)
+}
+
+/// 在访达中定位最新日志文件（无日志则打开日志目录）。仅 macOS。
+#[tauri::command]
+pub fn logs_reveal() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let dir = maclean_core::logger::log_dir();
+        let target = maclean_core::logger::latest_log_file().unwrap_or_else(|| dir.clone());
+        let status = if target.is_file() {
+            std::process::Command::new("open")
+                .arg("-R")
+                .arg(&target)
+                .status()
+        } else {
+            std::process::Command::new("open")
+                .arg(&dir)
+                .status()
+        };
+        status
+            .map_err(|e| format!("无法打开访达: {e}"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "打开访达失败".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台暂不支持图形定位日志目录".to_string())
+    }
 }
 
 /* ============================== 设置 ============================== */

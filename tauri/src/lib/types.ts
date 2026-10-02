@@ -106,3 +106,28 @@ export interface ScanModuleEvent {
   status?: "start" | "done";
   items: ScanItem[];
 }
+
+/** 删除过程中的单条日志（事件名 clean-log） */
+export interface CleanLogEntry {
+  line: string;
+  path: string;
+  ok: boolean;
+}
+
+/** 删除进度（事件名 clean-progress） */
+export interface CleanProgress {
+  done: number;
+  total: number;
+  pct: number;
+  deleted: number;
+  intercepted: number;
+  skipped: number;
+  path: string;
+  ok: boolean;
+}
+
+/** 日志目录中的一个日志文件（logs_list） */
+export interface LogFile {
+  name: string;
+  size_bytes: number;
+}

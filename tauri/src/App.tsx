@@ -4,6 +4,7 @@ import { TopBar } from "./components/TopBar";
 import { ToastHost } from "./components/ToastHost";
 import { ScanOverlay } from "./components/ScanOverlay";
 import { ConfirmModal } from "./components/ConfirmModal";
+import { CleanProgress } from "./components/CleanProgress";
 import { Overview } from "./pages/Overview";
 import { Analysis } from "./pages/Analysis";
 import { Clean } from "./pages/Clean";
@@ -48,6 +49,7 @@ function Shell() {
       </div>
       <ScanOverlay />
       <ConfirmModal />
+      <CleanProgress />
       <ToastHost />
     </div>
   );

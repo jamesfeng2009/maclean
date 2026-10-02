@@ -86,13 +86,13 @@ export function Clean() {
     fullRunning,
     confirm,
     toast,
-    langEn,
     results,
     ready,
     scanTick,
     lastScope,
     startFullScan,
     removePaths,
+    executeClean,
   } = useApp();
   // 数据来自全局缓存的 all 模块：全量体检或单模块重新扫描写入后，本页直接复用
   const items = results.all;
@@ -210,7 +210,7 @@ export function Clean() {
       onConfirm: async () => {
         setBusy(true);
         try {
-          const rep = await ipc.cleanExecute(finalReqs, langEn);
+          const rep = await executeClean(finalReqs);
           if (rep.cancelled) {
             toast("warn", "清理已取消");
           } else {

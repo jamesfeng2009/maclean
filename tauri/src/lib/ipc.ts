@@ -3,8 +3,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
   CleanItemReq,
+  CleanLogEntry,
+  CleanProgress,
   CleanReport,
   DiskInfo,
+  LogFile,
   PreviewItem,
   ScanItem,
   ScanModuleEvent,
@@ -61,12 +64,36 @@ export const ipc = {
 
   cleanPreview: (items: CleanItemReq[]) =>
     invoke<PreviewItem[]>("clean_preview", { items }),
-  cleanExecute: (items: CleanItemReq[], langEn: boolean) =>
-    invoke<CleanReport>("clean_execute", { items, langEn }),
+  /**
+   * 执行清理；删除全程经 clean-log / clean-progress 事件推送，
+   * 用于全局进度遮罩与实时日志。
+   */
+  cleanExecute: async (
+    items: CleanItemReq[],
+    langEn: boolean,
+    onLog?: (l: CleanLogEntry) => void,
+    onProgress?: (p: CleanProgress) => void
+  ): Promise<CleanReport> => {
+    let unL: UnlistenFn | undefined;
+    let unP: UnlistenFn | undefined;
+    if (onLog) unL = await listen<CleanLogEntry>("clean-log", (e) => onLog(e.payload));
+    if (onProgress)
+      unP = await listen<CleanProgress>("clean-progress", (e) => onProgress(e.payload));
+    try {
+      return await invoke<CleanReport>("clean_execute", { items, langEn });
+    } finally {
+      unL?.();
+      unP?.();
+    }
+  },
 
   settingsGet: () => invoke<AppSettings>("settings_get"),
   settingsSet: (patch: Partial<AppSettings>) =>
     invoke<void>("settings_set", { patch }),
+
+  logsList: () => invoke<LogFile[]>("logs_list"),
+  logsRead: (name?: string) => invoke<string>("logs_read", { name: name ?? null }),
+  logsReveal: () => invoke<void>("logs_reveal"),
 };
 
 export type { UnlistenFn };

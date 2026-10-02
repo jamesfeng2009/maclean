@@ -9,7 +9,16 @@ import {
   type ReactNode,
 } from "react";
 import { ipc } from "./ipc";
-import type { ResultScope, ScanItem, ScanProgress, ScanScope } from "./types";
+import type {
+  CleanItemReq,
+  CleanLogEntry,
+  CleanProgress,
+  CleanReport,
+  ResultScope,
+  ScanItem,
+  ScanProgress,
+  ScanScope,
+} from "./types";
 import type { IconName } from "../components/Icon";
 
 /**
@@ -112,6 +121,17 @@ interface AppState {
   confirm: (req: ConfirmRequest) => void;
   confirmReq: ConfirmRequest | null;
   closeConfirm: () => void;
+  /** 是否正在执行删除/清理（全局，供进度遮罩拦截重复操作） */
+  cleaning: boolean;
+  /** 删除进度（已处理/总数/拦截等） */
+  cleanProgress: CleanProgress | null;
+  /** 本次删除实时日志（最近若干条，遮罩内滚动展示） */
+  cleanLogs: CleanLogEntry[];
+  /**
+   * 统一删除入口：所有页面（智能清理/重复文件/磁盘分析）都走这里，
+   * 由 store 维护全局进度与日志；调用方仍负责预览、确认弹窗与结果后处理。
+   */
+  executeClean: (reqs: CleanItemReq[]) => Promise<CleanReport>;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -162,6 +182,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [scanTick, setScanTick] = useState(0);
   const [lastScope, setLastScope] = useState<ResultScope | null>(null);
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanProgress, setCleanProgress] = useState<CleanProgress | null>(null);
+  const [cleanLogs, setCleanLogs] = useState<CleanLogEntry[]>([]);
   const toastId = useRef(0);
 
   // 主题即时生效 + 持久化
@@ -283,6 +306,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
     ipc.settingsSet({ lang_en: en }).catch(() => undefined);
   }, []);
 
+  /**
+   * 统一删除入口：重置进度/日志 → 调 IPC（订阅 clean-log/clean-progress）→
+   * 结束后复位。无论成功失败都要解除遮罩，避免删除按钮“看起来没反应”。
+   */
+  const executeClean = useCallback(
+    async (reqs: CleanItemReq[]) => {
+      setCleanLogs([]);
+      setCleanProgress(null);
+      setCleaning(true);
+      try {
+        return await ipc.cleanExecute(
+          reqs,
+          langEn,
+          (l) =>
+            setCleanLogs((prev) => {
+              const next = [...prev, l];
+              return next.length > 300 ? next.slice(next.length - 300) : next;
+            }),
+          (p) => setCleanProgress(p)
+        );
+      } finally {
+        setCleaning(false);
+      }
+    },
+    [langEn]
+  );
+
   const value = useMemo<AppState>(
     () => ({
       page,
@@ -309,6 +359,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       confirm: (req) => setConfirmReq(req),
       confirmReq,
       closeConfirm: () => setConfirmReq(null),
+      cleaning,
+      cleanProgress,
+      cleanLogs,
+      executeClean,
     }),
     [
       page,
@@ -331,6 +385,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       removePaths,
       startScan,
       confirmReq,
+      executeClean,
     ]
   );
 

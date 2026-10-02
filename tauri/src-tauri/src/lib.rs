@@ -6,12 +6,16 @@
 mod commands;
 
 use commands::{
-    clean_execute, clean_preview, disk_info, optimize_list, optimize_run, palette, scan,
-    settings_get, settings_set, startup_set_enabled, startups_list,
+    clean_execute, clean_preview, disk_info, logs_list, logs_read, logs_reveal, optimize_list,
+    optimize_run, palette, scan, settings_get, settings_set, startup_set_enabled, startups_list,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 启用跨平台文件日志（~/.maclean/logs/maclean_YYYY-MM-DD.log），
+    // 删除链路的拦截/成功都会落盘，供「设置 → 日志」查看与排障。
+    maclean_core::logger::init();
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             disk_info,
@@ -25,6 +29,9 @@ pub fn run() {
             settings_get,
             settings_set,
             palette,
+            logs_list,
+            logs_read,
+            logs_reveal,
         ])
         .setup(|_app| Ok(()))
         .run(tauri::generate_context!())
