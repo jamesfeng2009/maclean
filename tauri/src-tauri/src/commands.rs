@@ -452,7 +452,34 @@ pub fn clean_preview(items: Vec<CleanItemReq>) -> Vec<PreviewItemDto> {
     items
         .into_iter()
         .map(|it| {
-            let (allowed, reason) =
+            // 聚合项（.DS_Store / __pycache__ / Monorepo 等）：`path` 只是一段描述文字
+            // （如 "~/ 下的 .DS_Store 文件 (11 个)"），并非真实文件，真正要删的是
+            // `batch_paths` 里的每个成员。执行层 ops 对批量项也是“逐个成员过安全闸门，
+            // 命中保护的成员单独跳过、其余照常删”。预览必须与执行同口径，不能拿那段并不
+            // 存在的描述路径去过 check_deletable（必然返回不存在→整组被误拦，历史上导致
+            // “仅选安全项却提示 1 项未通过安全检查”）。
+            let (allowed, reason) = if !it.batch_paths.is_empty() {
+                let (safe_n, blocked_n) =
+                    it.batch_paths
+                        .iter()
+                        .fold((0usize, 0usize), |(s, b), bp| {
+                            match safety::check_path_safety_with_category(bp, &it.category) {
+                                SafetyCheck::Safe => (s + 1, b),
+                                // Danger/Warning 成员在执行层都会被跳过，不计入可删成员
+                                _ => (s, b + 1),
+                            }
+                        });
+                if safe_n == 0 {
+                    (false, "该组所有成员均未通过安全检查".to_string())
+                } else if blocked_n > 0 {
+                    (
+                        true,
+                        format!("{blocked_n} 个成员位于受保护目录，清理时将自动跳过"),
+                    )
+                } else {
+                    (true, String::new())
+                }
+            } else {
                 match safety::check_path_safety_with_category(&it.path, &it.category) {
                     SafetyCheck::Safe => {
                         let (ok, why) = scanner::check_deletable(&it.path);
@@ -464,7 +491,8 @@ pub fn clean_preview(items: Vec<CleanItemReq>) -> Vec<PreviewItemDto> {
                         // Warning 允许进入但保留提示（高风险走前端二次确认）
                         (ok, if why.is_empty() { r } else { why })
                     }
-                };
+                }
+            };
             PreviewItemDto {
                 path: it.path,
                 category: it.category,
@@ -833,5 +861,92 @@ fn recommend_key(r: Recommend) -> &'static str {
         Recommend::CacheOnly => "cache_only",
         Recommend::Caution => "caution",
         Recommend::Advanced => "advanced",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(path: &str, batch_paths: Vec<&str>) -> CleanItemReq {
+        CleanItemReq {
+            path: path.to_string(),
+            category: "DS_Store".to_string(),
+            batch_paths: batch_paths.into_iter().map(|s| s.to_string()).collect(),
+            size_bytes: 1,
+            recommend: "safe".to_string(),
+        }
+    }
+
+    /// 在 HOME 下建一次性测试目录，返回其路径（测试结束自行清理）
+    fn home_tmp(tag: &str) -> std::path::PathBuf {
+        let p = std::path::PathBuf::from(std::env::var("HOME").unwrap())
+            .join(format!(".maclean_preview_test_{}_{}", tag, std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn touch(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+
+    /// 回归：聚合项的 path 是描述文字（文件不存在），不能因此把整组判为不可删。
+    /// 只要 batch_paths 中存在可安全删除的成员，就应放行。
+    #[test]
+    fn preview_aggregate_uses_batch_paths_not_descriptor() {
+        let root = home_tmp("ds");
+        let safe1 = root.join("a/.DS_Store");
+        let safe2 = root.join("b/.DS_Store");
+        touch(&safe1);
+        touch(&safe2);
+
+        let out = clean_preview(vec![req(
+            "~/ 下的 .DS_Store 文件 (2 个)",
+            vec![
+                safe1.to_str().unwrap(),
+                safe2.to_str().unwrap(),
+            ],
+        )]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].allowed, "含可删成员的聚合项必须放行，旧逻辑会误拦整组");
+        assert!(out[0].reason.is_empty(), "全部成员安全时不应有提示");
+
+        // 混入一个受保护成员（node_modules 内）仍应放行，仅提示会跳过该成员
+        let guarded = root.join("proj/node_modules/.DS_Store");
+        touch(&guarded);
+        let out2 = clean_preview(vec![req(
+            "~/ 下的 .DS_Store 文件 (3 个)",
+            vec![
+                safe1.to_str().unwrap(),
+                guarded.to_str().unwrap(),
+            ],
+        )]);
+        assert!(out2[0].allowed, "部分成员受保护不应拖累整组，执行层会单独跳过");
+        assert!(out2[0].reason.contains("跳过"), "应告知有成员被跳过: {}", out2[0].reason);
+
+        // 所有成员都在受保护目录时才整组拒绝
+        let out3 = clean_preview(vec![req(
+            "~/ 下的 .DS_Store 文件 (1 个)",
+            vec![guarded.to_str().unwrap()],
+        )]);
+        assert!(!out3[0].allowed, "没有可安全删除成员时必须拒绝");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 非聚合的普通项：SIP 系统保护路径仍必须判为不可清理（保留既有硬边界）。
+    #[test]
+    fn preview_plain_sip_path_blocked() {
+        let item = CleanItemReq {
+            path: "/System/Library/Frameworks".to_string(),
+            category: "系统".to_string(),
+            batch_paths: vec![],
+            size_bytes: 1,
+            recommend: "safe".to_string(),
+        };
+        let out = clean_preview(vec![item]);
+        assert!(!out[0].allowed, "SIP 系统保护路径必须拦截");
+        assert!(!out[0].reason.is_empty(), "应给出拦截原因");
     }
 }

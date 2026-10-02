@@ -256,6 +256,15 @@ fn home_blacklist(windows: bool) -> (&'static [&'static str], &'static [&'static
     }
 }
 
+/// 凭据/配置点目录整体受前缀保护，但其中**纯可再生的客户端缓存**子目录可安全整目录
+/// 清理。此处是精确相对路径白名单（相对 home），只放行这些目录本身：
+/// - `.kube/cache`：kubectl/helm 的服务端发现缓存与 RESTMapper 缓存（
+///   `api`/`discovery`/`http` 等 json），下次执行 kubectl 时自动重建；真正的集群凭证
+///   在 `~/.kube/config`（一个文件，不在本名单）与其它子目录，仍受保护。
+///
+/// 刻意只精确到目录本身、不做前缀：缓存目录的更深层路径也不放行，避免任何放宽蔓延。
+const RECLAIMABLE_INSIDE_PROTECTED_HOME: &[&str] = &[".kube/cache"];
+
 /// 第 4 层（平台无关实现）
 ///
 /// `windows` 参数决定用哪套黑名单，由调用方注入以便测试。
@@ -268,6 +277,17 @@ fn check_home_paths_for_platform(
     // 用户主目录本身禁止删除
     if homes.iter().any(|h| canonical == *h) {
         return Some(SafetyCheck::Danger("拒绝删除用户主目录".to_string()));
+    }
+
+    // 凭据点目录内的精确可再生缓存子目录（如 ~/.kube/cache）放行：
+    // 只对白名单目录本身生效，其兄弟项（.kube/config 等）与其更深层路径仍走下面的保护。
+    for home in homes {
+        if let Ok(rel) = canonical.strip_prefix(home) {
+            let rel = rel.to_string_lossy();
+            if RECLAIMABLE_INSIDE_PROTECTED_HOME.contains(&rel.as_ref()) {
+                return None;
+            }
+        }
     }
 
     let (forbidden_exact, forbidden_prefix) = home_blacklist(windows);
@@ -2300,6 +2320,30 @@ mod tests {
             &PathBuf::from("/Volumes/External/.npm"),
             &[h.clone()]
         ));
+    }
+
+    #[test]
+    fn kube_cache_reclaimable_but_credentials_still_protected() {
+        let h = PathBuf::from("/Users/tester");
+        let f = |rel: &str| {
+            let p = h.join(rel);
+            let s = p.to_string_lossy().to_string();
+            check_home_paths_for_platform(&p, &s, &[h.clone()], false)
+        };
+
+        // kubectl 发现缓存：整目录可再生，放行进后续层
+        assert!(f(".kube/cache").is_none(), "~/.kube/cache 应放行");
+        // 凭证与目录本身：必须继续被第 4 层拦
+        assert!(f(".kube").is_some(), "~/.kube 目录本身仍受保护");
+        assert!(f(".kube/config").is_some(), "~/.kube/config 凭证必须保护");
+        assert!(
+            f(".kube/cache/discovery/apps.json").is_some(),
+            "缓存目录更深层路径不做前缀放行，仍由保护层兜底"
+        );
+        assert!(
+            f(".kube/cache2").is_some(),
+            "只有精确 .kube/cache 放行，近似目录不允许"
+        );
     }
 
     // ---------- P0: 规则根模板校验 + 受保护根判定 ----------
