@@ -4,12 +4,64 @@ import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq, ScanItem } from "../lib/types";
 import { useApp } from "../lib/store";
 import { Icon } from "../components/Icon";
-import { Badge, Empty, PageHeader, defaultSelected } from "../components/ui";
+import { Badge, Empty, PageHeader } from "../components/ui";
+
+type GroupRisk = "safe" | "caution" | "advanced";
 
 interface Group {
   name: string;
   items: ScanItem[];
+  /** 仅统计可删除项的可回收大小 */
   size: number;
+  deletableCount: number;
+  protectedCount: number;
+  safeCount: number;
+  cautionCount: number;
+  advancedCount: number;
+}
+
+/** 组内最高风险：高级 > 注意 > 安全 */
+function groupRisk(g: Group): GroupRisk {
+  if (g.advancedCount > 0) return "advanced";
+  if (g.cautionCount > 0) return "caution";
+  return "safe";
+}
+
+/** 整组可删除项是否都属于安全/缓存（默认勾选只允许这种纯安全组） */
+function isPureSafe(g: Group): boolean {
+  return g.deletableCount > 0 && g.advancedCount === 0 && g.cautionCount === 0;
+}
+
+/** 把扫描项按分类聚合成组，并统计各风险等级数量 */
+function groupItems(src: ScanItem[]): Group[] {
+  const m = new Map<string, Group>();
+  for (const it of src) {
+    let g = m.get(it.category);
+    if (!g) {
+      g = {
+        name: it.category,
+        items: [],
+        size: 0,
+        deletableCount: 0,
+        protectedCount: 0,
+        safeCount: 0,
+        cautionCount: 0,
+        advancedCount: 0,
+      };
+      m.set(it.category, g);
+    }
+    g.items.push(it);
+    if (it.deletable) {
+      g.size += it.size_bytes;
+      g.deletableCount += 1;
+      if (it.recommend === "Advanced") g.advancedCount += 1;
+      else if (it.recommend === "Caution") g.cautionCount += 1;
+      else g.safeCount += 1;
+    } else {
+      g.protectedCount += 1;
+    }
+  }
+  return [...m.values()].sort((a, b) => b.size - a.size);
 }
 
 const GROUP_ICON: Record<string, string> = {
@@ -40,28 +92,23 @@ export function Clean() {
     startScan("all", (its) => {
       setItems(its);
       setHasScanned(true);
-      // 默认勾选：安全/缓存组（与 core default_selected 一致）
-      const g = new Map<string, boolean>();
-      for (const it of its) {
-        if (it.deletable && defaultSelected(it.recommend)) g.set(it.category, true);
-      }
-      setChecked(new Set(g.keys()));
+      // 默认勾选：仅“整组都安全/缓存”的分类；含注意/高级的组默认不勾，避免默认带入风险项
+      setChecked(new Set(groupItems(its).filter(isPureSafe).map((g) => g.name)));
     });
   }, [startScan]);
 
-  const groups = useMemo<Group[]>(() => {
-    const m = new Map<string, Group>();
-    for (const it of items) {
-      let g = m.get(it.category);
-      if (!g) {
-        g = { name: it.category, items: [], size: 0 };
-        m.set(it.category, g);
-      }
-      g.items.push(it);
-      if (it.deletable) g.size += it.size_bytes;
-    }
-    return [...m.values()].sort((a, b) => b.size - a.size);
-  }, [items]);
+  const groups = useMemo(() => groupItems(items), [items]);
+
+  // 可操作的分类（至少有 1 个可删除项）
+  const selectableGroups = useMemo(() => groups.filter((g) => g.deletableCount > 0), [groups]);
+  const selectAll = useCallback(
+    (mode: "all" | "safe" | "none") => {
+      if (mode === "none") setChecked(new Set());
+      else if (mode === "safe") setChecked(new Set(selectableGroups.filter(isPureSafe).map((g) => g.name)));
+      else setChecked(new Set(selectableGroups.map((g) => g.name)));
+    },
+    [selectableGroups]
+  );
 
   const selectedItems = useMemo(
     () =>
@@ -71,8 +118,14 @@ export function Clean() {
     [items, checked]
   );
   const selectedSize = selectedItems.reduce((s, i) => s + i.size_bytes, 0);
-  const hasAdvanced = selectedItems.some(
-    (i) => i.recommend === "Advanced" || i.recommend === "Caution"
+  const selCaution = selectedItems.filter((i) => i.recommend === "Caution").length;
+  const selAdvanced = selectedItems.filter((i) => i.recommend === "Advanced").length;
+  const hasRisk = selAdvanced > 0 || selCaution > 0;
+  // 已选中的风险分类名（确认弹窗里点名告知）
+  const riskCatNames = useMemo(
+    () =>
+      [...new Set(selectedItems.filter((i) => i.recommend !== "Safe" && i.recommend !== "CacheOnly").map((i) => i.category))],
+    [selectedItems]
   );
 
   const toggleGroup = (name: string) => {
@@ -125,9 +178,9 @@ export function Clean() {
     confirm({
       title: "确认清理选中项目？",
       sub: `将把 ${finalReqs.length} 项（含副本共 ${paths.length} 个路径）移入废纸篓，可恢复。`,
-      warn: hasAdvanced
-        ? "其中包含「注意/高级」风险项：请确认你了解这些文件的用途，删除后可能需要重新下载或登录。"
-        : "操作会先经过 maclean-core 安全闸门；系统关键目录会被拦截。",
+      warn: hasRisk
+        ? `包含「注意/高级」风险项（涉及分类：${riskCatNames.join("、")}）：请确认你了解这些文件的用途，删除后可能需要重新下载、重新编译或重新登录。`
+        : "所选均为安全/缓存项；操作会先经过 maclean-core 安全闸门，系统关键目录会被拦截。",
       items: paths,
       confirmText: `安全清理 ${fmt(selectedSize)}`,
       onConfirm: async () => {
@@ -188,80 +241,144 @@ export function Clean() {
           }
         />
       ) : (
-        <div className="cat-list">
-          {groups.map((g) => {
-            const isOn = checked.has(g.name);
-            const isOpen = open.has(g.name);
-            const deletableCount = g.items.filter((i) => i.deletable).length;
-            return (
-              <div key={g.name}>
-                <div
-                  className={`cat-card${isOn ? " checked" : ""}${deletableCount === 0 ? " disabled" : ""}`}
-                  onClick={() => deletableCount > 0 && toggleGroup(g.name)}
-                >
-                  <span className="chek">
-                    <Icon name="check" size={12} />
-                  </span>
-                  <span
-                    className="ico"
-                    style={{ background: "var(--brand-50)", color: "var(--brand)" }}
-                  >
-                    <Icon name={groupIcon(g.name)} size={20} />
-                  </span>
-                  <div className="meta">
-                    <div className="t">{g.name}</div>
-                    <div className="d">
-                      {g.items.length} 项
-                      {deletableCount < g.items.length
-                        ? `（${g.items.length - deletableCount} 项受保护不可删）`
-                        : ""}
-                    </div>
-                  </div>
-                  <span className="sz">{fmt(g.size)}</span>
-                  <span
-                    className="chev-rt"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleOpen(g.name);
-                    }}
-                  >
-                    <Icon
-                      name="chev"
-                      size={16}
-                      style={{
-                        transition: "transform .2s",
-                        transform: isOpen ? "rotate(90deg)" : "none",
-                      }}
-                    />
-                  </span>
-                </div>
+        <>
+          <div className="select-bar">
+            <span className="select-info">
+              共 {selectableGroups.length} 个可清理分类 · 已选 {selectedItems.length} 项 · 可回收{" "}
+              {fmt(selectedSize)}
+            </span>
+            <div className="grow" />
+            <button
+              className="btn-secondary select-btn"
+              onClick={() => selectAll("all")}
+              disabled={scanning}
+              title="勾选所有可清理分类，包括注意/高级风险项"
+            >
+              全选
+            </button>
+            <button
+              className="btn-secondary select-btn"
+              onClick={() => selectAll("safe")}
+              disabled={scanning}
+              title="只勾选整组均为安全/缓存的分类"
+            >
+              仅选安全项
+            </button>
+            <button
+              className="btn-secondary select-btn"
+              onClick={() => selectAll("none")}
+              disabled={scanning}
+            >
+              清空
+            </button>
+          </div>
 
-                {isOpen && (
-                  <div style={{ margin: "4px 0 4px 66px" }}>
-                    {g.items.map((it) => (
-                      <div
-                        key={it.path}
-                        className="dup-file"
-                        style={{ paddingLeft: 10, opacity: it.deletable ? 1 : 0.55 }}
-                      >
-                        <Badge r={it.recommend} />
-                        <span className="fp" title={it.path}>
-                          {shortPath(it.path)}
+          <div className="cat-list">
+            {groups.map((g) => {
+              const isOn = checked.has(g.name);
+              const isOpen = open.has(g.name);
+              const disabled = g.deletableCount === 0;
+              const risk = groupRisk(g);
+              const detail = [
+                `${g.deletableCount} 项可清理`,
+                g.advancedCount > 0 ? `${g.advancedCount} 项高级` : "",
+                g.cautionCount > 0 ? `${g.cautionCount} 项注意` : "",
+                g.protectedCount > 0 ? `${g.protectedCount} 项受保护` : "",
+              ]
+                .filter(Boolean)
+                .join(" · ");
+              return (
+                <div key={g.name}>
+                  <div
+                    className={`cat-card risk-${risk}${isOn ? " checked" : ""}${disabled ? " disabled" : ""}`}
+                    onClick={() => !disabled && toggleGroup(g.name)}
+                  >
+                    <span className="chek">
+                      <Icon name="check" size={12} />
+                    </span>
+                    <span
+                      className="ico"
+                      style={{ background: "var(--brand-50)", color: "var(--brand)" }}
+                    >
+                      <Icon name={groupIcon(g.name)} size={20} />
+                    </span>
+                    <div className="meta">
+                      <div className="t">
+                        {g.name}
+                        <span className="cat-tags">
+                          {risk === "advanced" ? (
+                            <Badge r="Advanced" />
+                          ) : risk === "caution" ? (
+                            <Badge r="Caution" />
+                          ) : (
+                            <Badge r="Safe" />
+                          )}
                         </span>
-                        {!it.deletable && (
-                          <span className="muted" style={{ fontSize: 11 }}>
-                            {it.undeletable_reason || "受保护"}
-                          </span>
-                        )}
-                        <span className="sz">{fmt(it.size_bytes)}</span>
                       </div>
-                    ))}
+                      <div className="d">{detail}</div>
+                    </div>
+                    <span className="sz">{fmt(g.size)}</span>
+                    <span
+                      className="chev-rt"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleOpen(g.name);
+                      }}
+                    >
+                      <Icon
+                        name="chev"
+                        size={16}
+                        style={{
+                          transition: "transform .2s",
+                          transform: isOpen ? "rotate(90deg)" : "none",
+                        }}
+                      />
+                    </span>
                   </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+
+                  {isOpen && (
+                    <div className="card cat-items">
+                      {g.items.map((it) => (
+                        <div
+                          key={it.path}
+                          className={`dup-file risk-${
+                            it.deletable
+                              ? it.recommend === "Advanced"
+                                ? "advanced"
+                                : it.recommend === "Caution"
+                                  ? "caution"
+                                  : "safe"
+                              : "protected"
+                          }`}
+                          style={{ paddingLeft: 10, opacity: it.deletable ? 1 : 0.55 }}
+                        >
+                          <Badge r={it.recommend} />
+                          <span className="fp" title={it.path}>
+                            {shortPath(it.path)}
+                          </span>
+                          {it.description && (
+                            <span
+                              className="item-desc"
+                              title={it.description}
+                            >
+                              {it.description}
+                            </span>
+                          )}
+                          {!it.deletable && (
+                            <span className="muted" style={{ fontSize: 11 }}>
+                              {it.undeletable_reason || "受保护"}
+                            </span>
+                          )}
+                          <span className="sz">{fmt(it.size_bytes)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {selectedItems.length > 0 && (
@@ -269,6 +386,15 @@ export function Clean() {
           <span className="sel">
             已选 <b>{selectedItems.length}</b> 项 · 共 <b>{fmt(selectedSize)}</b>
           </span>
+          {hasRisk && (
+            <span className="sel-risk">
+              <Icon name="shield" size={14} />
+              {selAdvanced > 0 ? `含 ${selAdvanced} 项高级` : ""}
+              {selAdvanced > 0 && selCaution > 0 ? "、" : ""}
+              {selCaution > 0 ? `${selCaution} 项注意` : ""}
+              ，删除后可能需重新下载 / 编译 / 登录
+            </span>
+          )}
           <div className="grow" />
           <button className="btn-primary danger" onClick={runClean} disabled={busy}>
             <Icon name="trash" size={16} />

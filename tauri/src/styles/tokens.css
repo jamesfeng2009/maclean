@@ -277,6 +277,37 @@ body{
 .summary-bar .sel{font-size:13px;color:var(--text-2)}
 .summary-bar .sel b{color:var(--text);font-size:15px}
 .summary-bar .grow{flex:1}
+.summary-bar .sel-risk{
+  display:inline-flex;align-items:center;gap:6px;margin-left:12px;font-size:12px;
+  color:var(--danger);background:var(--danger-50);border-radius:8px;padding:5px 10px;white-space:nowrap;
+}
+
+/* 选择工具条（全选 / 仅安全 / 清空） */
+.select-bar{display:flex;align-items:center;gap:10px;margin:2px 0 12px;flex-wrap:wrap}
+.select-info{font-size:12.5px;color:var(--text-3)}
+.select-btn{height:30px;padding:0 12px;font-size:12.5px}
+
+/* 分类标题行内的风险徽章 */
+.cat-card{position:relative}
+.cat-card .meta .t{display:flex;align-items:center;gap:8px}
+.cat-tags{display:inline-flex;gap:6px}
+/* 卡片左侧风险色条（伪元素，不受选中/悬停边框影响） */
+.cat-card::before{
+  content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:transparent;
+}
+.cat-card.risk-safe::before{background:var(--safe)}
+.cat-card.risk-caution::before{background:var(--caution)}
+.cat-card.risk-advanced::before{background:var(--danger)}
+
+/* 展开的文件项：风险底色 + 描述截断 */
+.cat-items{padding:0;overflow:hidden;margin:2px 0 6px}
+.cat-items .dup-file{padding-top:8px;padding-bottom:8px}
+.cat-items .fp{max-width:38%}
+.dup-file.risk-caution{background:var(--caution-50)}
+.dup-file.risk-advanced{background:var(--danger-50)}
+.item-desc{
+  color:var(--text-3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:30%;
+}
 
 /* ===== 重复文件 ===== */
 .dup-group{border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;margin-bottom:12px}
