@@ -201,6 +201,15 @@ body{
 .recent .row-item:last-child{border-bottom:none}
 .recent .ic{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:0 0 30px}
 .recent .ic svg{width:15px;height:15px}
+/* 摘要模块入口：可点击、悬停高亮、箭头位移 */
+.recent .row-item.link{margin:0 -10px;padding:10px;border-radius:10px;cursor:pointer;transition:background .15s var(--ease)}
+.recent .row-item.link:hover{background:var(--brand-50)}
+.recent .rn-label{font-size:13px;color:var(--text-2);transition:color .15s var(--ease)}
+.recent .row-item.link:hover .rn-label{color:var(--brand)}
+.recent b.dim{color:var(--text-3);font-weight:600}
+.recent .chev{display:flex;align-items:center;color:var(--text-3);opacity:.7;transition:transform .15s var(--ease),color .15s var(--ease)}
+.recent .chev svg{width:14px;height:14px}
+.recent .row-item.link:hover .chev{color:var(--brand);transform:translateX(2px)}
 
 /* ===== 扫描进度 ===== */
 /* 后台扫描进度（非阻断：顶部细条 + 右下浮动卡，不拦截点击，扫描中可切页） */

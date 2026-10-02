@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt } from "../lib/format";
-import type { DiskInfo, ScanItem } from "../lib/types";
-import { useApp } from "../lib/store";
-import { Icon } from "../components/Icon";
+import type { DiskInfo, ResultScope, ScanItem } from "../lib/types";
+import { useApp, type Page } from "../lib/store";
+import { Icon, type IconName } from "../components/Icon";
 import { defaultSelected } from "../components/ui";
 
 interface CatAgg {
@@ -31,13 +31,79 @@ const CAT_ICON: Record<string, string> = {
   Conda缓存: "cpu",
 };
 
+/** 「本次扫描摘要」= 全量体检的四个模块入口：每行讲清数量含义，点击直达对应明细页 */
+interface SummaryMod {
+  scope: ResultScope;
+  page: Page;
+  label: string;
+  icon: IconName;
+  bg: string;
+  fg: string;
+  /** 右侧体量与副标题的口径解释（鼠标悬停可见） */
+  tip: string;
+  readySub: (n: number) => string;
+}
+const SUMMARY_MODS: SummaryMod[] = [
+  {
+    scope: "all",
+    page: "clean",
+    label: "缓存与应用数据",
+    icon: "clean",
+    bg: "var(--brand-50)",
+    fg: "var(--brand)",
+    tip: "开发者/浏览器缓存、应用缓存与应用数据等垃圾；右侧为默认可安全回收的空间",
+    readySub: (n) => `${n} 项，默认可安全清理`,
+  },
+  {
+    scope: "large",
+    page: "analysis",
+    label: "磁盘大文件",
+    icon: "analysis",
+    bg: "var(--cache-50)",
+    fg: "var(--cache)",
+    tip: "占用空间较大的文件；右侧为这些文件的总大小，是否处理由你决定",
+    readySub: (n) => `${n} 个大文件`,
+  },
+  {
+    scope: "dup",
+    page: "dup",
+    label: "重复文件",
+    icon: "dup",
+    bg: "var(--safe-50)",
+    fg: "var(--safe)",
+    tip: "内容完全相同的文件分组，每组保留一份、删除多余副本；右侧为可释放空间",
+    readySub: (n) => `${n} 组重复`,
+  },
+  {
+    scope: "apps",
+    page: "uninstall",
+    label: "已安装应用",
+    icon: "uninstall",
+    bg: "var(--caution-50)",
+    fg: "var(--caution)",
+    tip: "本机已安装的应用及其残留；右侧为占用空间，卸载优先走官方卸载器",
+    readySub: (n) => `${n} 个应用`,
+  },
+];
+
 export function Overview() {
-  const { scanning, setPage, toast, results, ready, startFullScan } = useApp();
+  const {
+    scanning,
+    setPage,
+    toast,
+    results,
+    ready,
+    fullRunning,
+    runningScope,
+    singleScope,
+    startFullScan,
+  } = useApp();
   const [disk, setDisk] = useState<DiskInfo | null>(null);
 
   // 可回收 / 摘要复用全局缓存的 all 模块（全量体检产出，扫一次所有页共享）
   const items = results.all;
   const hasScanned = ready.all;
+  const hasAnyScanned = Object.values(ready).some(Boolean);
 
   // 启动仅读取磁盘容量（只读系统信息），绝不自动扫描；扫描必须由用户点击触发
   useEffect(() => {
@@ -199,37 +265,75 @@ export function Overview() {
           </div>
 
           <div className="card recent">
-            <div className="h3" style={{ marginBottom: 6 }}>
-              本次扫描摘要
+            <div
+              className="row"
+              style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}
+            >
+              <div className="h3">本次扫描摘要</div>
+              {hasAnyScanned && (
+                <span className="sub" style={{ fontSize: 11 }}>
+                  点击查看明细
+                </span>
+              )}
             </div>
-            <div className="row-item">
-              <span className="ic" style={{ background: "var(--brand-50)", color: "var(--brand)" }}>
-                <Icon name="file" size={15} />
-              </span>
-              <span style={{ flex: 1 }}>发现项目</span>
-              <b>{hasScanned ? items.length : "—"}</b>
-            </div>
-            <div className="row-item">
-              <span className="ic" style={{ background: "var(--safe-50)", color: "var(--safe)" }}>
-                <Icon name="check" size={15} />
-              </span>
-              <span style={{ flex: 1 }}>安全可清理</span>
-              <b>{hasScanned ? safeCount : "—"}</b>
-            </div>
-            <div className="row-item">
-              <span className="ic" style={{ background: "var(--cache-50)", color: "var(--cache)" }}>
-                <Icon name="folder" size={15} />
-              </span>
-              <span style={{ flex: 1 }}>类别数</span>
-              <b>{hasScanned ? cats.length : "—"}</b>
-            </div>
-            <div className="row-item">
-              <span className="ic" style={{ background: "var(--caution-50)", color: "var(--caution)" }}>
-                <Icon name="zap" size={15} />
-              </span>
-              <span style={{ flex: 1 }}>预计可回收</span>
-              <b style={{ color: "var(--brand)" }}>{hasScanned ? fmt(reclaim) : "—"}</b>
-            </div>
+            {SUMMARY_MODS.map((m) => {
+              const list = results[m.scope];
+              const isReady = ready[m.scope];
+              const isRun =
+                (fullRunning && runningScope === m.scope) ||
+                (!fullRunning && singleScope === m.scope && scanning);
+              const pending = fullRunning && !isReady && !isRun;
+              // all 行右侧展示「默认可安全回收」，与磁盘卡口径一致；其余模块展示相关占用体量
+              const size =
+                m.scope === "all"
+                  ? reclaim
+                  : list.reduce((s, i) => s + i.size_bytes, 0);
+              const sub = isReady
+                ? m.scope === "all"
+                  ? `${list.length} 项 · ${safeCount} 项可安全清理`
+                  : m.readySub(list.length)
+                : isRun
+                  ? "正在扫描…"
+                  : pending
+                    ? "等待扫描"
+                    : "尚未扫描";
+              return (
+                <div
+                  key={m.scope}
+                  className="row-item link"
+                  role="button"
+                  tabIndex={0}
+                  title={m.tip}
+                  onClick={() => setPage(m.page)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setPage(m.page);
+                    }
+                  }}
+                >
+                  <span className="ic" style={{ background: m.bg, color: m.fg }}>
+                    <Icon name={m.icon} size={15} />
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span className="rn-label">{m.label}</span>
+                    <div className="sub" style={{ fontSize: 11.5, marginTop: 1 }}>
+                      {sub}
+                    </div>
+                  </span>
+                  {isReady ? (
+                    <b style={{ color: m.scope === "all" ? "var(--brand)" : "var(--text)" }}>
+                      {fmt(size)}
+                    </b>
+                  ) : (
+                    <b className="dim">—</b>
+                  )}
+                  <span className="chev">
+                    <Icon name="chev" size={14} />
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
