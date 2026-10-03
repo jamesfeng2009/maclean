@@ -90,6 +90,7 @@ export function Overview() {
   const {
     scanning,
     setPage,
+    focusClean,
     toast,
     results,
     ready,
@@ -214,7 +215,16 @@ export function Overview() {
                   <div
                     key={a.name}
                     className="reclaim-item"
-                    onClick={() => setPage("clean")}
+                    role="button"
+                    tabIndex={0}
+                    title={`查看「${a.name}」的占用明细`}
+                    onClick={() => focusClean(a.name)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        focusClean(a.name);
+                      }
+                    }}
                   >
                     <div className="rt">
                       <span className="rn">
@@ -225,12 +235,14 @@ export function Overview() {
                         />
                         {a.name}
                       </span>
+                      <Icon name="chev" size={14} className="reclaim-go" />
                     </div>
                     <span className="rs" style={{ color: "var(--brand)" }}>
                       {fmt(a.size)}
                     </span>
                     <span className="rv">
                       <span className="badge ghost">{a.count} 项</span>
+                      <span className="reclaim-detail-hint">点击查看占用明细</span>
                     </span>
                   </div>
                 ))}

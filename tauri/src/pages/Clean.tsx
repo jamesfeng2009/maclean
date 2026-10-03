@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq, ImBreakdown, ScanItem } from "../lib/types";
@@ -143,6 +143,7 @@ export function Clean() {
     startFullScan,
     removePaths,
     executeClean,
+    cleanFocus,
   } = useApp();
   // 数据来自全局缓存的 all 模块：全量体检或单模块重新扫描写入后，本页直接复用
   const items = results.all;
@@ -150,6 +151,10 @@ export function Clean() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  // 概览跳转聚焦：分组 DOM 引用 + 短暂高亮的分类名
+  const groupRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const [flashCat, setFlashCat] = useState<string | null>(null);
+  const flashTimer = useRef<number | null>(null);
 
   // IM 受保护项：按需只读分析占用、打开应用
   const [imOpen, setImOpen] = useState<Set<string>>(new Set());
@@ -215,6 +220,27 @@ export function Clean() {
   }, [scanTick]);
 
   const groups = useMemo(() => groupItems(items), [items]);
+
+  // 概览页点某分类卡片 → focusClean：自动展开该组、平滑滚动定位、短暂高亮；
+  // 微信/QQ 等 IM 受保护组额外自动展开只读占用构成。以 nonce 为触发，重复点击同项也生效。
+  useEffect(() => {
+    const f = cleanFocus;
+    if (!f) return;
+    const g = groups.find((x) => x.name === f.category);
+    if (!g) return;
+    setOpen((s) => new Set(s).add(f.category));
+    const t = window.setTimeout(() => {
+      groupRefs.current.get(f.category)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setFlashCat(f.category);
+      if (flashTimer.current) window.clearTimeout(flashTimer.current);
+      flashTimer.current = window.setTimeout(() => setFlashCat(null), 1900);
+    }, 90);
+    const imItem = g.items.find((it) => !it.deletable && imFromPath(it.path));
+    if (imItem) void toggleIm(imItem);
+    return () => window.clearTimeout(t);
+    // 仅以跳转请求(nonce)为触发，groups/toggleIm 取当次渲染闭包即可
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cleanFocus?.nonce]);
 
   // 可操作的分类（至少有 1 个可删除项）
   const selectableGroups = useMemo(() => groups.filter((g) => g.deletableCount > 0), [groups]);
@@ -411,7 +437,13 @@ export function Clean() {
                 .filter(Boolean)
                 .join(" · ");
               return (
-                <div key={g.name}>
+                <div
+                  key={g.name}
+                  ref={(el) => {
+                    groupRefs.current.set(g.name, el);
+                  }}
+                  className={flashCat === g.name ? "cat-focus" : undefined}
+                >
                   <div
                     className={`cat-card risk-${risk}${isOn ? " checked" : ""}${disabled ? " disabled" : ""}`}
                     onClick={() => toggleOpen(g.name)}

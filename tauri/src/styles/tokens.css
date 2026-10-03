@@ -184,6 +184,9 @@ body{
   background:var(--panel-2);cursor:pointer;transition:all .2s var(--ease);display:flex;flex-direction:column;gap:6px;
 }
 .reclaim-item:hover{border-color:var(--brand);transform:translateY(-2px);box-shadow:var(--shadow)}
+.reclaim-item .reclaim-go{color:var(--text-3);transition:transform .2s var(--ease),color .15s}
+.reclaim-item:hover .reclaim-go{color:var(--brand);transform:translateX(2px)}
+.reclaim-item .reclaim-detail-hint{font-size:11px;color:var(--text-3)}
 .reclaim-item .rt{display:flex;align-items:center;justify-content:space-between;gap:6px}
 .reclaim-item .rn{font-weight:600;font-size:13.5px}
 .reclaim-item .rs{font-size:18px;font-weight:700;letter-spacing:-.01em}
@@ -310,6 +313,18 @@ body{
 .cat-card .meta .d{font-size:12.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cat-card .sz{font-size:15px;font-weight:700;letter-spacing:-.01em;font-family:ui-monospace,Menlo,monospace}
 .cat-card .chev-rt{color:var(--text-3)}
+/* 概览跳转定位：分组滚动时避开顶栏；聚焦时卡片短暂高亮一圈 */
+.cat-list > div{scroll-margin-top:76px}
+@keyframes catFlash{
+  0%{box-shadow:0 0 0 0 transparent}
+  18%{box-shadow:0 0 0 3px color-mix(in srgb,var(--brand) 50%,transparent)}
+  72%{box-shadow:0 0 0 3px color-mix(in srgb,var(--brand) 50%,transparent)}
+  100%{box-shadow:0 0 0 0 transparent}
+}
+.cat-list > div.cat-focus > .cat-card{
+  border-color:var(--brand);
+  animation:catFlash 1.9s ease;
+}
 .summary-bar{
   position:sticky;bottom:18px;display:flex;align-items:center;gap:14px;
   background:color-mix(in srgb,var(--panel) 92%,transparent);

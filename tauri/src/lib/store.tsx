@@ -87,6 +87,12 @@ export interface ConfirmRequest {
 interface AppState {
   page: Page;
   setPage: (p: Page) => void;
+  /**
+   * 从概览等页面跳转到「智能清理」并聚焦某个分类：自动展开该组、滚动定位、高亮。
+   * nonce 保证重复点击同一分类也能重新触发（展开 + 高亮 + 微信占用分析）。
+   */
+  cleanFocus: { category: string; nonce: number } | null;
+  focusClean: (category: string) => void;
   theme: Theme;
   toggleTheme: () => void;
   langEn: boolean;
@@ -160,6 +166,8 @@ export const PAGE_ICON: Record<Page, IconName> = {
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [page, setPage] = useState<Page>("overview");
+  const [cleanFocus, setCleanFocus] = useState<{ category: string; nonce: number } | null>(null);
+  const cleanFocusNonce = useRef(0);
   const [theme, setTheme] = useState<Theme>(() => {
     // 优先用户手动选择；首次启动跟随系统外观
     const saved = localStorage.getItem("maclean-theme") as Theme | null;
@@ -207,6 +215,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setTimeout(() => {
       setToasts((t) => t.filter((x) => x.id !== id));
     }, 3400);
+  }, []);
+
+  /** 跳转到智能清理页并请求聚焦某个分类（每次点击 nonce 递增，重复点击同项也生效） */
+  const focusClean = useCallback((category: string) => {
+    cleanFocusNonce.current += 1;
+    setCleanFocus({ category, nonce: cleanFocusNonce.current });
+    setPage("clean");
   }, []);
 
   /** 把一个模块的扫描结果写入全局缓存并标记就绪（供全量/单模块共用） */
@@ -337,6 +352,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => ({
       page,
       setPage,
+      cleanFocus,
+      focusClean,
       theme,
       toggleTheme: () => setTheme((t) => (t === "dark" ? "light" : "dark")),
       langEn,
@@ -366,6 +383,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }),
     [
       page,
+      cleanFocus,
+      focusClean,
       theme,
       langEn,
       setLangEn,
