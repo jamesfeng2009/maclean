@@ -35,6 +35,8 @@ export function Analysis() {
   // 一键全量时缓存(all)/应用(apps)模块可能仍在后台继续跑，但 large 通常最早
   // 完成；large 一就绪就应允许用户勾选并移入废纸篓，不必等待最慢的缓存模块。
   const largeBusy = runningScopes.includes("large");
+  // 视图：大文件（递归找到的超大单文件，概览入口默认）/ 大目录（主目录顶层占用）
+  const [view, setView] = useState<"files" | "dirs">("files");
   const [open, setOpen] = useState<Set<string>>(new Set());
   // 大文件/大目录默认全部不勾（均为「高级」风险，需用户逐个确认）
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -45,11 +47,25 @@ export function Analysis() {
     void startScan("large");
   }, [startScan]);
 
-  const total = items.reduce((s, i) => s + i.size_bytes, 0);
+  // large 模块同时产出两类：category === "目录" 的是大目录排行，其余是按文件
+  // 类型（视频/磁盘镜像/压缩包/AI模型…）分类的超大单文件。
+  const files = useMemo(() => items.filter((i) => i.category !== "目录"), [items]);
+  const dirs = useMemo(() => items.filter((i) => i.category === "目录"), [items]);
+  const list = view === "files" ? files : dirs;
+
+  const filesSize = files.reduce((s, i) => s + i.size_bytes, 0);
+  const dirsSize = dirs.reduce((s, i) => s + i.size_bytes, 0);
+  const total = list.reduce((s, i) => s + i.size_bytes, 0);
+
+  const segName = useCallback(
+    (it: (typeof items)[number]) =>
+      view === "files" ? it.category : shortPath(it.path).split("/").pop() || it.category,
+    [view]
+  );
 
   const segs = useMemo<Seg[]>(() => {
     const m = new Map<string, number>();
-    for (const it of items) m.set(it.category, (m.get(it.category) ?? 0) + it.size_bytes);
+    for (const it of list) m.set(segName(it), (m.get(segName(it)) ?? 0) + it.size_bytes);
     return [...m.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10)
@@ -59,7 +75,7 @@ export function Analysis() {
         pct: total ? (size / total) * 100 : 0,
         color: COLORS[idx % COLORS.length],
       }));
-  }, [items, total]);
+  }, [list, total, segName]);
 
   // donut：用 stroke-dasharray 多段拼接
   const r = 80;
@@ -81,10 +97,10 @@ export function Analysis() {
       return n;
     });
 
-  const selectable = useMemo(() => items.filter((i) => i.deletable), [items]);
+  const selectable = useMemo(() => list.filter((i) => i.deletable), [list]);
   const selectedItems = useMemo(
-    () => items.filter((i) => checked.has(i.path) && i.deletable),
-    [items, checked]
+    () => list.filter((i) => checked.has(i.path) && i.deletable),
+    [list, checked]
   );
   const selectedSize = selectedItems.reduce((s, i) => s + i.size_bytes, 0);
 
@@ -126,12 +142,16 @@ export function Analysis() {
       toast("info", `${blocked.length} 项未通过安全检查，已自动排除`);
     }
 
+    const noun = view === "files" ? "大文件" : "大目录";
     confirm({
-      title: `删除选中的 ${finalReqs.length} 个大文件 / 大目录？`,
+      title: `删除选中的 ${finalReqs.length} 个${noun}？`,
       sub: `将把它们移入废纸篓（共 ${fmt(
         selectedSize
       )}），误删可从废纸篓恢复。`,
-      warn: "这些是你的个人大文件 / 大目录，可能包含项目代码、虚拟机镜像、开发环境或数据集；删除后可能需要重新下载、重新构建或重新登录。请确认你了解每一项的用途后再继续。",
+      warn:
+        view === "files"
+          ? "这些是你的个人超大文件（视频 / 磁盘镜像 / 压缩包 / AI 模型等），删除后可能需要重新下载。请确认你了解每一项的用途后再继续。"
+          : "这些是占用较大的文件夹，可能包含项目代码、虚拟机镜像、开发环境或数据集；删除后可能需要重新下载、重新构建或重新登录。请确认你了解每一项的用途后再继续。",
       items: finalPaths,
       confirmText: `移入废纸篓 ${fmt(selectedSize)}`,
       onConfirm: async () => {
@@ -164,7 +184,7 @@ export function Analysis() {
     <div>
       <PageHeader
         title="磁盘分析"
-        sub="大文件与大目录空间占用（按顶层分类聚合）；勾选后可移入废纸篓"
+        sub="大文件（单个 ≥100MB）与大目录空间占用；勾选后可移入废纸篓"
         action={
           <button
             className="btn-secondary"
@@ -198,18 +218,49 @@ export function Analysis() {
         />
       ) : (
         <>
+          <div className="view-switch" role="tablist" aria-label="磁盘分析视图">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "files"}
+              className={view === "files" ? "active" : ""}
+              onClick={() => setView("files")}
+              title="递归找到的单个超大文件（视频 / 镜像 / 压缩包 / AI 模型等）"
+            >
+              <Icon name="file" size={15} />
+              大文件
+              <span className="vs-meta">
+                {files.length} 个 · {fmt(filesSize)}
+              </span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "dirs"}
+              className={view === "dirs" ? "active" : ""}
+              onClick={() => setView("dirs")}
+              title="主目录下各顶层文件夹的占用排行"
+            >
+              <Icon name="folder" size={15} />
+              大目录
+              <span className="vs-meta">
+                {dirs.length} 个 · {fmt(dirsSize)}
+              </span>
+            </button>
+          </div>
+
           {selectable.length > 0 && (
             <div className="select-bar">
               <span className="select-info">
-                {selectable.length} 个可处理项目 · 已选 {selectedItems.length} 项 ·{" "}
-                {fmt(selectedSize)}
+                {selectable.length} 个可处理{view === "files" ? "大文件" : "大目录"} · 已选{" "}
+                {selectedItems.length} 项 · {fmt(selectedSize)}
               </span>
               <div className="grow" />
               <button
                 className="btn-secondary select-btn"
                 onClick={() => setChecked(new Set(selectable.map((i) => i.path)))}
                 disabled={largeBusy || busy}
-                title="大文件 / 大目录均为高级风险项，全选后请逐项确认用途"
+                title={`均为高级风险项，全选${view === "files" ? "大文件" : "大目录"}后请逐项确认用途`}
               >
                 全选
               </button>
@@ -247,7 +298,7 @@ export function Analysis() {
                 </svg>
                 <div className="center">
                   <span className="n">{fmt(total)}</span>
-                  <span className="sub">大文件合计</span>
+                  <span className="sub">{view === "files" ? "大文件合计" : "大目录合计"}</span>
                 </div>
               </div>
               <div className="legend-col">
@@ -264,14 +315,35 @@ export function Analysis() {
 
             <div className="card">
               <div className="h3" style={{ marginBottom: 8 }}>
-                占用最大的项目
+                {view === "files" ? "占用最大的大文件" : "占用最大的大目录"}
               </div>
               <div className="dirtree">
-                {items.slice(0, 40).map((it, idx) => {
+                {list.length === 0 ? (
+                  <div className="view-empty">
+                    <Icon name="analysis" size={26} />
+                    <div className="muted" style={{ marginTop: 8 }}>
+                      {view === "files"
+                        ? "未发现单个 ≥100MB 的大文件"
+                        : "未发现可展示的大目录"}
+                    </div>
+                    {view === "files" && dirs.length > 0 && (
+                      <button
+                        type="button"
+                        className="btn-secondary select-btn"
+                        style={{ marginTop: 10 }}
+                        onClick={() => setView("dirs")}
+                      >
+                        切换到「大目录」查看文件夹占用
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  list.slice(0, 40).map((it, idx) => {
                   const k = it.path;
                   const isOpen = open.has(k);
                   const isChecked = checked.has(k);
-                  const pctv = total ? Math.min(100, (it.size_bytes / items[0].size_bytes) * 100) : 0;
+                  const maxSize = list[0]?.size_bytes || 1;
+                  const pctv = total ? Math.min(100, (it.size_bytes / maxSize) * 100) : 0;
                   const baseName = shortPath(it.path).split("/").pop();
                   return (
                     <div key={k}>
@@ -301,6 +373,9 @@ export function Analysis() {
                         <span className="nm" title={it.path}>
                           {baseName}
                         </span>
+                        {view === "files" && (
+                          <span className="badge ghost ftype">{it.category}</span>
+                        )}
                         <Badge r={it.recommend} />
                         <span className="mini">
                           <i
@@ -331,7 +406,8 @@ export function Analysis() {
                       )}
                     </div>
                   );
-                })}
+                  })
+                )}
               </div>
             </div>
           </div>
@@ -345,7 +421,9 @@ export function Analysis() {
           </span>
           <span className="sel-risk">
             <Icon name="warning" size={14} />
-            均为高级风险项，可能是项目 / 虚拟机 / 开发环境，删除后可能需重新下载或构建
+            {view === "files"
+              ? "均为你的个人超大文件，删除后可能需重新下载"
+              : "均为高级风险项，可能是项目 / 虚拟机 / 开发环境，删除后可能需重新下载或构建"}
           </span>
           <div className="grow" />
           <button

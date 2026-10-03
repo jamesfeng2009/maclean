@@ -340,6 +340,16 @@ body{
   color:var(--danger);background:var(--danger-50);border-radius:8px;padding:5px 10px;white-space:nowrap;
 }
 
+/* 磁盘分析：大文件 / 大目录 视图切换 */
+.view-switch{display:inline-flex;gap:4px;margin:2px 0 12px;padding:4px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px}
+.view-switch button{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border:none;background:transparent;color:var(--text-2);font-size:13px;font-weight:600;border-radius:7px;cursor:pointer;transition:color .15s,background .15s}
+.view-switch button .vs-meta{font-size:11.5px;font-weight:500;color:var(--text-3)}
+.view-switch button:hover{color:var(--text-1)}
+.view-switch button.active{background:var(--brand);color:#fff}
+.view-switch button.active .vs-meta{color:rgba(255,255,255,.85)}
+.view-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:56px 20px;color:var(--text-3);text-align:center}
+.dir-row .ftype{font-size:10.5px;padding:1px 7px;margin-left:0}
+
 /* 选择工具条（全选 / 仅安全 / 清空） */
 .select-bar{display:flex;align-items:center;gap:10px;margin:2px 0 12px;flex-wrap:wrap}
 .select-info{font-size:12.5px;color:var(--text-3)}

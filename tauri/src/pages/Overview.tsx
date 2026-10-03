@@ -61,7 +61,7 @@ const SUMMARY_MODS: SummaryMod[] = [
     icon: "analysis",
     bg: "var(--cache-50)",
     fg: "var(--cache)",
-    tip: "占用空间较大的文件；右侧为这些文件的总大小，是否处理由你决定",
+    tip: "单个 ≥100MB 的超大文件（视频 / 镜像 / 压缩包 / AI 模型等）总大小；进磁盘分析可切换看大目录占用",
     readySub: (n) => `${n} 个大文件`,
   },
   {
@@ -290,6 +290,10 @@ export function Overview() {
             </div>
             {SUMMARY_MODS.map((m) => {
               const list = results[m.scope];
+              // large 模块同时产出大文件与大目录；概览「磁盘大文件」只取真实
+              // 大文件（单个 ≥100MB）口径，大目录占用进磁盘分析后切换视图查看。
+              const countList =
+                m.scope === "large" ? list.filter((i) => i.category !== "目录") : list;
               const isReady = ready[m.scope];
               const isRun =
                 (fullRunning && runningScopes.includes(m.scope)) ||
@@ -299,11 +303,11 @@ export function Overview() {
               const size =
                 m.scope === "all"
                   ? reclaim
-                  : list.reduce((s, i) => s + i.size_bytes, 0);
+                  : countList.reduce((s, i) => s + i.size_bytes, 0);
               const sub = isReady
                 ? m.scope === "all"
                   ? `${list.length} 项 · ${safeCount} 项可安全清理`
-                  : m.readySub(list.length)
+                  : m.readySub(countList.length)
                 : isRun
                   ? "正在扫描…"
                   : pending
