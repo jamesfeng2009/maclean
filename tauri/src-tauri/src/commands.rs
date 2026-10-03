@@ -99,29 +99,71 @@ fn post_check(items: &mut Vec<ScanItem>) {
 }
 
 /// 按 scope 运行对应扫描器（只读）。
-fn run_scanner(scope: &str) -> Vec<ScanItem> {
-    macro_rules! scan_of {
-        ($scanner:expr) => {{
-            let mut r = $scanner.scan();
-            post_check(&mut r.items);
-            r.items
-        }};
-    }
-
+/// 各扫描器的墙钟预算（**上限保险**，不是目标耗时）。
+///
+/// 正常扫描应远低于此；仅当某扫描器内部仍存在漏网的「不可取消内核 IO 永久阻塞」
+/// 时（例如一个我们没能提前识别的网络卷），到点放弃该扫描器本轮结果。这样
+/// `run_full_scan` 的模块 `join` 不会被无限拖住，前端一定能到达「体检完成」。
+#[cfg(target_os = "macos")]
+fn scanner_budget(scope: &str) -> std::time::Duration {
+    use std::time::Duration;
     match scope {
-        "dev_cache" => scan_of!(scanner::dev_cache::DevCacheScanner::new()),
-        "large" => scan_of!(scanner::large_files::LargeFileScanner::new()),
-        "dup" => scan_of!(scanner::dup_files::DuplicateFileScanner::new()),
-        #[cfg(target_os = "macos")]
-        "app_cache" => scan_of!(scanner::app_cache::AppCacheScanner::new()),
-        #[cfg(target_os = "macos")]
-        "app_data" => scan_of!(scanner::app_data::AppDataScanner::new()),
-        #[cfg(target_os = "macos")]
-        "apps" => scan_of!(scanner::uninstall::UninstallScanner::new()),
-        // 概览/智能清理页的跨扫描器聚合在 scan() 内用 run_all_scanners 处理，
-        // run_scanner("all") 不会被调到；保留分支仅为穷尽匹配。
-        "all" => Vec::new(),
-        _ => Vec::new(),
+        // 重复文件要逐个做内容哈希，天然重计算，给最宽预算。
+        "dup" => Duration::from_secs(420),
+        // 全 home 大文件遍历（遍历层已剪掉网络卷 / TCC 容器）。
+        "large" => Duration::from_secs(180),
+        "dev_cache" => Duration::from_secs(150),
+        "apps" => Duration::from_secs(120),
+        "app_cache" => Duration::from_secs(90),
+        "app_data" => Duration::from_secs(90),
+        _ => Duration::from_secs(120),
+    }
+}
+
+fn run_scanner(scope: &str) -> Vec<ScanItem> {
+    let key = scope.to_string();
+    let job = move || -> Vec<ScanItem> {
+        macro_rules! scan_of {
+            ($scanner:expr) => {{
+                let mut r = $scanner.scan();
+                post_check(&mut r.items);
+                r.items
+            }};
+        }
+
+        match key.as_str() {
+            "dev_cache" => scan_of!(scanner::dev_cache::DevCacheScanner::new()),
+            "large" => scan_of!(scanner::large_files::LargeFileScanner::new()),
+            "dup" => scan_of!(scanner::dup_files::DuplicateFileScanner::new()),
+            #[cfg(target_os = "macos")]
+            "app_cache" => scan_of!(scanner::app_cache::AppCacheScanner::new()),
+            #[cfg(target_os = "macos")]
+            "app_data" => scan_of!(scanner::app_data::AppDataScanner::new()),
+            #[cfg(target_os = "macos")]
+            "apps" => scan_of!(scanner::uninstall::UninstallScanner::new()),
+            // 概览/智能清理页的跨扫描器聚合在 scan() 内用 run_all_scanners 处理，
+            // run_scanner("all") 不会被调到；保留分支仅为穷尽匹配。
+            "all" => Vec::new(),
+            _ => Vec::new(),
+        }
+    };
+
+    // 顶层硬超时兜底：整个扫描器在独立线程内运行，调用方到点即放弃等待。
+    // 该线程即便仍阻塞在不可取消的内核 IO 上也只是被 detach（每扫描器至多一个、
+    // 数量有界、进程退出即回收），绝不阻塞 run_full_scan 的模块 join。
+    #[cfg(target_os = "macos")]
+    let budget = scanner_budget(scope);
+    #[cfg(not(target_os = "macos"))]
+    let budget = std::time::Duration::from_secs(150);
+
+    match scanner::scan_with_timeout(budget, job) {
+        Some(items) => items,
+        None => {
+            maclean_core::logger::warn(&format!(
+                "[scan] 扫描器 {scope} 超过 {budget:?} 仍未完成，本轮跳过其结果（多见于不可达的网络卷或被系统拒绝访问的目录）；其它模块结果不受影响。"
+            ));
+            Vec::new()
+        }
     }
 }
 

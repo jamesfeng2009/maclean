@@ -1009,6 +1009,10 @@ fn search_dirs(base: &Path, name: &str, max_depth: usize) -> Vec<PathBuf> {
         .filter_entry(|e| {
             // 跳过版本控制目录
             if e.depth() > 0 && e.file_type().is_dir() {
+                // 网络/FUSE 挂载点、TCC 沙盒容器不深入（readdir/stat 可能永久卡在内核）
+                if crate::scanner::fs_guard::should_skip_traversal(e.path()) {
+                    return false;
+                }
                 let dir_name = e.file_name().to_string_lossy();
                 if dir_name == ".git" || dir_name == ".svn" || dir_name == ".hg" {
                     return false;

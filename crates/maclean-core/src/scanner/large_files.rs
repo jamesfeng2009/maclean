@@ -157,8 +157,15 @@ fn collect_large_files_under(root: &Path, threshold: u64) -> Vec<(PathBuf, u64)>
                 return true;
             }
             if e.file_type().is_dir() {
+                let p = e.path();
+                // 网络/FUSE 挂载点（如 OrbStack 的 ~/OrbStack NFS）、TCC 容器：
+                // 挂载点是真目录、follow_links(false) 挡不住，必须在此显式剪枝，
+                // 否则 readdir/stat 全部走网络会把整个大文件扫描永久拖死。
+                if crate::scanner::fs_guard::should_skip_traversal(p) {
+                    return false;
+                }
                 let name = e.file_name().to_str().unwrap_or("");
-                !skip_large_file_dir(e.path(), name, depth, root)
+                !skip_large_file_dir(p, name, depth, root)
             } else {
                 true
             }

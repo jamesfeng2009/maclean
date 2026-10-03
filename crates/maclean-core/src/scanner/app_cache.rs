@@ -90,207 +90,67 @@ impl Scanner for AppCacheScanner {
 //  ~/Library/Containers
 // =========================================================================
 
-/// 扫描应用容器缓存
+/// 扫描 IM 应用容器的 Documents 占用（只读、受保护）。
 ///
-/// 按 macOS 沙盒目录语义分别处理：
-/// - `Data/Library/Caches`：可重建缓存，标记 Safe 可清理；
-/// - `Data/Documents`：用户数据，**一律标记为受保护、不可删除**（通用止血，
-///   不针对特定 App）——历史上它被当作"高级可删整目录"，对 IM 会连同聊天记录、
-///   收发文件一起删掉，风险不可接受。识别为微信/QQ/企业微信等 IM 时，文案额外
-///   引导到 App 内的存储空间管理，并在前端提供"打开应用"。
+/// 只处理 [`im_data::IM_APPS`] 白名单内的微信 / QQ / 企业微信：
+/// - 路径精确为 `~/Library/Containers/<bundle>/Data/Documents`；
+/// - 一律 `deletable=false`、标"聊天数据（受保护）"，引导到 App 内存储空间管理；
+/// - 点击后的细分占用由 `im_data::analyze`（`im_breakdown` 命令）按需完成。
+///
+/// **刻意不再无差别广扫 `~/Library/Containers`**：旧实现列出全部容器后对每个并行
+/// `dir_size`，在未获全盘访问授权时会对大量其它 App 沙盒目录逐个撞 TCC（readdir/
+/// stat 在内核卡到超时），上百个容器足以耗尽模块预算、把整个"应用缓存"拖到超时。
+/// 其它沙盒 App 容器无授权、删除高危，不扫；Docker/OrbStack 等由 dev_cache 专门
+/// 通道只读展示。
 fn scan_containers() -> Vec<ScanItem> {
     let home = home_dir();
-    let containers_dir = home.join("Library/Containers");
-    let mut items = Vec::new();
-
-    let entries = match std::fs::read_dir(&containers_dir) {
-        Ok(e) => e,
-        Err(_) => return items,
-    };
-
-    // 收集所有容器路径
-    let container_paths: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-
-    // 并行计算每个容器的缓存和数据大小
-    // 返回: (container_path, caches_path, caches_size, docs_path, docs_size, app_name, im_name)
-    let sized: Vec<(PathBuf, PathBuf, u64, PathBuf, u64, String, Option<&'static str>)> =
-        container_paths
-            .par_iter()
-            .filter_map(|container_path| {
-                let caches_dir = container_path.join("Data/Library/Caches");
-                let caches_size = if caches_dir.is_dir() {
-                    dir_size(&caches_dir)
-                } else {
-                    0
-                };
-
-                let docs_dir = container_path.join("Data/Documents");
-                let docs_size = if docs_dir.is_dir() {
-                    dir_size(&docs_dir)
-                } else {
-                    0
-                };
-
-                // 至少有一个超过阈值才展示
-                if caches_size < CONTAINER_MIN && docs_size < CONTAINER_MIN {
-                    return None;
-                }
-
-                let container_name = container_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                let app_name = bundle_id_to_display_name(container_name);
-                // IM（微信/QQ/企业微信）识别成功时给出中文显示名
-                let im_name = im_data::im_app(container_name).map(|a| a.name);
-
-                Some((
-                    container_path.clone(),
-                    caches_dir,
-                    caches_size,
-                    docs_dir,
-                    docs_size,
-                    app_name,
-                    im_name,
-                ))
-            })
-            .collect();
-
-    for (_, caches_path, caches_size, docs_path, docs_size, app_name, im_name) in sized {
-        // 缓存项（Safe — 可自动重建）
-        if caches_size >= CONTAINER_MIN {
-            items.push(ScanItem {
-                path: caches_path.to_string_lossy().to_string(),
-                size_bytes: caches_size,
-                category: format!("{} 缓存", app_name),
-                selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
-                batch_paths: Vec::new(),
-                recommend: Recommend::Safe,
-                description: format!("{} 的应用缓存，删除后自动重建", app_name),
-            });
-        }
-        // 数据项（Documents —— 通用受保护，不可删除；IM 给应用内清理引导）
-        if docs_size >= CONTAINER_MIN {
-            let (category, description, undeletable_reason) = if let Some(im) = im_name {
-                (
-                    format!("{} 聊天数据（受保护）", im),
-                    format!(
-                        "{}的聊天记录、图片/视频与收到的文件保存在此。建议在{}「设置 → 通用 → 存储空间」中按会话管理；maclean 只做只读分析，不直接删除这些数据。",
-                        im, im
-                    ),
-                    format!(
-                        "{}聊天数据受保护，直接删除会丢失聊天记录与收发文件且难以恢复，请到{}内清理",
-                        im, im
-                    ),
-                )
-            } else {
-                (
-                    format!("{} 应用数据（受保护）", app_name),
-                    format!(
-                        "{}的文档与应用数据（可能含账号状态、下载的文件等），删除可能丢失数据并需要重新登录，建议在应用内管理。",
-                        app_name
-                    ),
-                    "应用数据目录受保护，maclean 不直接删除，请在应用内清理".to_string(),
-                )
-            };
-            items.push(ScanItem {
-                path: docs_path.to_string_lossy().to_string(),
+    im_data::IM_APPS
+        .par_iter()
+        .filter_map(|im| {
+            let docs_dir = home
+                .join("Library/Containers")
+                .join(im.bundle)
+                .join("Data")
+                .join("Documents");
+            // 交给带超时的 dir_size：不存在 / 无授权 / IO 卡都在有界时间内返回 0 或
+            // 部分值，故此处不再先做会裸卡在内核的 is_dir 探测。
+            let docs_size = dir_size(&docs_dir);
+            if docs_size < CONTAINER_MIN {
+                return None;
+            }
+            Some(ScanItem {
+                path: docs_dir.to_string_lossy().to_string(),
                 size_bytes: docs_size,
-                category,
+                category: format!("{} 聊天数据（受保护）", im.name),
                 selected: false,
                 deletable: false,
-                undeletable_reason,
+                undeletable_reason: format!(
+                    "{}聊天数据受保护，直接删除会丢失聊天记录与收发文件且难以恢复，请到{}内清理",
+                    im.name, im.name
+                ),
                 batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
-                description,
-            });
-        }
-    }
-
-    items
-}
-
-/// 将 bundle ID 转换为用户友好的显示名称
-///
-/// 通用方案：取 bundle ID 最后一段作为名称（如 com.tencent.xinWeChat → xinWeChat）。
-/// 不硬编码任何特定 App 名称，适用于所有应用。
-fn bundle_id_to_display_name(bundle_id: &str) -> String {
-    bundle_id
-        .split('.')
-        .next_back()
-        .unwrap_or(bundle_id)
-        .to_string()
+                description: format!(
+                    "{}的聊天记录、图片/视频与收到的文件保存在此。建议在{}中按会话管理；maclean 只做只读分析，不直接删除这些数据。",
+                    im.name, im.storage_hint
+                ),
+            })
+        })
+        .collect()
 }
 
 // =========================================================================
 //  ~/Library/Group Containers
 // =========================================================================
 
-/// 扫描 Group Containers
-fn scan_group_containers() -> Vec<ScanItem> {
-    let home = home_dir();
-    let group_dir = home.join("Library/Group Containers");
-    let mut items = Vec::new();
-
-    let entries = match std::fs::read_dir(&group_dir) {
-        Ok(e) => e,
-        Err(_) => return items,
-    };
-
-    let paths: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-
-    let sized: Vec<(PathBuf, u64, String)> = paths
-        .par_iter()
-        .filter_map(|path| {
-            let caches = path.join("Library/Caches");
-            let size = if caches.is_dir() {
-                dir_size(&caches)
-            } else {
-                0
-            };
-
-            if size >= CONTAINER_MIN {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let display = group_container_display_name(name);
-                Some((caches, size, display))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (cache_path, size, display) in sized {
-        items.push(ScanItem {
-            path: cache_path.to_string_lossy().to_string(),
-            size_bytes: size,
-            category: display,
-            selected: false,
-            deletable: true,
-            undeletable_reason: String::new(),
-            batch_paths: Vec::new(),
-            recommend: Recommend::Caution,
-            description: "应用组缓存，删除后可能需重新配置".to_string(),
-        });
-    }
-
-    items
-}
-
-/// Group Containers 名称映射
+/// 组容器通用缓存扫描**已停用**（返回空）。
 ///
-/// 通用方案：直接使用目录名作为显示名，不做任何 App 特殊处理。
-fn group_container_display_name(id: &str) -> String {
-    id.to_string()
+/// `~/Library/Group Containers` 是各 App 的共享容器，未授权时同样逐个撞 TCC、很难
+/// 读到；其内容又常含登录态 / 共享配置，通用"Caches 可删"风险高。OrbStack 等组容器
+/// 占用由 dev_cache 专门通道只读展示，IM 共享数据体现在其 Documents 占用与
+/// `im_data::analyze` 的细分里。保留空函数以维持 `scan()` 调用点稳定。
+fn scan_group_containers() -> Vec<ScanItem> {
+    Vec::new()
 }
 
 // =========================================================================
@@ -420,6 +280,12 @@ fn scan_app_support_caches() -> Vec<ScanItem> {
         .filter_entry(|e| {
             // 跳过隐藏目录（如 .vscode 内部不再深入）
             if e.depth() > 0 {
+                // 网络/FUSE 挂载点、TCC 沙盒容器不深入（避免 readdir/stat 卡在内核）
+                if e.file_type().is_dir()
+                    && crate::scanner::fs_guard::should_skip_traversal(e.path())
+                {
+                    return false;
+                }
                 if let Some(name) = e.file_name().to_str() {
                     if name.starts_with('.') && e.depth() > 1 {
                         return false;

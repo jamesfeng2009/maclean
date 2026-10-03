@@ -21,6 +21,10 @@ pub mod app_cache;
 pub mod app_data;
 pub mod cache_registry;
 pub mod dev_cache;
+// 文件系统遍历护栏（网络/FUSE 挂载点 + TCC 容器快跳）与有界阻塞 IO 池：
+// 必须先于各扫描器声明，供 dir_size / read_dir 及具体扫描器复用。
+pub mod fs_guard;
+pub mod io_pool;
 pub mod dup_files;
 pub mod large_files;
 pub mod optimize;
@@ -177,6 +181,14 @@ const DIR_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
 /// 休眠唤醒 / 刚挂载的外置磁盘足够时间，尽量一次就统计准确。
 const ACCURATE_DIR_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// TCC 沙盒容器内目录的枚举超时（快速失败）。
+///
+/// 未授权访问其它 App 的 `Containers` / `Group Containers` 时，readdir/stat 往往
+/// 卡在内核等待；容器路径因此用比普通目录短得多的预算：真正可读的（本机 IM、
+/// Docker/OrbStack 自身数据）枚举本身是毫秒级，2s 绰绰有余；读不到的也不硬等
+/// 10s，贴合"容器快速跳过、不硬等"。
+const TCC_DIR_SCAN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// 快速统计（清理扫描）的遍历最大深度；磁盘分析的准确统计不受此限。
 const DIR_MAX_DEPTH: usize = 50;
 
@@ -186,22 +198,39 @@ const DIR_MAX_DEPTH: usize = 50;
 /// 调用方直接跳过该目录——单个坏目录不再阻塞整个扫描流程。
 /// 与 dir_size 的目录级隔离共用 DIR_SCAN_TIMEOUT。
 pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    // 网络 / FUSE 挂载点：直接判定不可枚举、调用方按跳过处理，绝不发起一个注定
+    // 会卡在内核（甚至比超时更久）的 readdir。TCC 沙盒容器不在此一刀切 —— 卸载器、
+    // Docker/OrbStack 等存在对「具体容器路径」的合法只读访问，交由有界 IO 池超时
+    // 去「能读则读、卡则快速跳过」。
+    if fs_guard::is_remote_path(dir) {
+        return None;
+    }
+    // 容器内目录给更短预算（TCC 快速失败），普通目录用标准枚举超时。
+    let timeout = if fs_guard::is_tcc_sandbox_container(dir) {
+        TCC_DIR_SCAN_TIMEOUT
+    } else {
+        DIR_SCAN_TIMEOUT
+    };
     let d = dir.to_path_buf();
-    std::thread::spawn(move || {
-        let mut paths: Vec<PathBuf> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&d) {
-            for e in entries.flatten() {
-                paths.push(e.path());
+    // 枚举跑在有界阻塞 IO 池里：即便底层 readdir 卡死，被占住的也只是池内固定
+    // 名额，调用方到点放弃等待即可，不再为每个目录泄漏一个 detached 线程。
+    let paths = io_pool::run_with_timeout(
+        move || {
+            let mut paths: Vec<PathBuf> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&d) {
+                for e in entries.flatten() {
+                    paths.push(e.path());
+                }
             }
-        }
-        let _ = tx.send(paths);
-    });
-    match rx.recv_timeout(DIR_SCAN_TIMEOUT) {
-        Ok(paths) => Some(paths),
-        Err(_) => {
+            paths
+        },
+        timeout,
+    );
+    match paths {
+        Some(paths) => Some(paths),
+        None => {
             crate::logger::warn(&format!(
-                "[read_dir] 目录遍历超时（IO 卡死），跳过: {}",
+                "[read_dir] 目录遍历超时/失败（IO 卡死），跳过: {}",
                 dir.display()
             ));
             None
@@ -227,6 +256,12 @@ pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
 /// 遇到无法访问的文件/目录时直接跳过，不报错。
 pub fn dir_size_impl(path: &Path) -> (u64, bool) {
     use rayon::prelude::*;
+    // 网络 / FUSE 挂载点：不深入统计（不可达），直接给「不完整、占用未知」。
+    // TCC 容器不在此一刀切（Docker/OrbStack 等具体容器路径需要可只读统计），
+    // 它们走有界 IO 池：能读则读、卡则按目录超时剪枝，不会永久挂起。
+    if fs_guard::is_remote_path(path) {
+        return (0, true);
+    }
     let mut total: u64 = 0;
     let mut skipped = false;
     let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
@@ -261,46 +296,56 @@ pub fn dir_size_impl(path: &Path) -> (u64, bool) {
                     }
                 }
 
-                // 每个目录在独立线程枚举，超时等待（可中断的目录级 watchdog）
-                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                // 枚举跑在有界阻塞 IO 池、超时等待（可中断的目录级 watchdog）。
+                // 池把卡死的内核 readdir 限制在固定名额内；rayon worker 只做有超时
+                // 的等待、不会被永久占用，整轮扫描因此不会被僵尸 IO 拖垮。
+                // 容器内目录用短超时快速失败（TCC 不硬等），普通目录用标准超时。
+                let per_dir_timeout = if fs_guard::is_tcc_sandbox_container(&dir) {
+                    TCC_DIR_SCAN_TIMEOUT
+                } else {
+                    DIR_SCAN_TIMEOUT
+                };
                 let dir_task = dir.clone();
-                std::thread::spawn(move || {
-                    let mut files_size: u64 = 0;
-                    let mut subdirs: Vec<PathBuf> = Vec::new();
-                    if let Ok(entries) = std::fs::read_dir(&dir_task) {
-                        for e in entries.flatten() {
-                            // file_type() 是 lstat 语义：目录符号链接 is_dir()=false，
-                            // 天然不跟随链接（与 follow_links(false) 一致）
-                            if let Ok(ft) = e.file_type() {
-                                if ft.is_dir() {
-                                    subdirs.push(e.path());
-                                } else if ft.is_file() {
-                                    if let Ok(meta) = e.metadata() {
-                                        // 用 st_blocks×512（实际磁盘占用）而非 len()
-                                        // （逻辑大小）：APFS 稀疏文件（VM 镜像、
-                                        // Docker/OrbStack 磁盘）len() 会虚高——
-                                        // 实测 OrbStack 容器目录按 len 算 995G，
-                                        // 超过整机磁盘 926G，明显是稀疏文件误计。
-                                        #[cfg(unix)]
-                                        {
-                                            use std::os::unix::fs::MetadataExt;
-                                            files_size += meta.blocks() * 512;
-                                        }
-                                        #[cfg(not(unix))]
-                                        {
-                                            files_size += meta.len();
+                let enumerated = io_pool::run_with_timeout(
+                    move || {
+                        let mut files_size: u64 = 0;
+                        let mut subdirs: Vec<PathBuf> = Vec::new();
+                        if let Ok(entries) = std::fs::read_dir(&dir_task) {
+                            for e in entries.flatten() {
+                                // file_type() 是 lstat 语义：目录符号链接 is_dir()=false，
+                                // 天然不跟随链接（与 follow_links(false) 一致）
+                                if let Ok(ft) = e.file_type() {
+                                    if ft.is_dir() {
+                                        subdirs.push(e.path());
+                                    } else if ft.is_file() {
+                                        if let Ok(meta) = e.metadata() {
+                                            // 用 st_blocks×512（实际磁盘占用）而非 len()
+                                            // （逻辑大小）：APFS 稀疏文件（VM 镜像、
+                                            // Docker/OrbStack 磁盘）len() 会虚高——
+                                            // 实测 OrbStack 容器目录按 len 算 995G，
+                                            // 超过整机磁盘 926G，明显是稀疏文件误计。
+                                            #[cfg(unix)]
+                                            {
+                                                use std::os::unix::fs::MetadataExt;
+                                                files_size += meta.blocks() * 512;
+                                            }
+                                            #[cfg(not(unix))]
+                                            {
+                                                files_size += meta.len();
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    let _ = tx.send((files_size, subdirs));
-                });
+                        (files_size, subdirs)
+                    },
+                    per_dir_timeout,
+                );
 
-                match rx.recv_timeout(DIR_SCAN_TIMEOUT) {
-                    Ok((files_size, subdirs)) => (depth, false, files_size, subdirs, None),
-                    Err(_) => (depth, true, 0, Vec::new(), Some(dir)),
+                match enumerated {
+                    Some((files_size, subdirs)) => (depth, false, files_size, subdirs, None),
+                    None => (depth, true, 0, Vec::new(), Some(dir)),
                 }
             })
             .collect();
@@ -322,6 +367,12 @@ pub fn dir_size_impl(path: &Path) -> (u64, bool) {
             }
             total += files_size;
             for sub in subdirs {
+                // 下钻前快跳网络 / FUSE 挂载点：挂载点是真目录、不跟随链接挡不住，
+                // 在此剪枝才能避免对其子项发起走网络、会卡在内核的 readdir/stat。
+                if fs_guard::is_remote_path(&sub) {
+                    skipped = true;
+                    continue;
+                }
                 queue.push_back((sub, _depth + 1));
             }
         }
@@ -355,7 +406,11 @@ pub fn dir_size(path: &Path) -> u64 {
 pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
     use rayon::prelude::*;
     use std::collections::VecDeque;
-    use std::sync::mpsc::sync_channel;
+
+    // 网络 / FUSE 挂载点不深入统计（不可达）；TCC 容器交由有界池超时处理。
+    if fs_guard::is_remote_path(path) {
+        return (0, true);
+    }
 
     let mut total: u64 = 0;
     let mut incomplete = false;
@@ -383,40 +438,48 @@ pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
                     }
                 }
 
-                let (tx, rx) = sync_channel(1);
+                // 有界阻塞 IO 池 + 宽松 watchdog：卡死的内核 readdir 只占池内固定
+                // 名额，不泄漏 detached 线程；一个坏目录最多让本项标 incomplete。
+                // 容器内目录短超时快速失败（TCC 不硬等），其它目录用宽松准确统计超时。
+                let per_dir_timeout = if fs_guard::is_tcc_sandbox_container(&dir) {
+                    TCC_DIR_SCAN_TIMEOUT
+                } else {
+                    ACCURATE_DIR_TIMEOUT
+                };
                 let task = dir.clone();
-                std::thread::spawn(move || {
-                    let mut files_size: u64 = 0;
-                    let mut subdirs: Vec<PathBuf> = Vec::new();
-                    if let Ok(entries) = std::fs::read_dir(&task) {
-                        for e in entries.flatten() {
-                            if let Ok(ft) = e.file_type() {
-                                if ft.is_dir() {
-                                    subdirs.push(e.path());
-                                } else if ft.is_file() {
-                                    if let Ok(meta) = e.metadata() {
-                                        #[cfg(unix)]
-                                        {
-                                            use std::os::unix::fs::MetadataExt;
-                                            files_size += meta.blocks() * 512;
-                                        }
-                                        #[cfg(not(unix))]
-                                        {
-                                            files_size += meta.len();
+                let enumerated = io_pool::run_with_timeout(
+                    move || {
+                        let mut files_size: u64 = 0;
+                        let mut subdirs: Vec<PathBuf> = Vec::new();
+                        if let Ok(entries) = std::fs::read_dir(&task) {
+                            for e in entries.flatten() {
+                                if let Ok(ft) = e.file_type() {
+                                    if ft.is_dir() {
+                                        subdirs.push(e.path());
+                                    } else if ft.is_file() {
+                                        if let Ok(meta) = e.metadata() {
+                                            #[cfg(unix)]
+                                            {
+                                                use std::os::unix::fs::MetadataExt;
+                                                files_size += meta.blocks() * 512;
+                                            }
+                                            #[cfg(not(unix))]
+                                            {
+                                                files_size += meta.len();
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    let _ = tx.send((files_size, subdirs));
-                });
+                        (files_size, subdirs)
+                    },
+                    per_dir_timeout,
+                );
 
-                match rx.recv_timeout(ACCURATE_DIR_TIMEOUT) {
-                    Ok((files_size, subdirs)) => {
-                        (depth, false, files_size, subdirs, None)
-                    }
-                    Err(_) => (depth, true, 0, Vec::new(), Some(dir)),
+                match enumerated {
+                    Some((files_size, subdirs)) => (depth, false, files_size, subdirs, None),
+                    None => (depth, true, 0, Vec::new(), Some(dir)),
                 }
             })
             .collect();
@@ -439,6 +502,11 @@ pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
             }
             total += files_size;
             for sub in subdirs {
+                // 下钻前快跳网络 / FUSE 挂载点；未计入的子树标 incomplete（下限）。
+                if fs_guard::is_remote_path(&sub) {
+                    incomplete = true;
+                    continue;
+                }
                 queue.push_back((sub, depth + 1));
             }
         }
