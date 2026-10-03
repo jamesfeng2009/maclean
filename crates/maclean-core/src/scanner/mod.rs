@@ -168,58 +168,17 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// 单目录遍历超时：超过视为该目录磁盘 IO 卡死，跳过并记入黑名单
+/// 单目录遍历超时：超过视为该目录本次枚举磁盘 IO 卡死，**仅本次统计**跳过其子树。
+/// 不落盘、不跨扫描记忆——下次扫描会无条件重新尝试（慢盘唤醒 / 外置盘重新挂载
+/// 后即可自然恢复，避免一次偶发卡顿把目录长期判小）。
 const DIR_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 磁盘分析「大目录」准确统计的单目录枚举超时：比清理扫描更宽松，给慢盘 /
-/// 休眠唤醒 / 刚挂载的外置磁盘足够时间，避免一次偶发卡顿就把整棵大目录判小。
-/// 仅作用于磁盘分析；已知卡死目录仍会被黑名单在 TTL 内秒级跳过。
+/// 休眠唤醒 / 刚挂载的外置磁盘足够时间，尽量一次就统计准确。
 const ACCURATE_DIR_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// 遍历最大深度（与原 WalkDir 行为一致）
+/// 快速统计（清理扫描）的遍历最大深度；磁盘分析的准确统计不受此限。
 const DIR_MAX_DEPTH: usize = 50;
-
-/// 黑名单有效期（秒）：7 天。过期后目录会被重新尝试扫描，
-/// 避免磁盘恢复后永久误跳过。
-const BLOCKED_TTL_SECS: u64 = 7 * 24 * 60 * 60;
-
-/// 黑名单文件：上次遍历卡死的目录（~/.maclean/blocked_dirs.json）
-fn blocked_dirs_file() -> PathBuf {
-    home_dir().join(".maclean/blocked_dirs.json")
-}
-
-/// 当前 Unix 秒（取不到时钟时返回 0）
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// 读取黑名单原始条目 `(path, 加入时间戳)`，并过滤掉已超过 [`BLOCKED_TTL_SECS`]
-/// 的过期项（过期目录会在下次访问时被重新真正尝试，实现自愈）。
-fn load_blocked_entries() -> Vec<(PathBuf, u64)> {
-    let path = blocked_dirs_file();
-    let Ok(s) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let Ok(list) = serde_json::from_str::<Vec<(String, u64)>>(&s) else {
-        return Vec::new();
-    };
-    let now = now_secs();
-    list.into_iter()
-        .map(|(p, ts)| (PathBuf::from(p), ts))
-        .filter(|(_, ts)| now.saturating_sub(*ts) < BLOCKED_TTL_SECS)
-        .collect()
-}
-
-/// 读取黑名单（过滤过期条目）
-pub fn load_blocked_dirs() -> std::collections::HashSet<PathBuf> {
-    load_blocked_entries()
-        .into_iter()
-        .map(|(p, _)| p)
-        .collect()
-}
 
 /// 带超时的目录枚举：返回子路径列表。
 ///
@@ -250,156 +209,46 @@ pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
     }
 }
 
-/// 把新路径合并进黑名单条目列表（纯函数，便于单测）：
-/// - **保留每个已有条目的原始时间戳**（这是 TTL 能真正过期的关键）；
-/// - 仅给新条目分配 `now`；
-/// - 路径已存在时返回 `None`（不重复加入、也不刷新其时间戳）。
-fn merge_blocked(
-    entries: Vec<(PathBuf, u64)>,
-    path: &Path,
-    now: u64,
-) -> Option<Vec<(PathBuf, u64)>> {
-    if entries.iter().any(|(p, _)| p == path) {
-        return None;
-    }
-    let mut entries = entries;
-    entries.push((path.to_path_buf(), now));
-    Some(entries)
-}
-
-/// 将目录加入黑名单（持久化，7 天自动过期）。
+/// 递归计算目录大小（字节），并返回该次统计是否因超时而不完整。
 ///
-/// 关键：保留每个**已有条目的原始时间戳**，只给本次新增目录记当前时间。
-/// 旧实现重写文件时把所有旧条目时间戳都刷成 now，导致只要 7 天内有任何新目录
-/// 被拉黑，旧条目（如 OrbStack）就不断续命、TTL 名存实亡、长期被低估为 0。
-/// 顺带把已过期条目物理清理（load 时已过滤）。
-pub fn add_blocked_dir(path: &Path) {
-    let entries = load_blocked_entries();
-    let Some(entries) = merge_blocked(entries, path, now_secs()) else {
-        return;
-    };
-    let list: Vec<(String, u64)> = entries
-        .iter()
-        .map(|(p, ts)| (p.to_string_lossy().to_string(), *ts))
-        .collect();
-    if let Ok(s) = serde_json::to_string(&list) {
-        let file = blocked_dirs_file();
-        if let Some(parent) = file.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&file, s);
-    }
-}
-
-/// 清空黑名单（磁盘恢复后手动重试全部目录）
-pub fn clear_blocked_dirs() {
-    let _ = std::fs::remove_file(blocked_dirs_file());
-}
-
-/// 目录大小缓存文件：最近一次成功统计的大小（~/.maclean/dir_size_cache.json）
+/// 返回 (大小, skipped)：skipped=true 表示统计过程中有目录枚举超时（或触达深度
+/// 上限 / 命中资源库 bundle）而有子树没能计入，该大小是「至少」占用，真实值可能
+/// 更大。磁盘分析等可用它给对应项追加"统计不完整"提示。
 ///
-/// 黑名单目录（上次遍历卡死）不再返回 0，而是回退到最近一次成功统计的大小：
-/// 跨扫描结果稳定，避免"这次统计到、下次跳过"造成的列表大小/排序抖动。
-fn dir_size_cache_file() -> PathBuf {
-    home_dir().join(".maclean/dir_size_cache.json")
-}
-
-/// 读取目录大小缓存（dir → 最近一次成功统计的字节数）
-fn load_dir_size_cache() -> std::collections::HashMap<PathBuf, u64> {
-    let mut cache = std::collections::HashMap::new();
-    let path = dir_size_cache_file();
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        if let Ok(list) = serde_json::from_str::<Vec<(String, u64)>>(&s) {
-            for (p, size) in list {
-                cache.insert(PathBuf::from(p), size);
-            }
-        }
-    }
-    cache
-}
-
-/// 持久化目录大小缓存
+/// 目录级隔离：每个目录的枚举放到独立线程，主循环用超时等待。当某个目录磁盘 IO
+/// 卡死（APFS 异常 / 网络卷挂起，readdir/stat 在内核长时间不返回）时，**仅本次
+/// 统计**跳过该子树，其余目录照常——一个坏目录不拖垮整轮扫描，也不让 UI 停住。
 ///
-/// 采用「写同目录临时文件 → rename 原子替换」：磁盘分析等扫描器会在 rayon
-/// 线程里并行统计多个目录，非原子的直接覆写在并发/崩溃时可能留下被截断的
-/// JSON（下次加载静默回退空缓存）。rename 在同一卷上是原子的，读者要么
-/// 看到旧文件、要么看到完整新文件。
-fn save_dir_size_cache(cache: &std::collections::HashMap<PathBuf, u64>) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let list: Vec<(String, u64)> = cache
-        .iter()
-        .map(|(p, size)| (p.to_string_lossy().to_string(), *size))
-        .collect();
-    if let Ok(s) = serde_json::to_string(&list) {
-        let file = dir_size_cache_file();
-        if let Some(parent) = file.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("dir_size_cache.json");
-        // 每个并发写者使用独立临时名，避免彼此截断；写完原子改名
-        let tmp = file.with_file_name(format!(
-            ".{name}.{}.{}.tmp",
-            std::process::id(),
-            WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        if std::fs::write(&tmp, s).is_ok() {
-            if std::fs::rename(&tmp, &file).is_err() {
-                let _ = std::fs::remove_file(&tmp);
-            }
-        }
-    }
-}
-
-/// 递归计算目录大小（字节），并返回该次统计是否因黑名单/超时而不完整。
-///
-/// 返回 (大小, skipped)：skipped=true 表示统计过程中有黑名单目录被跳过或
-/// 目录遍历超时，该大小可能是上次成功值或缺失。扫描器可用它给对应项
-/// 追加"统计跳过（上次遍历卡死）"标记，让用户知道数值可能不准。
-///
-/// 目录级隔离：每个目录的枚举放到独立线程，主循环用超时等待。
-/// 当某个目录磁盘 IO 卡死（APFS 异常 / 网络卷挂起，readdir/stat 在内核
-/// 长时间不返回）时，超时后跳过该目录并记入黑名单，其余目录照常统计——
-/// 一个坏目录不再拖垮整个扫描，也不会让 UI 长时间停在同一个路径。
+/// **不做任何持久记忆**：超时不落盘、不写黑名单，下次扫描会无条件重新尝试。慢盘
+/// 唤醒、外置盘重新挂载、系统负载恢复后，下一次即可统计到真实体量，不会因一次偶发
+/// 卡顿被长期低估为 0（同一棵遍历树内每个目录本就只访问一次，剪枝即天然避免在
+/// 同一轮里重复踩中同一个坏目录，无需额外的内存表）。
 ///
 /// 遇到无法访问的文件/目录时直接跳过，不报错。
 pub fn dir_size_impl(path: &Path) -> (u64, bool) {
     use rayon::prelude::*;
-    let blocked = load_blocked_dirs();
-    let mut cache = load_dir_size_cache();
     let mut total: u64 = 0;
     let mut skipped = false;
-    let mut entry_timeout = false;
     let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
     queue.push_back((path.to_path_buf(), 0));
 
     while !queue.is_empty() {
         let batch: Vec<(PathBuf, usize)> = queue.drain(..).collect();
-        // 并行 BFS：同一批目录同时枚举（rayon 池并发 = CPU 核数）。
-        // 每个目录仍是独立线程 + 超时 watchdog —— 一个坏目录只跳过自身，
-        // 不阻塞同批其它目录（历史：Telegram 目录 readdir 卡死拖死整轮
-        // 扫描、进度条冻结；串行逐目录等待是扫描慢的主因之一）。
-        // 黑名单/缓存读取只做不可变借用，写入回到主循环串行处理。
+        // 并行 BFS：同一批目录同时枚举（rayon 池并发 = CPU 核数）。每个目录在独立
+        // 线程 + 超时 watchdog —— 一个坏目录只在本次跳过自身子树，不阻塞同批其它
+        // 目录（历史：Telegram 目录 readdir 卡死拖死整轮扫描、进度条冻结）。
         type DirScanResult = (
             usize,           // depth
-            bool,            // skipped（深度/黑名单/photos/超时）
+            bool,            // skipped（深度 / 资源库 bundle）
             u64,             // files_size
             Vec<PathBuf>,    // subdirs
-            Option<PathBuf>, // 超时目录（需入黑名单）
-            Option<PathBuf>, // 黑名单命中目录
+            Option<PathBuf>, // 本次枚举超时的目录（仅本次剪枝，不落盘）
         );
         let results: Vec<DirScanResult> = batch
             .into_par_iter()
             .map(|(dir, depth)| {
                 if depth > DIR_MAX_DEPTH {
-                    return (depth, true, 0, Vec::new(), None, None);
-                }
-                // 黑名单目录：上次遍历卡死，跳过并回退最近一次成功统计的大小
-                // （无缓存则为 0）—— 结果跨扫描稳定，不再"这次有、下次没有"地跳。
-                if blocked.contains(&dir) {
-                    let cached = cache.get(&dir).copied().unwrap_or(0);
-                    return (depth, true, cached, Vec::new(), None, Some(dir));
+                    return (depth, true, 0, Vec::new(), None);
                 }
                 // 跳过 Photos Library 等问题 bundle（与原 WalkDir filter_entry 一致）
                 if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
@@ -408,7 +257,7 @@ pub fn dir_size_impl(path: &Path) -> (u64, bool) {
                         || lower.ends_with(".musiclibrary")
                         || lower.ends_with(".tvlibrary")
                     {
-                        return (depth, true, 0, Vec::new(), None, None);
+                        return (depth, true, 0, Vec::new(), None);
                     }
                 }
 
@@ -450,51 +299,32 @@ pub fn dir_size_impl(path: &Path) -> (u64, bool) {
                 });
 
                 match rx.recv_timeout(DIR_SCAN_TIMEOUT) {
-                    Ok((files_size, subdirs)) => (depth, false, files_size, subdirs, None, None),
-                    Err(_) => (depth, true, 0, Vec::new(), Some(dir), None),
+                    Ok((files_size, subdirs)) => (depth, false, files_size, subdirs, None),
+                    Err(_) => (depth, true, 0, Vec::new(), Some(dir)),
                 }
             })
             .collect();
 
-        for (depth, skipped_this, files_size, subdirs, timed_out, blocked_hit) in results {
+        for (_depth, skipped_this, files_size, subdirs, timed_out) in results {
             if let Some(bdir) = timed_out {
-                // 该目录遍历超时（IO 卡死）：跳过并记入黑名单，保留旧缓存
+                // 该目录本次枚举超时（IO 卡死/忙）：本次只跳过它的子树并标记
+                // 不完整，不落盘、不记忆——下次扫描无条件重试。
                 skipped = true;
-                if bdir.as_path() == path {
-                    entry_timeout = true;
-                }
                 crate::logger::warn(&format!(
-                    "[dir_size] 目录遍历超时（IO 卡死），跳过并加入黑名单: {}",
+                    "[dir_size] 目录本次枚举超时（IO 忙/卡死），本轮跳过其子树、下次扫描重试: {}",
                     bdir.display()
                 ));
-                add_blocked_dir(&bdir);
                 continue;
             }
             if skipped_this {
-                if let Some(bdir) = blocked_hit {
-                    skipped = true;
-                    let cached = cache.get(&bdir).copied().unwrap_or(0);
-                    crate::logger::warn(&format!(
-                        "[dir_size] 跳过黑名单目录（上次遍历卡死），使用上次统计大小 {}: {}",
-                        cached,
-                        bdir.display()
-                    ));
-                }
-                // 深度超限 / Photos 跳过：无警告，正常继续
+                // 深度超限 / 资源库 bundle：正常剪枝，不计入警告
                 continue;
             }
             total += files_size;
             for sub in subdirs {
-                queue.push_back((sub, depth + 1));
+                queue.push_back((sub, _depth + 1));
             }
         }
-    }
-
-    // 入口成功统计（即使部分子目录被跳过）都记录最近值：黑名单清空前，
-    // 后续扫描会得到同样的值，跨扫描结果稳定。入口本身超时不覆盖旧值。
-    if !entry_timeout {
-        cache.insert(path.to_path_buf(), total);
-        save_dir_size_cache(&cache);
     }
 
     (total, skipped)
@@ -505,33 +335,20 @@ pub fn dir_size(path: &Path) -> u64 {
     dir_size_impl(path).0
 }
 
-/// 大目录准确统计命中黑名单时，是否值得对该目录**当场真重试一次**：
-/// 仅当它是顶层入口 `root` 且缓存兜底为 0（从未成功统计到体量）时才重试。
-/// 成本至多一次 [`ACCURATE_DIR_TIMEOUT`]，可在同一轮扫描自愈；
-/// 深层黑名单目录（`dir != root`）不重试，避免深树里多个历史坏目录叠加拖慢；
-/// 顶层已有非 0 兜底也不重试（直接展示保守值，等 7 天 TTL 后再刷新）。
-fn blocked_top_needs_probe(dir: &Path, root: &Path, cached: u64) -> bool {
-    dir == root && cached == 0
-}
-
 /// 磁盘分析「大目录」专用的**尽力准确**目录统计。
 ///
 /// 返回 `(占用字节数, incomplete)`：`incomplete == true` 表示存在因磁盘 IO 卡死 /
-/// 无法访问而**没能统计到**的子树，此时字节数是「至少」占用，真实值可能更大，
-/// 调用方应向用户如实标注，而不是把它当成精确的小数字展示。
+/// 忙而**本次没能统计到**的子树，此时字节数是「至少」占用，真实值可能更大，调用方
+/// 应向用户如实标注，而不是把它当成精确的小数字展示。
 ///
-/// 为「快速、绝不卡死」的清理扫描设计的 [`dir_size_impl`] 有两处会低估大目录：
-/// 1. 单个目录 readdir 超过 10s 就**整棵子树丢弃**（慢盘 / 磁盘休眠唤醒 / 外置盘
-///    刚挂载时很容易触发，与真实体量无关）；
-/// 2. [`DIR_MAX_DEPTH`] 深度截断。
-///
-/// 本函数对应改进：
+/// 相比为「快速、绝不卡死」的清理扫描设计的 [`dir_size_impl`]，这里做两点放宽：
 /// - **不做深度截断**，再深的目录也一直走到文件；
-/// - 单目录枚举超时放宽到 [`ACCURATE_DIR_TIMEOUT`]（20s），给慢磁盘足够时间；
-/// - 读取持久黑名单，在 TTL 内**秒级跳过已知卡死目录**（不白等），并把其最近一次
-///   成功统计的体量（缓存）计入、同时标 `incomplete`；黑名单 TTL 过期后会重新真正
-///   尝试，磁盘恢复后能自愈，不再被一次偶发卡顿长期判 0；
-/// - 本次仍超时的目录会写入黑名单（供后续扫描秒跳），但只影响这一项、不波及其他。
+/// - 单目录枚举超时放宽到 [`ACCURATE_DIR_TIMEOUT`]（20s），给慢磁盘 / 休眠唤醒 /
+///   刚挂载的外置盘足够时间，尽量一次统计准确。
+///
+/// 与 [`dir_size_impl`] 一样**不做任何持久记忆**：超时只在本次统计中剪枝并标记
+/// incomplete，不落盘、不写黑名单；下次扫描无条件重新尝试，慢盘恢复 / 外置盘重新
+/// 挂载后自然能统计到真实体量，绝不因一次偶发卡顿把大目录长期记 0。
 ///
 /// 用 `st_blocks×512`（实际磁盘块占用）而非逻辑长度，APFS 稀疏文件（虚拟机磁盘）
 /// 不会被虚高计；符号链接不跟随（`file_type` 为 lstat 语义），无环风险。
@@ -540,44 +357,21 @@ pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
     use std::collections::VecDeque;
     use std::sync::mpsc::sync_channel;
 
-    let blocked = load_blocked_dirs();
-    let mut cache = load_dir_size_cache();
     let mut total: u64 = 0;
     let mut incomplete = false;
-    // 入口自身不可用时（黑名单 / 枚举超时），不用部分结果覆盖其历史缓存
-    let mut entry_unavailable = false;
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     queue.push_back((path.to_path_buf(), 0));
 
-    // (depth, skipped, files_size, subdirs, 超时目录, 黑名单命中目录)
-    type Row = (
-        usize,
-        bool,
-        u64,
-        Vec<PathBuf>,
-        Option<PathBuf>,
-        Option<PathBuf>,
-    );
+    // (depth, skipped(资源库 bundle), files_size, subdirs, 本次超时目录)
+    type Row = (usize, bool, u64, Vec<PathBuf>, Option<PathBuf>);
 
     while !queue.is_empty() {
         let batch: Vec<(PathBuf, usize)> = queue.drain(..).collect();
         // 同层目录并行枚举（rayon），每个目录独立线程 + 宽松 watchdog：
-        // 一个坏目录最多拖慢这一项，不阻塞同层其它目录。
+        // 一个坏目录最多让这一项标 incomplete，不阻塞同层其它目录。
         let results: Vec<Row> = batch
             .into_par_iter()
             .map(|(dir, depth)| {
-                if blocked.contains(&dir) {
-                    let cached = cache.get(&dir).copied().unwrap_or(0);
-                    // 命中 TTL 内黑名单。默认秒跳、用最近成功体量兜底；
-                    // 但若是**顶层入口**且兜底为 0（从未统计成功，可能只是当年一次
-                    // 偶发卡顿），磁盘分析应当场真重试一次——成功则秒回，最坏等
-                    // ACCURATE_DIR_TIMEOUT，同一轮扫描即可自愈，不必干等 7 天 TTL。
-                    // 深层黑名单目录不重试（避免深树里多个历史坏目录叠加拖慢）。
-                    if !blocked_top_needs_probe(&dir, path, cached) {
-                        return (depth, true, cached, Vec::new(), None, Some(dir));
-                    }
-                    // 顶层 0 兜底：落到下方真实枚举重试一次（不再 return）
-                }
                 if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
                     let lower = name.to_lowercase();
                     if lower.ends_with(".photoslibrary")
@@ -585,7 +379,7 @@ pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
                         || lower.ends_with(".tvlibrary")
                     {
                         // 资源库 bundle 有意整体跳过，不计入 incomplete
-                        return (depth, true, 0, Vec::new(), None, None);
+                        return (depth, true, 0, Vec::new(), None);
                     }
                 }
 
@@ -620,38 +414,26 @@ pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
 
                 match rx.recv_timeout(ACCURATE_DIR_TIMEOUT) {
                     Ok((files_size, subdirs)) => {
-                        (depth, false, files_size, subdirs, None, None)
+                        (depth, false, files_size, subdirs, None)
                     }
-                    Err(_) => (depth, true, 0, Vec::new(), Some(dir), None),
+                    Err(_) => (depth, true, 0, Vec::new(), Some(dir)),
                 }
             })
             .collect();
 
-        for (depth, skipped, files_size, subdirs, timed_out, blocked_hit) in results {
+        for (depth, skipped, files_size, subdirs, timed_out) in results {
             if let Some(bdir) = timed_out {
-                // 该项 IO 卡死：计 incomplete（体量未知），写黑名单供后续秒跳，
-                // 但本次扫描不把它伪装成 0 精确值。
+                // 该项本次 IO 卡死/忙：标 incomplete（体量未知）、本次跳过其子树，
+                // 不落盘、不记忆——下次扫描会重新真正尝试。
                 incomplete = true;
-                if bdir.as_path() == path {
-                    entry_unavailable = true;
-                }
                 crate::logger::warn(&format!(
-                    "[dir_size_accurate] 目录枚举超过 {ACCURATE_DIR_TIMEOUT:?}（IO 卡死/忙），\
-                     本项标记为统计不完整并跳过子树: {}",
+                    "[dir_size_accurate] 目录枚举超过 {ACCURATE_DIR_TIMEOUT:?}（IO 忙/卡死），\
+                     本项标记为统计不完整并跳过子树、下次扫描重试: {}",
                     bdir.display()
                 ));
-                add_blocked_dir(&bdir);
                 continue;
             }
             if skipped {
-                if let Some(bdir) = blocked_hit {
-                    // 黑名单兜底：计入最近成功体量，并明确告知用户这一项不完整
-                    incomplete = true;
-                    total += files_size;
-                    if bdir.as_path() == path {
-                        entry_unavailable = true;
-                    }
-                }
                 // 资源库 bundle：files_size=0，正常忽略
                 continue;
             }
@@ -660,13 +442,6 @@ pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
                 queue.push_back((sub, depth + 1));
             }
         }
-    }
-
-    // 入口本身可枚举时，把本次（可能含部分 incomplete 子树的）体量写入缓存，
-    // 作为日后被黑名单秒跳时的兜底值；入口自身不可用则不覆盖历史值。
-    if !entry_unavailable {
-        cache.insert(path.to_path_buf(), total);
-        save_dir_size_cache(&cache);
     }
 
     (total, incomplete)
@@ -920,38 +695,6 @@ mod tests {
     fn write_8k(path: &Path) {
         let data: Vec<u8> = (0..8192u32).map(|i| (i * 73 + 17) as u8).collect();
         std::fs::write(path, data).unwrap();
-    }
-
-    #[test]
-    fn merge_blocked_preserves_existing_timestamps() {
-        let a = PathBuf::from("/tmp/mcl_blk_a");
-        let b = PathBuf::from("/tmp/mcl_blk_b");
-        let entries = vec![(a.clone(), 100u64)];
-
-        // 新增 b：旧条目 a 的时间戳必须原样保留为 100，新条目 b 用 now=200
-        let merged = merge_blocked(entries, &b, 200).expect("新路径应被加入");
-        assert_eq!(
-            merged.iter().find(|(p, _)| p == &a).unwrap().1,
-            100,
-            "加入其它目录时不得刷新旧条目时间戳（否则 TTL 永久续命）"
-        );
-        assert_eq!(merged.iter().find(|(p, _)| p == &b).unwrap().1, 200);
-
-        // 已存在路径：返回 None（不重复加入、不刷新）
-        assert!(
-            merge_blocked(merged, &a, 999).is_none(),
-            "已在黑名单中的路径应返回 None"
-        );
-    }
-
-    #[test]
-    fn blocked_top_needs_probe_rules() {
-        let root = PathBuf::from("/root");
-        let deep = PathBuf::from("/root/deep");
-        assert!(blocked_top_needs_probe(&root, &root, 0), "顶层且0兜底应重试");
-        assert!(!blocked_top_needs_probe(&root, &root, 2988), "顶层已有非0兜底不重试");
-        assert!(!blocked_top_needs_probe(&deep, &root, 0), "深层黑名单目录不重试");
-        assert!(!blocked_top_needs_probe(&deep, &root, 4096), "深层且有兜底不重试");
     }
 
     #[test]
