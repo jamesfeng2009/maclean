@@ -14,10 +14,11 @@
 //! - 一律跳过隐藏目录、包管理/构建/缓存依赖（node_modules / target / .git /
 //!   site-packages / go pkg/mod 等），这些属于「智能清理」的范畴，避免淹没列表。
 //! - 跳过 .app / .photoslibrary 等 bundle 目录（应用与资源库应走卸载/专门入口）。
-//! - 大目录大小统一走 [`super::dir_size_impl`]：分层并行 BFS（rayon）、
-//!   st_blocks×512 真实占用（APFS 稀疏镜像不虚高）、单目录 10s 看门狗
-//!   与黑名单——不再使用本文件早期的「逐目录串行 WalkDir + len()」实现
-//!   （串行遍历 OrbStack / node_modules 等巨型目录是磁盘分析偏慢的主因）。
+//! - 大目录大小走磁盘分析专用的 [`super::dir_size_accurate`]：分层并行 BFS
+//!   （rayon）、st_blocks×512 真实占用（APFS 稀疏镜像不虚高）、**不做深度截断**、
+//!   单目录 20s 宽松超时 + 黑名单 7 天 TTL 自愈，尽量给出准确体量；个别磁盘忙 /
+//!   被占用而无法访问的子树会以 incomplete 如实标注「至少占用」，不再像早期
+//!   10s 看门狗实现那样一次偶发卡顿就把整棵大目录判小或永久记 0。
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -26,7 +27,9 @@ use std::time::Instant;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use super::{dir_size_impl, format_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{
+    dir_size_accurate, format_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner,
+};
 
 /// 大文件阈值：单个文件 ≥ 100MB 才计入「大文件」视图
 const LARGE_FILE_THRESHOLD: u64 = 100 * 1024 * 1024;
@@ -346,30 +349,32 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
 
     crate::log_scan_step(&format!("磁盘分析: {} 个子项待计算", paths.len()));
 
-    // 并行计算每个子项的大小
-    let sized: Vec<(PathBuf, u64, bool)> = paths
+    // 并行计算每个子项的大小。大目录走「尽力准确」统计（无深度截断 + 20s 宽松
+    // 超时 + 黑名单兜底/自愈），返回 incomplete 标记部分未能访问的子树。
+    // 元组：(路径, 大小, 是否目录, 是否统计不完整)
+    let sized: Vec<(PathBuf, u64, bool, bool)> = paths
         .par_iter()
         .filter_map(|path| {
             let is_dir = path.is_dir();
 
-            let size = catch_unwind(AssertUnwindSafe(|| {
+            let (size, incomplete) = catch_unwind(AssertUnwindSafe(|| {
                 if is_dir {
-                    // 统一走并行 BFS + st_blocks + 看门狗/黑名单（见模块文档）
-                    dir_size_impl(path).0
+                    dir_size_accurate(path)
                 } else {
-                    path.symlink_metadata().map(|m| m.len()).unwrap_or(0)
+                    (path.symlink_metadata().map(|m| m.len()).unwrap_or(0), false)
                 }
             }))
-            .unwrap_or(0);
+            // 统计过程 panic（极端 IO 异常）：当作不完整，避免给出误导性精确值
+            .unwrap_or((0, true));
 
-            Some((path.clone(), size, is_dir))
+            Some((path.clone(), size, is_dir, incomplete))
         })
-        .filter(|(_, size, _)| *size >= MIN_DISPLAY_SIZE)
+        .filter(|(_, size, _, _)| *size >= MIN_DISPLAY_SIZE)
         .collect();
 
-    let total_size: u64 = sized.iter().map(|(_, s, _)| *s).sum();
+    let total_size: u64 = sized.iter().map(|(_, s, _, _)| *s).sum();
 
-    for (path, size, is_dir) in sized {
+    for (path, size, is_dir, incomplete) in sized {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -377,6 +382,20 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
             .to_string();
 
         let category = if is_dir { "目录" } else { "文件" };
+
+        let description = if is_dir {
+            if incomplete {
+                format!(
+                    "📁 {} — 至少 {}（部分内容磁盘忙或被占用、暂时无法访问，真实占用可能更大）",
+                    name,
+                    format_size(size)
+                )
+            } else {
+                format!("📁 {} — {}（可进入查看详情）", name, format_size(size))
+            }
+        } else {
+            format!("📄 {} — {}", name, format_size(size))
+        };
 
         items.push(ScanItem {
             path: path.to_string_lossy().to_string(),
@@ -387,15 +406,7 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
             undeletable_reason: String::new(),
             batch_paths: Vec::new(),
             recommend: Recommend::Advanced,
-            description: if is_dir {
-                format!(
-                    "📁 {} — {}（可进入查看详情）",
-                    name,
-                    super::format_size(size)
-                )
-            } else {
-                format!("📄 {} — {}", name, super::format_size(size))
-            },
+            description,
         });
     }
 
