@@ -229,14 +229,16 @@ export function Clean() {
     const g = groups.find((x) => x.name === f.category);
     if (!g) return;
     setOpen((s) => new Set(s).add(f.category));
+    const imItem = g.items.find((it) => !it.deletable && imFromPath(it.path));
+    // 先让切页 / 展开 / 滚动 / 高亮瞬时完成，再在转场稳定后发起 IM 占用分析；
+    // 分析本身在 Rust 阻塞线程池跑（不卡 UI），延迟只为主线程转场动画不掉帧。
     const t = window.setTimeout(() => {
       groupRefs.current.get(f.category)?.scrollIntoView({ behavior: "smooth", block: "start" });
       setFlashCat(f.category);
       if (flashTimer.current) window.clearTimeout(flashTimer.current);
       flashTimer.current = window.setTimeout(() => setFlashCat(null), 1900);
-    }, 90);
-    const imItem = g.items.find((it) => !it.deletable && imFromPath(it.path));
-    if (imItem) void toggleIm(imItem);
+      if (imItem) void toggleIm(imItem);
+    }, 120);
     return () => window.clearTimeout(t);
     // 仅以跳转请求(nonce)为触发，groups/toggleIm 取当次渲染闭包即可
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -560,7 +562,7 @@ export function Clean() {
                               <div className="im-breakdown">
                                 {imBusy === it.path ? (
                                   <span className="muted">
-                                    正在只读统计占用，目录较大时可能需要几十秒…
+                                    正在后台只读统计占用，期间可正常操作；数据较多时请稍候…
                                   </span>
                                 ) : imErr[it.path] ? (
                                   <span className="muted">分析失败：{imErr[it.path]}</span>

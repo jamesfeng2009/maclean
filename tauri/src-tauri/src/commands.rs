@@ -812,15 +812,22 @@ pub fn app_open(bundle_id: String) -> Result<(), String> {
 /// 入参路径必须严格位于 `~/Library/Containers/<受支持IM>/Data/Documents`，
 /// 否则拒绝；全程只统计目录大小，不删除、不修改任何内容。
 #[tauri::command]
-pub fn im_breakdown(path: String) -> Result<maclean_core::im_data::ImBreakdown, String> {
-    let p = std::path::Path::new(&path);
-    let app = maclean_core::im_data::im_app_for_docs_path(p)
-        .ok_or_else(|| "该路径不是受支持 IM 的数据目录，已拒绝分析".to_string())?;
-    maclean_core::log_scan_step(&format!(
-        "IM 占用分析（只读）: {} — {}",
-        app.name, path
-    ));
-    Ok(maclean_core::im_data::analyze(p))
+pub async fn im_breakdown(path: String) -> Result<maclean_core::im_data::ImBreakdown, String> {
+    // 微信 Documents 可达数十 GB、含几十万小文件，遍历是 CPU/IO 密集操作，
+    // 必须放到阻塞线程池——若在主线程同步跑（旧实现），点击概览卡片后整个窗口
+    // 会无响应直到统计结束，表现为“点击微信聊天数据卡顿”。
+    tauri::async_runtime::spawn_blocking(move || -> Result<maclean_core::im_data::ImBreakdown, String> {
+        let p = std::path::Path::new(&path);
+        let app = maclean_core::im_data::im_app_for_docs_path(p)
+            .ok_or_else(|| "该路径不是受支持 IM 的数据目录，已拒绝分析".to_string())?;
+        maclean_core::log_scan_step(&format!(
+            "IM 占用分析（只读）: {} — {}",
+            app.name, path
+        ));
+        Ok(maclean_core::im_data::analyze(p))
+    })
+    .await
+    .map_err(|e| format!("IM 占用分析任务执行失败: {e}"))?
 }
 
 /* ============================== 设置 ============================== */

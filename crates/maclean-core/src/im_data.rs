@@ -10,10 +10,12 @@
 //! `xwechat_files/<wxid>/…`，老版本与 QQ 布局不同，未命中的部分一律落入
 //! "其它数据"，绝不因识别不出而误判。
 
-use std::collections::BTreeMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
-use crate::scanner::{dir_size, home_dir};
+use rayon::prelude::*;
+
+use crate::scanner::home_dir;
 
 /// 受支持的 IM 应用：(bundle_id, 中文显示名, 应用内清理入口提示)
 pub struct ImApp {
@@ -140,12 +142,119 @@ fn name_lower(dir: &Path) -> String {
         .to_lowercase()
 }
 
-/// 对 IM 的 Documents 根做只读分类统计。
+/// 分类在累加数组（也是 [`PART_ORDER`]）中的下标；其它分类为 `[0..=5]`，
+/// 「其它」固定为 `OTHER_IDX`。
+const OTHER_IDX: usize = 6;
+
+/// 单个文件的真实磁盘占用（字节）：优先 `st_blocks×512`（与全项目其它扫描口径
+/// 一致，APFS 稀疏文件不虚高）；拿不到块信息时退回逻辑长度。
+#[inline]
+fn file_disk_bytes(md: &std::fs::Metadata) -> u64 {
+    let blocks = md.blocks();
+    if blocks > 0 {
+        blocks.saturating_mul(512)
+    } else {
+        md.len()
+    }
+}
+
+/// 依据目录名（及父目录是否为 `msg`）判定整棵子树的归属分类下标。
+/// 返回 `None` 表示未识别，继续向其子目录尝试分类；其中散落文件归入「其它」。
 ///
-/// 用受限深度的手动 BFS：命中已知分类目录即整体 `dir_size` 计一次并入队剪枝，
-/// 避免重复累计；未识别的目录继续向下。`消息数据库/视频/图片/文件/缓存/备份`
-/// 之和之外的全部余量归入"其它数据"，保证各分类之和等于总量（受看门狗
-/// 近似统计影响可能有微小误差，用 saturating 兜底）。
+/// 下标语义必须与 [`PART_ORDER`] 的顺序一一对应（由单测
+/// `part_order_indices_stable` 守护）。
+#[inline]
+fn classify_im_dir(name: &str, parent_is_msg: bool) -> Option<usize> {
+    if name == "db_storage" {
+        Some(0) // db
+    } else if parent_is_msg && name == "video" {
+        Some(1) // video
+    } else if parent_is_msg && name == "attach" {
+        Some(2) // image
+    } else if parent_is_msg && name == "file" {
+        Some(3) // file
+    } else if BACKUP_DIR_NAMES.contains(&name) {
+        Some(4) // backup
+    } else if CACHE_DIR_NAMES.contains(&name) {
+        Some(5) // cache
+    } else {
+        None
+    }
+}
+
+/// 并行递归遍历一个目录子树，返回 `(总字节, 各分类字节[7])`。
+///
+/// - `forced` 为 `Some(k)` 时整棵子树都计入分类 k（已命中分类边界，不再细判）；
+///   `None` 表示仍在未识别区域，子目录继续尝试分类、散落文件计入「其它」。
+/// - 每个常规文件只 stat 一次；当前层收集完子目录后用 rayon 对各子树并行递归并
+///   归约。不设深度上限（未命中的深目录照样走到文件）、不用看门狗，因此
+///   「各分类之和 == 总量」严格成立，也不会因超时低估大附件目录。
+fn walk_classify(dir: &Path, forced: Option<usize>) -> (u64, [u64; 7]) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return (0, [0; 7]), // TCC / 不存在等：静默跳过，绝不报错中断
+    };
+    let parent_is_msg = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "msg")
+        .unwrap_or(false);
+
+    let mut total = 0u64;
+    let mut acc = [0u64; 7];
+    let mut subs: Vec<(PathBuf, Option<usize>)> = Vec::new();
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        // DirEntry::metadata 不跟随符号链接
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if md.is_dir() {
+            let key = match forced {
+                Some(k) => Some(k),
+                None => classify_im_dir(&name_lower(&path), parent_is_msg),
+            };
+            subs.push((path, key));
+        } else {
+            let idx = forced.unwrap_or(OTHER_IDX);
+            let size = file_disk_bytes(&md);
+            total = total.saturating_add(size);
+            acc[idx] = acc[idx].saturating_add(size);
+        }
+    }
+
+    // 多核并行递归各子树并归约
+    let (sub_total, sub_acc) = subs
+        .par_iter()
+        .map(|(p, k)| walk_classify(p, *k))
+        .reduce(
+            || (0u64, [0u64; 7]),
+            |(t1, a1), (t2, a2)| {
+                let mut a = [0u64; 7];
+                for i in 0..7 {
+                    a[i] = a1[i].saturating_add(a2[i]);
+                }
+                (t1.saturating_add(t2), a)
+            },
+        );
+
+    let mut merged = [0u64; 7];
+    for i in 0..7 {
+        merged[i] = acc[i].saturating_add(sub_acc[i]);
+    }
+    (total.saturating_add(sub_total), merged)
+}
+
+/// 对 IM 的 Documents 根做只读分类统计（多核并行、单次遍历）。
+///
+/// 命中已知分类目录（db_storage / msg-video|attach|file / cache / backup）后，其下
+/// 所有文件整体计入该分类；未命中区域的散落文件归入「其它数据」。每个常规文件只
+/// stat 一次，「各分类之和 == 总量」严格成立，也避免了旧实现「整树一次 + 每个分类
+/// 各一次」对几十万 IM 小文件的重复串行遍历。
+///
+/// 该函数为 CPU/IO 密集型，调用方（Tauri command）必须放到阻塞线程池，避免卡 UI。
 pub fn analyze(docs_root: &Path) -> ImBreakdown {
     let app = im_app_for_docs_path(docs_root);
     let app_name = app.map(|a| a.name).unwrap_or("IM").to_string();
@@ -154,69 +263,14 @@ pub fn analyze(docs_root: &Path) -> ImBreakdown {
         .unwrap_or("应用的「设置 → 通用 → 存储空间」")
         .to_string();
 
-    let total = dir_size(docs_root);
-    let mut acc: BTreeMap<&'static str, u64> = BTreeMap::new();
-    let add = |acc: &mut BTreeMap<&'static str, u64>, key: &'static str, size: u64| {
-        *acc.entry(key).or_insert(0) += size;
-    };
-
-    // 手动 BFS（不跟随符号链接），命中分类即剪枝
-    let mut queue: Vec<(PathBuf, usize)> = vec![(docs_root.to_path_buf(), 0)];
-    const MAX_DEPTH: usize = 8;
-    while let Some((dir, depth)) = queue.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue; // 散落文件由 other 兜底，不逐个统计
-            }
-            if depth >= MAX_DEPTH {
-                continue;
-            }
-            let name = name_lower(&path);
-            let parent_is_msg = dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n == "msg")
-                .unwrap_or(false);
-
-            let key: Option<&'static str> = if name == "db_storage" {
-                Some("db")
-            } else if parent_is_msg && name == "video" {
-                Some("video")
-            } else if parent_is_msg && name == "attach" {
-                Some("image")
-            } else if parent_is_msg && name == "file" {
-                Some("file")
-            } else if BACKUP_DIR_NAMES.contains(&name.as_str()) {
-                Some("backup")
-            } else if CACHE_DIR_NAMES.contains(&name.as_str()) {
-                Some("cache")
-            } else {
-                None
-            };
-
-            if let Some(k) = key {
-                add(&mut acc, k, dir_size(&path));
-            } else {
-                queue.push((path, depth + 1));
-            }
-        }
-    }
-
-    let classified: u64 = acc.values().sum();
-    let other = total.saturating_sub(classified);
-    if other > 0 {
-        acc.insert("other", other);
-    }
+    let (total_bytes, arr) = walk_classify(docs_root, None);
 
     let parts: Vec<ImPart> = PART_ORDER
         .iter()
-        .filter_map(|(key, label)| {
-            acc.get(*key).map(|&size_bytes| ImPart {
+        .enumerate()
+        .filter_map(|(i, (key, label))| {
+            let size_bytes = arr[i];
+            (size_bytes > 0).then(|| ImPart {
                 key,
                 label,
                 size_bytes,
@@ -228,7 +282,7 @@ pub fn analyze(docs_root: &Path) -> ImBreakdown {
         app_name,
         storage_hint,
         root: docs_root.to_string_lossy().to_string(),
-        total_bytes: total,
+        total_bytes,
         parts,
     }
 }
@@ -250,6 +304,31 @@ mod tests {
         let p = root.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, vec![7u8; bytes]).unwrap();
+    }
+
+    #[test]
+    fn part_order_indices_stable() {
+        // 守护 classify_im_dir 返回的下标与 PART_ORDER 不错位
+        assert_eq!(PART_ORDER[0].0, "db");
+        assert_eq!(PART_ORDER[1].0, "video");
+        assert_eq!(PART_ORDER[2].0, "image");
+        assert_eq!(PART_ORDER[3].0, "file");
+        assert_eq!(PART_ORDER[4].0, "backup");
+        assert_eq!(PART_ORDER[5].0, "cache");
+        assert_eq!(PART_ORDER[OTHER_IDX].0, "other");
+        assert_eq!(PART_ORDER.len(), 7);
+    }
+
+    #[test]
+    fn classify_dir_indices() {
+        assert_eq!(classify_im_dir("db_storage", false), Some(0));
+        assert_eq!(classify_im_dir("video", true), Some(1));
+        assert_eq!(classify_im_dir("video", false), None, "非 msg 父目录的 video 不算");
+        assert_eq!(classify_im_dir("attach", true), Some(2));
+        assert_eq!(classify_im_dir("file", true), Some(3));
+        assert_eq!(classify_im_dir("backup", false), Some(4));
+        assert_eq!(classify_im_dir("caches", false), Some(5));
+        assert_eq!(classify_im_dir("random", false), None);
     }
 
     #[test]
@@ -281,6 +360,20 @@ mod tests {
         let sum: u64 = b.parts.iter().map(|p| p.size_bytes).sum();
         assert_eq!(sum, b.total_bytes, "各分类之和应等于总量");
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forced_category_covers_entire_subtree() {
+        // 命中分类目录后，其下任意深度、甚至同名“干扰”子目录都整体归该类
+        let root = tmp_root("forced");
+        mk_file(&root, "x/w/msg/video/a/b/c.mp4", 1000);
+        mk_file(&root, "x/w/msg/video/db_storage/x.db", 1000);
+        mk_file(&root, "x/w/msg/video/loose.bin", 1000);
+        let b = analyze(&root);
+        let get = |k: &str| b.parts.iter().find(|p| p.key == k).map(|p| p.size_bytes).unwrap_or(0);
+        assert_eq!(get("video"), b.total_bytes, "video 子树应整体计入视频");
+        assert_eq!(get("db"), 0, "已在 video 子树内的 db_storage 不应再被识别为数据库");
         let _ = fs::remove_dir_all(&root);
     }
 
