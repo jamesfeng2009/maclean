@@ -603,6 +603,44 @@ fn is_reclaimable_cache_root(path: &Path) -> bool {
     reclaimable_cache_root_with_homes(path, &protected_homes())
 }
 
+/// 判定被删路径是否为「应用数据根」：`~/Library/Application Support/<App>`
+/// （home 由调用方注入，便于单测）。只认 Application Support 的**直接子项**，
+/// 更深的嵌套目录不匹配。
+///
+/// 为什么需要它：第 4.6 层「祖先目录含 venv/node_modules/site-packages 就拒删」
+/// 保护的是**用户自己的项目依赖 / Python 虚拟环境**。但同样的目录名出现在应用
+/// 数据根里时，几乎都是**应用自带的捆绑运行时 / 插件 / 类型存根**，例如：
+///   - PyCharm: `Application Support/JetBrains/PyCharm*/plugins/python-ce/
+///     helpers/typeshed/stdlib/venv`（标准库类型存根，目录名叫 venv，并非虚拟环境）
+///   - TRAE:   `Application Support/TRAE SOLO CN/ModularData/ai-agent/vm/tools/
+///     lib/node_modules` 与 `lib/python3.10/site-packages`（内置 node / Python VM）
+/// 这些随应用可重装、删除统一移入废纸篓可恢复，不属于要保护的用户项目环境。
+/// 用户在「应用数据」分类勾选整目录、且经高级风险二次确认后删除，是设计内的
+/// 「重装级清理」。因此仅对这**一个位置**豁免第 4.6 层的后代深扫；系统关键目录、
+/// 容器数据（Docker/OrbStack）、仓库 .git、敏感文件名等其它红线一律不受影响。
+fn app_support_data_root_with_homes(path: &Path, homes: &[PathBuf]) -> bool {
+    for home in homes {
+        let Ok(rel) = path.strip_prefix(home) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy();
+        let rel = rel.trim_start_matches('/');
+        // 必须恰好是 Library/Application Support/<一个直接子项>：
+        // Application Support 根本身、以及再深一层的嵌套目录都不放行。
+        if let Some(name) = rel.strip_prefix("Library/Application Support/") {
+            if !name.is_empty() && !name.contains('/') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 判定被删路径是否为应用数据根（生产环境用受保护 home 集合）。
+fn is_app_support_data_root(path: &Path) -> bool {
+    app_support_data_root_with_homes(path, &protected_homes())
+}
+
 pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyCheck {
     // 当前策略对所有分类一视同仁（category 预留给后续按场景细化，如"大文件"放宽白名单）。
     // 先显式消费掉，避免误删参数后调用方悄悄失配。
@@ -788,6 +826,11 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     if contains_manifest_managed_descendant(&canonical)
         && !(category == "Monorepo依赖" && canonical_has_component(&canonical, "node_modules"))
         && !is_reclaimable_cache_root(&canonical)
+        // 应用数据根（~/Library/Application Support/<App>）里出现的
+        // node_modules/site-packages/venv 多为应用自带运行时/插件/类型存根，
+        // 不是用户项目环境；整目录删除经高级风险确认、且走废纸篓可恢复，放行。
+        // 系统关键 / 容器数据 / .git / 敏感文件等其它层的红线不受影响。
+        && !is_app_support_data_root(&canonical)
     {
         return SafetyCheck::Danger(format!(
             "目录内部含清单管理结构（venv/site-packages 等），拒绝删除祖先目录: {}",
@@ -2289,6 +2332,75 @@ mod tests {
         std::fs::create_dir_all(clean.join("some/app/Contents/MacOS")).unwrap();
         assert!(!contains_manifest_managed_descendant(&clean));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn app_support_data_root_boundaries() {
+        use std::path::PathBuf;
+        let h = PathBuf::from("/Users/tester");
+        let f = |rel: &str| app_support_data_root_with_homes(&h.join(rel), &[h.clone()]);
+        // Application Support 的直接子项才识别为应用数据根
+        assert!(f("Library/Application Support/JetBrains"));
+        assert!(f("Library/Application Support/TRAE SOLO CN"), "含空格 App 名");
+        // 根本身、再深一层、Toolbox 深层、其它 home 子树都不放行
+        assert!(!f("Library/Application Support"), "Application Support 根不放行");
+        assert!(!f("Library/Application Support/JetBrains/PyCharmCE2025.2"), "嵌套不放行");
+        assert!(!f("Library/Application Support/JetBrains/Toolbox/apps"), "深层不放行");
+        assert!(!f("Library/Caches/pypoetry"), "Caches 不是应用数据根");
+        assert!(!f("Documents/proj"), "其它 home 子树不是");
+        assert!(!f("Library/Containers/com.x/Data"), "沙盒容器本次不放开");
+    }
+
+    #[test]
+    fn app_support_root_bundled_runtime_not_blocked_but_redlines_hold() {
+        use std::path::Path;
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        let pid = std::process::id();
+
+        // 1) App 根内捆绑、仅与虚拟环境同名的目录（PyCharm typeshed 存根 venv）
+        //    不应锁死整个应用数据根 —— 复现 JetBrains 4.1GB 无法清理的误判。
+        let app = Path::new(&home)
+            .join(format!("Library/Application Support/maclean_test_app_{pid}"));
+        let stub = app.join("plugins/python-ce/helpers/typeshed/stdlib/venv");
+        std::fs::create_dir_all(&stub).unwrap();
+        std::fs::write(stub.join("__init__.pyi"), "").unwrap();
+        let ap = app.to_string_lossy().into_owned();
+        let r1 = check_path_safety_with_category(&ap, "maclean_test_app");
+        assert!(
+            !matches!(r1, SafetyCheck::Danger(_)),
+            "应用自带类型存根(venv 同名)不应误拦整个 App 根: {:?}",
+            r1
+        );
+        let _ = std::fs::remove_dir_all(&app);
+
+        // 2) 豁免只挂在第 4.6 层：系统受保护的 App Support 子目录（通讯录）在更早
+        //    的第 3/4 层就被拦 —— 即使它形状上同样是「Application Support 直接子项」。
+        //    只读判定（不创建/删除该系统目录），该层按路径组件匹配、不依赖目录存在。
+        let protected = Path::new(&home).join("Library/Application Support/AddressBook");
+        assert!(
+            is_app_support_data_root(&protected),
+            "通讯录目录形状上也是 Application Support 直接子项"
+        );
+        let pp = protected.to_string_lossy().into_owned();
+        let r2 = check_path_safety_with_category(&pp, "AddressBook");
+        assert!(
+            matches!(r2, SafetyCheck::Danger(_)),
+            "系统受保护目录必须在 4.6 之前的层被拦: {:?}",
+            r2
+        );
+
+        // 3) 非应用数据根（Caches 下祖先含虚拟环境）仍受 4.6 层保护。
+        let cache =
+            Path::new(&home).join(format!("Library/Caches/maclean_test_venv_{pid}"));
+        std::fs::create_dir_all(cache.join("some/virtualenvs/proj")).unwrap();
+        let cp = cache.to_string_lossy().into_owned();
+        let r3 = check_path_safety_with_category(&cp, "maclean_test_venv");
+        assert!(
+            matches!(r3, SafetyCheck::Danger(_)),
+            "Caches 祖先含虚拟环境仍应拦截: {:?}",
+            r3
+        );
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[test]

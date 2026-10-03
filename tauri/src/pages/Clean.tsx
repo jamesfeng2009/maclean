@@ -309,7 +309,19 @@ export function Clean() {
     const blocked = preview.filter((p) => !p.allowed);
     const allowed = preview.filter((p) => p.allowed);
     if (allowed.length === 0) {
-      toast("warn", "所选项目均未通过安全检查，未执行删除");
+      // 不再只给一句"未通过安全检查"：把后端闸门给出的具体原因展示出来，
+      // 让用户知道为什么删不了（如内含容器数据 / 系统关键目录 / 项目虚拟环境）。
+      const reasons = Array.from(
+        new Set(blocked.map((b) => b.reason?.trim()).filter(Boolean) as string[])
+      ).slice(0, 2);
+      toast(
+        "warn",
+        reasons.length
+          ? `所选项目受安全保护、未执行删除：${reasons.join("；")}${
+              blocked.length > reasons.length ? `（等 ${blocked.length} 项）` : ""
+            }`
+          : "所选项目均未通过安全检查，未执行删除"
+      );
       return;
     }
     const byKey = new Map(allowed.map((p) => [p.path + "|" + p.category, p]));
@@ -317,7 +329,13 @@ export function Clean() {
     const paths = finalReqs.flatMap((r) => [r.path, ...r.batch_paths]);
 
     if (blocked.length > 0) {
-      toast("info", `${blocked.length} 项未通过安全检查，已自动排除`);
+      const firstReason = blocked.map((b) => b.reason?.trim()).find(Boolean);
+      toast(
+        "info",
+        firstReason
+          ? `${blocked.length} 项受安全保护、已自动跳过：${firstReason}`
+          : `${blocked.length} 项未通过安全检查，已自动排除`
+      );
     }
 
     confirm({
