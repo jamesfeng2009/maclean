@@ -414,9 +414,17 @@ export function Clean() {
                 <div key={g.name}>
                   <div
                     className={`cat-card risk-${risk}${isOn ? " checked" : ""}${disabled ? " disabled" : ""}`}
-                    onClick={() => !disabled && toggleGroup(g.name)}
+                    onClick={() => toggleOpen(g.name)}
                   >
-                    <span className="chek">
+                    <span
+                      className={`chek${disabled ? " disabled" : ""}`}
+                      title={disabled ? "该分类暂无可清理项" : "选择 / 取消该分类"}
+                      onClick={(e) => {
+                        // 勾选框独立负责选中，阻止冒泡以免同时触发展开
+                        e.stopPropagation();
+                        if (!disabled) toggleGroup(g.name);
+                      }}
+                    >
                       <Icon name="check" size={12} />
                     </span>
                     <span
@@ -443,13 +451,7 @@ export function Clean() {
                       <div className="d">{detail}</div>
                     </div>
                     <span className="sz">{fmt(g.size)}</span>
-                    <span
-                      className="chev-rt"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleOpen(g.name);
-                      }}
-                    >
+                    <span className="chev-rt" title={isOpen ? "收起" : "展开明细"}>
                       <Icon
                         name="chev"
                         size={16}

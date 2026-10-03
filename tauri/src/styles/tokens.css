@@ -286,18 +286,23 @@ body{
 .cat-card{
   border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel-2);
   padding:14px 16px;display:flex;align-items:center;gap:14px;cursor:pointer;
-  transition:all .2s var(--ease);
+  transition:all .2s var(--ease);user-select:none;-webkit-user-select:none;
 }
 .cat-card:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
 .cat-card.checked{border-color:var(--brand);background:var(--brand-50)}
-.cat-card.disabled{opacity:.55;cursor:not-allowed}
+/* 整组不可清理时仍可点击展开查看受保护项，仅勾选框禁用 */
+.cat-card.disabled{opacity:.6;cursor:pointer}
 .cat-card .chek{
   width:20px;height:20px;border-radius:6px;border:1.5px solid var(--line-2);flex:0 0 20px;
   display:flex;align-items:center;justify-content:center;color:#fff;transition:all .15s;
+  cursor:pointer;user-select:none;
 }
+.cat-card .chek:hover{border-color:var(--brand)}
 .cat-card.checked .chek{background:var(--brand);border-color:var(--brand)}
 .cat-card .chek svg{width:12px;height:12px;opacity:0;transition:opacity .15s}
 .cat-card.checked .chek svg{opacity:1}
+.cat-card .chek.disabled{cursor:not-allowed;border-style:dashed}
+.cat-card .chek.disabled:hover{border-color:var(--line-2)}
 .cat-card .ico{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;flex:0 0 40px}
 .cat-card .ico svg{width:20px;height:20px}
 .cat-card .meta{flex:1;min-width:0}
