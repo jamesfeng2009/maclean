@@ -23,6 +23,8 @@ import type {
  */
 export const ipc = {
   diskInfo: () => invoke<DiskInfo>("disk_info"),
+  /** 在访达中打开废纸篓（仅打开，清空由用户在 Finder 内确认；不需要完全磁盘访问） */
+  revealTrash: () => invoke<void>("reveal_trash"),
 
   /** 运行扫描（只读），进度经 onProgress 回调推送；全量体检时每个模块结果经 onModule 推送 */
   scan: async (

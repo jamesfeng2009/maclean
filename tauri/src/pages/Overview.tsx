@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt } from "../lib/format";
 import type { DiskInfo, ResultScope, ScanItem } from "../lib/types";
@@ -98,6 +98,8 @@ export function Overview() {
     runningScopes,
     singleScope,
     startFullScan,
+    cleanNonce,
+    sessionTrashBytes,
   } = useApp();
   const [disk, setDisk] = useState<DiskInfo | null>(null);
 
@@ -106,12 +108,42 @@ export function Overview() {
   const hasScanned = ready.all;
   const hasAnyScanned = Object.values(ready).some(Boolean);
 
-  // 启动仅读取磁盘容量（只读系统信息），绝不自动扫描；扫描必须由用户点击触发
+  // 仅读取磁盘容量（只读系统信息），绝不自动扫描；扫描必须由用户点击触发。
+  // 删除默认「移入废纸篓」，同卷下 df 已用 / 可用不会立即变——待用户清空废纸篓
+  // 后才下降，因此在窗口重新激活时也重拉一次，做到「清空 → 回到 app」数字即更新。
+  const refreshDisk = useCallback(() => {
+    ipc.diskInfo().then(setDisk).catch(() => undefined);
+  }, []);
+
+  // 挂载时、以及每次成功清理（cleanNonce 递增）后刷新
   useEffect(() => {
     ipc
       .diskInfo()
       .then(setDisk)
       .catch((e) => toast("warn", "读取磁盘信息失败：" + e));
+  }, [toast, cleanNonce]);
+
+  // 用户去 Finder 清空废纸篓后回到窗口：重新激活时刷新，已用 / 可用立即闭环下降
+  useEffect(() => {
+    let last = 0;
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - last < 2000) return; // 简单节流，避免 focus/visibilitychange 连发
+      last = now;
+      refreshDisk();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [refreshDisk]);
+
+  const openTrash = useCallback(() => {
+    ipc
+      .revealTrash()
+      .catch((e) => toast("warn", "打开废纸篓失败：" + e));
   }, [toast]);
 
   const cats = useMemo(() => aggregate(items), [items]);
@@ -184,6 +216,17 @@ export function Overview() {
                   可清理 {hasScanned ? fmt(reclaim) : "—"}
                 </span>
               </div>
+              {sessionTrashBytes > 0 && (
+                <button
+                  type="button"
+                  className="trash-hint"
+                  onClick={openTrash}
+                  title="清理的文件已移入废纸篓，仍占用启动磁盘，所以上方已用 / 可用暂时不变；点击在访达中打开废纸篓，清空后已用空间即会下降（回到本窗口会自动刷新）"
+                >
+                  <Icon name="trash" size={13} />
+                  本次已移入废纸篓约 {fmt(sessionTrashBytes)} · 清空后释放，点击打开
+                </button>
+              )}
             </div>
           </div>
 

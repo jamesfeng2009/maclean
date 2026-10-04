@@ -52,6 +52,37 @@ pub fn disk_info() -> DiskInfoDto {
     }
 }
 
+/// 在访达中打开用户废纸篓（仅打开，绝不替用户执行清空）。
+///
+/// maclean 的删除统一「移入废纸篓」，同卷上清空前不释放空间。这里只负责把
+/// 废纸篓在 Finder 中打开（`open` 走启动服务、不枚举目录内容，因而不需要
+/// 「完全磁盘访问」）；清空是不可逆永久删除，交给 Finder 由用户本人确认。
+/// 无参数、无注入面。仅 macOS。
+#[tauri::command]
+pub fn reveal_trash() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let dir = maclean_core::backup::trash_dir();
+        if dir.is_empty() {
+            return Err("无法定位废纸篓".to_string());
+        }
+        std::process::Command::new("open")
+            .arg(&dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("无法打开废纸篓: {e}"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "打开废纸篓失败".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台暂不支持打开废纸篓".to_string())
+    }
+}
+
 /* ============================== 扫描 ============================== */
 
 /// 扫描后处理：与 egui 壳 `start_scan` 完全一致的可删除性二次判定。

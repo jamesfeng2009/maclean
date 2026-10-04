@@ -129,6 +129,14 @@ interface AppState {
   closeConfirm: () => void;
   /** 是否正在执行删除/清理（全局，供进度遮罩拦截重复操作） */
   cleaning: boolean;
+  /** 每次成功删除（移入废纸篓）后递增，供概览等页重新拉取磁盘/废纸篓占用 */
+  cleanNonce: number;
+  /**
+   * 本次运行会话内经 maclean 成功移入废纸篓的字节数（跨页累计）。
+   * macOS 未授予「完全磁盘访问」时无法读取废纸篓真实大小（TCC 拦截），
+   * 故只统计我们自己本次删除的量——始终真实；重启应用后归零。
+   */
+  sessionTrashBytes: number;
   /** 删除进度（已处理/总数/拦截等） */
   cleanProgress: CleanProgress | null;
   /** 本次删除实时日志（最近若干条，遮罩内滚动展示） */
@@ -191,6 +199,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [lastScope, setLastScope] = useState<ResultScope | null>(null);
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
   const [cleaning, setCleaning] = useState(false);
+  const [cleanNonce, setCleanNonce] = useState(0);
+  const [sessionTrashBytes, setSessionTrashBytes] = useState(0);
   const [cleanProgress, setCleanProgress] = useState<CleanProgress | null>(null);
   const [cleanLogs, setCleanLogs] = useState<CleanLogEntry[]>([]);
   const toastId = useRef(0);
@@ -331,7 +341,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setCleanProgress(null);
       setCleaning(true);
       try {
-        return await ipc.cleanExecute(
+        const report = await ipc.cleanExecute(
           reqs,
           langEn,
           (l) =>
@@ -341,6 +351,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
             }),
           (p) => setCleanProgress(p)
         );
+        // 有项真正被删除（移入废纸篓）：通知概览等页刷新磁盘用量，并累计本次
+        // 移入废纸篓的体量。取消 / 全部被拦截时不计。
+        if (!report.cancelled && report.deleted > 0) {
+          setCleanNonce((n) => n + 1);
+          const moved = reqs.reduce((s, r) => s + (r.size_bytes || 0), 0);
+          if (moved > 0) setSessionTrashBytes((b) => b + moved);
+        }
+        return report;
       } finally {
         setCleaning(false);
       }
@@ -377,6 +395,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       confirmReq,
       closeConfirm: () => setConfirmReq(null),
       cleaning,
+      cleanNonce,
+      sessionTrashBytes,
       cleanProgress,
       cleanLogs,
       executeClean,

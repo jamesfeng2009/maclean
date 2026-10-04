@@ -7,8 +7,8 @@ mod commands;
 
 use commands::{
     app_open, clean_execute, clean_preview, disk_info, im_breakdown, logs_list, logs_read,
-    logs_reveal, optimize_list, optimize_run, palette, scan, settings_get, settings_set,
-    startup_set_enabled, startups_list,
+    logs_reveal, optimize_list, optimize_run, palette, reveal_trash, scan, settings_get,
+    settings_set, startup_set_enabled, startups_list,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,6 +20,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             disk_info,
+            reveal_trash,
             scan,
             startups_list,
             startup_set_enabled,
