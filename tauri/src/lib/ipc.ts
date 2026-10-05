@@ -2,12 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
+  AppInventorySize,
   CleanItemReq,
   CleanLogEntry,
   CleanProgress,
   CleanReport,
   DiskInfo,
   ImBreakdown,
+  InstalledApp,
   LogFile,
   PreviewItem,
   ScanItem,
@@ -15,6 +17,7 @@ import type {
   ScanProgress,
   ScanScope,
   StartupItem,
+  UninstallAppReport,
 } from "./types";
 
 /**
@@ -104,6 +107,15 @@ export const ipc = {
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   /** 对 IM 的 Documents 根做只读占用分析 */
   imBreakdown: (path: string) => invoke<ImBreakdown>("im_breakdown", { path }),
+
+  /** 已安装应用轻量清单（元数据 + 真实图标，不含体积，打开页面秒回） */
+  appsInventory: () => invoke<InstalledApp[]>("apps_inventory"),
+  /** 后台补算应用本体 / 数据 / 缓存体积（与清单按 path 对齐） */
+  appsSizes: (paths: string[]) =>
+    invoke<AppInventorySize[]>("apps_sizes", { paths }),
+  /** 应用一键卸载（本体 + 关联数据 + 缓存，全部过安全闸门进废纸篓） */
+  appUninstall: (appPath: string, langEn: boolean) =>
+    invoke<UninstallAppReport>("app_uninstall", { appPath, langEn }),
 };
 
 export type { UnlistenFn };

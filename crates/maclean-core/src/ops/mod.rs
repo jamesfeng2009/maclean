@@ -12,6 +12,10 @@ use std::sync::mpsc;
 use crate::scanner::ScanItem;
 use crate::{logger, platform, safety, scanner};
 
+mod uninstall_app;
+
+pub use uninstall_app::{is_uninstallable_app_path, uninstall_app, UninstallAppReport};
+
 /// 后台扫描消息
 pub enum ScanMessage {
     /// 扫描进度更新

@@ -83,6 +83,8 @@ GUI 与 CLI 是**同一个二进制**：不带参数启动 GUI，带子命令走
 | `clean [--tab <key>] [--safe-only] [--dry-run] [--yes] [--scheduled]` | 删除（默认预览；删除走与 GUI 同一套安全闸门） | 全部 |
 | `check-disk [--breakdown]` | 磁盘空间 / 分类占比总览 | 磁盘分析 |
 | `list` | 列出可用扫描类别 | - |
+| `apps [--json]` | 列出已安装应用清单（含 Chrome/Safari 安装的 PWA 标记与保护状态） | 应用卸载 |
+| `uninstall <路径\|名称> [--yes]` | 一键卸载应用（本体+关联数据+缓存，移入废纸篓可还原；默认预览） | 应用卸载 |
 | `startup list \| disable <label> \| enable <label>` | macOS 启动项管理（可逆禁用） | 启动项 |
 | `optimize list-tasks \| run --task <id> [--yes]` | 系统优化/维护任务 | 系统优化 |
 | `schedule [--install --days N] [--remove]` | 定时清理任务管理 | 设置 |
@@ -110,7 +112,7 @@ GUI 与 CLI 是**同一个二进制**：不带参数启动 GUI，带子命令走
 | 0 | 成功 |
 | 1 | 通用失败（找不到项、磁盘信息不可读等） |
 | 2 | JSON 序列化失败 |
-| 4 | 需要确认（非 TTY 下 `clean` 未带 `--yes`；`optimize run` 非低风险任务未带 `--yes`） |
+| 4 | 需要确认（非 TTY 下 `clean` / `uninstall` 未带 `--yes`；`optimize run` 非低风险任务未带 `--yes`） |
 | 7 | Ctrl+C 取消 |
 | 8 | `clean` / `restore` 有失败项或被安全拦截项（带警告完成） |
 

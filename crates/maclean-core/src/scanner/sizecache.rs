@@ -169,7 +169,7 @@ impl Store {
             entries: std::mem::take(&mut self.entries),
         };
         let text = serde_json::to_string_pretty(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         // save 会消费 entries（take），仅在真正写成功时才算提交；失败需回填。
         let write_result = (|| -> std::io::Result<()> {
             let tmp = self.path.with_extension(format!(

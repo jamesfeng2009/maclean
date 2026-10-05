@@ -164,3 +164,55 @@ export interface ImBreakdown {
   total_bytes: number;
   parts: ImPart[];
 }
+
+/** 已安装应用清单条目（apps_inventory，core scanner::uninstall::InstalledApp） */
+export interface InstalledApp {
+  name: string;
+  path: string;
+  bundle_id: string;
+  version: string;
+  /** .app 包本体大小 */
+  app_size: number;
+  /** 关联数据（Containers / Application Support / Preferences 等） */
+  data_size: number;
+  /** 关联缓存（Caches / Logs / HTTPStorages 等） */
+  cache_size: number;
+  /** 是否为浏览器安装的 PWA / Web App */
+  is_pwa: boolean;
+  /** PWA 来源：chrome / edge / brave / chromium / safari（非 PWA 为空串） */
+  pwa_kind: string;
+  /** 是否允许一键卸载 */
+  deletable: boolean;
+  undeletable_reason: string;
+  /** 保护级别：none / critical / official / data */
+  protection: string;
+  has_official_uninstaller: boolean;
+  /** 应用真实图标（PNG data URL）；提取失败时缺省，前端回退首字母色块 */
+  icon?: string | null;
+  /** 前端私有：该应用的体积是否已流式回填（不参与后端数据） */
+  _sized?: boolean;
+  /** 前端私有：磁盘繁忙、预算内未算完精确体积（不参与后端数据） */
+  _skipped?: boolean;
+}
+
+/** 应用体积补算条目（apps_sizes，与轻量清单按 path 对齐） */
+export interface AppInventorySize {
+  path: string;
+  app_size: number;
+  data_size: number;
+  cache_size: number;
+}
+
+/** 应用一键卸载结果（app_uninstall，core ops::UninstallAppReport） */
+export interface UninstallAppReport {
+  /** blocked（拒绝）/ delegated（已交官方卸载器）/ done（已卸载） */
+  status: "blocked" | "delegated" | "done";
+  message: string;
+  deleted: number;
+  intercepted: number;
+  skipped: number;
+  restorable: number;
+  total: number;
+  backup_id: string | null;
+  freed_bytes: number;
+}

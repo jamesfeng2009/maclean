@@ -74,13 +74,16 @@ impl Scanner for AppCacheScanner {
     }
 }
 
+/// 扫描段类型：`(段标识, 扫描函数)`
+type Segment = (&'static str, fn() -> Vec<ScanItem>);
+
 /// 应用缓存的各独立扫描段：`(段标识, 扫描函数)`。
 ///
 /// 每段彼此独立、可在各自的墙钟预算下运行；高磁盘负载时某一段即便超时也只丢该段，
 /// 其余段结果照常合并（部分结果），不再因整扫描器到点而全部归零。段函数都是无捕获
 /// 的 `fn`，可安全跨线程移交。分段结果合并后务必调用 [`finish_items`] 做与
 /// [`AppCacheScanner::scan`] 一致的去重 / 排序。
-pub fn scan_segments() -> [(&'static str, fn() -> Vec<ScanItem>); 6] {
+pub fn scan_segments() -> [Segment; 6] {
     [
         ("im_containers", scan_containers),
         ("group_containers", scan_group_containers),

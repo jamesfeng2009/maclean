@@ -908,6 +908,92 @@ pub async fn clean_execute(
     .map_err(|e| format!("清理任务异常: {e}"))?
 }
 
+/* ============================== 应用一键卸载 ============================== */
+
+/// 已安装应用**轻量清单**（应用卸载页首屏数据源）：元数据 + 真实图标，
+/// **不含体积**，打开页面秒回。体积由 [`apps_sizes`] 在后台补算。
+///
+/// 历史上这里直接跑完整 `list_installed_apps()`，会对每个应用的本体及全部
+/// 关联目录（微信 / Telegram 等可达数十 GB）做递归统计，冷跑约 80 秒并把
+/// 磁盘 IO 打满，表现为「点击应用卸载卡死」。现拆成两阶段：本命令只做
+/// plist 读取与图标提取（秒级），重 IO 的体积统计移到 [`apps_sizes`]。
+#[tauri::command]
+pub async fn apps_inventory() -> Result<Vec<scanner::uninstall::InstalledApp>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        {
+            Ok(scanner::uninstall::list_installed_apps_light())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(Vec::new())
+        }
+    })
+    .await
+    .map_err(|e| format!("应用清单加载异常: {e}"))?
+}
+
+/// 后台补算应用本体 / 数据 / 缓存体积，并**逐条流式推送**。
+///
+/// 重 IO。前端在轻量清单渲染后调用；后端并行统计，**每算完一个应用就 emit
+/// 一条 `app-size` 事件**（payload 为单个 `AppInventorySize`），因此小应用
+/// 先出体积、微信 / Telegram 这类数十 GB 的大目录最后才更新，不会因为最慢
+/// 的一个而让整屏停留在「统计中…」。命令最终 resolve 全量结果作为完成信号。
+#[tauri::command]
+pub async fn apps_sizes(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<scanner::uninstall::AppInventorySize>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        {
+            use std::time::Duration;
+            // IO 拥塞时过多线程只会互相拖累：并发按核数限制在 2..=6。
+            let concurrency = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(2, 6);
+            // 整批墙钟预算：磁盘繁忙时，算不完的应用在前端标注「繁忙跳过」，
+            // 不让页面无限转圈；机器空闲时全部远早于预算完成、提前返回。
+            let budget = Duration::from_secs(20);
+            let completed = scanner::uninstall::app_inventory_sizes_bounded(
+                paths,
+                concurrency,
+                budget,
+                move |item| {
+                    let _ = app.emit("app-size", &item);
+                },
+            );
+            Ok(completed)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (app, paths);
+            Ok(Vec::new())
+        }
+    })
+    .await
+    .map_err(|e| format!("应用体积统计异常: {e}"))?
+}
+
+/// 应用一键卸载：应用本体 + 关联数据 + 关联缓存一次清理。
+///
+/// 安全边界全在 core 内：路径白名单（仅 /Applications 与 ~/Applications
+/// 下的 .app）、保护级别拦截、官方卸载器优先（读配置开关）、删除逐成员过
+/// safety 闸门并移入废纸篓（M-2 备份清单）。前端传入的路径不被信任，
+/// 删除前在 Rust 侧重新校验。
+#[tauri::command]
+pub async fn app_uninstall(app_path: String, lang_en: bool) -> Result<ops::UninstallAppReport, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ops::UninstallAppReport, String> {
+        // 官方卸载器开关来自 core 配置（设置页同一把锁）
+        let prefer_official_uninstaller =
+            config::load_config().settings_prefer_official_uninstaller;
+        Ok(ops::uninstall_app(&app_path, lang_en, prefer_official_uninstaller))
+    })
+    .await
+    .map_err(|e| format!("卸载任务异常: {e}"))?
+}
+
 /* ============================== 日志 ============================== */
 
 #[derive(Debug, Serialize)]

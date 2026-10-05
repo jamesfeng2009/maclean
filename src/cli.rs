@@ -193,6 +193,22 @@ pub enum Commands {
     /// 列出所有可用的扫描类别
     List,
 
+    /// 列出已安装应用清单（含 Chrome/Safari 安装的 PWA，一键卸载用）
+    Apps,
+
+    /// 一键卸载应用（本体 + 关联数据 + 缓存，移入废纸篓可还原）
+    ///
+    /// 默认只预览不卸载；加 --yes 才实际执行。接受完整 .app 路径，
+    /// 也接受应用名（自动在 /Applications 与 ~/Applications 下解析）。
+    Uninstall {
+        /// 应用路径（/Applications/Foo.app）或应用名
+        app: String,
+
+        /// 确认执行卸载（非交互环境必须显式携带，否则拒绝执行）
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// 查看日志文件路径或输出最近日志
     Log {
         /// 输出最近 N 行日志（默认显示路径）
@@ -330,6 +346,8 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
         } => cmd_schedule(install, remove, days, format),
         Commands::CheckDisk { breakdown } => cmd_check_disk(breakdown, format),
         Commands::List => cmd_list(format),
+        Commands::Apps => cmd_apps(format),
+        Commands::Uninstall { app, yes } => cmd_uninstall(&app, yes, format),
         // 日志是给人看的，不做 JSON
         Commands::Log { tail, open } => cmd_log(tail, open),
         Commands::Backups { restorable_only } => cmd_backups(restorable_only, format),
@@ -1391,6 +1409,143 @@ fn cmd_list(format: OutputFormat) -> u8 {
     println!("  maclean clean --tab dev-cache --safe-only --dry-run  # 预览安全清理");
     println!("  maclean check-disk               # 检查磁盘空间");
     EXIT_OK
+}
+
+// =========================================================================
+//  M-3 · 应用清单 / 一键卸载
+// =========================================================================
+
+/// `maclean apps`：列出已安装应用（含 PWA 标记与保护状态）
+fn cmd_apps(format: OutputFormat) -> u8 {
+    let apps = crate::scanner::uninstall::list_installed_apps();
+
+    if format != OutputFormat::Human {
+        emit_json(&apps, format, true);
+        return EXIT_OK;
+    }
+
+    if apps.is_empty() {
+        println!("未发现已安装应用");
+        return EXIT_OK;
+    }
+
+    println!();
+    println!("{:<26} {:>9}  {:<9}  路径", "应用", "本体大小", "类型");
+    for a in &apps {
+        let kind = if a.is_pwa {
+            format!("PWA({})", a.pwa_kind)
+        } else if !a.deletable {
+            "受保护".to_string()
+        } else {
+            "App".to_string()
+        };
+        let name: String = a.name.chars().take(24).collect();
+        println!(
+            "{:<26} {:>9}  {:<9}  {}",
+            name,
+            format_size(a.app_size),
+            kind,
+            a.path
+        );
+    }
+    println!(
+        "\n提示：`maclean uninstall <路径或名称> --yes` 一键卸载（本体+数据+缓存，移入废纸篓）"
+    );
+    EXIT_OK
+}
+
+/// 解析 `uninstall` 参数：接受完整 .app 路径，或按应用名在
+/// /Applications 与 ~/Applications（含 PWA 目录）下解析。
+fn resolve_app_arg(arg: &str) -> Result<String, String> {
+    let p = std::path::Path::new(arg);
+    if p.extension().and_then(|e| e.to_str()) == Some("app") && p.is_dir() {
+        return Ok(arg.to_string());
+    }
+
+    let apps = crate::scanner::uninstall::list_installed_apps();
+    let lower = arg.to_lowercase();
+    let mut hits: Vec<String> = apps
+        .iter()
+        .filter(|a| a.name.to_lowercase().contains(&lower))
+        .map(|a| a.path.clone())
+        .collect();
+    match hits.len() {
+        0 => Err(format!("找不到应用：{}（可用 `maclean apps` 查看）", arg)),
+        1 => Ok(hits.remove(0)),
+        _ => Err(format!(
+            "应用名 {} 匹配到多个应用：{}\n请传入完整 .app 路径",
+            arg,
+            hits.join(", ")
+        )),
+    }
+}
+
+/// `maclean uninstall <app> [--yes]`：一键卸载
+///
+/// 安全口径与 GUI 完全一致（core ops::uninstall_app）：路径白名单、
+/// 保护级别拦截、官方卸载器优先（跟随设置）、删除逐成员过闸门并移入废纸篓。
+/// 默认只预览；非交互环境不带 --yes 直接拒绝（退出码 4）。
+fn cmd_uninstall(app_arg: &str, yes: bool, format: OutputFormat) -> u8 {
+    let path = match resolve_app_arg(app_arg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            return EXIT_FAILURE;
+        }
+    };
+
+    // 展示用元数据（只读）
+    let info = crate::scanner::uninstall::list_installed_apps()
+        .into_iter()
+        .find(|a| a.path == path);
+    let name = info.as_ref().map(|a| a.name.as_str()).unwrap_or(&path);
+    let release = info
+        .as_ref()
+        .map(|a| a.app_size + a.data_size + a.cache_size)
+        .unwrap_or(0);
+    let is_pwa = info.as_ref().map(|a| a.is_pwa).unwrap_or(false);
+
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            eprintln!("非交互环境执行卸载必须显式携带 --yes（仅预览请直接查看输出）");
+            return EXIT_CONFIRM_REQUIRED;
+        }
+        let kind = if is_pwa { "PWA" } else { "应用" };
+        println!(
+            "[预览] 将卸载 {kind}「{}」（{}），释放 {}，移入废纸篓可还原",
+            name,
+            path,
+            format_size(release)
+        );
+        println!("确认请加 --yes 执行");
+        return EXIT_OK;
+    }
+
+    let prefer_official = maclean_core::config::load_config().settings_prefer_official_uninstaller;
+    let rep = crate::ops::uninstall_app(&path, false, prefer_official);
+
+    if format != OutputFormat::Human {
+        emit_json(&rep, format, true);
+    } else if rep.status == "blocked" {
+        eprintln!("{}", rep.message);
+    } else {
+        println!("{}", rep.message);
+        if rep.restorable > 0 {
+            println!("可还原 {} 项（`maclean backups` 查看清单）", rep.restorable);
+        }
+    }
+
+    match rep.status.as_str() {
+        "done" => {
+            if rep.intercepted > 0 {
+                EXIT_WARNINGS
+            } else {
+                EXIT_OK
+            }
+        }
+        "delegated" => EXIT_OK,
+        _ => EXIT_FAILURE,
+    }
 }
 
 // =========================================================================

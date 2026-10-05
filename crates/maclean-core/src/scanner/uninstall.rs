@@ -21,8 +21,11 @@
 // windows_apps 链路，本模块整体不被调用 —— 死代码告警是设计使然，不是回归。
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -718,7 +721,7 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
 /// 判断路径是否为缓存/日志类路径
 ///
 /// 缓存类路径删除后应用可正常运行并自动重建。
-fn is_cache_like_path(path: &str) -> bool {
+pub(crate) fn is_cache_like_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.contains("library/caches/")
         || lower.contains("library/logs/")
@@ -726,7 +729,7 @@ fn is_cache_like_path(path: &str) -> bool {
 }
 
 /// 计算单个路径的大小（文件或目录）
-fn path_size(path: &str) -> u64 {
+pub(crate) fn path_size(path: &str) -> u64 {
     let p = std::path::Path::new(path);
     if p.is_dir() {
         dir_size(p)
@@ -744,7 +747,7 @@ fn path_size(path: &str) -> u64 {
 /// 从 Info.plist 读取 bundle ID
 ///
 /// 优先使用 `defaults read`，失败时回退到 `plutil`。
-fn get_bundle_id(app_path: &Path) -> Option<String> {
+pub(crate) fn get_bundle_id(app_path: &Path) -> Option<String> {
     let plist = app_path.join("Contents/Info.plist");
     if !plist.exists() {
         return None;
@@ -810,7 +813,7 @@ pub(crate) fn installed_bundle_id_set() -> std::collections::HashSet<String> {
 ///
 /// 优先读取 CFBundleDisplayName，回退到 CFBundleName。
 /// macOS `defaults read` 对中文字符会输出 \uXXXX 转义序列，这里做解码。
-fn get_app_display_name(app_path: &Path) -> Option<String> {
+pub(crate) fn get_app_display_name(app_path: &Path) -> Option<String> {
     let plist = app_path.join("Contents/Info.plist");
     if !plist.exists() {
         return None;
@@ -956,6 +959,36 @@ fn is_allowed_associated_path(path: &Path, home: &Path) -> bool {
     roots.iter().any(|r| target.starts_with(r))
 }
 
+/// 从 Info.plist 读取应用版本号
+///
+/// 优先 CFBundleShortVersionString，回退到 CFBundleVersion。
+pub(crate) fn get_app_version(app_path: &Path) -> Option<String> {
+    let plist = app_path.join("Contents/Info.plist");
+    if !plist.exists() {
+        return None;
+    }
+
+    for key in &["CFBundleShortVersionString", "CFBundleVersion"] {
+        let output = Command::new("defaults")
+            .arg("read")
+            .arg(&plist)
+            .arg(key)
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let version = decode_unicode_escapes(&raw);
+                if !version.is_empty() {
+                    return Some(version);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// 查找应用的关联文件
 ///
 /// 基于 bundle ID 和应用名搜索 ~/Library/ 下的各类关联路径。
@@ -981,7 +1014,31 @@ fn is_allowed_associated_path(path: &Path, home: &Path) -> bool {
 /// 16. LaunchDaemons — 系统级守护进程（需 sudo 删除）
 /// 17. Caches/Application Support（按命名变体匹配）
 /// 18. Embedded bundle ID（XPC/appex 内嵌的 bundle ID）
-fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
+///
+/// 关联文件候选路径（供一键卸载复用；与扫描器同一份拼接与出口兜底逻辑）
+/// `~/Library/Group Containers` 下的全部条目的**全路径**，进程内只枚举一次。
+///
+/// 一台机器上该目录对所有应用是同一份，且常含上百个共享容器；若每个应用都
+/// `read_dir` 一遍，N 个应用就是 N 次全量枚举，是应用卸载页的显著 IO 浪费。
+/// 首次调用时枚举并缓存，后续调用零 IO。
+fn group_container_paths() -> Vec<String> {
+    static CACHE: OnceLock<Vec<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let group_dir = home_dir().join("Library/Group Containers");
+            read_dir_with_timeout(&group_dir)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     let home = home_dir();
     let mut paths = Vec::new();
 
@@ -1009,21 +1066,20 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     }
 
     // 2. ~/Library/Group Containers/*<bundle_id>*/
-    let group_dir = home.join("Library/Group Containers");
-    if let Some(entries) = read_dir_with_timeout(&group_dir) {
-        for path in entries {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            for bid in &bundle_id_variants {
-                if name.contains(bid) {
-                    let p = path.to_string_lossy().to_string();
-                    if !paths.contains(&p) {
-                        paths.push(p);
-                    }
-                    break;
+    // 该目录在一台机器上对所有应用是同一份、条目往往很多；逐应用重复 read_dir
+    // 是打开「应用卸载」页的主要 IO 开销之一（N 个应用 = N 次全量枚举）。
+    // 改为进程内只枚举一次并缓存（见 group_container_paths）。
+    for gc in group_container_paths() {
+        let name = Path::new(&gc)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        for bid in &bundle_id_variants {
+            if name.contains(bid) {
+                if !paths.contains(&gc) {
+                    paths.push(gc.clone());
                 }
+                break;
             }
         }
     }
@@ -1060,26 +1116,13 @@ fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
         }
     }
 
-    // 7. Chrome Web App (PWA)：com.google.Chrome.app.<hash>
-    //    本体在 ~/Applications/Chrome Apps.localized/，数据在
-    //    ~/Library/Application Support/Google/Chrome/Default/Web Applications/
-    //    （Manifest Resources/<hash> + Temp/<hash>）
-    for bid in &bundle_id_variants {
-        if let Some(hash) = bid.strip_prefix("com.google.Chrome.app.") {
-            if is_safe_path_segment(hash) {
-                for sub in ["Manifest Resources", "Temp"] {
-                    let p = home.join(format!(
-                        "Library/Application Support/Google/Chrome/Default/Web Applications/{}/{}",
-                        sub, hash
-                    ));
-                    if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
-                        paths.push(p.to_string_lossy().to_string());
-                    }
-                }
-            }
-            break;
-        }
-    }
+    // 7. 浏览器 PWA 的「浏览器侧数据」刻意不在此枚举/删除：
+    //    Chromium 系 PWA 的内部注册（Preferences / LevelDB 的 web_apps 注册表）与
+    //    `Web Applications/Manifest Resources/<资源id>` 使用的是与快捷方式 extension id
+    //    不同的独立标识，无法从 shim `.app` 安全映射（盲删可能误删共享资源），且浏览器
+    //    运行中改写其配置会造成损坏。PWA 卸载只移除 shim `.app` 本体（见
+    //    ops::uninstall_app）；浏览器下次启动自检到快捷方式缺失，会自行清除失效注册与
+    //    资源 —— 这与 Finder「拖进废纸篓」的官方卸载效果一致。
 
     // 7. ~/Library/Logs/<app_name>/ (含命名变体)
     for name in &name_variants {
@@ -1869,6 +1912,614 @@ fn is_versioned_app_dir(name: &str, installed_apps: &std::collections::HashSet<S
     false
 }
 
+// =========================================================================
+//  应用清单（一键卸载数据源）
+// =========================================================================
+
+/// 已安装应用清单条目
+///
+/// 应用卸载页「一键卸载」卡片的数据源：每应用一条，包含展示用元数据
+/// （名称/版本/体积/保护级别）与 PWA 标记。体积口径与扫描器一致：
+/// - `app_size`：.app 包本体
+/// - `data_size`：关联数据（Containers / Application Support / Preferences 等）
+/// - `cache_size`：关联缓存（Caches / Logs / HTTPStorages 等）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct InstalledApp {
+    /// 展示名（CFBundleDisplayName / CFBundleName）
+    pub name: String,
+    /// .app 包路径
+    pub path: String,
+    pub bundle_id: String,
+    /// CFBundleShortVersionString（回退 CFBundleVersion），可能为空
+    pub version: String,
+    pub app_size: u64,
+    pub data_size: u64,
+    pub cache_size: u64,
+    /// 是否为浏览器安装的 PWA / Web App
+    pub is_pwa: bool,
+    /// PWA 来源：chrome / edge / brave / chromium / safari（非 PWA 为空串）
+    pub pwa_kind: String,
+    /// 是否允许一键卸载（保护级别 + 系统应用名双重判定）
+    pub deletable: bool,
+    pub undeletable_reason: String,
+    /// 保护级别：none / critical / official / data
+    pub protection: String,
+    /// 应用包内或同级目录是否存在官方卸载器
+    pub has_official_uninstaller: bool,
+    /// 应用真实图标（PNG data URL）。轻量清单阶段提取；体积补算阶段为 `None`。
+    /// 提取失败（无 icns / sips 失败）时为 `None`，前端回退为首字母色块。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+/// 浏览器安装 PWA 的 bundle id 前缀 → 来源名
+///
+/// Chrome 系 PWA 快捷方式的 bundle id 形如 `com.google.Chrome.app.<hash>`，
+/// Edge / Brave / Chromium 同构。Safari 网页应用为 `com.apple.Safari.WebApp.*`。
+const PWA_BUNDLE_PREFIXES: &[(&str, &str)] = &[
+    ("com.google.Chrome.app.", "chrome"),
+    ("com.microsoft.edgemac.app.", "edge"),
+    ("com.brave.Browser.app.", "brave"),
+    ("com.chromium.Chromium.app.", "chromium"),
+    ("com.apple.Safari.WebApp.", "safari"),
+];
+
+/// 判断一个应用是否为浏览器安装的 PWA / Web App，并返回来源名
+///
+/// 双重判定：先按 bundle id 前缀精确匹配，再按路径回退
+/// （`~/Applications/Chrome Apps.localized/`、`Safari Web Apps.localized`）。
+pub fn pwa_kind_for(bundle_id: &str, path: &str) -> Option<&'static str> {
+    for (prefix, kind) in PWA_BUNDLE_PREFIXES {
+        if bundle_id.starts_with(prefix) {
+            return Some(kind);
+        }
+    }
+    if path.contains("Chrome Apps.localized") {
+        return Some("chrome");
+    }
+    if path.contains("Safari Web Apps.localized") || path.contains("Web Apps.localized") {
+        return Some("safari");
+    }
+    None
+}
+
+// ---- 通用 Chromium PWA shim 识别（不依赖硬编码浏览器清单）----
+
+/// Chromium 宿主浏览器 bundle id → PWA 来源名；无法识别的内核浏览器统一归 `chromium`。
+///
+/// Chrome 系各发行版的 PWA 安装机制同构（都是 `app_mode_loader` shim），
+/// Arc / Opera / Vivaldi / Yandex / 豆包等非清单内浏览器也走同一路径，
+/// 因此未知宿主安全地归为 `chromium`（前端对未知来源统一显示「PWA」）。
+fn chromium_host_kind(host_bundle: &str) -> &'static str {
+    let h = host_bundle.to_ascii_lowercase();
+    if h.starts_with("com.google.chrome") {
+        "chrome"
+    } else if h.contains("edgemac") || h.contains("microsoftedge") || h.contains("msedge") {
+        "edge"
+    } else if h.contains("brave") {
+        "brave"
+    } else {
+        // 含 org.chromium.* 以及 Arc / Opera / Vivaldi / Yandex / 豆包等其它内核
+        "chromium"
+    }
+}
+
+/// 依据 Chromium shim 的 `Info.plist` 特征判定 PWA 来源（纯逻辑，便于单测）。
+///
+/// - `shortcut_id` = `CrAppModeShortcutID`（快捷方式/扩展 id，存在即 shim）；
+/// - `executable` = `CFBundleExecutable`（Chromium shim 固定为 `app_mode_loader`）；
+/// - `host_bundle` = `CrBundleIdentifier`（生成该 shim 的宿主浏览器 bundle id）。
+fn pwa_kind_from_shim(
+    shortcut_id: Option<&str>,
+    executable: Option<&str>,
+    host_bundle: Option<&str>,
+) -> Option<&'static str> {
+    let has_shortcut = matches!(shortcut_id, Some(s) if !s.is_empty());
+    let is_loader = matches!(executable, Some(e) if e == "app_mode_loader");
+    if !has_shortcut && !is_loader {
+        return None;
+    }
+    Some(host_bundle.map(chromium_host_kind).unwrap_or("chromium"))
+}
+
+/// 路径是否位于 `~/Applications/<容器>.localized/<Name>.app`（浏览器 PWA 容器布局）。
+///
+/// 只对这种布局里的包读 plist，避免给 `/Applications` 与 `~/Applications` 顶层的
+/// 普通应用增加额外的元数据 IO。
+fn in_localized_app_container(path: &str) -> bool {
+    let marker = "/Applications/";
+    let Some(idx) = path.find(marker) else {
+        return false;
+    };
+    let rest = &path[idx + marker.len()..];
+    // rest 形如 "<container>.localized/<Name>.app"；顶层 .app（无第二段）直接排除。
+    let Some((container, after)) = rest.split_once('/') else {
+        return false;
+    };
+    container.ends_with(".localized") && after.ends_with(".app")
+}
+
+/// 从 `.app/Contents/Info.plist` 读取一个字符串键（`defaults read`，失败回退 `plutil`）。
+fn read_plist_string(app_path: &Path, key: &str) -> Option<String> {
+    let plist = app_path.join("Contents/Info.plist");
+    if !plist.exists() {
+        return None;
+    }
+    if let Ok(out) = Command::new("defaults")
+        .arg("read")
+        .arg(&plist)
+        .arg(key)
+        .output()
+    {
+        if out.status.success() {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    if let Ok(out) = Command::new("plutil")
+        .arg("-extract")
+        .arg(key)
+        .arg("raw")
+        .arg(&plist)
+        .output()
+    {
+        if out.status.success() {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// 综合判定一个 `.app` 是否为浏览器安装的 PWA / Web App，并返回来源名。
+///
+/// 先走 [`pwa_kind_for`] 的 bundle id / 路径快速判定；未命中且包位于 PWA 容器
+/// （`~/Applications/<容器>.localized/`）时，再读 `Info.plist` 用 shim 特征判定，
+/// 从而覆盖硬编码清单之外的 Chromium 内核浏览器（豆包 / Arc / Opera 等）。
+pub(crate) fn detect_pwa_kind(
+    app_path: &Path,
+    bundle_id: &str,
+    path: &str,
+) -> Option<&'static str> {
+    if let Some(kind) = pwa_kind_for(bundle_id, path) {
+        return Some(kind);
+    }
+    if !in_localized_app_container(path) {
+        return None;
+    }
+    let shortcut = read_plist_string(app_path, "CrAppModeShortcutID");
+    let executable = read_plist_string(app_path, "CFBundleExecutable");
+    let host = read_plist_string(app_path, "CrBundleIdentifier");
+    pwa_kind_from_shim(
+        shortcut.as_deref(),
+        executable.as_deref(),
+        host.as_deref(),
+    )
+}
+
+/// 扫描全部已安装应用，返回完整清单（按应用本体大小降序）
+///
+/// 与 `UninstallScanner::scan` 共享同一套路径收集 / plist 读取 / 关联文件
+/// 查找逻辑，但不做废纸篓 / Downloads / Library 残留扫描 —— 它是给
+/// 「一键卸载」用的只读视图，需要带版本号与体积。
+///
+/// 注意：本函数会对每个应用的本体及全部关联目录做完整体积递归（微信 / Telegram
+/// 等可达数十 GB），冷跑可能耗时数十秒。**GUI「应用卸载」页不要直接调用它**：
+/// 先用 [`list_installed_apps_light`] 秒出带图标的清单，再用
+/// [`app_inventory_sizes_for`] 在后台补体积。本函数供 CLI / 卸载时按需使用。
+pub fn list_installed_apps() -> Vec<InstalledApp> {
+    let app_paths = collect_app_paths();
+
+    let mut apps: Vec<InstalledApp> = app_paths
+        .par_iter()
+        .map(|p| p.as_path())
+        .filter_map(inspect_app)
+        .collect();
+
+    apps.sort_by(|a, b| {
+        b.app_size
+            .cmp(&a.app_size)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    apps
+}
+
+/// 轻量应用清单（GUI 打开「应用卸载」页时秒回）：
+///
+/// 只枚举 `.app`、读 plist 元数据、提取真实图标，**不做任何目录体积递归**
+/// （`app_size/data_size/cache_size` 全为 0）。体积随后由
+/// [`app_inventory_sizes_for`] 在后台统一补算。按名称稳定排序，
+/// 避免体积补回后卡片整屏重排跳动。
+pub fn list_installed_apps_light() -> Vec<InstalledApp> {
+    let app_paths = collect_app_paths();
+
+    let mut apps: Vec<InstalledApp> = app_paths
+        .par_iter()
+        .map(|p| p.as_path())
+        .filter_map(|p| inspect_app_meta(p, true))
+        .collect();
+
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    apps
+}
+
+/// 读取单个 .app 的元数据（bundle id 读不到或位于 /System/ 下则跳过）。
+///
+/// `with_icon` 为真时额外用 `sips` 提取真实图标（PNG data URL）；体积字段恒为 0。
+fn inspect_app_meta(app_path: &Path, with_icon: bool) -> Option<InstalledApp> {
+    let path_str = app_path.to_string_lossy();
+
+    // 跳过 /System/ 下的应用（系统只读区域，无法删除）
+    if path_str.starts_with("/System/") {
+        return None;
+    }
+
+    let bundle_id = get_bundle_id(app_path)?;
+
+    let name = get_app_display_name(app_path).unwrap_or_else(|| {
+        app_path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("未知应用")
+            .to_string()
+    });
+    let version = get_app_version(app_path).unwrap_or_default();
+
+    // 保护级别（与 scan_app 同一套判定）
+    let protection = app_protection::check_bundle_protection(&bundle_id);
+    let is_system_by_name = is_system_app(&name);
+    let is_critical = matches!(protection, ProtectionLevel::Critical) || is_system_by_name;
+
+    let (deletable, undeletable_reason, protection_label) = if is_critical {
+        (false, "protection_critical".to_string(), "critical")
+    } else if matches!(protection, ProtectionLevel::RequiresOfficialUninstaller) {
+        let vendor = app_protection::get_security_vendor(&bundle_id).unwrap_or("官方");
+        (
+            false,
+            format!("protection_official_uninstaller:{}", vendor),
+            "official",
+        )
+    } else {
+        let label = if matches!(protection, ProtectionLevel::DataProtected) {
+            "data"
+        } else {
+            "none"
+        };
+        (true, String::new(), label)
+    };
+
+    let has_official_uninstaller = !is_critical
+        && crate::scanner::official_uninstaller::find_official_uninstaller(&path_str, &name)
+            .is_some();
+
+    let pwa_kind = detect_pwa_kind(app_path, &bundle_id, &path_str);
+
+    let icon = if with_icon {
+        extract_app_icon_data_url(app_path)
+    } else {
+        None
+    };
+
+    Some(InstalledApp {
+        name,
+        path: path_str.into_owned(),
+        bundle_id,
+        version,
+        app_size: 0,
+        data_size: 0,
+        cache_size: 0,
+        is_pwa: pwa_kind.is_some(),
+        pwa_kind: pwa_kind.unwrap_or("").to_string(),
+        deletable,
+        undeletable_reason,
+        protection: protection_label.to_string(),
+        has_official_uninstaller,
+        icon,
+    })
+}
+
+/// 读取单个 .app 的完整信息（元数据 + 体积），供 CLI / 卸载流程使用。
+fn inspect_app(app_path: &Path) -> Option<InstalledApp> {
+    let mut app = inspect_app_meta(app_path, false)?;
+
+    app.app_size = dir_size(app_path);
+
+    // 关联文件：数据类 / 缓存类拆开，口径与扫描器一致
+    let associated = find_associated_files(&app.bundle_id, &app.name);
+    let (cache_paths, data_paths): (Vec<String>, Vec<String>) =
+        associated.into_iter().partition(|p| is_cache_like_path(p));
+    app.data_size = data_paths.iter().map(|p| path_size(p)).sum();
+    app.cache_size = cache_paths.iter().map(|p| path_size(p)).sum();
+
+    Some(app)
+}
+
+/// 单个应用的体积补算结果（与轻量清单按 `path` 对齐）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppInventorySize {
+    pub path: String,
+    pub app_size: u64,
+    pub data_size: u64,
+    pub cache_size: u64,
+}
+
+/// 单条路径的只读占用（带持久体积缓存）：目录走
+/// [`sizecache::dir_size_accurate_cached`]，普通文件取元数据长度。
+///
+/// 仅供应用卸载页的**只读占用展示**。物理块口径（`st_blocks×512`）与删除
+/// 链路的 [`path_size`] 一致；差别在于大目录结果会落盘缓存（TTL 7 天），
+/// 机器空闲算过一次后，即便随后磁盘繁忙也能秒回。不完整结果不写缓存。
+fn path_size_cached(path: &str) -> u64 {
+    let p = Path::new(path);
+    if p.is_dir() {
+        crate::scanner::sizecache::dir_size_accurate_cached(p).0
+    } else if let Ok(meta) = p.symlink_metadata() {
+        meta.len()
+    } else {
+        0
+    }
+}
+
+/// 计算单个应用的本体 / 数据 / 缓存体积（只读展示口径，带持久缓存）。
+///
+/// 关联路径发现 / 数据 / 缓存分类与 [`inspect_app`] 完全一致；体积统计改用
+/// [`path_size_cached`] / `dir_size_accurate_cached`，使高负载机器二次打开
+/// 秒出。`/System/` 或读不到 bundle id 时返回 `None`。
+/// 单应用内无需去重（本体 `.app` 与 `~/Library` 关联路径不会重叠）。
+pub fn app_inventory_size_one(raw: &str) -> Option<AppInventorySize> {
+    let app_path = Path::new(raw);
+    let path_str = app_path.to_string_lossy();
+    if path_str.starts_with("/System/") {
+        return None;
+    }
+    let bundle_id = get_bundle_id(app_path)?;
+    let name = get_app_display_name(app_path).unwrap_or_else(|| {
+        app_path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("未知应用")
+            .to_string()
+    });
+
+    let app_size = crate::scanner::sizecache::dir_size_accurate_cached(app_path).0;
+    let associated = find_associated_files(&bundle_id, &name);
+    let (cache_paths, data_paths): (Vec<String>, Vec<String>) =
+        associated.into_iter().partition(|p| is_cache_like_path(p));
+
+    Some(AppInventorySize {
+        path: raw.to_string(),
+        app_size,
+        data_size: data_paths.iter().map(|p| path_size_cached(p)).sum(),
+        cache_size: cache_paths.iter().map(|p| path_size_cached(p)).sum(),
+    })
+}
+
+/// 后台并行补算一批应用的体积。
+///
+/// 每个应用独立走 [`app_inventory_size_one`]，可被上层逐条产出（GUI 据此做
+/// 流式回填：先算完的小应用先显示，不等最慢的大目录）。`~/Library/Group
+/// Containers` 的枚举由 [`group_container_paths`] 在进程内只做一次。
+pub fn app_inventory_sizes_for(paths: &[String]) -> Vec<AppInventorySize> {
+    paths
+        .par_iter()
+        .filter_map(|p| app_inventory_size_one(p))
+        .collect()
+}
+
+/// 并行补算体积，并在**每个应用算完时立即回调**一次（供 GUI 流式回填）。
+///
+/// 与 [`app_inventory_sizes_bounded`] 不同，本函数无墙钟预算、会等所有应用
+/// 算完（CLI / 测试用）。回调跨线程触发，要求 `Sync`。
+pub fn app_inventory_sizes_emit<F: Fn(AppInventorySize) + Sync>(paths: &[String], on_item: F) {
+    paths.par_iter().for_each(|p| {
+        if let Some(item) = app_inventory_size_one(p) {
+            on_item(item);
+        }
+    });
+    crate::scanner::sizecache::flush();
+}
+
+/// 有界并发 + 墙钟预算地补算应用体积，**算完一个回调一个**（GUI 流式回填）。
+///
+/// 针对磁盘高负载是一等公民：用固定 `concurrency` 个 worker（过多线程只会在
+/// IO 拥塞时互相拖累），每条结果经 `on_item` 立即推送。超过 `budget` 后停止
+/// 领取新任务，已在跑的单个大目录不强行中断（其内部 `dir_size` 有看门狗，
+/// 会在子树级超时后自然结束），detach 到后台自生自灭，本函数准时返回，
+/// 因此 UI 绝不会无限停留在「统计中…」。返回预算内实际算完的条目。
+pub fn app_inventory_sizes_bounded<F>(
+    paths: Vec<String>,
+    concurrency: usize,
+    budget: std::time::Duration,
+    on_item: F,
+) -> Vec<AppInventorySize>
+where
+    F: Fn(AppInventorySize) + Send + Sync + 'static,
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
+    let start = Instant::now();
+    let concurrency = concurrency.clamp(1, 16);
+    let total = paths.len();
+    let completed = std::sync::Arc::new(AtomicUsize::new(0));
+    let done = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let (job_tx, job_rx) = mpsc::channel::<String>();
+    let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
+    let on_item = std::sync::Arc::new(on_item);
+
+    // feeder：投递全部任务后 drop sender，worker 在队列耗尽时自然退出
+    let feeder = std::thread::spawn(move || {
+        for p in paths {
+            if job_tx.send(p).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut workers = Vec::new();
+    for _ in 0..concurrency {
+        let job_rx = std::sync::Arc::clone(&job_rx);
+        let on_item = std::sync::Arc::clone(&on_item);
+        let completed = std::sync::Arc::clone(&completed);
+        let done = std::sync::Arc::clone(&done);
+        // 普通线程（非 scope）：预算到仍在跑的 worker 被 detach，不阻塞返回
+        workers.push(std::thread::spawn(move || loop {
+            if start.elapsed() >= budget {
+                break;
+            }
+            let Ok(guard) = job_rx.lock() else { break };
+            let path = match guard.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(p) => p,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue, // 预算到由循环头判
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break, // 任务投递完毕
+            };
+            drop(guard);
+            if let Some(item) = app_inventory_size_one(&path) {
+                on_item(item.clone());
+                if let Ok(mut g) = done.lock() {
+                    g.push(item);
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+            } else {
+                completed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+
+    // 全部完成则提前返回，否则到预算准时返回（不 join，detach 慢 worker）
+    while completed.load(Ordering::SeqCst) < total && start.elapsed() < budget {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = feeder;
+    drop(workers); // 显式 detach：不等待慢任务
+
+    // 本次完整算出的目录落盘：机器空闲算过一次后，随后即便磁盘繁忙也能秒回。
+    crate::scanner::sizecache::flush();
+
+    std::sync::Arc::try_unwrap(done)
+        .ok()
+        .and_then(|m| m.into_inner().ok())
+        .unwrap_or_default()
+}
+
+// ---- 应用真实图标提取（.icns → PNG data URL，使用系统自带 sips，零新依赖）----
+
+/// 标准 Base64 编码（不引第三方依赖；图标数据无需 url-safe）。
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut push = |n: u32| out.push(TABLE[(n & 63) as usize] as char);
+
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
+        push(n >> 18);
+        push(n >> 12);
+        push(n >> 6);
+        push(n);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        push(n >> 18);
+        push(n >> 12);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        push(n >> 18);
+        push(n >> 12);
+        push(n >> 6);
+        out.push('=');
+    }
+    out
+}
+
+/// 定位 `.app` 内的图标文件（`.icns`）。
+///
+/// 先读 `Info.plist` 的 `CFBundleIconFile`（可能带或不带 `.icns` 扩展名），
+/// 在 `Contents/Resources/` 下解析；读不到则兜底取 Resources 下第一个图标，
+/// 优先 `AppIcon*` / `app.icns`。
+fn locate_app_icns(app_path: &Path) -> Option<PathBuf> {
+    let resources = app_path.join("Contents/Resources");
+
+    if let Some(name) = read_plist_string(app_path, "CFBundleIconFile") {
+        let direct = resources.join(&name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        let with_ext = if name.to_ascii_lowercase().ends_with(".icns") {
+            name
+        } else {
+            format!("{}.icns", name)
+        };
+        let candidate = resources.join(&with_ext);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // 兜底：Resources 下任一 .icns，AppIcon / app 优先
+    let mut entries = read_dir_with_timeout(&resources)?;
+    entries.retain(|p| p.extension().is_some_and(|e| e == "icns"));
+    entries.sort_by_key(|p| {
+        let n = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if n.starts_with("appicon") || n == "app.icns" {
+            0
+        } else {
+            1
+        }
+    });
+    entries.into_iter().next()
+}
+
+/// 提取应用真实图标为 PNG data URL（长边 128px）。
+///
+/// 使用 macOS 自带 `/usr/bin/sips` 把 `.icns` 转成 PNG，再 Base64 内联，
+/// 前端直接 `<img src>`。任何一步失败都返回 `None`（前端回退首字母色块），
+/// 绝不因图标问题影响清单加载。
+fn extract_app_icon_data_url(app_path: &Path) -> Option<String> {
+    let icns = locate_app_icns(app_path)?;
+
+    // 以 app 路径哈希命名临时文件，保证并发提取不同应用时互不冲突
+    let mut hasher = DefaultHasher::new();
+    app_path.hash(&mut hasher);
+    let tmp = std::env::temp_dir().join(format!("maclean_icon_{:016x}.png", hasher.finish()));
+
+    let ok = Command::new("/usr/bin/sips")
+        .args(["-s", "format", "png", "-Z", "128"])
+        .arg(&icns)
+        .arg("--out")
+        .arg(&tmp)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return None;
+    }
+
+    let bytes = std::fs::read(&tmp).ok()?;
+    let _ = std::fs::remove_file(&tmp);
+    if bytes.len() < 16 {
+        return None;
+    }
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64_encode(&bytes)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2087,5 +2738,328 @@ mod tests {
 
         let (recommend, _) = classify_leftover_plist("com.example.preferences.plist");
         assert_eq!(recommend, Recommend::Safe);
+    }
+
+    // ---------- 一键卸载：PWA 识别 ----------
+
+    #[test]
+    fn pwa_kind_detects_chrome_family_by_bundle_id() {
+        assert_eq!(
+            pwa_kind_for("com.google.Chrome.app.abcdef1234", "/x/Chrome.app"),
+            Some("chrome")
+        );
+        assert_eq!(
+            pwa_kind_for("com.microsoft.edgemac.app.abcdef", "/x/Edge.app"),
+            Some("edge")
+        );
+        assert_eq!(
+            pwa_kind_for("com.brave.Browser.app.abcdef", "/x/Brave.app"),
+            Some("brave")
+        );
+        assert_eq!(
+            pwa_kind_for("com.chromium.Chromium.app.abcdef", "/x/Chromium.app"),
+            Some("chromium")
+        );
+        assert_eq!(
+            pwa_kind_for("com.apple.Safari.WebApp.uuid", "/x/S.webapp"),
+            Some("safari")
+        );
+    }
+
+    #[test]
+    fn pwa_kind_falls_back_to_path_for_chrome_apps_folder() {
+        // 目录名回退：bundle id 读不到或命名不标准时，仍能按路径认出 PWA
+        assert_eq!(
+            pwa_kind_for(
+                "com.example.unknown",
+                "/Users/u/Applications/Chrome Apps.localized/Notion.app"
+            ),
+            Some("chrome")
+        );
+        assert_eq!(
+            pwa_kind_for(
+                "com.example.unknown",
+                "/Users/u/Applications/Safari Web Apps.localized/X.app"
+            ),
+            Some("safari")
+        );
+    }
+
+    #[test]
+    fn pwa_kind_rejects_regular_apps() {
+        assert_eq!(
+            pwa_kind_for("com.jetbrains.intellij", "/Applications/IntelliJ IDEA.app"),
+            None
+        );
+        assert_eq!(
+            pwa_kind_for("com.google.Chrome", "/Applications/Google Chrome.app"),
+            None,
+            "Chrome 本体不是 PWA"
+        );
+        assert_eq!(
+            pwa_kind_for("com.apple.Safari", "/Applications/Safari.app"),
+            None
+        );
+    }
+
+    #[test]
+    fn chromium_host_kind_maps_known_browsers_and_falls_back() {
+        assert_eq!(chromium_host_kind("com.google.Chrome"), "chrome");
+        assert_eq!(chromium_host_kind("com.google.Chrome.canary"), "chrome");
+        assert_eq!(chromium_host_kind("com.microsoft.edgemac"), "edge");
+        assert_eq!(chromium_host_kind("com.brave.Browser"), "brave");
+        assert_eq!(chromium_host_kind("org.chromium.Chromium"), "chromium");
+        // 清单之外的 Chromium 内核浏览器统一归 chromium，而不是误判为非 PWA
+        assert_eq!(chromium_host_kind("company.thebrowser.Browser"), "chromium"); // Arc
+        assert_eq!(chromium_host_kind("com.operasoftware.Opera"), "chromium");
+        assert_eq!(chromium_host_kind("com.doubao.something"), "chromium");
+    }
+
+    #[test]
+    fn pwa_kind_from_shim_requires_real_shim_signature() {
+        // 有 CrAppModeShortcutID：按宿主浏览器归类
+        assert_eq!(
+            pwa_kind_from_shim(Some("abc"), None, Some("com.google.Chrome")),
+            Some("chrome")
+        );
+        // 可执行固定为 app_mode_loader 也成立；宿主缺失时归 chromium
+        assert_eq!(
+            pwa_kind_from_shim(None, Some("app_mode_loader"), None),
+            Some("chromium")
+        );
+        // Arc 等未知宿主的 shim
+        assert_eq!(
+            pwa_kind_from_shim(Some("x"), None, Some("company.thebrowser.Browser")),
+            Some("chromium")
+        );
+        // 普通应用：无 shortcut id、可执行不是 loader → 不是 PWA（即使装了 Chrome）
+        assert_eq!(
+            pwa_kind_from_shim(None, Some("MyApp"), Some("com.google.Chrome")),
+            None
+        );
+        assert_eq!(pwa_kind_from_shim(None, None, None), None);
+        // 空字符串 shortcut id 不构成 shim 特征
+        assert_eq!(pwa_kind_from_shim(Some(""), None, None), None);
+    }
+
+    #[test]
+    fn localized_container_predicate_matches_only_pwa_layout() {
+        assert!(in_localized_app_container(
+            "/Users/u/Applications/Chrome Apps.localized/X.app"
+        ));
+        assert!(in_localized_app_container(
+            "/Users/u/Applications/Doubao Apps.localized/Some.webapp.app"
+        ));
+        // /Applications 顶层、~/Applications 顶层普通应用都不应触发 plist 特征判定
+        assert!(!in_localized_app_container("/Applications/Google Chrome.app"));
+        assert!(!in_localized_app_container("/Users/u/Applications/Foo.app"));
+    }
+
+    // 以下测试依赖 macOS 的 `defaults read` 真正解析 Info.plist。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detect_pwa_kind_reads_shim_signature_from_unlisted_browser() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!(
+            "maclean_pwa_detect_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let container = root.join("Applications").join("Doubao Apps.localized");
+
+        // 1) 清单之外浏览器（Doubao）的 shim：靠 Info.plist 特征识别为 chromium 系 PWA
+        let shim = container.join("Demo.app");
+        fs::create_dir_all(shim.join("Contents")).unwrap();
+        fs::write(
+            shim.join("Contents/Info.plist"),
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+              \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+              <plist version=\"1.0\"><dict>\
+              <key>CFBundleIdentifier</key><string>com.doubao.demo.pwa</string>\
+              <key>CFBundleExecutable</key><string>app_mode_loader</string>\
+              <key>CFBundleName</key><string>Demo PWA</string>\
+              <key>CrAppModeShortcutID</key><string>zzzshortid</string>\
+              <key>CrBundleIdentifier</key><string>com.doubao.browser</string>\
+              </dict></plist>",
+        )
+        .unwrap();
+        let shim_str = shim.to_string_lossy().to_string();
+        // 该 bundle id 与路径都不在硬编码清单里：必须靠 shim 特征命中
+        assert_eq!(
+            pwa_kind_for("com.doubao.demo.pwa", &shim_str),
+            None,
+            "前置：快速路径不应识别该非清单浏览器"
+        );
+        assert_eq!(
+            detect_pwa_kind(&shim, "com.doubao.demo.pwa", &shim_str),
+            Some("chromium")
+        );
+
+        // 2) 同一容器里的普通 .app（无 Cr* 特征、可执行不是 loader）不得误判
+        let plain = container.join("Plain.app");
+        fs::create_dir_all(plain.join("Contents")).unwrap();
+        fs::write(
+            plain.join("Contents/Info.plist"),
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+              \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+              <plist version=\"1.0\"><dict>\
+              <key>CFBundleIdentifier</key><string>com.example.plain</string>\
+              <key>CFBundleExecutable</key><string>Plain</string>\
+              </dict></plist>",
+        )
+        .unwrap();
+        let plain_str = plain.to_string_lossy().to_string();
+        assert_eq!(
+            detect_pwa_kind(&plain, "com.example.plain", &plain_str),
+            None,
+            "容器内普通 app 不得被误判为 PWA"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // 若本机装有 Chrome PWA，端到端确认真实 shim 被识别，且能读到 shortcut id。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detect_pwa_kind_on_real_chrome_pwa_if_present() {
+        let candidate = home_dir().join("Applications/Chrome Apps.localized/X.app");
+        if !candidate.exists() {
+            return; // 本机没有该 PWA，跳过
+        }
+        let path = candidate.to_string_lossy().to_string();
+        assert_eq!(
+            detect_pwa_kind(
+                &candidate,
+                "com.google.Chrome.app.lodlkdfmihgonocnmddehnfgiljnadcf",
+                &path
+            ),
+            Some("chrome")
+        );
+        assert!(read_plist_string(&candidate, "CrAppModeShortcutID").is_some());
+        assert_eq!(
+            read_plist_string(&candidate, "CrBundleIdentifier").as_deref(),
+            Some("com.google.Chrome")
+        );
+    }
+
+    // ---- 图标 Base64 / 轻量清单 / 体积补算 ----
+
+    #[test]
+    fn base64_encode_matches_rfc4648_vectors() {
+        // RFC 4648 标准测试向量
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // 任意字节往返长度自洽（输出长度为 4 的倍数，含 padding）
+        let raw: Vec<u8> = (0u32..256).map(|i| (i % 256) as u8).collect();
+        let enc = base64_encode(&raw);
+        assert_eq!(enc.len(), raw.len().div_ceil(3) * 4);
+        assert!(enc.ends_with('='));
+    }
+
+    #[test]
+    fn app_inventory_sizes_empty_and_invalid_inputs() {
+        // 空输入 → 空结果；非法 / /System 路径不 panic、被安全跳过
+        assert!(app_inventory_sizes_for(&[]).is_empty());
+        let out = app_inventory_sizes_for(&[
+            "/definitely/not/an/app.app".to_string(),
+            "/System/Applications/Safari.app".to_string(),
+        ]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn app_inventory_sizes_bounded_never_blocks_past_budget() {
+        use std::time::Duration;
+        // 空输入立即返回
+        assert!(app_inventory_sizes_bounded(Vec::new(), 2, Duration::from_millis(50), |_| {}).is_empty());
+
+        // 非法路径在 worker 内被快速跳过（completed 计数），必须很快结束、不挂死
+        let t = Instant::now();
+        let out = app_inventory_sizes_bounded(
+            vec!["/definitely/not/an/app.app".to_string()],
+            2,
+            Duration::from_millis(300),
+            |_| {},
+        );
+        assert!(out.is_empty());
+        assert!(t.elapsed() < Duration::from_secs(3), "有界统计必须准时返回");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn icon_and_light_inventory_on_real_apps_if_present() {
+        // Keynote（标准 .icns）若在，图标定位 + 轻量清单应秒返回且不做体积
+        let keynote = PathBuf::from("/Applications/Keynote.app");
+        if keynote.exists() {
+            let icns = locate_app_icns(&keynote).expect("Keynote 应能定位到 .icns");
+            assert!(icns.extension().is_some_and(|e| e == "icns"));
+            let data_url = extract_app_icon_data_url(&keynote).expect("Keynote 图标应能转 PNG");
+            assert!(data_url.starts_with("data:image/png;base64,"));
+            assert!(data_url.len() > 100);
+        }
+
+        // 轻量清单：体积字段必须全为 0（保证不做重 IO），图标字段存在（成功或 None）
+        let light = list_installed_apps_light();
+        assert!(!light.is_empty(), "本机应至少能枚举出应用");
+        for a in &light {
+            assert_eq!(a.app_size, 0, "轻量清单不得统计体积: {}", a.name);
+            assert_eq!(a.data_size, 0);
+            assert_eq!(a.cache_size, 0);
+            // 排序按名称稳定（体积补回后不重排）
+        }
+        for w in light.windows(2) {
+            assert!(w[0].name <= w[1].name, "轻量清单应按名称排序");
+        }
+
+        // Chrome PWA X：应识别为 PWA，且能从 shim 提取到真实图标
+        let x = home_dir().join("Applications/Chrome Apps.localized/X.app");
+        if x.exists() {
+            let xapp = light
+                .iter()
+                .find(|a| a.path == x.to_string_lossy().as_ref())
+                .expect("轻量清单应包含 X PWA");
+            assert!(xapp.is_pwa);
+            assert_eq!(xapp.pwa_kind, "chrome");
+            assert!(
+                xapp.icon.as_deref().is_some_and(|s| s.starts_with("data:image/png;base64,")),
+                "X PWA 应带真实图标 data URL"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_inventory_sizes_matches_full_scan_for_small_app() {
+        // 体积补算与完整 inspect_app 口径一致：挑一个小真机应用比对（避免挑巨型应用拖慢测试）
+        let candidate = home_dir().join("Applications/Chrome Apps.localized/X.app");
+        let target = if candidate.exists() {
+            candidate
+        } else {
+            let k = PathBuf::from("/Applications/Keynote.app");
+            if k.exists() { k } else { return; }
+        };
+        let p = target.to_string_lossy().to_string();
+        let sizes = app_inventory_sizes_for(&[p.clone()]);
+        assert_eq!(sizes.len(), 1);
+        assert_eq!(sizes[0].path, p);
+        // 本体必然非零（.app 内含文件）
+        assert!(sizes[0].app_size > 0);
+        // 与完整 inspect_app 的本体体积逐字节一致（同一 dir_size 口径）
+        if let Some(full) = inspect_app(&target) {
+            assert_eq!(
+                sizes[0].app_size, full.app_size,
+                "体积补算口径必须与完整清单一致"
+            );
+        }
     }
 }

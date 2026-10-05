@@ -614,6 +614,7 @@ fn is_reclaimable_cache_root(path: &Path) -> bool {
 ///     helpers/typeshed/stdlib/venv`（标准库类型存根，目录名叫 venv，并非虚拟环境）
 ///   - TRAE:   `Application Support/TRAE SOLO CN/ModularData/ai-agent/vm/tools/
 ///     lib/node_modules` 与 `lib/python3.10/site-packages`（内置 node / Python VM）
+///
 /// 这些随应用可重装、删除统一移入废纸篓可恢复，不属于要保护的用户项目环境。
 /// 用户在「应用数据」分类勾选整目录、且经高级风险二次确认后删除，是设计内的
 /// 「重装级清理」。因此仅对这**一个位置**豁免第 4.6 层的后代深扫；系统关键目录、
@@ -823,14 +824,14 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // `npm cache clean` 同类的标准清理目标（实测 ~/.npm 与 VSCode.ShipIt
     // 更新残留共约 0.9GB）误判为危险。名单精确到路径，pypoetry virtualenvs
     // 等真实环境宿主不在其列、仍被拦截。
-    if contains_manifest_managed_descendant(&canonical)
-        && !(category == "Monorepo依赖" && canonical_has_component(&canonical, "node_modules"))
-        && !is_reclaimable_cache_root(&canonical)
+    if !(!contains_manifest_managed_descendant(&canonical)
+        || is_reclaimable_cache_root(&canonical)
         // 应用数据根（~/Library/Application Support/<App>）里出现的
         // node_modules/site-packages/venv 多为应用自带运行时/插件/类型存根，
         // 不是用户项目环境；整目录删除经高级风险确认、且走废纸篓可恢复，放行。
         // 系统关键 / 容器数据 / .git / 敏感文件等其它层的红线不受影响。
-        && !is_app_support_data_root(&canonical)
+        || is_app_support_data_root(&canonical)
+        || category == "Monorepo依赖" && canonical_has_component(&canonical, "node_modules"))
     {
         return SafetyCheck::Danger(format!(
             "目录内部含清单管理结构（venv/site-packages 等），拒绝删除祖先目录: {}",

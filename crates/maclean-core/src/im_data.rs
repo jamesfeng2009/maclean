@@ -270,7 +270,7 @@ pub fn analyze(docs_root: &Path) -> ImBreakdown {
         .enumerate()
         .filter_map(|(i, (key, label))| {
             let size_bytes = arr[i];
-            (size_bytes > 0).then(|| ImPart {
+            (size_bytes > 0).then_some(ImPart {
                 key,
                 label,
                 size_bytes,
