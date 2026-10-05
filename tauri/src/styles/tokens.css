@@ -625,3 +625,24 @@ body{
   .app-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
   .scanbox{width:92vw}
 }
+
+/* ===== 概览：受保护 · 只读占用分析 ===== */
+.protected-usage{margin-top:14px;padding-top:14px;border-top:1px dashed var(--line-2)}
+.pu-head{display:flex;align-items:center;gap:7px;margin-bottom:10px;flex-wrap:wrap}
+.pu-head svg{color:var(--text-3)}
+.pu-title{font-size:13px;font-weight:600;color:var(--text-2)}
+.pu-sub{font-size:11.5px;color:var(--text-3);width:100%}
+.reclaim-item.prot{background:var(--panel-2);border-style:dashed}
+.reclaim-item.prot:hover{border-color:var(--line-2);transform:none;box-shadow:none}
+.reclaim-item.prot:hover .reclaim-go{color:var(--text-3);transform:none}
+.reclaim-item.prot .rn{color:var(--text-2)}
+.reclaim-item.prot svg{color:var(--text-3)}
+/* 智能清理：纯受保护组的只读占用数字（不可回收） */
+.sz-readonly{color:var(--text-3);font-weight:500}
+
+/* ===== 确认弹窗：本次切换勾选（更保守方向）===== */
+.confirm-toggle{display:flex;align-items:flex-start;gap:9px;margin:10px 2px 2px;padding:10px 12px;
+  border:1px solid var(--line-2);border-radius:10px;background:var(--panel-2);
+  font-size:12.5px;color:var(--text-2);cursor:pointer;line-height:1.45;user-select:none}
+.confirm-toggle:hover{border-color:var(--brand)}
+.confirm-toggle input{margin-top:2px;accent-color:var(--brand);cursor:pointer;flex:none}

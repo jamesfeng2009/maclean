@@ -100,6 +100,8 @@ export const ipc = {
 
   /** 按 bundle id 打开本机应用（引导去微信/QQ 内清理，不触碰数据） */
   appOpen: (bundleId: string) => invoke<void>("app_open", { bundleId }),
+  /** 在访达中定位受保护 IM 的 Documents 目录（仅白名单路径，交 Finder 打开） */
+  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   /** 对 IM 的 Documents 根做只读占用分析 */
   imBreakdown: (path: string) => invoke<ImBreakdown>("im_breakdown", { path }),
 };

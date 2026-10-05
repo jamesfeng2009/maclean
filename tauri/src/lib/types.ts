@@ -38,6 +38,8 @@ export interface CleanItemReq {
   batch_paths: string[];
   size_bytes: number;
   recommend: string;
+  /** true=移入废纸篓，false=永久删除；风险项以后端强制进废纸篓为准 */
+  use_trash?: boolean;
 }
 
 export interface PreviewItem {
@@ -74,6 +76,8 @@ export interface AppSettings {
   schedule_last_run: number;
   settings_confirm_advanced: boolean;
   settings_prevent_lid_close: boolean;
+  /** 删除方式：smart=安全项永久删/风险项进废纸篓；trash=一律进废纸篓 */
+  settings_delete_strategy?: "smart" | "trash";
   [k: string]: unknown;
 }
 
@@ -105,6 +109,19 @@ export interface ScanModuleEvent {
   /** start=模块开始扫描（items 为空）；done=模块完成并带回结果。缺省按 done 处理 */
   status?: "start" | "done";
   items: ScanItem[];
+  /** done 时为 true 表示该模块因磁盘繁忙 / 不可达目录只拿到部分结果（可能偏小） */
+  partial?: boolean;
+}
+
+/**
+ * 部分结果事件（事件名 scan-partial）。
+ *
+ * 高磁盘负载下，某些扫描模块 / 分段在预算内没能完整跑完：后端不再整体归零，而是返回
+ * 已统计到的部分，并用本事件告知前端哪些模块「不完整」，由 UI 提示用户空闲后重扫补齐。
+ */
+export interface ScanPartialEvent {
+  /** 未完整完成的模块中文名列表（已去重保序） */
+  scopes: string[];
 }
 
 /** 删除过程中的单条日志（事件名 clean-log） */

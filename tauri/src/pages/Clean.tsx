@@ -3,6 +3,7 @@ import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq, ImBreakdown, ScanItem } from "../lib/types";
 import { useApp } from "../lib/store";
+import { useDeleteStrategy, planDelete, deleteSubText } from "../lib/deletePolicy";
 import { Icon } from "../components/Icon";
 import { Badge, Empty, PageHeader } from "../components/ui";
 
@@ -13,6 +14,8 @@ interface Group {
   items: ScanItem[];
   /** 仅统计可删除项的可回收大小 */
   size: number;
+  /** 仅统计受保护（不可删）项的只读占用大小 */
+  protectedSize: number;
   deletableCount: number;
   protectedCount: number;
   safeCount: number;
@@ -45,6 +48,7 @@ function groupItems(src: ScanItem[]): Group[] {
         name: it.category,
         items: [],
         size: 0,
+        protectedSize: 0,
         deletableCount: 0,
         protectedCount: 0,
         safeCount: 0,
@@ -62,6 +66,7 @@ function groupItems(src: ScanItem[]): Group[] {
       else g.safeCount += 1;
     } else {
       g.protectedCount += 1;
+      g.protectedSize += it.size_bytes;
     }
   }
   return [...m.values()].sort((a, b) => b.size - a.size);
@@ -134,6 +139,7 @@ export function Clean() {
     startScan,
     scanning,
     fullRunning,
+    partialScopes,
     confirm,
     toast,
     results,
@@ -161,6 +167,9 @@ export function Clean() {
   const [imData, setImData] = useState<Record<string, ImBreakdown>>({});
   const [imBusy, setImBusy] = useState<string | null>(null);
   const [imErr, setImErr] = useState<Record<string, string>>({});
+
+  // 删除方式策略（smart=安全项永久删/风险项进废纸篓；trash=一律进废纸篓）
+  const delStrategy = useDeleteStrategy();
 
   const toggleIm = useCallback(
     async (it: ScanItem) => {
@@ -194,6 +203,18 @@ export function Clean() {
         await ipc.appOpen(bundle);
       } catch (e) {
         toast("warn", `打开${name}失败：` + String(e));
+      }
+    },
+    [toast]
+  );
+
+  // 在访达中定位受保护 IM 的 Documents 目录（交 Finder 打开，由用户自行处理）
+  const revealImDocs = useCallback(
+    async (path: string, name: string) => {
+      try {
+        await ipc.revealPath(path);
+      } catch (e) {
+        toast("warn", `在访达中打开${name}数据目录失败：` + String(e));
       }
     },
     [toast]
@@ -325,8 +346,8 @@ export function Clean() {
       return;
     }
     const byKey = new Map(allowed.map((p) => [p.path + "|" + p.category, p]));
-    const finalReqs = reqs.filter((r) => byKey.has(r.path + "|" + r.category));
-    const paths = finalReqs.flatMap((r) => [r.path, ...r.batch_paths]);
+    const finalReqsBase = reqs.filter((r) => byKey.has(r.path + "|" + r.category));
+    const paths = finalReqsBase.flatMap((r) => [r.path, ...r.batch_paths]);
 
     if (blocked.length > 0) {
       const firstReason = blocked.map((b) => b.reason?.trim()).find(Boolean);
@@ -338,18 +359,38 @@ export function Clean() {
       );
     }
 
+    // —— 删除方式分层 ——
+    // 安全/缓存项：smart 下默认永久删除（立即释放空间），可在弹窗本次改为进废纸篓；
+    // 注意/高级项：无论设置与勾选如何都进废纸篓（后端亦会强制，前端仅作展示口径）。
+    const smart = delStrategy !== "trash";
+    const plan = planDelete(finalReqsBase, delStrategy);
+    const safeN = plan.safeN;
+    const sub =
+      deleteSubText(plan) + `（含副本共 ${paths.length} 个路径，安全闸门会拦截系统关键项）。`;
+    // use_trash 的最终决策统一在 store.executeClean（按当前设置 + 本次覆盖），
+    // 风险项并由后端再次强制进废纸篓。
+
     confirm({
       title: "确认清理选中项目？",
-      sub: `将把 ${finalReqs.length} 项（含副本共 ${paths.length} 个路径）移入废纸篓，可恢复。`,
+      sub,
       warn: hasRisk
-        ? `包含「注意/高级」风险项（涉及分类：${riskCatNames.join("、")}）：请确认你了解这些文件的用途，删除后可能需要重新下载、重新编译或重新登录。`
+        ? `包含「注意/高级」风险项（涉及分类：${riskCatNames.join("、")}）：这些项目只会移入废纸篓；请确认你了解这些文件的用途，删除后可能需要重新下载、重新编译或重新登录。`
         : "所选均为安全/缓存项；操作会先经过 maclean-core 安全闸门，系统关键目录会被拦截。",
       items: paths,
-      confirmText: `安全清理 ${fmt(selectedSize)}`,
-      onConfirm: async () => {
+      confirmText: `确认清理 ${fmt(selectedSize)}`,
+      // 只提供「更保守」的单向切换：把本该永久删除的安全项改为进废纸篓；
+      // 不提供「把高级项临时永久删」的捷径。
+      confirmToggle:
+        smart && safeN > 0
+          ? {
+              label: `本次也把 ${safeN} 项安全垃圾移入废纸篓（更稳妥、可恢复）`,
+              defaultOn: false,
+            }
+          : undefined,
+      onConfirm: async (forceTrashSafe) => {
         setBusy(true);
         try {
-          const rep = await executeClean(finalReqs);
+          const rep = await executeClean(finalReqsBase, forceTrashSafe === true);
           if (rep.cancelled) {
             toast("warn", "清理已取消");
           } else {
@@ -360,7 +401,7 @@ export function Clean() {
               }`
             );
             // 从全局缓存移除已清理项，不自动重扫；需要最新结果请用户手动重新扫描
-            const removed = new Set(finalReqs.map((r) => r.path));
+            const removed = new Set(finalReqsBase.map((r) => r.path));
             removePaths("all", removed);
             setChecked(new Set());
           }
@@ -388,6 +429,18 @@ export function Clean() {
           </button>
         }
       />
+
+      {partialScopes.length > 0 && (
+        <div className="partial-banner" role="status">
+          <div className="pb-text">
+            <b>部分结果（{partialScopes.join("、")}）</b>
+            <span>
+              磁盘当前较繁忙，或有部分目录暂时无法访问，本次只统计到部分内容、数字可能偏小。
+              建议机器空闲后点「重新扫描」补齐；已列出的项目仍可正常勾选清理。
+            </span>
+          </div>
+        </div>
+      )}
 
       {groups.length === 0 ? (
         <Empty
@@ -502,7 +555,16 @@ export function Clean() {
                       </div>
                       <div className="d">{detail}</div>
                     </div>
-                    <span className="sz">{fmt(g.size)}</span>
+                    <span
+                      className={`sz${g.deletableCount === 0 ? " sz-readonly" : ""}`}
+                      title={
+                        g.deletableCount === 0
+                          ? "只读占用大小：maclean 不会删除这些数据"
+                          : undefined
+                      }
+                    >
+                      {fmt(g.deletableCount > 0 ? g.size : g.protectedSize)}
+                    </span>
                     <span className="chev-rt" title={isOpen ? "收起" : "展开明细"}>
                       <Icon
                         name="chev"
@@ -574,6 +636,15 @@ export function Clean() {
                                 onClick={() => void openImApp(im.bundle, im.name)}
                               >
                                 打开{im.name}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary im-btn"
+                                onClick={() => void revealImDocs(it.path, im.name)}
+                                title="在访达中打开该数据目录，由你自行决定如何处理"
+                              >
+                                <Icon name="folder" size={14} />
+                                在访达中打开
                               </button>
                             </div>
                             {imOpen.has(it.path) && (

@@ -95,6 +95,25 @@ export function Settings() {
       <div className="set-group">
         <div className="sgh">清理与卸载</div>
         <Row
+          title="删除方式"
+          desc="智能分层：安全/缓存垃圾永久删除、立即释放空间，注意/高级项移入废纸篓可恢复；一律进废纸篓：所有项都可从废纸篓恢复，更稳妥"
+        >
+          <div className="seg">
+            <button
+              className={cfg.settings_delete_strategy !== "trash" ? "on" : ""}
+              onClick={() => patch({ settings_delete_strategy: "smart" })}
+            >
+              智能分层
+            </button>
+            <button
+              className={cfg.settings_delete_strategy === "trash" ? "on" : ""}
+              onClick={() => patch({ settings_delete_strategy: "trash" })}
+            >
+              一律进废纸篓
+            </button>
+          </div>
+        </Row>
+        <Row
           title="优先使用官方卸载器"
           desc="卸载应用时优先调用其自带卸载程序，避免残留与授权损坏"
         >

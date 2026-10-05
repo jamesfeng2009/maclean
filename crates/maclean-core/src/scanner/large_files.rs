@@ -28,7 +28,8 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use super::{
-    dir_size_accurate, format_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner,
+    format_size, has_home, home_dir, sizecache::dir_size_accurate_cached, Recommend, ScanItem,
+    ScanResult, Scanner,
 };
 
 /// 大文件阈值：单个文件 ≥ 100MB 才计入「大文件」视图
@@ -366,7 +367,8 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
 
             let (size, incomplete) = catch_unwind(AssertUnwindSafe(|| {
                 if is_dir {
-                    dir_size_accurate(path)
+                    // 只读大目录占用：未变化目录命中持久化缓存秒回，变化子树才重算。
+                    dir_size_accurate_cached(path)
                 } else {
                     (path.symlink_metadata().map(|m| m.len()).unwrap_or(0), false)
                 }

@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ipc } from "./ipc";
 import type {
   CleanItemReq,
@@ -16,6 +17,7 @@ import type {
   CleanReport,
   ResultScope,
   ScanItem,
+  ScanPartialEvent,
   ScanProgress,
   ScanScope,
 } from "./types";
@@ -81,7 +83,10 @@ export interface ConfirmRequest {
   warn?: string;
   items: string[];
   confirmText?: string;
-  onConfirm: () => void | Promise<void>;
+  /** 勾选项状态通过参数回传；无勾选项的既有调用可忽略该参数 */
+  onConfirm: (toggleOn?: boolean) => void | Promise<void>;
+  /** 可选的单一勾选项（如"本次也把安全项移入废纸篓"），仅允许更保守的选择 */
+  confirmToggle?: { label: string; defaultOn?: boolean };
 }
 
 interface AppState {
@@ -108,6 +113,11 @@ interface AppState {
   runningScopes: ResultScope[];
   /** 单模块重新扫描时的目标模块 */
   singleScope: ResultScope | null;
+  /**
+   * 本轮扫描中「只拿到部分结果」的模块中文名（磁盘繁忙 / 不可达目录导致未完整统计）。
+   * 非空时概览 / 智能清理页显示提示横幅；发起新一轮扫描时清空。
+   */
+  partialScopes: string[];
   /** 各模块扫描结果（跨页面共享、切页复用） */
   results: Record<ResultScope, ScanItem[]>;
   /** 各模块是否已完成过至少一次扫描 */
@@ -145,7 +155,10 @@ interface AppState {
    * 统一删除入口：所有页面（智能清理/重复文件/磁盘分析）都走这里，
    * 由 store 维护全局进度与日志；调用方仍负责预览、确认弹窗与结果后处理。
    */
-  executeClean: (reqs: CleanItemReq[]) => Promise<CleanReport>;
+  executeClean: (
+    reqs: CleanItemReq[],
+    forceTrashSafe?: boolean
+  ) => Promise<CleanReport>;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -193,6 +206,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [fullRunning, setFullRunning] = useState(false);
   const [runningScopes, setRunningScopes] = useState<ResultScope[]>([]);
   const [singleScope, setSingleScope] = useState<ResultScope | null>(null);
+  // 部分结果模块（仅本轮扫描内存态）：收到 scan-partial 累积去重，新一轮扫描开始时清空。
+  const [partialScopes, setPartialScopes] = useState<string[]>([]);
   const [results, setResults] = useState<Record<ResultScope, ScanItem[]>>(emptyResults);
   const [ready, setReady] = useState<Record<ResultScope, boolean>>(emptyReady);
   const [scanTick, setScanTick] = useState(0);
@@ -217,6 +232,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
       .settingsGet()
       .then((c) => setLangEnState(!!c.lang_en))
       .catch(() => undefined);
+  }, []);
+
+  // 全局监听「部分结果」事件：扫描在磁盘繁忙下只完成部分模块 / 分段时，后端用本事件
+  // 告知，UI 显示横幅提示「数值可能偏小、空闲后重扫」。监听器与扫描调用解耦，App 生命周期内常驻。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<ScanPartialEvent>("scan-partial", (e) => {
+      const add = Array.isArray(e.payload?.scopes) ? e.payload.scopes : [];
+      setPartialScopes((prev) => {
+        const next = [...prev];
+        for (const name of add) {
+          if (name && !next.includes(name)) next.push(name);
+        }
+        return next;
+      });
+    })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => undefined);
+    return () => unlisten?.();
   }, []);
 
   const toast = useCallback((type: Toast["type"], msg: string) => {
@@ -250,6 +286,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setScanning(true);
       setFullRunning(false);
       setSingleScope(isModule ? (scope as ResultScope) : null);
+      // 新一轮单模块扫描：清空上一轮的部分结果提示（结束后若仍不完整会重新收到事件）。
+      setPartialScopes([]);
       setScanPct(0);
       setScanLabel("正在准备…");
       try {
@@ -284,6 +322,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setFullRunning(true);
     setSingleScope(null);
     setScanning(true);
+    // 新一轮体检：清空上一轮的部分结果提示（结束后若仍有模块不完整会重新收到事件）。
+    setPartialScopes([]);
     setScanPct(2);
     setScanLabel("开始全盘体检");
     try {
@@ -336,13 +376,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
    * 结束后复位。无论成功失败都要解除遮罩，避免删除按钮“看起来没反应”。
    */
   const executeClean = useCallback(
-    async (reqs: CleanItemReq[]) => {
+    async (reqs: CleanItemReq[], forceTrashSafe = false) => {
       setCleanLogs([]);
       setCleanProgress(null);
       setCleaning(true);
       try {
+        // 删除出口在所有页面统一决策（重复文件 / 磁盘分析 / 卸载 / 智能清理共用）：
+        // 注意/高级项强制进废纸篓；安全/缓存项按设置（smart 永久删 / trash 进
+        // 废纸篓）并支持确认弹窗的本次覆盖。后端对风险项亦会再次强制，双保险。
+        let strategy: "smart" | "trash" = "smart";
+        try {
+          const cfg = await ipc.settingsGet();
+          if (cfg.settings_delete_strategy === "trash") strategy = "trash";
+        } catch {
+          /* 读取设置失败时用默认 smart */
+        }
+        const decided = reqs.map((r) => {
+          const risky = r.recommend !== "Safe" && r.recommend !== "CacheOnly";
+          return { ...r, use_trash: risky || strategy !== "smart" || forceTrashSafe };
+        });
         const report = await ipc.cleanExecute(
-          reqs,
+          decided,
           langEn,
           (l) =>
             setCleanLogs((prev) => {
@@ -351,12 +405,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
             }),
           (p) => setCleanProgress(p)
         );
-        // 有项真正被删除（移入废纸篓）：通知概览等页刷新磁盘用量，并累计本次
-        // 移入废纸篓的体量。取消 / 全部被拦截时不计。
+        // 有项真正被删除：通知概览等页刷新磁盘用量。取消 / 全部被拦截时不计。
         if (!report.cancelled && report.deleted > 0) {
           setCleanNonce((n) => n + 1);
-          const moved = reqs.reduce((s, r) => s + (r.size_bytes || 0), 0);
-          if (moved > 0) setSessionTrashBytes((b) => b + moved);
+          // 仅「移入废纸篓」的体量才会计入提示（永久删除已立即释放、不经废纸篓）。
+          const trashed = decided
+            .filter((r) => r.use_trash)
+            .reduce((s, r) => s + (r.size_bytes || 0), 0);
+          if (trashed > 0) setSessionTrashBytes((b) => b + trashed);
         }
         return report;
       } finally {
@@ -384,6 +440,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       fullRunning,
       runningScopes,
       singleScope,
+      partialScopes,
       results,
       ready,
       scanTick,
@@ -416,6 +473,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       fullRunning,
       runningScopes,
       singleScope,
+      partialScopes,
       results,
       ready,
       scanTick,

@@ -7,8 +7,8 @@ mod commands;
 
 use commands::{
     app_open, clean_execute, clean_preview, disk_info, im_breakdown, logs_list, logs_read,
-    logs_reveal, optimize_list, optimize_run, palette, reveal_trash, scan, settings_get,
-    settings_set, startup_set_enabled, startups_list,
+    logs_reveal, optimize_list, optimize_run, palette, reveal_path, reveal_trash, scan,
+    settings_get, settings_set, startup_set_enabled, startups_list,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -16,6 +16,11 @@ pub fn run() {
     // 启用跨平台文件日志（~/.maclean/logs/maclean_YYYY-MM-DD.log），
     // 删除链路的拦截/成功都会落盘，供「设置 → 日志」查看与排障。
     maclean_core::logger::init();
+
+    // 在任何并行迭代前安装「后台优先级」全局 rayon 池：扫描的目录大小统计等
+    // par_iter 工作线程都带 UTILITY QoS，高负载时不与前台 App / WindowServer 抢 CPU/IO。
+    // 必须尽早调用；若底层已初始化（重复启动）会返回 false，忽略即可。
+    maclean_core::scanner::load::install_rayon_bg_pool();
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -36,6 +41,7 @@ pub fn run() {
             logs_reveal,
             app_open,
             im_breakdown,
+            reveal_path,
         ])
         .setup(|_app| Ok(()))
         .run(tauri::generate_context!())

@@ -97,6 +97,7 @@ export function Overview() {
     fullRunning,
     runningScopes,
     singleScope,
+    partialScopes,
     startFullScan,
     cleanNonce,
     sessionTrashBytes,
@@ -146,8 +147,16 @@ export function Overview() {
       .catch((e) => toast("warn", "打开废纸篓失败：" + e));
   }, [toast]);
 
-  const cats = useMemo(() => aggregate(items), [items]);
+  // 口径统一：「可回收空间」只统计可删除项；受保护/只读大项（IM 聊天库、
+  // Docker/OrbStack 虚拟磁盘等）不计入可回收，单独进只读「占用分析」区。
+  const cats = useMemo(() => aggregate(items.filter((i) => i.deletable)), [items]);
   const top = cats.slice(0, 4);
+  // maclean 主动保护的用户大数据（物理可删但代价高 / 只能只读）：只展示占用、
+  // 给出去看/自行处理的入口，绝不计入可清理数字。
+  const protectedTop = useMemo(
+    () => aggregate(items.filter((i) => !i.deletable)).slice(0, 4),
+    [items]
+  );
   const reclaim = useMemo(
     () =>
       items
@@ -164,6 +173,17 @@ export function Overview() {
 
   return (
     <div className="grid" style={{ gap: 16 }}>
+      {partialScopes.length > 0 && (
+        <div className="partial-banner" role="status">
+          <div className="pb-text">
+            <b>部分结果（{partialScopes.join("、")}）</b>
+            <span>
+              磁盘当前较繁忙，或有部分目录暂时无法访问，因此上述占用可能偏小、并非全部可清理内容。
+              建议关闭占盘应用、待机器空闲后重新扫描即可补齐；已列出的项目仍可正常清理，不受影响。
+            </span>
+          </div>
+        </div>
+      )}
       <div className="hero">
         {/* 左：磁盘 + 可回收 */}
         <div className="hero-left">
@@ -289,6 +309,55 @@ export function Overview() {
                     </span>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {hasScanned && protectedTop.length > 0 && (
+              <div className="protected-usage">
+                <div className="pu-head">
+                  <Icon name="lock" size={14} />
+                  <span className="pu-title">受保护 · 占用分析（只读）</span>
+                  <span className="pu-sub">
+                    这些数据 maclean 不会删除、也不计入可清理，点击查看占用与自行处理方式
+                  </span>
+                </div>
+                <div className="reclaim-grid">
+                  {protectedTop.map((a) => (
+                    <div
+                      key={"prot-" + a.name}
+                      className="reclaim-item prot"
+                      role="button"
+                      tabIndex={0}
+                      title={`查看「${a.name}」的占用与处理方式`}
+                      onClick={() => focusClean(a.name)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          focusClean(a.name);
+                        }
+                      }}
+                    >
+                      <div className="rt">
+                        <span className="rn">
+                          <Icon
+                            name="lock"
+                            size={14}
+                            style={{ verticalAlign: "-2px", marginRight: 5 }}
+                          />
+                          {a.name}
+                        </span>
+                        <Icon name="chev" size={14} className="reclaim-go" />
+                      </div>
+                      <span className="rs" style={{ color: "var(--text-2)" }}>
+                        {fmt(a.size)}
+                      </span>
+                      <span className="rv">
+                        <span className="badge ghost">{a.count} 项</span>
+                        <span className="reclaim-detail-hint">受保护 · 点击查看</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

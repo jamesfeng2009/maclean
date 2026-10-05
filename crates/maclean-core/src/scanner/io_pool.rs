@@ -38,26 +38,17 @@ struct Pool {
     _workers: Vec<JoinHandle<()>>,
 }
 
-/// 计算专用阻塞 IO 线程数。
-///
-/// 这些线程跑的是磁盘 / 网络元数据 IO 而非 CPU 计算。全量体检时多个模块并行、
-/// 各自再分层并行，会在同一时刻提交大量目录枚举任务；槽位过少会让**本地本来毫秒
-/// 级返回的目录在队列里久等**，任务级超时因此误判成「坏目录」。所以按 CPU 核数
-/// 给到 2×、并在 [16, 32] 区间收敛：SSD/APFS 元数据并发能吃下这个量级，同时封顶
-/// 避免在机械盘 / 网络卷上过度争用。真正永久阻塞的枚举已由 fs_guard 前置剪枝，
-/// 能卡住 worker 的任务极少，最坏也只占满这个有界名额。
-fn desired_workers() -> usize {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(8);
-    cores.saturating_mul(2).clamp(16, 32)
-}
-
+/// 常驻 worker 数取负载自适应的**上限**（见 [`super::load::max_concurrency`]）：
+/// 这是「最多能同时在途多少」的天花板，不代表一开始就满并发。真正的有效并发由
+/// [`super::load`] 的闸门在 2～上限之间动态调节——繁忙时只放行 2–4 个，空闲才平滑
+/// 升满。这些线程跑磁盘 / 网络元数据 IO 而非 CPU 计算，常驻数按 CPU 核数 2×、在
+/// [16, 32] 收敛并封顶，避免在机械盘 / 网络卷上过度争用；真正永久阻塞的枚举已由
+/// fs_guard 前置剪枝，能卡死 worker 的任务极少，最坏也只占满这个有界名额。
 static POOL: OnceLock<Pool> = OnceLock::new();
 
 fn pool() -> &'static Pool {
     POOL.get_or_init(|| {
-        let worker_count = desired_workers();
+        let worker_count = super::load::max_concurrency();
         let (tx, rx) = channel::<Task>();
         // Receiver 不是 Sync，用 Mutex 共享给固定数量的 worker。
         // 进程生命周期内只建一次，Box::leak 得到 'static 引用（可接受的一次性泄漏）。
@@ -67,24 +58,32 @@ fn pool() -> &'static Pool {
         for id in 0..worker_count {
             let builder = thread::Builder::new().name(format!("maclean-io-{id}"));
             let handle = builder
-                .spawn(move || loop {
-                    // 仅在「取下一个任务」期间持锁；recv 返回后立刻离开作用域释放锁，
-                    // 再执行任务体 —— 这样多个 worker 能真正并行处理任务。
-                    let next = {
-                        let guard = match rx.lock() {
-                            Ok(g) => g,
-                            // 锁中毒说明某个持锁线程 panic，退出本 worker。
-                            Err(_) => break,
+                .spawn(move || {
+                    // IO 工作线程整体降到后台 QoS，不与前台 App / WindowServer 平权抢盘。
+                    super::load::apply_bg_priority();
+                    loop {
+                        // 仅在「取下一个任务」期间持锁；recv 返回后立刻离开作用域释放锁，
+                        // 再执行任务体 —— 这样多个 worker 能真正并行处理任务。
+                        let next = {
+                            let guard = match rx.lock() {
+                                Ok(g) => g,
+                                // 锁中毒说明某个持锁线程 panic，退出本 worker。
+                                Err(_) => break,
+                            };
+                            guard.recv()
                         };
-                        guard.recv()
-                    };
-                    match next {
-                        Ok(task) => {
-                            // 任务 panic 不得杀死 worker（否则池容量悄悄缩小）。
-                            let _ = catch_unwind(AssertUnwindSafe(task));
+                        match next {
+                            Ok(task) => {
+                                // gated_run 负责自适应并发闸门（繁忙时限在途 IO）与执行
+                                // 延迟反馈；catch_unwind 兜底确保任务 panic 不杀死 worker
+                                //（否则池容量会悄悄缩小）。
+                                let _ = catch_unwind(AssertUnwindSafe(|| {
+                                    super::load::gated_run(task)
+                                }));
+                            }
+                            // 所有发送端释放（进程退出）时 recv 报错，worker 干净退出。
+                            Err(_) => break,
                         }
-                        // 所有发送端释放（进程退出）时 recv 报错，worker 干净退出。
-                        Err(_) => break,
                     }
                 })
                 .expect("failed to spawn maclean io worker");
@@ -121,5 +120,14 @@ where
     if pool().tx.send(task).is_err() {
         return None;
     }
-    rx.recv_timeout(timeout).ok()
+    match rx.recv_timeout(timeout) {
+        Ok(r) => Some(r),
+        Err(_) => {
+            // 到点仍未拿到结果：可能是池内排队（繁忙期限流）也可能是内核 IO 卡死。
+            // 两种都应被当成拥塞信号反馈，驱动自适应并发下降；底层任务即便之后才完成
+            // 也只是被丢弃结果，受有界池上界约束，不影响主流程。
+            super::load::note_wait_timeout();
+            None
+        }
+    }
 }

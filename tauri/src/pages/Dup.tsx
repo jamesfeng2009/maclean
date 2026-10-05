@@ -3,6 +3,7 @@ import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq } from "../lib/types";
 import { useApp } from "../lib/store";
+import { useDeleteStrategy, planDelete, deleteSubText } from "../lib/deletePolicy";
 import { Icon } from "../components/Icon";
 import { Empty, PageHeader } from "../components/ui";
 
@@ -28,6 +29,7 @@ export function Dup() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const delStrategy = useDeleteStrategy();
 
   // 页头「重新扫描」只刷新重复文件模块
   const refresh = useCallback(() => {
@@ -95,18 +97,26 @@ export function Dup() {
       toast("info", `${blocked.length} 组未通过安全检查，已自动排除`);
     }
 
+    const plan = planDelete(finalReqs, delStrategy);
     confirm({
       title: `删除选中的 ${finalReqs.length} 组重复副本？`,
       sub: `将删除 ${copyPaths.length} 个重复副本、回收约 ${fmt(
         copySize
-      )}；每组保留 1 份最新 / 项目内文件，副本移入废纸篓，误删可恢复。`,
+      )}；每组保留 1 份最新 / 项目内文件。${deleteSubText(plan)}。`,
       warn: "只会删除下列「副本」文件，每组标记为「保留」的那一份不会动。请确认保留的是你需要的版本后再继续。",
       items: copyPaths,
       confirmText: `删除副本 ${fmt(copySize)}`,
-      onConfirm: async () => {
+      confirmToggle:
+        delStrategy !== "trash" && plan.safeN > 0
+          ? {
+              label: "本次也把重复副本移入废纸篓（更稳妥、清空后才释放空间）",
+              defaultOn: false,
+            }
+          : undefined,
+      onConfirm: async (forceTrashSafe) => {
         setBusy(true);
         try {
-          const rep = await executeClean(finalReqs);
+          const rep = await executeClean(finalReqs, forceTrashSafe === true);
           if (rep.cancelled) {
             toast("warn", "已取消");
           } else {
@@ -131,7 +141,7 @@ export function Dup() {
     <div>
       <PageHeader
         title="重复文件"
-        sub="相同内容的文件只保留 1 份（最新 / 项目内优先），其余移入废纸篓"
+        sub="相同内容的文件只保留 1 份（最新 / 项目内优先）；副本按删除方式清理，可在设置中选择永久删除或移入废纸篓"
         action={
           <button
             className="btn-secondary"
@@ -266,7 +276,7 @@ export function Dup() {
           </span>
           <span className="sel-risk">
             <Icon name="warning" size={14} />
-            每组保留 1 份最新 / 项目内文件，仅删除多余副本并移入废纸篓，可恢复
+            每组保留 1 份最新 / 项目内文件，仅删除多余副本；默认永久删除以释放空间，确认时可改为移入废纸篓
           </span>
           <div className="grow" />
           <button className="btn-primary danger" onClick={runDedup} disabled={busy || dupBusy}>

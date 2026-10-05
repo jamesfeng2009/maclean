@@ -786,6 +786,26 @@ fn get_bundle_id(app_path: &Path) -> Option<String> {
     None
 }
 
+/// 枚举 `/Applications` 与 `~/Applications`（含一层子目录的 PWA）下全部
+/// `.app` 的 bundle id 集合。
+///
+/// 供 IM 容器数据判定「对应 App 是否仍安装」使用：App 已卸载后，其沙盒
+/// 容器里的聊天数据成为可清理的孤儿。这里基于**文件系统真相**（直接读
+/// 各 `.app/Contents/Info.plist` 的 `CFBundleIdentifier`），不依赖
+/// Spotlight 索引或 Finder 自动化授权，因此在关闭 Spotlight 的机器上、
+/// 或无自动化权限时也可靠。
+///
+/// # 调用方的保守义务
+/// 返回**空**集合意味着「一个应用都没枚举到」（目录不可读等异常），
+/// 而不是「机器上没有任何应用」。调用方必须把空集合当作无法判定，
+/// 一律按「仍安装」保护受保护数据，绝不据此把数据误判为孤儿。
+pub(crate) fn installed_bundle_id_set() -> std::collections::HashSet<String> {
+    collect_app_paths()
+        .iter()
+        .filter_map(|p| get_bundle_id(p))
+        .collect()
+}
+
 /// 从 Info.plist 读取应用显示名称
 ///
 /// 优先读取 CFBundleDisplayName，回退到 CFBundleName。

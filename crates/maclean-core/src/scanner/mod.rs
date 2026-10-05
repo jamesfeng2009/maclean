@@ -25,6 +25,13 @@ pub mod dev_cache;
 // 必须先于各扫描器声明，供 dir_size / read_dir 及具体扫描器复用。
 pub mod fs_guard;
 pub mod io_pool;
+// 目录批量枚举（macOS getattrlistbulk：一次 syscall 取回一批条目类型 + 物理占用）。
+pub(crate) mod bulkdir;
+// 只读「大目录」占用分析的持久化增量体积缓存（P2，重扫提速）。
+pub mod sizecache;
+// 负载自适应（后台 QoS / 负载信号 / 自适应并发闸门 / 繁忙看门狗参数）。
+// 全平台可编译：非 macOS 上 apply_bg_priority 为 no-op。
+pub mod load;
 pub mod dup_files;
 pub mod large_files;
 pub mod optimize;
@@ -133,6 +140,8 @@ where
 {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
+        // 扫描整体跑在后台 QoS，不与用户前台应用平权抢 CPU / IO。
+        load::apply_bg_priority();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok();
         // sync_channel 容量 1：发送永不阻塞，recv_timeout 收到即返回
         let _ = tx.send(result);
@@ -192,29 +201,71 @@ const TCC_DIR_SCAN_TIMEOUT: Duration = Duration::from_secs(2);
 /// 快速统计（清理扫描）的遍历最大深度；磁盘分析的准确统计不受此限。
 const DIR_MAX_DEPTH: usize = 50;
 
+/// 本地目录**首次**枚举超时后的退避重试预算（快速清理统计）。
+///
+/// 仅对本地卷、且首次 [`DIR_SCAN_TIMEOUT`] 已超时后使用：高负载下本地 APFS 目录的
+/// `readdir` 也可能排队超过 10s（并非损坏），此时自适应并发通常已被超时信号压到
+/// 2–4，给一次更长的机会把「只是慢」的子树统计进来，而不是成片误剪为 0。远程卷 /
+/// TCC 容器不享受重试（不可达 / 无权限，重试无意义）。
+const LOCAL_RETRY_TIMEOUT: Duration = Duration::from_secs(28);
+
+/// 「大目录」准确统计的本地退避重试预算（比快速清理更宽松）。
+const ACCURATE_RETRY_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// 在有界 IO 池内执行一次目录相关阻塞操作 `f`，统一应用目录看门狗策略：
+///
+/// - 远程 / FUSE 挂载点：直接返回 `None`，绝不发起注定卡在内核的枚举；
+/// - TCC 沙盒容器：仅给 [`TCC_DIR_SCAN_TIMEOUT`] 短预算、**不重试**（多为无权限）；
+/// - 普通本地目录：先给 `first`（快扫 10s / 准确 20s）；首次超时后**退避重试一次**
+///   `retry`（快扫 28s / 准确 45s），仍失败才判定该子树本次不可枚举。
+///
+/// `f` 必须可重复调用（[`Fn`]）以支持重试；其结果需可跨线程传递。
+fn run_dir_io<R, F>(dir: &Path, first: Duration, retry: Duration, f: F) -> Option<R>
+where
+    R: Send + 'static,
+    F: Fn() -> R + Send + Sync + 'static,
+{
+    // 网络 / FUSE 挂载点：不可达，直接判不可枚举（调用方按跳过处理）。
+    if fs_guard::is_remote_path(dir) {
+        return None;
+    }
+    let is_tcc = fs_guard::is_tcc_sandbox_container(dir);
+    let first_timeout = if is_tcc { TCC_DIR_SCAN_TIMEOUT } else { first };
+    // Arc 让同一份只读捕获（如目标 PathBuf）能安全地用于至多两次尝试。
+    let f = std::sync::Arc::new(f);
+    let run = move |timeout: Duration| {
+        let f = f.clone();
+        io_pool::run_with_timeout(move || f(), timeout)
+    };
+
+    if let Some(r) = run(first_timeout) {
+        return Some(r);
+    }
+    // 容器多为 TCC 拒绝（枚举在 2s 内被系统挡住），重试也不会突然可读，快速失败。
+    if is_tcc {
+        return None;
+    }
+    // 本地卷首次超时：大概率是高负载排队慢（该超时已作为拥塞信号压低了自适应并发）。
+    // 退避重试一次，尽量保住大子树；仍超时才剪枝，由调用方标记不完整。
+    crate::logger::warn(&format!(
+        "[dir_watchdog] 本地目录首次枚举超时，降低并发后退避重试一次: {}",
+        dir.display()
+    ));
+    run(retry)
+}
+
 /// 带超时的目录枚举：返回子路径列表。
 ///
 /// 目录磁盘 IO 卡死（readdir 在内核长时间不返回）时，超时返回 None，
 /// 调用方直接跳过该目录——单个坏目录不再阻塞整个扫描流程。
 /// 与 dir_size 的目录级隔离共用 DIR_SCAN_TIMEOUT。
 pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
-    // 网络 / FUSE 挂载点：直接判定不可枚举、调用方按跳过处理，绝不发起一个注定
-    // 会卡在内核（甚至比超时更久）的 readdir。TCC 沙盒容器不在此一刀切 —— 卸载器、
-    // Docker/OrbStack 等存在对「具体容器路径」的合法只读访问，交由有界 IO 池超时
-    // 去「能读则读、卡则快速跳过」。
-    if fs_guard::is_remote_path(dir) {
-        return None;
-    }
-    // 容器内目录给更短预算（TCC 快速失败），普通目录用标准枚举超时。
-    let timeout = if fs_guard::is_tcc_sandbox_container(dir) {
-        TCC_DIR_SCAN_TIMEOUT
-    } else {
-        DIR_SCAN_TIMEOUT
-    };
+    // 远程 / TCC 快跳、本地繁忙退避重试的统一看门狗在 run_dir_io 内处理。
     let d = dir.to_path_buf();
-    // 枚举跑在有界阻塞 IO 池里：即便底层 readdir 卡死，被占住的也只是池内固定
-    // 名额，调用方到点放弃等待即可，不再为每个目录泄漏一个 detached 线程。
-    let paths = io_pool::run_with_timeout(
+    let paths = run_dir_io(
+        dir,
+        DIR_SCAN_TIMEOUT,
+        LOCAL_RETRY_TIMEOUT,
         move || {
             let mut paths: Vec<PathBuf> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&d) {
@@ -224,13 +275,12 @@ pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
             }
             paths
         },
-        timeout,
     );
     match paths {
         Some(paths) => Some(paths),
         None => {
             crate::logger::warn(&format!(
-                "[read_dir] 目录遍历超时/失败（IO 卡死），跳过: {}",
+                "[read_dir] 目录遍历超时/失败（IO 卡死或被系统拒绝），跳过: {}",
                 dir.display()
             ));
             None
@@ -240,145 +290,28 @@ pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
 
 /// 递归计算目录大小（字节），并返回该次统计是否因超时而不完整。
 ///
-/// 返回 (大小, skipped)：skipped=true 表示统计过程中有目录枚举超时（或触达深度
-/// 上限 / 命中资源库 bundle）而有子树没能计入，该大小是「至少」占用，真实值可能
-/// 更大。磁盘分析等可用它给对应项追加"统计不完整"提示。
+/// 返回 (大小, incomplete)：incomplete=true 表示统计过程中有目录枚举超时（或触达
+/// 远程挂载点）而有子树没能计入，该大小是「至少」占用，真实值可能更大。磁盘分析等
+/// 可用它给对应项追加“统计不完整”提示。
 ///
-/// 目录级隔离：每个目录的枚举放到独立线程，主循环用超时等待。当某个目录磁盘 IO
-/// 卡死（APFS 异常 / 网络卷挂起，readdir/stat 在内核长时间不返回）时，**仅本次
-/// 统计**跳过该子树，其余目录照常——一个坏目录不拖垮整轮扫描，也不让 UI 停住。
+/// 实现（P1-e 重构）：
+/// - **工作窃取并行遍历**（[`walk_tree`]）：每个目录枚举完就把兄弟子目录作为可被
+///   rayon 其它线程窃取的任务派发，不再有旧实现「逐层 collect→par_iter」的 join
+///   栅栏——一个慢目录不会再挡住空闲线程下钻其旁支子树，高负载下尾部更短。
+/// - **批量枚举**（[`bulkdir::list_dir`]）：macOS 用 `getattrlistbulk` 一次系统调用
+///   取回一批条目的类型与物理占用（数据叉 allocated size），消除旧实现「每文件一次
+///   metadata/stat」的海量系统调用，从根上降低高磁盘负载下的排队与看门狗超时概率。
+/// - **目录级看门狗**：每个目录的枚举经 [`run_dir_io`] 放到有界阻塞 IO 池并带超时；
+///   远程/FUSE 快跳、TCC 短预算、本地首次超时在降并发后退避重试一次。卡死只跳过该
+///   子树，不拖垮整轮。
 ///
-/// **不做任何持久记忆**：超时不落盘、不写黑名单，下次扫描会无条件重新尝试。慢盘
-/// 唤醒、外置盘重新挂载、系统负载恢复后，下一次即可统计到真实体量，不会因一次偶发
-/// 卡顿被长期低估为 0（同一棵遍历树内每个目录本就只访问一次，剪枝即天然避免在
-/// 同一轮里重复踩中同一个坏目录，无需额外的内存表）。
+/// **不做任何持久记忆**：超时不落盘、不写黑名单，下次扫描无条件重试。慢盘唤醒、外置
+/// 盘重新挂载、负载恢复后下一次即可统计到真实体量，不会因一次偶发卡顿被长期记 0。
 ///
-/// 遇到无法访问的文件/目录时直接跳过，不报错。
+/// 口径：只计常规文件的 `st_blocks×512`（或 macOS 数据叉 allocated size），稀疏文件
+/// 不虚高；符号链接不跟随；遇到无法访问的条目直接跳过、不报错。
 pub fn dir_size_impl(path: &Path) -> (u64, bool) {
-    use rayon::prelude::*;
-    // 网络 / FUSE 挂载点：不深入统计（不可达），直接给「不完整、占用未知」。
-    // TCC 容器不在此一刀切（Docker/OrbStack 等具体容器路径需要可只读统计），
-    // 它们走有界 IO 池：能读则读、卡则按目录超时剪枝，不会永久挂起。
-    if fs_guard::is_remote_path(path) {
-        return (0, true);
-    }
-    let mut total: u64 = 0;
-    let mut skipped = false;
-    let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
-    queue.push_back((path.to_path_buf(), 0));
-
-    while !queue.is_empty() {
-        let batch: Vec<(PathBuf, usize)> = queue.drain(..).collect();
-        // 并行 BFS：同一批目录同时枚举（rayon 池并发 = CPU 核数）。每个目录在独立
-        // 线程 + 超时 watchdog —— 一个坏目录只在本次跳过自身子树，不阻塞同批其它
-        // 目录（历史：Telegram 目录 readdir 卡死拖死整轮扫描、进度条冻结）。
-        type DirScanResult = (
-            usize,           // depth
-            bool,            // skipped（深度 / 资源库 bundle）
-            u64,             // files_size
-            Vec<PathBuf>,    // subdirs
-            Option<PathBuf>, // 本次枚举超时的目录（仅本次剪枝，不落盘）
-        );
-        let results: Vec<DirScanResult> = batch
-            .into_par_iter()
-            .map(|(dir, depth)| {
-                if depth > DIR_MAX_DEPTH {
-                    return (depth, true, 0, Vec::new(), None);
-                }
-                // 跳过 Photos Library 等问题 bundle（与原 WalkDir filter_entry 一致）
-                if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
-                    let lower = name.to_lowercase();
-                    if lower.ends_with(".photoslibrary")
-                        || lower.ends_with(".musiclibrary")
-                        || lower.ends_with(".tvlibrary")
-                    {
-                        return (depth, true, 0, Vec::new(), None);
-                    }
-                }
-
-                // 枚举跑在有界阻塞 IO 池、超时等待（可中断的目录级 watchdog）。
-                // 池把卡死的内核 readdir 限制在固定名额内；rayon worker 只做有超时
-                // 的等待、不会被永久占用，整轮扫描因此不会被僵尸 IO 拖垮。
-                // 容器内目录用短超时快速失败（TCC 不硬等），普通目录用标准超时。
-                let per_dir_timeout = if fs_guard::is_tcc_sandbox_container(&dir) {
-                    TCC_DIR_SCAN_TIMEOUT
-                } else {
-                    DIR_SCAN_TIMEOUT
-                };
-                let dir_task = dir.clone();
-                let enumerated = io_pool::run_with_timeout(
-                    move || {
-                        let mut files_size: u64 = 0;
-                        let mut subdirs: Vec<PathBuf> = Vec::new();
-                        if let Ok(entries) = std::fs::read_dir(&dir_task) {
-                            for e in entries.flatten() {
-                                // file_type() 是 lstat 语义：目录符号链接 is_dir()=false，
-                                // 天然不跟随链接（与 follow_links(false) 一致）
-                                if let Ok(ft) = e.file_type() {
-                                    if ft.is_dir() {
-                                        subdirs.push(e.path());
-                                    } else if ft.is_file() {
-                                        if let Ok(meta) = e.metadata() {
-                                            // 用 st_blocks×512（实际磁盘占用）而非 len()
-                                            // （逻辑大小）：APFS 稀疏文件（VM 镜像、
-                                            // Docker/OrbStack 磁盘）len() 会虚高——
-                                            // 实测 OrbStack 容器目录按 len 算 995G，
-                                            // 超过整机磁盘 926G，明显是稀疏文件误计。
-                                            #[cfg(unix)]
-                                            {
-                                                use std::os::unix::fs::MetadataExt;
-                                                files_size += meta.blocks() * 512;
-                                            }
-                                            #[cfg(not(unix))]
-                                            {
-                                                files_size += meta.len();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        (files_size, subdirs)
-                    },
-                    per_dir_timeout,
-                );
-
-                match enumerated {
-                    Some((files_size, subdirs)) => (depth, false, files_size, subdirs, None),
-                    None => (depth, true, 0, Vec::new(), Some(dir)),
-                }
-            })
-            .collect();
-
-        for (_depth, skipped_this, files_size, subdirs, timed_out) in results {
-            if let Some(bdir) = timed_out {
-                // 该目录本次枚举超时（IO 卡死/忙）：本次只跳过它的子树并标记
-                // 不完整，不落盘、不记忆——下次扫描无条件重试。
-                skipped = true;
-                crate::logger::warn(&format!(
-                    "[dir_size] 目录本次枚举超时（IO 忙/卡死），本轮跳过其子树、下次扫描重试: {}",
-                    bdir.display()
-                ));
-                continue;
-            }
-            if skipped_this {
-                // 深度超限 / 资源库 bundle：正常剪枝，不计入警告
-                continue;
-            }
-            total += files_size;
-            for sub in subdirs {
-                // 下钻前快跳网络 / FUSE 挂载点：挂载点是真目录、不跟随链接挡不住，
-                // 在此剪枝才能避免对其子项发起走网络、会卡在内核的 readdir/stat。
-                if fs_guard::is_remote_path(&sub) {
-                    skipped = true;
-                    continue;
-                }
-                queue.push_back((sub, _depth + 1));
-            }
-        }
-    }
-
-    (total, skipped)
+    walk_tree(path, WalkMode::Fast)
 }
 
 /// 递归计算目录大小（字节），见 [`dir_size_impl`]
@@ -389,131 +322,172 @@ pub fn dir_size(path: &Path) -> u64 {
 /// 磁盘分析「大目录」专用的**尽力准确**目录统计。
 ///
 /// 返回 `(占用字节数, incomplete)`：`incomplete == true` 表示存在因磁盘 IO 卡死 /
-/// 忙而**本次没能统计到**的子树，此时字节数是「至少」占用，真实值可能更大，调用方
-/// 应向用户如实标注，而不是把它当成精确的小数字展示。
+/// 繁忙 / 远程挂载点而**本次没能统计到**的子树，此时字节数是「至少」占用，真实值可能
+/// 更大，调用方应向用户如实标注，而不是当成精确的小数字展示。
 ///
-/// 相比为「快速、绝不卡死」的清理扫描设计的 [`dir_size_impl`]，这里做两点放宽：
+/// 与为「快速、绝不卡死」设计的 [`dir_size_impl`] 相比：
 /// - **不做深度截断**，再深的目录也一直走到文件；
-/// - 单目录枚举超时放宽到 [`ACCURATE_DIR_TIMEOUT`]（20s），给慢磁盘 / 休眠唤醒 /
-///   刚挂载的外置盘足够时间，尽量一次统计准确。
+/// - 单目录看门狗更宽松（[`ACCURATE_DIR_TIMEOUT`] + [`ACCURATE_RETRY_TIMEOUT`]）。
 ///
-/// 与 [`dir_size_impl`] 一样**不做任何持久记忆**：超时只在本次统计中剪枝并标记
-/// incomplete，不落盘、不写黑名单；下次扫描无条件重新尝试，慢盘恢复 / 外置盘重新
-/// 挂载后自然能统计到真实体量，绝不因一次偶发卡顿把大目录长期记 0。
-///
-/// 用 `st_blocks×512`（实际磁盘块占用）而非逻辑长度，APFS 稀疏文件（虚拟机磁盘）
-/// 不会被虚高计；符号链接不跟随（`file_type` 为 lstat 语义），无环风险。
+/// 其余（工作窃取遍历、批量枚举、远程快跳、稀疏文件按物理块计、不跟随链接、不落盘不
+/// 记忆）与 [`dir_size_impl`] 完全一致。只读「大目录」占用分析在 [`crate::scanner::
+/// sizecache`] 里还会对**完整统计结果**做持久化缓存，未变化的大目录重扫时秒回。
 pub fn dir_size_accurate(path: &Path) -> (u64, bool) {
-    use rayon::prelude::*;
-    use std::collections::VecDeque;
+    walk_tree(path, WalkMode::Accurate)
+}
 
-    // 网络 / FUSE 挂载点不深入统计（不可达）；TCC 容器交由有界池超时处理。
-    if fs_guard::is_remote_path(path) {
+/// 遍历精度档位：快扫（清理链路，深度截断 + 较短看门狗）/ 准确（磁盘分析，无截断 +
+/// 宽松看门狗）。两者共用同一套工作窃取遍历与口径，只在预算与深度上限上不同。
+#[derive(Clone, Copy)]
+enum WalkMode {
+    Fast,
+    Accurate,
+}
+
+impl WalkMode {
+    fn first_timeout(self) -> Duration {
+        match self {
+            WalkMode::Fast => DIR_SCAN_TIMEOUT,
+            WalkMode::Accurate => ACCURATE_DIR_TIMEOUT,
+        }
+    }
+    fn retry_timeout(self) -> Duration {
+        match self {
+            WalkMode::Fast => LOCAL_RETRY_TIMEOUT,
+            WalkMode::Accurate => ACCURATE_RETRY_TIMEOUT,
+        }
+    }
+    /// 快扫限制最大深度（[`DIR_MAX_DEPTH`]）；准确统计不截断。
+    fn depth_cap(self) -> Option<usize> {
+        match self {
+            WalkMode::Fast => Some(DIR_MAX_DEPTH),
+            WalkMode::Accurate => None,
+        }
+    }
+}
+
+struct WalkTotals {
+    bytes: std::sync::atomic::AtomicU64,
+    incomplete: std::sync::atomic::AtomicBool,
+}
+
+/// Photos / Music / TV 资源库 bundle 有意整体跳过（与历史 filter 一致）。
+fn is_media_library_bundle(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".photoslibrary")
+        || lower.ends_with(".musiclibrary")
+        || lower.ends_with(".tvlibrary")
+}
+
+/// 工作窃取并行遍历入口。
+fn walk_tree(root: &Path, mode: WalkMode) -> (u64, bool) {
+    use std::sync::atomic::Ordering;
+    // 网络 / FUSE 挂载点：不深入统计（不可达），直接给「不完整、占用未知」。
+    // TCC 容器不在此一刀切（Docker/OrbStack 等具体容器路径需要可只读统计），
+    // 它们走有界 IO 池：能读则读、卡则按目录超时剪枝，不会永久挂起。
+    if fs_guard::is_remote_path(root) {
         return (0, true);
     }
+    let totals = WalkTotals {
+        bytes: std::sync::atomic::AtomicU64::new(0),
+        incomplete: std::sync::atomic::AtomicBool::new(false),
+    };
+    rayon::scope(|s| visit_dir(s, &totals, root.to_path_buf(), 0, mode));
+    (
+        totals.bytes.load(Ordering::Relaxed),
+        totals.incomplete.load(Ordering::Relaxed),
+    )
+}
 
-    let mut total: u64 = 0;
-    let mut incomplete = false;
-    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
-    queue.push_back((path.to_path_buf(), 0));
+/// 统计单个目录并把子目录派发为可窃取的兄弟任务。
+fn visit_dir<'scope>(
+    s: &rayon::Scope<'scope>,
+    w: &'scope WalkTotals,
+    dir: PathBuf,
+    depth: usize,
+    mode: WalkMode,
+) {
+    use std::sync::atomic::Ordering;
 
-    // (depth, skipped(资源库 bundle), files_size, subdirs, 本次超时目录)
-    type Row = (usize, bool, u64, Vec<PathBuf>, Option<PathBuf>);
-
-    while !queue.is_empty() {
-        let batch: Vec<(PathBuf, usize)> = queue.drain(..).collect();
-        // 同层目录并行枚举（rayon），每个目录独立线程 + 宽松 watchdog：
-        // 一个坏目录最多让这一项标 incomplete，不阻塞同层其它目录。
-        let results: Vec<Row> = batch
-            .into_par_iter()
-            .map(|(dir, depth)| {
-                if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
-                    let lower = name.to_lowercase();
-                    if lower.ends_with(".photoslibrary")
-                        || lower.ends_with(".musiclibrary")
-                        || lower.ends_with(".tvlibrary")
-                    {
-                        // 资源库 bundle 有意整体跳过，不计入 incomplete
-                        return (depth, true, 0, Vec::new(), None);
-                    }
-                }
-
-                // 有界阻塞 IO 池 + 宽松 watchdog：卡死的内核 readdir 只占池内固定
-                // 名额，不泄漏 detached 线程；一个坏目录最多让本项标 incomplete。
-                // 容器内目录短超时快速失败（TCC 不硬等），其它目录用宽松准确统计超时。
-                let per_dir_timeout = if fs_guard::is_tcc_sandbox_container(&dir) {
-                    TCC_DIR_SCAN_TIMEOUT
-                } else {
-                    ACCURATE_DIR_TIMEOUT
-                };
-                let task = dir.clone();
-                let enumerated = io_pool::run_with_timeout(
-                    move || {
-                        let mut files_size: u64 = 0;
-                        let mut subdirs: Vec<PathBuf> = Vec::new();
-                        if let Ok(entries) = std::fs::read_dir(&task) {
-                            for e in entries.flatten() {
-                                if let Ok(ft) = e.file_type() {
-                                    if ft.is_dir() {
-                                        subdirs.push(e.path());
-                                    } else if ft.is_file() {
-                                        if let Ok(meta) = e.metadata() {
-                                            #[cfg(unix)]
-                                            {
-                                                use std::os::unix::fs::MetadataExt;
-                                                files_size += meta.blocks() * 512;
-                                            }
-                                            #[cfg(not(unix))]
-                                            {
-                                                files_size += meta.len();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        (files_size, subdirs)
-                    },
-                    per_dir_timeout,
-                );
-
-                match enumerated {
-                    Some((files_size, subdirs)) => (depth, false, files_size, subdirs, None),
-                    None => (depth, true, 0, Vec::new(), Some(dir)),
-                }
-            })
-            .collect();
-
-        for (depth, skipped, files_size, subdirs, timed_out) in results {
-            if let Some(bdir) = timed_out {
-                // 该项本次 IO 卡死/忙：标 incomplete（体量未知）、本次跳过其子树，
-                // 不落盘、不记忆——下次扫描会重新真正尝试。
-                incomplete = true;
-                crate::logger::warn(&format!(
-                    "[dir_size_accurate] 目录枚举超过 {ACCURATE_DIR_TIMEOUT:?}（IO 忙/卡死），\
-                     本项标记为统计不完整并跳过子树、下次扫描重试: {}",
-                    bdir.display()
-                ));
-                continue;
-            }
-            if skipped {
-                // 资源库 bundle：files_size=0，正常忽略
-                continue;
-            }
-            total += files_size;
-            for sub in subdirs {
-                // 下钻前快跳网络 / FUSE 挂载点；未计入的子树标 incomplete（下限）。
-                if fs_guard::is_remote_path(&sub) {
-                    incomplete = true;
-                    continue;
-                }
-                queue.push_back((sub, depth + 1));
-            }
+    // 快扫深度截断（准确统计无上限）。命中即静默剪枝，不计 incomplete。
+    if let Some(cap) = mode.depth_cap() {
+        if depth > cap {
+            return;
+        }
+    }
+    if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+        if is_media_library_bundle(name) {
+            return;
         }
     }
 
-    (total, incomplete)
+    // 每个目录独立看门狗（远程/TCC 快跳、本地繁忙退避重试一次）；枚举本体走批量
+    // getattrlistbulk，返回该目录直接文件的物理占用之和与直接子目录。
+    let task = dir.clone();
+    let listed = run_dir_io(
+        &dir,
+        mode.first_timeout(),
+        mode.retry_timeout(),
+        move || bulkdir::list_dir(&task).unwrap_or_default(),
+    );
+
+    let listing = match listed {
+        Some(l) => l,
+        None => {
+            // 该目录本次枚举超时（IO 卡死/忙）：本次只跳过其子树并标记不完整，
+            // 不落盘、不记忆——下次扫描无条件重试。
+            w.incomplete.store(true, Ordering::Relaxed);
+            let tag = if matches!(mode, WalkMode::Accurate) {
+                "dir_size_accurate"
+            } else {
+                "dir_size"
+            };
+            crate::logger::warn(&format!(
+                "[{tag}] 目录本次枚举超时（IO 忙/卡死），本轮跳过其子树、下次扫描重试: {}",
+                dir.display()
+            ));
+            return;
+        }
+    };
+
+    w.bytes
+        .fetch_add(listing.files_bytes, Ordering::Relaxed);
+
+    // 下钻前快跳网络 / FUSE 挂载点：挂载点是真目录、不跟随链接挡不住，在此剪枝才能
+    // 避免对其子项发起走网络、会卡在内核的枚举。
+    let mut subdirs: Vec<PathBuf> = Vec::with_capacity(listing.subdirs.len());
+    for sub in listing.subdirs {
+        if fs_guard::is_remote_path(&sub) {
+            w.incomplete.store(true, Ordering::Relaxed);
+            continue;
+        }
+        subdirs.push(sub);
+    }
+
+    spawn_children(s, w, subdirs, depth + 1, mode);
 }
+
+/// 把一批子目录派发为可被 rayon 其它工作线程**窃取**的兄弟任务。
+///
+/// 除最后一个目录在当前任务内直接递归外，其余各自 `spawn`。这样一个目录刚枚举完，它
+/// 的多个子树立刻可被空闲线程并行拿走，不存在旧实现「整层必须全部枚举完才统一进入下一
+/// 层」的栅栏；慢目录所在的分支不会拖住旁支分支，高负载下整体墙钟更短。
+fn spawn_children<'scope>(
+    s: &rayon::Scope<'scope>,
+    w: &'scope WalkTotals,
+    mut dirs: Vec<PathBuf>,
+    depth: usize,
+    mode: WalkMode,
+) {
+    let inline = dirs.pop();
+    for d in dirs {
+        s.spawn(move |s2| visit_dir(s2, w, d, depth, mode));
+    }
+    if let Some(d) = inline {
+        visit_dir(s, w, d, depth, mode);
+    }
+}
+
 
 /// 取一个路径占用的磁盘大小：普通文件取其长度，目录/其它递归统计。
 /// 仅用于在“从聚合项中剔除个别危险成员”时回减大小（罕见路径）。

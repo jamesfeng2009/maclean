@@ -3,6 +3,7 @@ import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
 import type { CleanItemReq } from "../lib/types";
 import { useApp } from "../lib/store";
+import { useDeleteStrategy, planDelete, deleteSubText } from "../lib/deletePolicy";
 import { Icon } from "../components/Icon";
 import { Badge, Empty, PageHeader } from "../components/ui";
 
@@ -41,6 +42,7 @@ export function Analysis() {
   // 大文件/大目录默认全部不勾（均为「高级」风险，需用户逐个确认）
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const delStrategy = useDeleteStrategy();
 
   // 页头「重新扫描」只刷新磁盘大文件模块
   const refresh = useCallback(() => {
@@ -143,27 +145,33 @@ export function Analysis() {
     }
 
     const noun = view === "files" ? "大文件" : "大目录";
+    const plan = planDelete(finalReqs, delStrategy);
     confirm({
       title: `删除选中的 ${finalReqs.length} 个${noun}？`,
-      sub: `将把它们移入废纸篓（共 ${fmt(
-        selectedSize
-      )}），误删可从废纸篓恢复。`,
+      sub: `${deleteSubText(plan)}（共 ${fmt(selectedSize)}）。`,
       warn:
         view === "files"
           ? "这些是你的个人超大文件（视频 / 磁盘镜像 / 压缩包 / AI 模型等），删除后可能需要重新下载。请确认你了解每一项的用途后再继续。"
           : "这些是占用较大的文件夹，可能包含项目代码、虚拟机镜像、开发环境或数据集；删除后可能需要重新下载、重新构建或重新登录。请确认你了解每一项的用途后再继续。",
       items: finalPaths,
-      confirmText: `移入废纸篓 ${fmt(selectedSize)}`,
-      onConfirm: async () => {
+      confirmText: `删除 ${fmt(selectedSize)}`,
+      confirmToggle:
+        delStrategy !== "trash" && plan.safeN > 0
+          ? {
+              label: "本次也把这些安全项移入废纸篓（更稳妥、可恢复）",
+              defaultOn: false,
+            }
+          : undefined,
+      onConfirm: async (forceTrashSafe) => {
         setBusy(true);
         try {
-          const rep = await executeClean(finalReqs);
+          const rep = await executeClean(finalReqs, forceTrashSafe === true);
           if (rep.cancelled) {
             toast("warn", "已取消");
           } else {
             toast(
               "success",
-              `已移入废纸篓 ${rep.deleted} 项${rep.intercepted ? `，拦截 ${rep.intercepted} 项` : ""}${
+              `已清理 ${rep.deleted} 项${rep.intercepted ? `，拦截 ${rep.intercepted} 项` : ""}${
                 rep.need_password ? `，${rep.need_password} 项需要管理员权限` : ""
               }`
             );
@@ -184,7 +192,7 @@ export function Analysis() {
     <div>
       <PageHeader
         title="磁盘分析"
-        sub="大文件（单个 ≥100MB）与大目录空间占用；勾选后可移入废纸篓"
+        sub="大文件（单个 ≥100MB）与大目录空间占用；勾选后按删除方式清理（风险项进废纸篓）"
         action={
           <button
             className="btn-secondary"
@@ -354,7 +362,7 @@ export function Analysis() {
                         {it.deletable ? (
                           <span
                             className={`chek${isChecked ? " on" : ""}`}
-                            title="选择后可移入废纸篓"
+                            title="选择后可删除"
                             onClick={(e) => {
                               e.stopPropagation();
                               toggleCheck(k);
@@ -433,7 +441,7 @@ export function Analysis() {
             title="缓存等其它模块仍在后台扫描不影响此处；仅在大文件模块刷新时暂禁"
           >
             <Icon name="trash" size={16} />
-            {busy ? "正在删除…" : `移入废纸篓 ${fmt(selectedSize)}`}
+            {busy ? "正在删除…" : `删除 ${fmt(selectedSize)}`}
           </button>
         </div>
       )}

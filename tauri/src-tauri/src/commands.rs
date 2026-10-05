@@ -151,7 +151,33 @@ fn scanner_budget(scope: &str) -> std::time::Duration {
     }
 }
 
-fn run_scanner(scope: &str) -> Vec<ScanItem> {
+/// scope → 中文模块名（用于部分结果事件 / 提示）。
+fn scope_label(scope: &str) -> &'static str {
+    match scope {
+        "dev_cache" => "开发者缓存",
+        "app_cache" => "应用缓存",
+        "app_data" => "应用数据与残留",
+        "large" => "磁盘大文件",
+        "dup" => "重复文件",
+        "apps" => "已安装应用",
+        "all" => "缓存与应用数据",
+        _ => "部分扫描项",
+    }
+}
+
+/// 运行一个扫描器，返回 `(项目, 是否为部分结果)`。
+///
+/// `partial == true` 表示该扫描器（或其内某些分段）因磁盘高负载 / 不可达目录在预算内
+/// 没能完整跑完：此时 `项目` 是**已成功统计到的部分**（可能偏小），而不是像旧实现那样
+/// 到点整体丢弃成空 Vec——繁忙环境下也先给用户可用结果，机器空闲后重新扫描即可补齐。
+fn run_scanner(scope: &str) -> (Vec<ScanItem>, bool) {
+    // app_cache 由 6 个相对独立的来源组成：改走「分段独立预算」，某一段超时只丢该段，
+    // 其余段照常合并，避免最重的容器/Application Support 遍历拖垮整个 app_cache。
+    #[cfg(target_os = "macos")]
+    if scope == "app_cache" {
+        return run_app_cache_segmented();
+    }
+
     let key = scope.to_string();
     let job = move || -> Vec<ScanItem> {
         macro_rules! scan_of {
@@ -188,18 +214,61 @@ fn run_scanner(scope: &str) -> Vec<ScanItem> {
     let budget = std::time::Duration::from_secs(150);
 
     match scanner::scan_with_timeout(budget, job) {
-        Some(items) => items,
+        Some(items) => (items, false),
         None => {
             maclean_core::logger::warn(&format!(
-                "[scan] 扫描器 {scope} 超过 {budget:?} 仍未完成，本轮跳过其结果（多见于不可达的网络卷或被系统拒绝访问的目录）；其它模块结果不受影响。"
+                "[scan] 扫描器 {scope} 超过 {budget:?} 仍未完成，本轮返回已统计到的部分（可能偏小）；多见于磁盘繁忙、不可达网络卷或被系统拒绝访问的目录。"
             ));
-            Vec::new()
+            (Vec::new(), true)
         }
     }
 }
 
+/// 分段运行应用缓存扫描（macOS）：6 个来源各拿独立预算，超时只丢该段。
+///
+/// 返回 `(合并去重排序后的项, 是否有任一段未完成)`。总墙钟设上限兜底，单段再设上限，
+/// 避免最重的一段在高负载下吃光全部预算、拖死其余本来很快的缓存来源。
 #[cfg(target_os = "macos")]
-fn run_all_scanners(app: &AppHandle) -> Vec<ScanItem> {
+fn run_app_cache_segmented() -> (Vec<ScanItem>, bool) {
+    use std::time::{Duration, Instant};
+    if !scanner::app_cache::home_available() {
+        // home 不可得：正常的「空结果」，不算繁忙导致的部分结果。
+        return (Vec::new(), false);
+    }
+    const TOTAL_BUDGET: Duration = Duration::from_secs(150);
+    const PER_SEG_CAP: Duration = Duration::from_secs(45);
+
+    let start = Instant::now();
+    let mut items: Vec<ScanItem> = Vec::new();
+    let mut partial = false;
+
+    for (seg_name, seg_fn) in scanner::app_cache::scan_segments() {
+        let elapsed = start.elapsed();
+        if elapsed >= TOTAL_BUDGET {
+            partial = true;
+            maclean_core::logger::warn(&format!(
+                "[scan] app_cache 分段总预算 {TOTAL_BUDGET:?} 已耗尽，剩余段（含 {seg_name}）本轮跳过；已完成分段照常返回。"
+            ));
+            break;
+        }
+        let budget = TOTAL_BUDGET.saturating_sub(elapsed).min(PER_SEG_CAP);
+        match scanner::scan_with_timeout(budget, move || seg_fn()) {
+            Some(part) => items.extend(part),
+            None => {
+                partial = true;
+                maclean_core::logger::warn(&format!(
+                    "[scan] app_cache 分段 {seg_name} 超过 {budget:?} 未完成，本轮只跳过该段，其它分段结果保留。"
+                ));
+            }
+        }
+    }
+
+    // 与正常 scan 一致的去重 + 排序（分段缺失时去重仍安全：只少项、不重复计）。
+    (scanner::app_cache::finish_items(items), partial)
+}
+
+#[cfg(target_os = "macos")]
+fn run_all_scanners(app: &AppHandle) -> (Vec<ScanItem>, bool) {
     // 阶段顺序模拟交互稿的 9 阶段提示；每个扫描器独立 catch，单个挂了不拖垮全部。
     let stages = [
         ("dev_cache", "开发者缓存", 20u8),
@@ -207,20 +276,23 @@ fn run_all_scanners(app: &AppHandle) -> Vec<ScanItem> {
         ("app_data", "应用数据与残留", 85),
     ];
     let mut all = Vec::new();
+    let mut partial = false;
     for (key, label, pct) in stages {
         let _ = app.emit(
             "scan-progress",
             serde_json::json!({ "stage": key, "label": label, "pct": pct }),
         );
-        let part =
+        // 逐阶段累积：某阶段因高负载只拿到部分结果时，前序阶段的结果不丢。
+        let (part, p) =
             std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(key))).unwrap_or_default();
         all.extend(part);
+        partial |= p;
     }
     let _ = app.emit(
         "scan-progress",
         serde_json::json!({ "stage": "done", "label": "完成", "pct": 100 }),
     );
-    all
+    (all, partial)
 }
 
 /// 全量体检各模块在整体进度中的权重（合计 100，反映相对耗时；large 最重）。
@@ -250,13 +322,17 @@ fn module_bit(key: &str) -> u32 {
 /// 整体进度按已完成模块权重**单调累加**（模块并行完成顺序不定也不会回退）。
 /// panic 按模块隔离，不拖垮其它线程。
 #[cfg(target_os = "macos")]
-fn run_module<F: FnOnce() -> Vec<ScanItem>>(
+fn run_module<F>(
     app: &AppHandle,
+    partial_scopes: &std::sync::Mutex<Vec<String>>,
     done_bits: &std::sync::atomic::AtomicU32,
     key: &str,
     label: &str,
     f: F,
-) -> Vec<ScanItem> {
+) -> Vec<ScanItem>
+where
+    F: FnOnce() -> (Vec<ScanItem>, bool),
+{
     use std::sync::atomic::Ordering;
     // 按已完成模块位图计算整体进度（权重合计，最小 2%），模块并行完成顺序不定也不回退
     let pct_of = |bits: u32| -> u8 {
@@ -276,12 +352,19 @@ fn run_module<F: FnOnce() -> Vec<ScanItem>>(
         serde_json::json!({ "stage": "full", "label": format!("正在扫描：{label}"), "pct": pct_of(done_bits.load(Ordering::Relaxed)) }),
     );
 
-    let items = std::panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_default();
+    // f 返回 (本模块项目, 是否部分结果)；panic 兜底为（空、非部分）。
+    let (items, partial) =
+        std::panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| (Vec::new(), false));
 
     let _ = app.emit(
         "scan-module",
-        serde_json::json!({ "scope": key, "status": "done", "items": items }),
+        serde_json::json!({ "scope": key, "status": "done", "items": items, "partial": partial }),
     );
+    if partial {
+        if let Ok(mut g) = partial_scopes.lock() {
+            g.push(label.to_string());
+        }
+    }
     let bits = done_bits.fetch_or(module_bit(key), Ordering::AcqRel) | module_bit(key);
     let _ = app.emit(
         "scan-progress",
@@ -316,25 +399,34 @@ fn run_full_scan(app: &AppHandle) -> Vec<ScanItem> {
     );
 
     let mut out: Vec<ScanItem> = Vec::new();
+    let partial_scopes = std::sync::Mutex::new(Vec::<String>::new());
     std::thread::scope(|scope| {
         // 模块 all = 开发者缓存 + 应用缓存 + 应用数据与残留。
-        // 三段内部维持串行（见函数文档：激进并行在 IO bound 场景无收益）。
+        // 三段内部维持串行（见函数文档：激进并行在 IO bound 场景无收益）；逐段保留
+        // 已统计部分，任一段繁忙超时都不拖累其它段。
         let h_all = scope.spawn(|| {
-            run_module(app, &done_bits, "all", "缓存与应用数据", || {
+            run_module(app, &partial_scopes, &done_bits, "all", "缓存与应用数据", || {
                 let mut all = Vec::new();
+                let mut partial = false;
                 for key in ["dev_cache", "app_cache", "app_data"] {
-                    all.extend(run_scanner(key));
+                    let (part, p) = run_scanner(key);
+                    all.extend(part);
+                    partial |= p;
                 }
-                all
+                (all, partial)
             })
         });
         // 模块 large = 磁盘大文件 / 大目录
         let h_large = scope.spawn(|| {
-            run_module(app, &done_bits, "large", "磁盘大文件", || run_scanner("large"))
+            run_module(app, &partial_scopes, &done_bits, "large", "磁盘大文件", || {
+                run_scanner("large")
+            })
         });
         // 模块 apps = 已安装应用
         let h_apps = scope.spawn(|| {
-            run_module(app, &done_bits, "apps", "已安装应用", || run_scanner("apps"))
+            run_module(app, &partial_scopes, &done_bits, "apps", "已安装应用", || {
+                run_scanner("apps")
+            })
         });
 
         for h in [h_all, h_large, h_apps] {
@@ -343,6 +435,21 @@ fn run_full_scan(app: &AppHandle) -> Vec<ScanItem> {
             }
         }
     });
+
+    // 任一模块只拿到部分结果时，统一向前端发一次「部分结果」事件（模块名去重保序），
+    // 由前端提示用户「数字可能偏小、空闲后重扫可补齐」，而不是静默显示 0 或不说明。
+    let partial_labels = partial_scopes.into_inner().unwrap_or_default();
+    if !partial_labels.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let labels: Vec<String> = partial_labels
+            .into_iter()
+            .filter(|name| seen.insert(name.clone()))
+            .collect();
+        let _ = app.emit(
+            "scan-partial",
+            serde_json::json!({ "scopes": labels }),
+        );
+    }
 
     let _ = app.emit(
         "scan-progress",
@@ -362,44 +469,67 @@ pub async fn scan(scope: String, app: AppHandle) -> Result<Vec<ScanItem>, String
             serde_json::json!({ "stage": &scope, "label": "准备扫描", "pct": 2 }),
         );
 
-        let items = if scope == "full" {
+        // 各路径结果。full 路径在 run_full_scan 内自行发 scan-partial；
+        // all / 单 scope 路径在各自分支内按需发 scan-partial，故外层的 partial 不直接使用。
+        let (items, _partial): (Vec<ScanItem>, bool) = if scope == "full" {
             // 全量体检：逐模块经 scan-module 事件回传结果（后台渐进式）
             #[cfg(target_os = "macos")]
             {
-                run_full_scan(&app)
+                (run_full_scan(&app), false)
             }
             #[cfg(not(target_os = "macos"))]
             {
-                // 全量体检目前仅在 macOS 提供五模块；其它平台退化为开发者缓存
-                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                // 全量体检目前仅在 macOS 提供多模块；其它平台退化为开发者缓存
+                let v = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     let mut r = scanner::dev_cache::DevCacheScanner::new().scan();
                     post_check(&mut r.items);
                     r.items
                 }))
-                .unwrap_or_default()
+                .unwrap_or_default();
+                (v, false)
             }
         } else if scope == "all" {
             #[cfg(target_os = "macos")]
             {
-                run_all_scanners(&app)
+                let (v, p) = run_all_scanners(&app);
+                if p {
+                    let _ = app.emit(
+                        "scan-partial",
+                        serde_json::json!({ "scopes": ["缓存与应用数据"] }),
+                    );
+                }
+                (v, p)
             }
             #[cfg(not(target_os = "macos"))]
             {
-                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let v = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     let mut r = scanner::dev_cache::DevCacheScanner::new().scan();
                     post_check(&mut r.items);
                     r.items
                 }))
-                .unwrap_or_default()
+                .unwrap_or_default();
+                (v, false)
             }
         } else {
-            std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(&scope))).unwrap_or_default()
+            // 单扫描器（dup / large / apps / dev_cache…）：繁忙时返回部分结果。
+            let (v, p) =
+                std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(&scope))).unwrap_or_default();
+            if p {
+                let _ = app.emit(
+                    "scan-partial",
+                    serde_json::json!({ "scopes": [scope_label(&scope)] }),
+                );
+            }
+            (v, p)
         };
 
         let _ = app.emit(
             "scan-progress",
             serde_json::json!({ "stage": "done", "label": "完成", "pct": 100 }),
         );
+        // 扫描收尾：把本轮只读「大目录」占用分析写入持久缓存（无改动则空操作），
+        // 使下次扫描未变化的大目录秒回；缓存仅作用于只读分析，不触碰删除判定。
+        maclean_core::scanner::sizecache::flush();
         Ok(items)
     })
     .await
@@ -533,8 +663,31 @@ pub struct CleanItemReq {
     #[serde(default)]
     pub batch_paths: Vec<String>,
     pub size_bytes: u64,
-    /// safe / cache_only / caution / advanced
+    /// safe / cache_only / caution / advanced（实际序列化为 PascalCase 变体名）
     pub recommend: String,
+    /// 前端按删除策略 + 本次覆盖给出的**意愿**：true=移入废纸篓，false=永久删除。
+    /// 仅对安全/缓存项生效；注意/高级项在 [`clean_execute`] 内被强制改为 true。
+    #[serde(default = "default_use_trash")]
+    pub use_trash: bool,
+}
+
+/// 旧前端 / 缺省字段时按「移入废纸篓」处理（更安全的缺省）。
+fn default_use_trash() -> bool {
+    true
+}
+
+/// 后端权威裁决某项最终是否进废纸篓（前端不可信，纵深防御）。
+///
+/// 采用**白名单**而非黑名单：只有等级**明确**为 `Safe` / `CacheOnly` 的项
+/// 才允许在请求永久删除时照办；注意 / 高级、以及任何无法识别 / 缺失 /
+/// 大小写异常的等级一律落入废纸篓（默认保守）。这样即使前端被篡改传入
+/// 伪造等级，风险项也不可能被永久删除。
+///
+/// - 注意/高级/未知：恒为 `true`（即使前端请求永久删除）；
+/// - 安全/缓存：尊重前端按「删除策略 + 本次覆盖」给出的意愿。
+fn resolve_use_trash(recommend: &str, requested: bool) -> bool {
+    let explicitly_safe = matches!(recommend.trim(), "Safe" | "CacheOnly");
+    requested || !explicitly_safe
 }
 
 #[derive(Debug, Serialize)]
@@ -641,11 +794,15 @@ pub async fn clean_execute(
         let to_delete: Vec<(String, String, Vec<String>, bool, u64)> = items
             .iter()
             .map(|i| {
+                // 删除方式以后端裁决为准（前端不可信）：
+                // - 注意/高级（含 IM 孤儿残留等）永远移入废纸篓，即使前端传 false；
+                // - 安全/缓存项才尊重前端按「删除策略 + 本次覆盖」给出的意愿。
+                let use_trash = resolve_use_trash(&i.recommend, i.use_trash);
                 (
                     i.path.clone(),
                     i.category.clone(),
                     i.batch_paths.clone(),
-                    true,
+                    use_trash,
                     i.size_bytes,
                 )
             })
@@ -742,6 +899,9 @@ pub async fn clean_execute(
                 }
             }
         }
+        // 任何删除都可能改变大目录占用：丢弃只读体积缓存，使后续磁盘分析/概览立即
+        // 基于当前文件系统重算，而不是复用删除前的旧数字（缓存不影响删除目标本身）。
+        maclean_core::scanner::sizecache::invalidate_all();
         Ok(report)
     })
     .await
@@ -880,13 +1040,47 @@ pub fn app_open(bundle_id: String) -> Result<(), String> {
     }
 }
 
+/// 在访达（Finder）中定位并选中某个条目。
+///
+/// 仅用于引导用户**自己**处理受保护数据：当前严格白名单，只允许受支持
+/// IM（微信 / QQ / 企微）的 `Data/Documents` 根，其它路径一律拒绝，避免
+/// 成为"打开/触碰任意路径"的通用入口。
+///
+/// 用 `open -R` 交给有完全磁盘访问权限的 Finder 去显示/选中，maclean
+/// 自身既不枚举也不读取该目录（规避无 FDA 时的 TCC 拒绝）；参数直传
+/// argv、不经 shell，杜绝命令注入。
+#[tauri::command]
+pub fn reveal_path(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let _im = maclean_core::im_data::im_app_for_docs_path(p).ok_or_else(|| {
+        "仅支持在访达中打开受保护 IM（微信 / QQ / 企业微信）的 Documents 目录".to_string()
+    })?;
+
+    if !p.exists() {
+        return Err("该目录不存在（数据可能已被移除）".to_string());
+    }
+
+    let status = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("调用访达失败：{e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("在访达中打开失败".to_string())
+    }
+}
+
 /// 对 IM（微信/QQ/企业微信）的 Documents 根做**只读**占用分析。
 ///
 /// 入参路径必须严格位于 `~/Library/Containers/<受支持IM>/Data/Documents`，
 /// 否则拒绝；全程只统计目录大小，不删除、不修改任何内容。
 #[tauri::command]
-pub async fn im_breakdown(path: String) -> Result<maclean_core::im_data::ImBreakdown, String> {
-    // 微信 Documents 可达数十 GB、含几十万小文件，遍历是 CPU/IO 密集操作，
+pub async fn im_breakdown(path: String) -> Result<maclean_core::im_data::ImBreakdown, String> {    // 微信 Documents 可达数十 GB、含几十万小文件，遍历是 CPU/IO 密集操作，
     // 必须放到阻塞线程池——若在主线程同步跑（旧实现），点击概览卡片后整个窗口
     // 会无响应直到统计结束，表现为“点击微信聊天数据卡顿”。
     tauri::async_runtime::spawn_blocking(move || -> Result<maclean_core::im_data::ImBreakdown, String> {
@@ -937,6 +1131,14 @@ pub fn settings_set(patch: serde_json::Value) -> Result<(), String> {
             cfg.settings_show_protected_items = x;
         }
     }
+    if let Some(v) = get("settings_delete_strategy") {
+        if let Some(s) = v.as_str() {
+            // 只接受两个合法值，其余一律忽略（避免写入脏配置）
+            if s == "smart" || s == "trash" {
+                cfg.settings_delete_strategy = s.to_string();
+            }
+        }
+    }
     if let Some(v) = get("schedule_enabled") {
         if let Some(x) = v.as_bool() {
             cfg.schedule_enabled = x;
@@ -985,6 +1187,7 @@ mod tests {
             batch_paths: batch_paths.into_iter().map(|s| s.to_string()).collect(),
             size_bytes: 1,
             recommend: "safe".to_string(),
+            use_trash: true,
         }
     }
 
@@ -1054,10 +1257,28 @@ mod tests {
             batch_paths: vec![],
             size_bytes: 1,
             recommend: "safe".to_string(),
+            use_trash: true,
         };
         let out = clean_preview(vec![item]);
         assert!(!out[0].allowed, "SIP 系统保护路径必须拦截");
         assert!(!out[0].reason.is_empty(), "应给出拦截原因");
+    }
+
+    #[test]
+    fn resolve_use_trash_forces_risky_and_unknown_into_trash() {
+        // 注意/高级：即使前端请求永久删除(false)，后端也强制进废纸篓
+        assert!(resolve_use_trash("Advanced", false));
+        assert!(resolve_use_trash("Caution", false));
+        assert!(resolve_use_trash(" Advanced ", false), "trim 后应识别为高级");
+        // 未知 / 缺失 / 大小写异常等级：默认保守，一律进废纸篓
+        assert!(resolve_use_trash("", false));
+        assert!(resolve_use_trash("advanced", false));
+        assert!(resolve_use_trash("whatever", false));
+        // 明确安全/缓存：尊重前端意愿（false 才永久删除）
+        assert!(!resolve_use_trash("Safe", false));
+        assert!(resolve_use_trash("Safe", true));
+        assert!(!resolve_use_trash("CacheOnly", false));
+        assert!(resolve_use_trash("CacheOnly", true));
     }
 
     fn scan_item(path: &str, batch: Vec<&str>) -> ScanItem {

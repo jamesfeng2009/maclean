@@ -1,18 +1,53 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "../lib/store";
 import { Icon } from "./Icon";
 import { shortPath } from "../lib/format";
 
-/** 高危操作二次确认弹窗（危险级红色描边 + 路径清单） */
+/**
+ * 高危操作二次确认弹窗（危险级红色描边 + 路径清单）。
+ *
+ * 防误触设计（删除/卸载不可逆，必须由用户一次"独立、有意"的点击触发）：
+ * 1. 打开保护期：弹窗出现后的短暂窗口内「确认」按钮处于禁用态，
+ *    吞掉来自触发按钮的点击穿透 / 双击第二击 / 合成事件，避免弹窗刚渲染就被确认。
+ * 2. 确认与取消按钮均显式 type="button"，不使用任何表单默认提交语义。
+ * 3. 不把 Enter 绑定到「确认」：回车不会触发删除；Esc 仅用于取消。
+ */
+const CONFIRM_GUARD_MS = 700;
+
 export function ConfirmModal() {
   const { confirmReq, closeConfirm } = useApp();
   const [busy, setBusy] = useState(false);
+  const [toggleOn, setToggleOn] = useState(false);
+  const [guarded, setGuarded] = useState(false);
+
+  // 每次弹出新的确认框：勾选项恢复默认值，并进入"打开保护期"
+  useEffect(() => {
+    if (!confirmReq) return;
+    setToggleOn(!!confirmReq.confirmToggle?.defaultOn);
+    setBusy(false);
+    setGuarded(true);
+    const t = setTimeout(() => setGuarded(false), CONFIRM_GUARD_MS);
+    return () => clearTimeout(t);
+  }, [confirmReq]);
+
+  // Esc 关闭；刻意不监听 Enter（回车不得触发确认）
+  useEffect(() => {
+    if (!confirmReq) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) closeConfirm();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmReq, busy, closeConfirm]);
+
   if (!confirmReq) return null;
 
   const doConfirm = async () => {
+    // 保护期内 / 执行中一律忽略，杜绝穿透与重复提交
+    if (guarded || busy) return;
     setBusy(true);
     try {
-      await confirmReq.onConfirm();
+      await confirmReq.onConfirm(confirmReq.confirmToggle ? toggleOn : undefined);
     } finally {
       setBusy(false);
       closeConfirm();
@@ -24,7 +59,12 @@ export function ConfirmModal() {
     confirmReq.confirmText?.includes("卸载");
 
   return (
-    <div className="modal show" onMouseDown={(e) => !busy && e.target === e.currentTarget && closeConfirm()}>
+    <div
+      className="modal show"
+      role="dialog"
+      aria-modal="true"
+      onMouseDown={(e) => !busy && !guarded && e.target === e.currentTarget && closeConfirm()}
+    >
       <div className={`modal-box${danger ? " danger" : ""}`}>
         <div className="modal-head">
           <span
@@ -63,16 +103,30 @@ export function ConfirmModal() {
           </div>
         )}
 
+        {confirmReq.confirmToggle && (
+          <label className="confirm-toggle">
+            <input
+              type="checkbox"
+              checked={toggleOn}
+              disabled={busy}
+              onChange={(e) => setToggleOn(e.target.checked)}
+            />
+            <span>{confirmReq.confirmToggle.label}</span>
+          </label>
+        )}
+
         <div className="modal-actions">
-          <button className="btn-secondary" onClick={closeConfirm} disabled={busy}>
+          <button type="button" className="btn-secondary" onClick={closeConfirm} disabled={busy}>
             取消
           </button>
           <button
+            type="button"
             className={`btn-primary${danger ? " danger" : ""}`}
             onClick={doConfirm}
-            disabled={busy}
+            disabled={busy || guarded}
+            title={guarded ? "请稍候确认，防止误触" : undefined}
           >
-            {busy ? "执行中…" : confirmReq.confirmText || "确认"}
+            {busy ? "执行中…" : guarded ? "请确认…" : confirmReq.confirmText || "确认"}
           </button>
         </div>
       </div>

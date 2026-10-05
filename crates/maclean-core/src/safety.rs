@@ -1478,9 +1478,17 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
     let user_containers = format!("{}/Library/Containers/", home_str);
     if canonical_str.starts_with(&user_containers) {
         // 允许删除整个 Container 子目录（App 卸载场景）
-        // 或 Container 内的 Caches/Documents（缓存/数据清理场景）
+        // 或 Container 内的 Caches/Documents 子内容（缓存/数据清理场景）。
+        // "/Data/Documents/" 带尾斜杠，只匹配 Documents **内** 的条目，匹配不到
+        // Documents 目录本身；这里仅对受支持 IM（微信/QQ/企微）额外放行其
+        // Documents 根——用于「App 已卸载后的孤儿数据」清理（在位 IM 在扫描期
+        // 即 deletable=false，根本不会走到删除）。
+        let im_docs_root = crate::im_data::IM_APPS.iter().any(|a| {
+            canonical_str.ends_with(&format!("/Library/Containers/{}/Data/Documents", a.bundle))
+        });
         return canonical_str.contains("/Data/Library/Caches/")
             || canonical_str.contains("/Data/Documents/")
+            || im_docs_root
             || is_direct_child(&canonical_str, &user_containers);
     }
 
@@ -2349,6 +2357,23 @@ mod tests {
         assert!(!f("Library/Caches/pypoetry"), "Caches 不是应用数据根");
         assert!(!f("Documents/proj"), "其它 home 子树不是");
         assert!(!f("Library/Containers/com.x/Data"), "沙盒容器本次不放开");
+    }
+
+    #[test]
+    fn orphan_im_documents_root_allowed_but_other_apps_docs_root_blocked() {
+        use std::path::PathBuf;
+        let h = PathBuf::from("/Users/u");
+        let wl = |rel: &str| check_whitelist(&h.join(rel), &h, "应用缓存");
+        // IM（微信 / QQ / 企微）Documents 根：App 已卸载后的孤儿数据可清理
+        assert!(wl("Library/Containers/com.tencent.xinWeChat/Data/Documents"));
+        assert!(wl("Library/Containers/com.tencent.qq/Data/Documents"));
+        assert!(wl("Library/Containers/com.tencent.WeWorkMac/Data/Documents"));
+        // IM Documents 内的子项：尾斜杠规则，保持原有放行
+        assert!(wl("Library/Containers/com.tencent.xinWeChat/Data/Documents/x/video.dat"));
+        // 非 IM 沙盒 App 的 Documents 根不放行（最小权限，避免扩大删除面）
+        assert!(!wl("Library/Containers/com.some.editor/Data/Documents"));
+        // IM 容器的 Data 层本身、其它层级不放行
+        assert!(!wl("Library/Containers/com.tencent.qq/Data"));
     }
 
     #[test]

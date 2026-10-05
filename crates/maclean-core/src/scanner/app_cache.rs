@@ -57,23 +57,11 @@ impl Scanner for AppCacheScanner {
             };
         }
 
-        items.extend(scan_containers());
-        items.extend(scan_group_containers());
-        items.extend(scan_app_support_caches());
-        items.extend(scan_system_caches());
-        items.extend(scan_logs());
-        items.extend(scan_browser_caches());
-
-        // 按路径去重（保留首次出现的那一项）
-        //
-        // scan_app_support_caches 与 scan_browser_caches 都用 CACHE_DIR_NAMES
-        // 做匹配，Chrome 的 Default/Cache、Default/GPUCache 这类目录会被两个
-        // 函数各扫一次 —— 同一路径进列表两次，total_size 直接翻倍，
-        // 用户看到的"可释放空间"是虚高的。
-        items = dedup_by_path(items);
-
-        // 按大小降序排列
-        items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
+        // 逐段扫描（与 scan_segments 同源）；commands 层的分段部分结果模式也复用这些段。
+        for (_label, seg) in scan_segments() {
+            items.extend(seg());
+        }
+        items = finish_items(items);
 
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
@@ -86,6 +74,41 @@ impl Scanner for AppCacheScanner {
     }
 }
 
+/// 应用缓存的各独立扫描段：`(段标识, 扫描函数)`。
+///
+/// 每段彼此独立、可在各自的墙钟预算下运行；高磁盘负载时某一段即便超时也只丢该段，
+/// 其余段结果照常合并（部分结果），不再因整扫描器到点而全部归零。段函数都是无捕获
+/// 的 `fn`，可安全跨线程移交。分段结果合并后务必调用 [`finish_items`] 做与
+/// [`AppCacheScanner::scan`] 一致的去重 / 排序。
+pub fn scan_segments() -> [(&'static str, fn() -> Vec<ScanItem>); 6] {
+    [
+        ("im_containers", scan_containers),
+        ("group_containers", scan_group_containers),
+        ("app_support_caches", scan_app_support_caches),
+        ("system_caches", scan_system_caches),
+        ("logs", scan_logs),
+        ("browser_caches", scan_browser_caches),
+    ]
+}
+
+/// home 目录是否可用：逐段扫描前先判空，home 不可得时不硬扫（避免退化为扫系统目录）。
+pub fn home_available() -> bool {
+    has_home()
+}
+
+/// 对分段（或整体）扫描得到的原始项做**与正常 scan 一致**的收尾：按路径去重
+/// （保留首次出现项）后按大小降序排列。
+///
+/// 必须去重：`scan_app_support_caches` 与 `scan_browser_caches` 都用缓存目录名匹配，
+/// Chrome 的 `Default/Cache`、`Default/GPUCache` 会被两段各扫一次，不去重则
+/// `total_size` 翻倍、可释放空间虚高。分段超时导致其中一段缺失时去重仍安全（只少项、
+/// 不重复计）。
+pub fn finish_items(mut items: Vec<ScanItem>) -> Vec<ScanItem> {
+    items = dedup_by_path(items);
+    items.sort_by_key(|i| std::cmp::Reverse(i.size_bytes));
+    items
+}
+
 // =========================================================================
 //  ~/Library/Containers
 // =========================================================================
@@ -94,7 +117,12 @@ impl Scanner for AppCacheScanner {
 ///
 /// 只处理 [`im_data::IM_APPS`] 白名单内的微信 / QQ / 企业微信：
 /// - 路径精确为 `~/Library/Containers/<bundle>/Data/Documents`；
-/// - 一律 `deletable=false`、标"聊天数据（受保护）"，引导到 App 内存储空间管理；
+/// - **App 仍安装**：`deletable=false`、标"聊天数据（受保护）"，引导到 App
+///   内存储空间管理或在访达中打开，由用户自行处理；
+/// - **App 已卸载**：容器数据成为孤儿，转为可清理项（`deletable=true`、
+///   `Advanced`、默认不勾选、删除时强制进废纸篓）；
+/// - 是否在位通过枚举 `.app` 的 bundle id 判断（不依赖 Spotlight）；枚举
+///   结果为空（异常）时保守地一律按"仍安装"保护；
 /// - 点击后的细分占用由 `im_data::analyze`（`im_breakdown` 命令）按需完成。
 ///
 /// **刻意不再无差别广扫 `~/Library/Containers`**：旧实现列出全部容器后对每个并行
@@ -102,8 +130,27 @@ impl Scanner for AppCacheScanner {
 /// stat 在内核卡到超时），上百个容器足以耗尽模块预算、把整个"应用缓存"拖到超时。
 /// 其它沙盒 App 容器无授权、删除高危，不扫；Docker/OrbStack 等由 dev_cache 专门
 /// 通道只读展示。
-fn scan_containers() -> Vec<ScanItem> {
+/// 判定某 IM 是否仍安装。
+///
+/// - `installed` 为空（一个应用都没枚举到，属枚举异常）→ `None`：无法判定，
+///   调用方必须按「仍安装」保守保护，避免把受保护数据误判成孤儿；
+/// - 命中该 bundle → `Some(true)`；未命中 → `Some(false)`（数据已成孤儿）。
+fn im_install_state(
+    im_bundle: &str,
+    installed: &std::collections::HashSet<String>,
+) -> Option<bool> {
+    if installed.is_empty() {
+        None
+    } else {
+        Some(installed.contains(im_bundle))
+    }
+}
+
+pub fn scan_containers() -> Vec<ScanItem> {
     let home = home_dir();
+    // 已安装 App 的 bundle id 集合：用于区分 IM「仍安装（受保护）」与
+    // 「已卸载（孤儿数据可清理）」。空集合表示枚举异常，调用处保守保护。
+    let installed = super::uninstall::installed_bundle_id_set();
     im_data::IM_APPS
         .par_iter()
         .filter_map(|im| {
@@ -118,23 +165,50 @@ fn scan_containers() -> Vec<ScanItem> {
             if docs_size < CONTAINER_MIN {
                 return None;
             }
-            Some(ScanItem {
-                path: docs_dir.to_string_lossy().to_string(),
-                size_bytes: docs_size,
-                category: format!("{} 聊天数据（受保护）", im.name),
-                selected: false,
-                deletable: false,
-                undeletable_reason: format!(
-                    "{}聊天数据受保护，直接删除会丢失聊天记录与收发文件且难以恢复，请到{}内清理",
-                    im.name, im.name
-                ),
-                batch_paths: Vec::new(),
-                recommend: Recommend::Advanced,
-                description: format!(
-                    "{}的聊天记录、图片/视频与收到的文件保存在此。建议在{}中按会话管理；maclean 只做只读分析，不直接删除这些数据。",
-                    im.name, im.storage_hint
-                ),
-            })
+            let path = docs_dir.to_string_lossy().to_string();
+            // 空集合（一个应用都没枚举到）视为无法判定，保守按"仍安装"处理。
+            let still_installed = im_install_state(im.bundle, &installed).unwrap_or(true);
+
+            if still_installed {
+                // 微信/QQ/企业微信仍安装：聊天记录库 + 收发的图片/视频/文件，
+                // 物理上可删但代价极高（可能永久丢失聊天记录），标记为不可删除，
+                // 只做只读展示 + 引导（App 内清理 / 访达中打开 Documents）。
+                Some(ScanItem {
+                    path,
+                    size_bytes: docs_size,
+                    category: format!("{} 聊天数据（受保护）", im.name),
+                    selected: false,
+                    deletable: false,
+                    undeletable_reason: format!(
+                        "{}仍在使用：聊天记录与收发文件受保护，建议在{}内清理或在访达中自行处理",
+                        im.name, im.storage_hint
+                    ),
+                    batch_paths: Vec::new(),
+                    recommend: Recommend::Advanced,
+                    description: format!(
+                        "{}的聊天记录、图片/视频与收到的文件保存在此。建议在{}中按会话管理；maclean 只做只读分析，不直接删除这些数据。",
+                        im.name, im.storage_hint
+                    ),
+                })
+            } else {
+                // App 已卸载：沙盒容器里残留的聊天数据已无主，转为可清理。
+                // 仍属高价值数据 → Advanced、默认不勾；删除出口在后端被强制
+                // 移入废纸篓（可在清空前恢复），不做永久删除。
+                Some(ScanItem {
+                    path,
+                    size_bytes: docs_size,
+                    category: format!("{} 残留数据（App 已卸载）", im.name),
+                    selected: false,
+                    deletable: true,
+                    undeletable_reason: String::new(),
+                    batch_paths: Vec::new(),
+                    recommend: Recommend::Advanced,
+                    description: format!(
+                        "{}已不在本机，但其聊天记录、图片/视频与收到的文件仍残留在沙盒容器中。确认不再需要后可清理，将移入废纸篓，清空前可恢复。",
+                        im.name
+                    ),
+                })
+            }
         })
         .collect()
 }
@@ -149,7 +223,7 @@ fn scan_containers() -> Vec<ScanItem> {
 /// 读到；其内容又常含登录态 / 共享配置，通用"Caches 可删"风险高。OrbStack 等组容器
 /// 占用由 dev_cache 专门通道只读展示，IM 共享数据体现在其 Documents 占用与
 /// `im_data::analyze` 的细分里。保留空函数以维持 `scan()` 调用点稳定。
-fn scan_group_containers() -> Vec<ScanItem> {
+pub fn scan_group_containers() -> Vec<ScanItem> {
     Vec::new()
 }
 
@@ -261,7 +335,7 @@ const CACHE_DIR_NAMES: &[&str] = &[
 /// 策略：用 walkdir 迭代遍历（不会栈溢出），最大深度 4 层，
 /// 遇到目录名匹配已知缓存名时，计算大小并加入清理列表，
 /// 不再继续递归该目录（剪枝，避免重复扫描缓存内部文件）。
-fn scan_app_support_caches() -> Vec<ScanItem> {
+pub fn scan_app_support_caches() -> Vec<ScanItem> {
     let home = home_dir();
     let app_support = home.join("Library/Application Support");
     let mut items = Vec::new();
@@ -377,7 +451,7 @@ fn extract_app_name_from_path(path: &std::path::Path, app_support: &std::path::P
 // =========================================================================
 
 /// 扫描系统缓存目录
-fn scan_system_caches() -> Vec<ScanItem> {
+pub fn scan_system_caches() -> Vec<ScanItem> {
     let home = home_dir();
     let caches_dir = home.join("Library/Caches");
     let mut items = Vec::new();
@@ -432,7 +506,7 @@ fn scan_system_caches() -> Vec<ScanItem> {
 // =========================================================================
 
 /// 扫描系统日志
-fn scan_logs() -> Vec<ScanItem> {
+pub fn scan_logs() -> Vec<ScanItem> {
     let home = home_dir();
     let logs_dir = home.join("Library/Logs");
     let mut items = Vec::new();
@@ -473,7 +547,7 @@ fn scan_logs() -> Vec<ScanItem> {
 /// - Arc
 /// - Firefox
 /// - Safari
-fn scan_browser_caches() -> Vec<ScanItem> {
+pub fn scan_browser_caches() -> Vec<ScanItem> {
     let home = home_dir();
     let app_support = home.join("Library/Application Support");
     let caches = home.join("Library/Caches");
@@ -768,5 +842,24 @@ mod tests {
     #[test]
     fn dedup_handles_empty() {
         assert!(dedup_by_path(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn im_install_state_detects_present_absent_and_unknown() {
+        use std::collections::HashSet;
+        let wx = "com.tencent.xinWeChat";
+
+        // 空集合：无法判定 → None（调用方据此保守保护）
+        assert_eq!(im_install_state(wx, &HashSet::new()), None);
+
+        // 命中：仍安装
+        let present: HashSet<String> =
+            [wx, "com.tencent.qq", "com.something.else"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(im_install_state(wx, &present), Some(true));
+
+        // 未命中：App 已卸载 → 孤儿
+        let absent: HashSet<String> =
+            ["com.finder.other", "com.another.app"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(im_install_state(wx, &absent), Some(false));
     }
 }

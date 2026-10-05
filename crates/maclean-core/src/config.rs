@@ -65,6 +65,13 @@ pub struct AppConfig {
     pub schedule_last_run: u64,
     /// 删除前二次确认（Advanced 项目）
     pub settings_confirm_advanced: bool,
+    /// 删除方式策略：
+    /// - `"smart"`（默认）：安全/缓存项直接永久删除（立即释放空间），
+    ///   注意/高级项移入废纸篓（可恢复）；
+    /// - `"trash"`：所有项一律移入废纸篓，最稳妥、可从废纸篓恢复。
+    ///
+    /// 无论哪种策略，注意/高级项在后端都被**强制**移入废纸篓，前端无法覆盖。
+    pub settings_delete_strategy: String,
     /// 合盖时禁止删除（macOS）
     pub settings_prevent_lid_close: bool,
     /// 操作前自动创建系统还原点（Windows）
@@ -95,6 +102,7 @@ impl Default for AppConfig {
             schedule_interval_days: 7,
             schedule_last_run: 0,
             settings_confirm_advanced: true,
+            settings_delete_strategy: "smart".to_string(),
             settings_prevent_lid_close: true,
             settings_auto_restore_point: true,
             dark_mode: false,
