@@ -34,7 +34,8 @@ use std::sync::{mpsc, Arc};
 use crate::app_protection::{self, ProtectionLevel};
 use crate::i18n::{self, tf_lang};
 use crate::scanner::uninstall::{
-    find_associated_files, get_app_display_name, get_bundle_id, is_cache_like_path, path_size,
+    find_associated_files, get_app_display_name, get_bundle_id, is_cache_like_path,
+    path_size_fast,
 };
 use crate::{logger, scanner};
 
@@ -59,8 +60,13 @@ pub struct UninstallAppReport {
     pub total: usize,
     /// M-2 恢复清单 id（可还原时）
     pub backup_id: Option<String>,
-    /// 本次卸载涉及的字节数（本体 + 关联数据 + 关联缓存，删除前统计）
+    /// 本次卸载涉及的字节数（本体 + 关联数据 + 关联缓存；删除前非阻塞估算，
+    /// 缓存未命中时偏小，仅用于展示，删除不依赖它）
     pub freed_bytes: u64,
+    /// 有关联项因系统保护（TCC：完全磁盘访问 / App 管理）或应用仍在运行而
+    /// 删除失败，需要前端引导用户授权 / 退出应用后重试。
+    #[serde(default)]
+    pub needs_full_disk_access: bool,
 }
 
 impl UninstallAppReport {
@@ -200,20 +206,23 @@ pub fn uninstall_app(
     let mut entries: Vec<(String, String, Vec<String>, bool, u64)> = Vec::new();
     let mut freed_bytes: u64 = 0;
 
-    let app_size = path_size(app_path);
-    if app_size > 0 {
-        freed_bytes += app_size;
-        entries.push((
-            app_path.to_string(),
-            format!("{} (卸载)", name),
-            vec![app_path.to_string()],
-            true,
-            app_size,
-        ));
-    }
+    // 本体体积仅用于报告展示（M-2 快照），删除不依赖它：只读持久缓存，未命中
+    // 给 0，绝不为算大小遍历本体而拖住卸载（见 path_size_fast）。
+    // 注意：加入删除条目的判据是「路径存在/合法」（上方已校验），绝不能用
+    // size>0 判定——缓存未命中时体积为 0，但本体必须照常删除。
+    let app_size = path_size_fast(app_path);
+    freed_bytes += app_size;
+    entries.push((
+        app_path.to_string(),
+        format!("{} (卸载)", name),
+        vec![app_path.to_string()],
+        true,
+        app_size,
+    ));
 
     if !data_paths.is_empty() {
-        let data_size: u64 = data_paths.iter().map(|p| path_size(p)).sum();
+        // 非阻塞估算：命中缓存给值，未命中记 0，不影响删除。
+        let data_size: u64 = data_paths.iter().map(|p| path_size_fast(p)).sum();
         freed_bytes += data_size;
         entries.push((
             data_paths[0].clone(),
@@ -225,7 +234,7 @@ pub fn uninstall_app(
     }
 
     if !cache_paths.is_empty() {
-        let cache_size: u64 = cache_paths.iter().map(|p| path_size(p)).sum();
+        let cache_size: u64 = cache_paths.iter().map(|p| path_size_fast(p)).sum();
         freed_bytes += cache_size;
         entries.push((
             cache_paths[0].clone(),
@@ -255,11 +264,17 @@ pub fn uninstall_app(
     if let Some(rx) = delete_rx {
         while let Ok(msg) = rx.recv() {
             match msg {
-                DeleteMessage::Log(.., ok) => {
+                DeleteMessage::Log(_text, failed_path, _category, ok) => {
                     if ok {
                         report.deleted += 1;
                     } else {
                         report.intercepted += 1;
+                        // 在沙盒容器 / 系统保护域或 .app 本体上失败，通常是
+                        // TCC（完全磁盘访问 / App 管理）未授权，或应用仍在运行
+                        // 占用。引导用户授权 / 退出后重试，而不是只报一句失败。
+                        if is_protected_or_running_path(&failed_path) {
+                            report.needs_full_disk_access = true;
+                        }
                     }
                 }
                 DeleteMessage::Skip(..) => report.skipped += 1,
@@ -303,6 +318,28 @@ pub fn uninstall_app(
     report
 }
 
+/// 判断某条删除失败的路径，是否属于「需要完全磁盘访问 / App 管理授权，或
+/// 应用正在运行占用」的典型位置。
+///
+/// 这些位置的删除失败在普通用户机上绝大多数不是"文件坏了"，而是：
+/// - `~/Library/Containers`、`Group Containers`、`HTTPStorages`、`Cookies`、
+///   `WebKit`、`Application Scripts` 等受 TCC 沙盒 / 完全磁盘访问保护；
+/// - `/Applications/*.app` 本体删除受「App 管理」权限管控，或应用仍在运行被占用。
+/// 命中时前端应引导用户：退出正在运行的应用 → 在「系统设置 → 隐私与安全性」
+/// 里给 maclean 开启「完全磁盘访问」与「App 管理」→ 重试。
+fn is_protected_or_running_path(path: &str) -> bool {
+    let l = path.to_lowercase();
+    let protected_data = l.contains("/library/containers/")
+        || l.contains("/library/group containers/")
+        || l.contains("/library/httpstorages/")
+        || l.contains("/library/cookies/")
+        || l.contains("/library/webkit/")
+        || l.contains("/library/application scripts/");
+    let app_bundle =
+        l.ends_with(".app") && (l.starts_with("/applications/") || l.contains("/applications/"));
+    protected_data || app_bundle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +376,51 @@ mod tests {
         assert!(!is_uninstallable_app_path(
             "/System/Applications/Utilities/Terminal.app"
         ));
+    }
+
+    #[test]
+    fn protected_or_running_path_detection() {
+        // 沙盒容器 / 共享容器 / HTTPStorages → 需完全磁盘访问
+        assert!(is_protected_or_running_path(
+            "/Users/x/Library/Containers/com.tencent.xinWeChat/Data/Library/Caches/a"
+        ));
+        assert!(is_protected_or_running_path(
+            "/Users/x/Library/Group Containers/group.com.x/a"
+        ));
+        assert!(is_protected_or_running_path(
+            "/Users/x/Library/HTTPStorages/com.example.app"
+        ));
+        // /Applications 下的 .app 本体 → 需 App 管理或应用正在运行
+        assert!(is_protected_or_running_path("/Applications/Xmind.app"));
+        // 普通用户缓存 / 下载项不是 TCC 保护域，不应误报
+        assert!(!is_protected_or_running_path(
+            "/Users/x/Library/Caches/com.example.app"
+        ));
+        assert!(!is_protected_or_running_path("/Users/x/Downloads/a.txt"));
+    }
+
+    #[test]
+    fn path_size_fast_never_recurses_and_uses_file_len() {
+        let d = std::env::temp_dir().join(format!("maclean_psf_{}", std::process::id()));
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/f.bin"), vec![0u8; 1234]).unwrap();
+        // 目录未命中缓存：必须返回 0，而不是去递归算出 1234（删除不能被统计阻塞）
+        assert_eq!(
+            crate::scanner::uninstall::path_size_fast(&d.to_string_lossy()),
+            0
+        );
+        // 普通文件取元数据长度（一次 stat，廉价）
+        let f = d.join("one.bin");
+        std::fs::write(&f, vec![0u8; 77]).unwrap();
+        assert_eq!(
+            crate::scanner::uninstall::path_size_fast(&f.to_string_lossy()),
+            77
+        );
+        // 不存在的路径返回 0
+        assert_eq!(
+            crate::scanner::uninstall::path_size_fast("/tmp/no-such-maclean-xyz-psf"),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 // Windows 操作前备份模块（系统还原点 + 注册表备份 + 还原入口）
 #[cfg(target_os = "windows")]
 pub mod windows_backup;
+// macOS 进程内「移入废纸篓」（NSFileManager / NSWorkspace），替代 osascript 代删
+#[cfg(target_os = "macos")]
+mod macos_trash;
 // 注册表备份的可信性校验。刻意不作平台限定 —— 这是 `reg import` 前最后一道关，
 // 必须在开发机上就能编译和测试，详见模块顶部注释。
 mod reg_safety;
@@ -149,15 +152,10 @@ pub fn path_on_readonly_volume(path: &str) -> bool {
 
 /// 移动文件/目录到废纸篓（跨平台）
 ///
-/// macOS: 调用 NSWorkspace.recycleURLs 或 fallback 到 rm
+/// macOS: 进程内 `NSFileManager`（静默回收）→ `NSWorkspace.recycleURLs`
+///   （由本 App 弹正规 Touch ID / 密码授权），详见 [`macos_trash`]；
+///   失败时**绝不**降级为永久删除。
 /// Windows: 调用 SHFileOperation FO_DELETE + FOF_ALLOWUNDO
-/// AppleScript 双引号字符串字面量转义。必须先转义 `\` 再转义 `"`，
-/// 否则引号转义产生的反斜杠会被二次处理。
-#[cfg(any(target_os = "macos", test))]
-fn applescript_string_literal(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 pub fn move_to_trash(path: &str) -> bool {
     let p = Path::new(path);
     if !p.exists() && p.symlink_metadata().is_err() {
@@ -166,43 +164,7 @@ pub fn move_to_trash(path: &str) -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        // P1-2：只读卷（OrbStack 挂载、APFS 快照等）上 Finder 无法回收，
-        // 调用只会弹"Some files can't be processed"且无法静音。预先探测，
-        // 命中直接记失败跳过，不触发系统对话框。
-        if crate::platform::path_on_readonly_volume(path) {
-            crate::logger::warn(&format!(
-                "目标位于只读卷，跳过废纸篓（不触发 Finder 弹窗）: {}",
-                path
-            ));
-            return false;
-        }
-        // macOS: 尝试 osascript 调用 Finder 移到废纸篓
-        // AppleScript 字符串字面量里 \ 和 " 都有特殊含义，必须都转义。
-        // 只转义 " 时，文件名含 \" （macOS 合法）就能闭合字面量并注入后续
-        // AppleScript 语句 —— Finder 常具完全磁盘访问，注入即越权删除。
-        let script = format!(
-            "tell application \"Finder\" to delete (POSIX file \"{}\" as alias)",
-            applescript_string_literal(path)
-        );
-        let status = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if status.map(|s| s.success()).unwrap_or(false) {
-            return true;
-        }
-
-        // 安全策略（P0-3）：废纸篓失败时**绝不**静默降级为永久删除。
-        // osascript 调用 Finder 需要 TCC「自动化」授权，未授权时这里必然失败；
-        // 旧实现会 fallback 到 remove_dir_all，用户以为"可恢复"的文件被永久删除。
-        // 正确做法：返回 false，由调用方明确告知用户并保留文件。
-        crate::logger::warn(&format!(
-            "move_to_trash 失败，已保留文件（未降级为永久删除）: {}",
-            path
-        ));
-        false
+        return macos_trash::move_to_trash_impl(path);
     }
 
     #[cfg(target_os = "windows")]
@@ -373,7 +335,7 @@ pub fn disk_info() -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{applescript_string_literal, check_deletable};
+    use super::check_deletable;
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -407,36 +369,6 @@ mod tests {
         ] {
             let (deletable, _) = check_deletable(&p);
             assert!(deletable, "用户路径应可删: {p}");
-        }
-    }
-
-    #[test]
-    fn applescript_literal_cannot_be_closed_by_filename() {
-        // 历史漏洞：只转义 " 不转义 \。文件名 `a\" & (do shell script "rm -rf …") & "`
-        // 里的 \" 会吃掉引号转义、闭合字面量并注入语句。
-        assert_eq!(applescript_string_literal(r#"plain"d"#), r#"plain\"d"#);
-        assert_eq!(
-            applescript_string_literal(r#"back\slash"#),
-            r#"back\\slash"#
-        );
-        // 关键回归：注入样本转义后，字符串里不存在未配对的可闭合引号
-        let evil = r#"x\" & (do shell script "rm -rf /") & ""#;
-        let out = applescript_string_literal(evil);
-        // 每个字面 " 前必是转义它的 \（即 \\ 或 \" 形式），首尾无裸引号
-        assert!(out.starts_with("x\\\\"), "got {}", out);
-        let bytes: Vec<char> = out.chars().collect();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == '"' {
-                assert!(
-                    i > 0 && bytes[i - 1] == '\\',
-                    "裸引号可闭合字面量: pos {}",
-                    i
-                );
-                i += 1;
-            } else {
-                i += 1;
-            }
         }
     }
 }

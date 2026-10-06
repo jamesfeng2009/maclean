@@ -273,6 +273,28 @@ pub fn dir_size_accurate_cached(path: &Path) -> (u64, bool) {
     crate::scanner::dir_size_accurate(path)
 }
 
+/// **只读**缓存：命中未过期条目时返回其字节数；未命中 / 已过期 / 非目录 /
+/// 锁异常一律返回 `None`，**绝不**实时遍历统计。
+///
+/// 用于「删除前只想展示一个不阻塞的估算值」的场景（如一键卸载）：卸载不能
+/// 为了算出"将释放多少字节"而先对几十 GB 的关联目录全递归——那会让用户点
+/// 卸载后干等几分钟。删除本身不依赖体积，未命中就当作未知（0）处理。
+#[cfg(unix)]
+pub fn dir_size_peek_cached(path: &Path) -> Option<u64> {
+    let meta = meta_of(path)?;
+    let key = path.to_string_lossy().to_string();
+    global()
+        .lock()
+        .ok()?
+        .get(&key, &meta, now_secs(), CACHE_TTL_SECS)
+}
+
+/// 非 unix：无缓存，`None` 表示"未知、不要为此统计"。
+#[cfg(not(unix))]
+pub fn dir_size_peek_cached(_path: &Path) -> Option<u64> {
+    None
+}
+
 /// 清空内存缓存并删除缓存文件（例如用户完成删除后，让占用数字立即不依赖旧缓存）。
 pub fn invalidate_all() {
     let path = cache_file_path();

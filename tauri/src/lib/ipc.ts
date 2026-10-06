@@ -116,6 +116,9 @@ export const ipc = {
   /** 应用一键卸载（本体 + 关联数据 + 缓存，全部过安全闸门进废纸篓） */
   appUninstall: (appPath: string, langEn: boolean) =>
     invoke<UninstallAppReport>("app_uninstall", { appPath, langEn }),
+
+  /** 打开「系统设置 → 隐私与安全性 → 完全磁盘访问」引导授权（卸载遇 TCC 拒绝时） */
+  openFdaSettings: () => invoke<void>("open_full_disk_access_settings"),
 };
 
 export type { UnlistenFn };

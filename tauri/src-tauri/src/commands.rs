@@ -83,6 +83,36 @@ pub fn reveal_trash() -> Result<(), String> {
     }
 }
 
+/// 打开「系统设置 → 隐私与安全性 → 完全磁盘访问」，引导用户给 maclean 授权。
+///
+/// 一键卸载删除沙盒容器（`~/Library/Containers`、`HTTPStorages` 等）或
+/// `/Applications` 下的 .app 时，可能被 TCC 以「完全磁盘访问 / App 管理」
+/// 拒绝（os error 1 / EPERM），或因应用正在运行被占用。删除本身无法也不应
+/// 绕过该授权；这里只把用户带到正确的设置面板，由用户本人开启开关后重试。
+/// URL 为 macOS 系统设置固定 scheme、无外部输入与注入面。仅 macOS。
+#[tauri::command]
+pub fn open_full_disk_access_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // 完全磁盘访问面板（容器数据）。同页也可让用户确认「App 管理」（删除 .app）。
+        let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+        std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("无法打开系统设置: {e}"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "打开系统设置失败".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台暂不支持打开该系统设置".to_string())
+    }
+}
+
 /* ============================== 扫描 ============================== */
 
 /// 扫描后处理：与 egui 壳 `start_scan` 完全一致的可删除性二次判定。

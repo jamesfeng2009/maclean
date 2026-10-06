@@ -30,7 +30,7 @@ export function Rail() {
           key={id}
           className={page === id ? "active" : ""}
           onClick={() => setPage(id)}
-          title={PAGE_LABEL[id]}
+          aria-label={PAGE_LABEL[id]}
         >
           <Icon name={PAGE_ICON[id]} />
           <span className="tip">{PAGE_LABEL[id]}</span>
@@ -39,7 +39,7 @@ export function Rail() {
       <div className="spacer" />
       <button
         onClick={() => toast("info", "当前为 Tauri 骨架版，更新通道接入中")}
-        title="检查更新"
+        aria-label="检查更新"
       >
         <Icon name="refresh" />
         <span className="tip">检查更新</span>

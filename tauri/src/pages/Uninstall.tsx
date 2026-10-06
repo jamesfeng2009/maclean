@@ -44,6 +44,8 @@ export function Uninstall() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   /** 真实图标加载失败的应用路径（回退为首字母色块） */
   const [iconErr, setIconErr] = useState<Set<string>>(new Set());
+  /** 卸载遇系统保护（TCC 完全磁盘访问 / App 管理）或应用运行中时，记录应用名以显示授权引导条 */
+  const [fdaTip, setFdaTip] = useState<string | null>(null);
   /** 加载代次，刷新时使上一次进行中的体积补算结果作废，避免竞态覆盖 */
   const genRef = useRef(0);
   /** 当前体积事件监听取消函数 */
@@ -207,6 +209,8 @@ export function Uninstall() {
         } else {
           toast("warn", rep.message);
         }
+        // 有残留因系统保护（TCC）或应用运行中删不掉：拉起授权引导条
+        if (rep.needs_full_disk_access) setFdaTip(app.name);
       } catch (e) {
         toast("warn", "卸载失败：" + String(e));
       } finally {
@@ -277,6 +281,67 @@ export function Uninstall() {
           </button>
         }
       />
+
+      {fdaTip && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            margin: "2px 0 12px",
+            padding: "10px 12px",
+            borderRadius: 12,
+            background: "rgba(245,158,11,.12)",
+            border: "1px solid rgba(245,158,11,.38)",
+            color: "var(--text-2)",
+          }}
+        >
+          <Icon name="shield" size={16} />
+          <div style={{ flex: 1, fontSize: 12.5, lineHeight: 1.55 }}>
+            {langEn ? (
+              <>
+                Some data of <b>{fdaTip}</b> couldn&apos;t be removed because it is protected by
+                macOS or the app is still running. Quit the app first, then grant maclean{" "}
+                <b>Full Disk Access</b> and <b>App Management</b> in System Settings → Privacy &amp;
+                Security, and uninstall again.
+              </>
+            ) : (
+              <>
+                「{fdaTip}」的部分数据因系统保护或应用仍在运行而未能删除。请先退出该应用，再在
+                <b> 系统设置 → 隐私与安全性 </b>
+                中为 maclean 开启「完全磁盘访问」和「App 管理（应用管理）」，然后重新卸载。
+              </>
+            )}
+          </div>
+          <button
+            className="btn-primary"
+            style={{ height: 30, fontSize: 12, whiteSpace: "nowrap", flex: "none" }}
+            onClick={() =>
+              void ipc
+                .openFdaSettings()
+                .catch((e) => toast("warn", "打开系统设置失败：" + String(e)))
+            }
+          >
+            <Icon name="settings" size={13} /> {langEn ? "Open Settings" : "打开系统设置"}
+          </button>
+          <button
+            title={langEn ? "Dismiss" : "关闭"}
+            onClick={() => setFdaTip(null)}
+            style={{
+              flex: "none",
+              border: "none",
+              background: "transparent",
+              color: "var(--text-3)",
+              fontSize: 16,
+              lineHeight: 1,
+              cursor: "pointer",
+              padding: "2px 2px",
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {apps === null || apps.length === 0 ? (
         <Empty

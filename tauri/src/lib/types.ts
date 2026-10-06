@@ -215,4 +215,6 @@ export interface UninstallAppReport {
   total: number;
   backup_id: string | null;
   freed_bytes: number;
+  /** 有关联项因 TCC 系统保护（完全磁盘访问 / App 管理）或应用运行中而删除失败，需引导授权 */
+  needs_full_disk_access?: boolean;
 }

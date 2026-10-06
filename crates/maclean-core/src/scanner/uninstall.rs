@@ -25,7 +25,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -1015,32 +1014,20 @@ pub(crate) fn get_app_version(app_path: &Path) -> Option<String> {
 /// 17. Caches/Application Support（按命名变体匹配）
 /// 18. Embedded bundle ID（XPC/appex 内嵌的 bundle ID）
 ///
-/// 关联文件候选路径（供一键卸载复用；与扫描器同一份拼接与出口兜底逻辑）
-/// `~/Library/Group Containers` 下的全部条目的**全路径**，进程内只枚举一次。
-///
-/// 一台机器上该目录对所有应用是同一份，且常含上百个共享容器；若每个应用都
-/// `read_dir` 一遍，N 个应用就是 N 次全量枚举，是应用卸载页的显著 IO 浪费。
-/// 首次调用时枚举并缓存，后续调用零 IO。
-fn group_container_paths() -> Vec<String> {
-    static CACHE: OnceLock<Vec<String>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let group_dir = home_dir().join("Library/Group Containers");
-            read_dir_with_timeout(&group_dir)
-                .map(|entries| {
-                    entries
-                        .iter()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .clone()
-}
+/// `~/Library/Group Containers` 不再整目录枚举：改在 [`find_associated_files`]
+/// 内按 `<bundle_id>` / `group.<bundle_id>` 定点 stat，避免卸载被大目录 read_dir 拖住。
 
 pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     let home = home_dir();
     let mut paths = Vec::new();
+
+    // 关联发现总预算：正常机器下面这些 exists() 都只是几次 metadata 查询、亚毫秒级；
+    // 磁盘极端拥塞时单次查询也可能排队。预算在**每个**定点 stat 循环的迭代级检查
+    // （不再只是个别大步骤），到点立即用「已发现」的部分返回，绝不拖住一键卸载
+    // （本体删除与残留清理相比，本体优先；少量残留下次可再清）。
+    let started = Instant::now();
+    const ASSOC_FIND_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+    let over_budget = |started: &Instant| started.elapsed() >= ASSOC_FIND_BUDGET;
 
     // 生成应用名称变体（含版本后缀剥离）
     // 安全：这些变体会被拼进路径，先筛掉可用于穿越的变体
@@ -1059,33 +1046,46 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 1. ~/Library/Containers/<bundle_id>/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Containers/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
         }
     }
 
-    // 2. ~/Library/Group Containers/*<bundle_id>*/
-    // 该目录在一台机器上对所有应用是同一份、条目往往很多；逐应用重复 read_dir
-    // 是打开「应用卸载」页的主要 IO 开销之一（N 个应用 = N 次全量枚举）。
-    // 改为进程内只枚举一次并缓存（见 group_container_paths）。
-    for gc in group_container_paths() {
-        let name = Path::new(&gc)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+    // 2. ~/Library/Group Containers/ —— 按 bundle_id **定点** stat，不再全量枚举。
+    //
+    // 历史实现对整个 `Group Containers`（常上百个共享容器）read_dir 一遍再做
+    // 子串匹配；该目录在磁盘繁忙时单次枚举就能被看门狗退避重试到数十秒，是
+    // 「点卸载后长时间卡在卸载中」的主要来源之一。共享容器目录名由配置描述
+    // 文件里的 team id + group id 决定，无法仅从 bundle id 无损推出 team id
+    // 前缀（`<TEAMID>.xxx`）；这里只定点检查两种最常见、可安全推出的命名：
+    //   * `<bundle_id>`
+    //   * `group.<bundle_id>`
+    // 宁可漏掉带未知 team id 前缀的共享容器（少量残留、风险低），也不为卸载
+    // 阻塞在整目录枚举上；命中的候选仍要过出口白名单。
+    if !over_budget(&started) {
         for bid in &bundle_id_variants {
-            if name.contains(bid) {
-                if !paths.contains(&gc) {
-                    paths.push(gc.clone());
+            if over_budget(&started) {
+                return paths;
+            }
+            for tail in [bid.as_str(), &format!("group.{}", bid)] {
+                let p = home.join(format!("Library/Group Containers/{}", tail));
+                let ps = p.to_string_lossy().to_string();
+                if p.exists() && !paths.contains(&ps) {
+                    paths.push(ps);
                 }
-                break;
             }
         }
     }
 
     // 3. ~/Library/Caches/<bundle_id>/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Caches/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1094,6 +1094,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 4. ~/Library/Application Support/<app_name>/ (含命名变体)
     for name in &name_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Application Support/{}", name));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1102,6 +1105,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 5. ~/Library/Preferences/<bundle_id>.plist
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Preferences/{}.plist", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1110,6 +1116,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 6. ~/Library/Preferences/<bundle_id>/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Preferences/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1126,6 +1135,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 7. ~/Library/Logs/<app_name>/ (含命名变体)
     for name in &name_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Logs/{}", name));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1134,6 +1146,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 8. ~/Library/Saved Application State/<bundle_id>.savedState/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!(
             "Library/Saved Application State/{}.savedState",
             bid
@@ -1145,6 +1160,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 9. ~/Library/HTTPStorages/<bundle_id>/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/HTTPStorages/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1153,6 +1171,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 10. ~/Library/Cookies/<bundle_id>.binarycookies
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Cookies/{}.binarycookies", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1161,6 +1182,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 11. ~/Library/WebKit/<bundle_id>/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/WebKit/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1169,6 +1193,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 12. ~/Library/Application Scripts/<bundle_id>/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Application Scripts/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1177,6 +1204,9 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 13. ~/Library/Metadata/<bundle_id>/
     for bid in &bundle_id_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Metadata/{}", bid));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -1185,20 +1215,31 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
 
     // 14. ~/Library/Caches/<app_name>/ — 按应用名匹配（含命名变体）
     for name in &name_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Caches/{}", name));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
         }
     }
 
-    // 15. ~/Library/LaunchAgents/ — 扫描用户级启动代理
-    scan_launch_agents(&home, &bundle_id_variants, &name_variants, &mut paths);
+    // 15/16. LaunchAgents / LaunchDaemons 是仅剩的「需要 read_dir 目录」的步骤。
+    // 磁盘拥塞且已超预算时跳过（可能残留启动项配置，风险低、可下次再清），优先
+    // 保证本体与主要数据的卸载不被目录枚举拖住。
+    if !over_budget(&started) {
+        // 15. ~/Library/LaunchAgents/ — 扫描用户级启动代理
+        scan_launch_agents(&home, &bundle_id_variants, &name_variants, &mut paths);
 
-    // 16. /Library/LaunchAgents/ 和 /Library/LaunchDaemons/ — 系统级（需 sudo）
-    scan_system_launch_agents(&bundle_id_variants, &name_variants, &mut paths);
+        // 16. /Library/LaunchAgents/ 和 /Library/LaunchDaemons/ — 系统级（需 sudo）
+        scan_system_launch_agents(&bundle_id_variants, &name_variants, &mut paths);
+    }
 
     // 17. ~/Library/Preferences/<app_name>/ (按应用名匹配的偏好设置目录)
     for name in &name_variants {
+        if over_budget(&started) {
+            return paths;
+        }
         let p = home.join(format!("Library/Preferences/{}", name));
         if p.exists() && !paths.contains(&p.to_string_lossy().to_string()) {
             paths.push(p.to_string_lossy().to_string());
@@ -2264,6 +2305,23 @@ fn path_size_cached(path: &str) -> u64 {
     }
 }
 
+/// 删除前的体积估算：**只读**持久缓存，命中给值；未命中 / 已过期一律返回 0，
+/// 绝不为了算大小而遍历目录（普通文件取一次元数据长度，廉价）。
+///
+/// 一键卸载不能被"先精确算出将释放多少字节"拖住——对几十 GB 的关联数据做全
+/// 递归，正是用户点卸载后长时间卡在「卸载中」的根因。删除动作本身不依赖体积；
+/// 缓存里若已有空闲时算好的值就展示，没有就当作未知，先把东西删掉。
+pub(crate) fn path_size_fast(path: &str) -> u64 {
+    let p = Path::new(path);
+    if p.is_dir() {
+        crate::scanner::sizecache::dir_size_peek_cached(p).unwrap_or(0)
+    } else if let Ok(meta) = p.symlink_metadata() {
+        meta.len()
+    } else {
+        0
+    }
+}
+
 /// 计算单个应用的本体 / 数据 / 缓存体积（只读展示口径，带持久缓存）。
 ///
 /// 关联路径发现 / 数据 / 缓存分类与 [`inspect_app`] 完全一致；体积统计改用
@@ -2301,8 +2359,9 @@ pub fn app_inventory_size_one(raw: &str) -> Option<AppInventorySize> {
 /// 后台并行补算一批应用的体积。
 ///
 /// 每个应用独立走 [`app_inventory_size_one`]，可被上层逐条产出（GUI 据此做
-/// 流式回填：先算完的小应用先显示，不等最慢的大目录）。`~/Library/Group
-/// Containers` 的枚举由 [`group_container_paths`] 在进程内只做一次。
+/// 流式回填：先算完的小应用先显示，不等最慢的大目录）。关联路径由
+/// [`find_associated_files`] 按 bundle_id 定点发现（不再整目录枚举
+/// `~/Library/Group Containers`），体积与卸载同口径。
 pub fn app_inventory_sizes_for(paths: &[String]) -> Vec<AppInventorySize> {
     paths
         .par_iter()
