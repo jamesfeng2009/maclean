@@ -323,7 +323,12 @@ fn run_app_cache_segmented() -> (Vec<ScanItem>, bool) {
     }
 
     // 与正常 scan 一致的去重 + 排序（分段缺失时去重仍安全：只少项、不重复计）。
-    (scanner::app_cache::finish_items(items), partial)
+    // 必须再走 post_check：分段路径此前直接 finish_items 返回，漏掉了对
+    // Safe/CacheOnly 项的删除期闸门预检（如企业微信升级备份目录内部含
+    // app 资源/清单结构，会在删除时才被拦下并弹「已自动跳过」提示）。
+    let mut out = scanner::app_cache::finish_items(items);
+    post_check(&mut out);
+    (out, partial)
 }
 
 #[cfg(target_os = "macos")]
@@ -1474,5 +1479,22 @@ mod tests {
         post_check(&mut items);
         assert!(!items[0].deletable, "SIP 单项必须不可删");
         assert!(!items[0].undeletable_reason.is_empty());
+    }
+
+    /// app_cache 分段扫描收尾必须经过 post_check：目录内含应用资源/清单结构
+    /// （如企业微信升级备份 `Library/Caches/*.BundleMigration/backups/*.backup.app`）
+    /// 的安全项应在扫描期锁定，删除时才不会弹「已自动跳过」提示。
+    /// 该目录只在真实机器上存在，测试在无此目录的机器上自动空转通过。
+    #[test]
+    fn app_cache_segmented_marks_gate_blocked_items_undeletable() {
+        let (items, _) = run_app_cache_segmented();
+        for it in items.iter().filter(|i| i.path.contains("BundleMigration")) {
+            assert!(
+                !it.deletable,
+                "含应用资源的 BundleMigration 目录必须被闸门锁定: {} ({})",
+                it.path,
+                it.undeletable_reason
+            );
+        }
     }
 }

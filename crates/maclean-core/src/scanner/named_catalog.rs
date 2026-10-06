@@ -24,12 +24,8 @@
 use std::path::PathBuf;
 
 use super::app_cache::{push_named_cache_item, NAMED_CACHE_MIN};
-use super::{dir_size, home_dir, Recommend, ScanItem};
+use super::{home_dir, Recommend, ScanItem};
 use crate::scanner::uninstall::{collect_app_paths, get_bundle_id};
-use crate::safety;
-
-/// 已安装应用缓存项的最小展示阈值
-const NAMED_MIN: u64 = NAMED_CACHE_MIN;
 
 /// 工具链 / 语言注册表条目
 struct ToolchainRule {
@@ -255,26 +251,17 @@ fn scan_container_cache_layer(items: &mut Vec<ScanItem>, data_root: &std::path::
             if !super::app_cache::is_cache_dir_name(&dir_name) {
                 continue;
             }
-            if safety::is_manifest_managed_path(&p) {
-                continue;
-            }
-            let size = dir_size(&p);
-            if size >= NAMED_MIN {
-                items.push(ScanItem {
-                    path: p.to_string_lossy().to_string(),
-                    size_bytes: size,
-                    category: format!("{}容器缓存", app_name),
-                    selected: false,
-                    deletable: true,
-                    undeletable_reason: String::new(),
-                    batch_paths: Vec::new(),
-                    recommend: Recommend::CacheOnly,
-                    description: format!(
-                        "{} 沙盒容器内的缓存目录（{}），删除后应用会自动重建；用户数据不受影响。清理前请退出{}。",
-                        app_name, dir_name, app_name
-                    ),
-                });
-            }
+            let description = format!(
+                "{} 沙盒容器内的缓存目录（{}），删除后应用会自动重建；用户数据不受影响。清理前请退出{}。",
+                app_name, dir_name, app_name
+            );
+            push_named_cache_item(
+                items,
+                &p,
+                &format!("{}容器缓存", app_name),
+                &description,
+                Recommend::CacheOnly,
+            );
         }
     }
 }

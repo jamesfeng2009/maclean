@@ -384,13 +384,26 @@ pub(crate) fn push_named_cache_item(
     if size < NAMED_CACHE_MIN {
         return;
     }
+    let path_str = dir.to_string_lossy().to_string();
+    // 删除期闸门预检（与删除入口共用 check_path_safety_with_category，保证
+    // 「扫出来就能删」）：被安全闸门拦截的项（如目录内含应用自带运行时 /
+    // 清单管理结构）标记为不可删并给出原因，前端显示为「受保护」锁定态，
+    // 用户不会勾选，删除时也不再出现「已自动跳过」的拒绝提示。
+    // 预检有界（闸门后代遍历深度 ≤8 / 条目 ≤2 万），只作用于达标的语义项。
+    let (deletable, undeletable_reason) =
+        match crate::safety::check_path_safety_with_category(&path_str, category) {
+            crate::safety::SafetyCheck::Danger(reason) => {
+                (false, format!("受安全闸门保护：{reason}"))
+            }
+            _ => (true, String::new()),
+        };
     items.push(ScanItem {
-        path: dir.to_string_lossy().to_string(),
+        path: path_str,
         size_bytes: size,
         category: category.to_string(),
         selected: false,
-        deletable: true,
-        undeletable_reason: String::new(),
+        deletable,
+        undeletable_reason,
         batch_paths: Vec::new(),
         recommend,
         description: description.to_string(),
