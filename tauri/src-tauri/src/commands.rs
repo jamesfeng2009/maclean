@@ -113,6 +113,35 @@ pub fn open_full_disk_access_settings() -> Result<(), String> {
     }
 }
 
+/// 打开「系统设置 → 隐私与安全性 → App 管理（应用管理）」面板。
+///
+/// 删除 `/Applications` 下 root 安装（`root:wheel`）的 .app 本体时，即使有
+/// 完全磁盘访问，仍受「App 管理」权限管控（或系统弹窗 Touch ID/密码确认）。
+/// 此命令把用户带到对应面板，由用户本人开启 maclean 的开关后重试。
+/// URL 为 macOS 系统设置固定 scheme、无外部输入与注入面。仅 macOS。
+#[tauri::command]
+pub fn open_app_management_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // App 管理面板（/Applications 下 .app 的删除授权）
+        let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_AppManagement";
+        std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("无法打开系统设置: {e}"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "打开系统设置失败".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台暂不支持打开该系统设置".to_string())
+    }
+}
+
 /* ============================== 扫描 ============================== */
 
 /// 扫描后处理：与 egui 壳 `start_scan` 完全一致的可删除性二次判定。

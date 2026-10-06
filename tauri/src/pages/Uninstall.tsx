@@ -44,8 +44,8 @@ export function Uninstall() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   /** 真实图标加载失败的应用路径（回退为首字母色块） */
   const [iconErr, setIconErr] = useState<Set<string>>(new Set());
-  /** 卸载遇系统保护（TCC 完全磁盘访问 / App 管理）或应用运行中时，记录应用名以显示授权引导条 */
-  const [fdaTip, setFdaTip] = useState<string | null>(null);
+  /** 卸载遇系统保护（TCC）或应用运行中时，记录应用名与需要的授权类型，显示分步引导条 */
+  const [fdaTip, setFdaTip] = useState<{ name: string; fda: boolean; am: boolean } | null>(null);
   /** 加载代次，刷新时使上一次进行中的体积补算结果作废，避免竞态覆盖 */
   const genRef = useRef(0);
   /** 当前体积事件监听取消函数 */
@@ -210,7 +210,13 @@ export function Uninstall() {
           toast("warn", rep.message);
         }
         // 有残留因系统保护（TCC）或应用运行中删不掉：拉起授权引导条
-        if (rep.needs_full_disk_access) setFdaTip(app.name);
+        if (rep.needs_full_disk_access || rep.needs_app_management) {
+          setFdaTip({
+            name: app.name,
+            fda: !!rep.needs_full_disk_access,
+            am: !!rep.needs_app_management,
+          });
+        }
       } catch (e) {
         toast("warn", "卸载失败：" + String(e));
       } finally {
@@ -297,33 +303,77 @@ export function Uninstall() {
           }}
         >
           <Icon name="shield" size={16} />
-          <div style={{ flex: 1, fontSize: 12.5, lineHeight: 1.55 }}>
+          <div style={{ flex: 1, fontSize: 12.5, lineHeight: 1.6 }}>
             {langEn ? (
               <>
-                Some data of <b>{fdaTip}</b> couldn&apos;t be removed because it is protected by
-                macOS or the app is still running. Quit the app first, then grant maclean{" "}
-                <b>Full Disk Access</b> and <b>App Management</b> in System Settings → Privacy &amp;
-                Security, and uninstall again.
+                Some data of <b>{fdaTip.name}</b> couldn&apos;t be removed because macOS protects
+                those locations. Please follow the steps below and uninstall again:
+                <ol style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {fdaTip.fda && (
+                    <li>
+                      Grant maclean <b>Full Disk Access</b> (protects the app&apos;s container data).
+                    </li>
+                  )}
+                  {fdaTip.am && (
+                    <li>
+                      Grant maclean <b>App Management</b> (deleting a root-installed app); the
+                      system may still ask for Touch ID / password once — please confirm it.
+                    </li>
+                  )}
+                  <li>Quit the app if it is running, then uninstall again.</li>
+                </ol>
               </>
             ) : (
               <>
-                「{fdaTip}」的部分数据因系统保护或应用仍在运行而未能删除。请先退出该应用，再在
-                <b> 系统设置 → 隐私与安全性 </b>
-                中为 maclean 开启「完全磁盘访问」和「App 管理（应用管理）」，然后重新卸载。
+                「{fdaTip.name}」的部分数据因 macOS 系统保护未能删除。请按下面步骤操作后重新卸载：
+                <ol style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {fdaTip.fda && (
+                    <li>
+                      在「系统设置 → 隐私与安全性 → <b>完全磁盘访问</b>」中为 maclean 打开开关
+                      （保护的是该应用的容器数据）。
+                    </li>
+                  )}
+                  {fdaTip.am && (
+                    <li>
+                      在「系统设置 → 隐私与安全性 → <b>App 管理（应用管理）</b>」中为 maclean
+                      打开开关（删除 root 安装的应用本体时需要）；系统可能还会弹一次
+                      Touch ID / 密码授权，<b>请在弹窗里确认，不要取消</b>。
+                    </li>
+                  )}
+                  <li>若该应用正在运行，先退出它，再重新卸载。</li>
+                </ol>
               </>
             )}
           </div>
-          <button
-            className="btn-primary"
-            style={{ height: 30, fontSize: 12, whiteSpace: "nowrap", flex: "none" }}
-            onClick={() =>
-              void ipc
-                .openFdaSettings()
-                .catch((e) => toast("warn", "打开系统设置失败：" + String(e)))
-            }
-          >
-            <Icon name="settings" size={13} /> {langEn ? "Open Settings" : "打开系统设置"}
-          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: "none" }}>
+            {fdaTip.fda && (
+              <button
+                className="btn-primary"
+                style={{ height: 30, fontSize: 12, whiteSpace: "nowrap" }}
+                onClick={() =>
+                  void ipc
+                    .openFdaSettings()
+                    .catch((e) => toast("warn", "打开系统设置失败：" + String(e)))
+                }
+              >
+                <Icon name="settings" size={13} />{" "}
+                {langEn ? "Full Disk Access" : "打开：完全磁盘访问"}
+              </button>
+            )}
+            {fdaTip.am && (
+              <button
+                className="btn-primary"
+                style={{ height: 30, fontSize: 12, whiteSpace: "nowrap" }}
+                onClick={() =>
+                  void ipc
+                    .openAppManagementSettings()
+                    .catch((e) => toast("warn", "打开系统设置失败：" + String(e)))
+                }
+              >
+                <Icon name="settings" size={13} /> {langEn ? "App Management" : "打开：App 管理"}
+              </button>
+            )}
+          </div>
           <button
             title={langEn ? "Dismiss" : "关闭"}
             onClick={() => setFdaTip(null)}

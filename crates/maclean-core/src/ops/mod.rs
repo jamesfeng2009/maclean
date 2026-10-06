@@ -2628,6 +2628,154 @@ exit 0
     started
 }
 
+/// macOS：把 **root 属主** 的应用本体提权移入废纸篓（可恢复）。
+///
+/// 一键卸载删除 `/Applications/` 下 root 安装（`root:wheel`）的 `.app` 时，
+/// 普通进程没有写权限：`NSFileManager` 静默回收必然失败（513），
+/// `NSWorkspace` 系统授权弹窗又可能被取消/抑制。此函数作为兜底，用
+/// `sudo -n` 直接 `mv` 进 `~/.Trash` —— 与 Finder 拖进废纸篓同语义、可还原，
+/// 不降级为永久删除。
+///
+/// 安全边界（P0-1，缺一不放行）：
+/// - 只接受 `/Applications/` 下的 `.app` 包（卸载入口的白名单之外再收紧）；
+/// - 元数据属主必须是 root（`uid == 0`），用户自有文件本可普通回收，
+///   不需要也不应走提权；
+/// - 拒绝换行 / 反引号 / `$(` / 单引号等可突破脚本引号包裹的字符；
+/// - 目标限定 `~/.Trash/<原名> [N]`，探测已存在条目避免覆盖；
+/// - 源与 `~/.Trash` 跨卷时放弃（不做意外的大文件复制）；
+/// - sudo 脚本走不可预测文件名 + O_EXCL + 0600（复用 `write_private_temp_file`），
+///   执行后立即删除；
+/// - `sudo -n` 非交互：未启用 Touch ID / 无票据时不弹密码框，立即失败不阻塞。
+#[cfg(target_os = "macos")]
+pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::process::Command;
+
+    let p = std::path::Path::new(path);
+    let _ = lang_en;
+
+    // 1) 形态：/Applications 下的 .app 包
+    if !path.starts_with("/Applications/") || !path.ends_with(".app") {
+        crate::logger::warn(&format!("[trash-sudo] 形态不符，拒绝提权回收: {}", path));
+        return false;
+    }
+    // 2) root 属主
+    let Ok(meta) = p.symlink_metadata() else {
+        return false;
+    };
+    if meta.uid() != 0 {
+        crate::logger::warn(&format!(
+            "[trash-sudo] 非 root 属主，不走提权（应由普通回收处理）: {}",
+            path
+        ));
+        return false;
+    }
+    // 3) 危险字符（脚本用单引号包裹路径参数）
+    if path.contains('\n')
+        || path.contains('\r')
+        || path.contains('`')
+        || path.contains("$(")
+        || path.contains('\'')
+    {
+        crate::logger::warn(&format!("[trash-sudo] 路径含危险字符，拒绝提权回收: {}", path));
+        return false;
+    }
+    // 4) 目标 ~/.Trash：必须存在且与源同卷
+    let home = crate::scanner::home_dir();
+    let trash = home.join(".Trash");
+    let Ok(trash_meta) = trash.metadata() else {
+        crate::logger::warn("[trash-sudo] ~/.Trash 不可用，放弃提权回收");
+        return false;
+    };
+    if trash_meta.dev() != meta.dev() {
+        crate::logger::warn(&format!(
+            "[trash-sudo] 源与废纸篓跨卷，放弃（避免意外大复制）: {}",
+            path
+        ));
+        return false;
+    }
+
+    // 5) 目标名避免覆盖：Finder 语义的 "name 2"、"name 3"…
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if file_name.is_empty() {
+        return false;
+    }
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_name.clone());
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut dst = trash.join(&file_name);
+    let mut n: u64 = 2;
+    while dst.exists() {
+        let alt = if ext.is_empty() {
+            format!("{} {}", stem, n)
+        } else {
+            format!("{} {}.{}", stem, n, ext)
+        };
+        dst = trash.join(alt);
+        n += 1;
+        if n > 999 {
+            crate::logger::warn(&format!(
+                "[trash-sudo] 废纸篓同名条目过多，放弃: {}",
+                path
+            ));
+            return false;
+        }
+    }
+
+    // 6) 写提权脚本：mv -- 'src' 'dst'（' 已被拒，单引号包裹安全；-- 防 - 开头名）
+    let script = format!(
+        "#!/bin/bash\nmv -- '{}' '{}'\nexit $?\n",
+        path,
+        dst.to_string_lossy()
+    );
+    let Some(tmp_script) = write_private_temp_file("maclean_trash_tid", "sh", &script) else {
+        crate::logger::error("[trash-sudo] 无法安全创建临时脚本，放弃提权回收");
+        return false;
+    };
+
+    // 7) sudo -n：启用 Touch ID 时弹系统 Touch ID；未启用/无票据时立即失败
+    let result = Command::new("/usr/bin/sudo")
+        .arg("-n")
+        .arg("/bin/bash")
+        .arg(&tmp_script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::fs::remove_file(&tmp_script);
+
+    match result {
+        Ok(s) if s.success() => {
+            crate::logger::info(&format!(
+                "[trash-sudo] 提权移入废纸篓成功: {} -> {}",
+                path,
+                dst.to_string_lossy()
+            ));
+            true
+        }
+        Ok(s) => {
+            crate::logger::warn(&format!(
+                "[trash-sudo] 提权回收未完成（退出码 {:?}，多为 Touch ID 未启用/取消）: {}",
+                s.code(),
+                path
+            ));
+            false
+        }
+        Err(e) => {
+            crate::logger::warn(&format!("[trash-sudo] 无法启动 sudo: {} — {}", path, e));
+            false
+        }
+    }
+}
+
 /// 跨平台在默认浏览器打开 URL
 pub fn open_url(url: &str) {
     #[cfg(target_os = "macos")]

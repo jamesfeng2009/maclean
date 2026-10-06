@@ -63,10 +63,15 @@ pub struct UninstallAppReport {
     /// 本次卸载涉及的字节数（本体 + 关联数据 + 关联缓存；删除前非阻塞估算，
     /// 缓存未命中时偏小，仅用于展示，删除不依赖它）
     pub freed_bytes: u64,
-    /// 有关联项因系统保护（TCC：完全磁盘访问 / App 管理）或应用仍在运行而
-    /// 删除失败，需要前端引导用户授权 / 退出应用后重试。
+    /// 有关联项因系统保护（TCC：完全磁盘访问）或应用仍在运行而删除失败，
+    /// 需要前端引导用户授权 / 退出应用后重试。
     #[serde(default)]
     pub needs_full_disk_access: bool,
+    /// 应用本体（`/Applications` 下 root 安装的 .app）删除失败，需要前端引导
+    /// 用户在「系统设置 → 隐私与安全性 → App 管理」授权（或系统弹窗确认）。
+    /// 若已通过提权移入废纸篓兜底成功，本字段为 false。
+    #[serde(default)]
+    pub needs_app_management: bool,
 }
 
 impl UninstallAppReport {
@@ -261,6 +266,8 @@ pub fn uninstall_app(
         ..Default::default()
     };
 
+    // 收集普通删除失败的路径：循环结束后统一归因 + 对 root 属主 .app 做提权兜底
+    let mut failed_paths: Vec<String> = Vec::new();
     if let Some(rx) = delete_rx {
         while let Ok(msg) = rx.recv() {
             match msg {
@@ -269,12 +276,7 @@ pub fn uninstall_app(
                         report.deleted += 1;
                     } else {
                         report.intercepted += 1;
-                        // 在沙盒容器 / 系统保护域或 .app 本体上失败，通常是
-                        // TCC（完全磁盘访问 / App 管理）未授权，或应用仍在运行
-                        // 占用。引导用户授权 / 退出后重试，而不是只报一句失败。
-                        if is_protected_or_running_path(&failed_path) {
-                            report.needs_full_disk_access = true;
-                        }
+                        failed_paths.push(failed_path);
                     }
                 }
                 DeleteMessage::Skip(..) => report.skipped += 1,
@@ -292,6 +294,34 @@ pub fn uninstall_app(
             }
         }
     }
+
+    // 失败归因 + 提权兜底：
+    // - 沙盒容器 / 共享容器 / HTTPStorages 等 → 需「完全磁盘访问」，只能去设置开；
+    // - `/Applications` 下 root 安装的 .app 本体 → 优先用 sudo 提权移入废纸篓
+    //   （可恢复，不依赖系统弹窗）；提权不可用（Touch ID 未启用/用户取消）时
+    //   才引导「App 管理」授权。
+    let mut needs_fda = false;
+    let mut needs_am = false;
+    for fp in &failed_paths {
+        match tcc_domain_of_path(fp) {
+            TccDomain::FullDiskAccess => needs_fda = true,
+            TccDomain::AppManagement => {
+                #[cfg(target_os = "macos")]
+                let trashed = super::sudo_move_app_to_trash(fp, lang_en);
+                #[cfg(not(target_os = "macos"))]
+                let trashed = false;
+                if trashed {
+                    report.deleted += 1;
+                    report.intercepted = report.intercepted.saturating_sub(1);
+                } else {
+                    needs_am = true;
+                }
+            }
+            TccDomain::Other => {}
+        }
+    }
+    report.needs_full_disk_access = needs_fda;
+    report.needs_app_management = needs_am;
 
     // 卸载改变了大目录占用：丢弃只读体积缓存（与 clean_execute 一致）
     scanner::sizecache::invalidate_all();
@@ -311,23 +341,38 @@ pub fn uninstall_app(
     };
 
     logger::info(&format!(
-        "[uninstall] {} 一键卸载完成: {} 项, {} 项被拦截, 涉及 {} 字节",
-        name, report.deleted, report.intercepted, freed_bytes
+        "[uninstall] {} 一键卸载完成: {} 项, {} 项被拦截, 涉及 {} 字节 (fda={}, am={})",
+        name,
+        report.deleted,
+        report.intercepted,
+        freed_bytes,
+        report.needs_full_disk_access,
+        report.needs_app_management
     ));
 
     report
 }
 
-/// 判断某条删除失败的路径，是否属于「需要完全磁盘访问 / App 管理授权，或
-/// 应用正在运行占用」的典型位置。
+/// 删除失败路径的 TCC 保护域分类，用于前端引导与提权兜底决策。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TccDomain {
+    /// 沙盒容器 / 共享容器 / HTTPStorages / Cookies / WebKit / Application Scripts：
+    /// 只能由用户在「系统设置 → 隐私与安全性 → 完全磁盘访问」手动授权。
+    FullDiskAccess,
+    /// `/Applications` 下的 .app 本体：删除受「App 管理」管控或系统授权弹窗确认；
+    /// root 安装（root:wheel）的还可走 sudo 提权移入废纸篓兜底。
+    AppManagement,
+    /// 非 TCC 保护域（普通用户缓存等），无需引导授权。
+    Other,
+}
+
+/// 判断删除失败路径属于哪个 TCC 保护域。
 ///
 /// 这些位置的删除失败在普通用户机上绝大多数不是"文件坏了"，而是：
 /// - `~/Library/Containers`、`Group Containers`、`HTTPStorages`、`Cookies`、
 ///   `WebKit`、`Application Scripts` 等受 TCC 沙盒 / 完全磁盘访问保护；
 /// - `/Applications/*.app` 本体删除受「App 管理」权限管控，或应用仍在运行被占用。
-/// 命中时前端应引导用户：退出正在运行的应用 → 在「系统设置 → 隐私与安全性」
-/// 里给 maclean 开启「完全磁盘访问」与「App 管理」→ 重试。
-fn is_protected_or_running_path(path: &str) -> bool {
+pub(crate) fn tcc_domain_of_path(path: &str) -> TccDomain {
     let l = path.to_lowercase();
     let protected_data = l.contains("/library/containers/")
         || l.contains("/library/group containers/")
@@ -335,9 +380,15 @@ fn is_protected_or_running_path(path: &str) -> bool {
         || l.contains("/library/cookies/")
         || l.contains("/library/webkit/")
         || l.contains("/library/application scripts/");
+    if protected_data {
+        return TccDomain::FullDiskAccess;
+    }
     let app_bundle =
         l.ends_with(".app") && (l.starts_with("/applications/") || l.contains("/applications/"));
-    protected_data || app_bundle
+    if app_bundle {
+        return TccDomain::AppManagement;
+    }
+    TccDomain::Other
 }
 
 #[cfg(test)]
@@ -381,22 +432,48 @@ mod tests {
     #[test]
     fn protected_or_running_path_detection() {
         // 沙盒容器 / 共享容器 / HTTPStorages → 需完全磁盘访问
-        assert!(is_protected_or_running_path(
-            "/Users/x/Library/Containers/com.tencent.xinWeChat/Data/Library/Caches/a"
-        ));
-        assert!(is_protected_or_running_path(
-            "/Users/x/Library/Group Containers/group.com.x/a"
-        ));
-        assert!(is_protected_or_running_path(
-            "/Users/x/Library/HTTPStorages/com.example.app"
-        ));
+        assert_eq!(
+            tcc_domain_of_path(
+                "/Users/x/Library/Containers/com.tencent.xinWeChat/Data/Library/Caches/a"
+            ),
+            TccDomain::FullDiskAccess
+        );
+        assert_eq!(
+            tcc_domain_of_path("/Users/x/Library/Group Containers/group.com.x/a"),
+            TccDomain::FullDiskAccess
+        );
+        assert_eq!(
+            tcc_domain_of_path("/Users/x/Library/HTTPStorages/com.example.app"),
+            TccDomain::FullDiskAccess
+        );
         // /Applications 下的 .app 本体 → 需 App 管理或应用正在运行
-        assert!(is_protected_or_running_path("/Applications/Xmind.app"));
+        assert_eq!(
+            tcc_domain_of_path("/Applications/Xmind.app"),
+            TccDomain::AppManagement
+        );
         // 普通用户缓存 / 下载项不是 TCC 保护域，不应误报
-        assert!(!is_protected_or_running_path(
-            "/Users/x/Library/Caches/com.example.app"
-        ));
-        assert!(!is_protected_or_running_path("/Users/x/Downloads/a.txt"));
+        assert_eq!(
+            tcc_domain_of_path("/Users/x/Library/Caches/com.example.app"),
+            TccDomain::Other
+        );
+        assert_eq!(tcc_domain_of_path("/Users/x/Downloads/a.txt"), TccDomain::Other);
+    }
+
+    #[test]
+    fn sudo_move_app_to_trash_rejects_unsafe_inputs_without_touching_fs() {
+        // 形态不符 / 非 /Applications / 含危险字符的路径必须在提权前被拒绝
+        // （这些分支不触碰文件系统，任何机器上都能测）
+        #[cfg(target_os = "macos")]
+        {
+            assert!(!crate::ops::sudo_move_app_to_trash("/Users/x/foo.app", false));
+            assert!(!crate::ops::sudo_move_app_to_trash("/tmp/foo.app", false));
+            assert!(!crate::ops::sudo_move_app_to_trash(
+                "/Applications/evil$(rm -rf /).app",
+                false
+            ));
+            assert!(!crate::ops::sudo_move_app_to_trash("/Applications/evil'.app", false));
+            assert!(!crate::ops::sudo_move_app_to_trash("/Applications/notanapp", false));
+        }
     }
 
     #[test]

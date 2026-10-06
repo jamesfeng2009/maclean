@@ -119,6 +119,9 @@ export const ipc = {
 
   /** 打开「系统设置 → 隐私与安全性 → 完全磁盘访问」引导授权（卸载遇 TCC 拒绝时） */
   openFdaSettings: () => invoke<void>("open_full_disk_access_settings"),
+
+  /** 打开「系统设置 → 隐私与安全性 → App 管理」引导授权（卸载 root 安装的 .app 失败时） */
+  openAppManagementSettings: () => invoke<void>("open_app_management_settings"),
 };
 
 export type { UnlistenFn };
