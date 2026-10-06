@@ -16,6 +16,8 @@ use crate::im_data;
 const CONTAINER_MIN: u64 = 50 * 1024 * 1024;
 /// 100MB 阈值
 const CACHE_MIN: u64 = 100 * 1024 * 1024;
+/// 语义化命名清理项的最小展示阈值（微信缓存 / 飞书渲染缓存 / Go构建缓存等）
+pub(crate) const NAMED_CACHE_MIN: u64 = 10 * 1024 * 1024;
 // 2026-09-18 删除了 APP_SUPPORT_MIN（500MB）：Application Support 的筛选
 // 实际走 app_data.rs，这里没有引用。
 
@@ -83,8 +85,11 @@ type Segment = (&'static str, fn() -> Vec<ScanItem>);
 /// 其余段结果照常合并（部分结果），不再因整扫描器到点而全部归零。段函数都是无捕获
 /// 的 `fn`，可安全跨线程移交。分段结果合并后务必调用 [`finish_items`] 做与
 /// [`AppCacheScanner::scan`] 一致的去重 / 排序。
-pub fn scan_segments() -> [Segment; 6] {
+pub fn scan_segments() -> [Segment; 7] {
     [
+        // 语义化命名清理项放最前：与通用扫描（system_caches 等）命中同一路径时，
+        // dedup 按「保留首次出现项」规则保住带应用语义名 + 风险等级的条目。
+        ("named_app_caches", scan_named_app_caches),
         ("im_containers", scan_containers),
         ("group_containers", scan_group_containers),
         ("app_support_caches", scan_app_support_caches),
@@ -110,6 +115,286 @@ pub fn finish_items(mut items: Vec<ScanItem>) -> Vec<ScanItem> {
     items = dedup_by_path(items);
     items.sort_by_key(|i| std::cmp::Reverse(i.size_bytes));
     items
+}
+
+// =========================================================================
+//  语义化命名清理项（对标 MangoDisk 的 WeChat/Lark/Go build 粒度）
+// =========================================================================
+
+/// 语义化命名清理项段：对已知应用的关键缓存做**定点**扫描（不扫全盘），
+/// 每个应用一个语义命名项 + 风险等级 + 说明文案。
+///
+/// 覆盖（与本机是否安装无关，路径存在即展示）：
+/// - 微信缓存 / 微信日志：`~/Library/Containers/com.tencent.xinWeChat/Data` 下
+///   的 `Cache`、`Cache_Data`、`GPUCache`、`DawnCache` 与 `Documents/app_data/log`。
+///   容器受 TCC 保护，**不走 walkdir**（fs_guard 会拦截 Containers），改用手动
+///   定深 read_dir + 有界 `dir_size`；无授权时读不到只丢项、不卡段。
+/// - 飞书 / Lark 渲染缓存：`~/Library/Application Support/LarkShell/aha/users/*`
+///   下的 `DawnCache` / `GPUCache` / `Code Cache` / `Cache` 等（Electron 渲染缓存）。
+///   LarkShell 是普通目录，可安全 walkdir（深度有界）。
+/// - Go 构建缓存：`~/Library/Caches/go-build`（此前仅覆盖 `~/go/pkg/mod` 模块缓存）。
+/// - uv 缓存：`~/Library/Caches/uv`；Yarn 下载缓存：`~/Library/Caches/Yarn`、
+///   `~/Library/Caches/Yarn v6`。
+pub fn scan_named_app_caches() -> Vec<ScanItem> {
+    let mut items = Vec::new();
+    // 1) 微信缓存 + 日志（容器定点，见下方 scan_wechat_caches）
+    scan_wechat_caches(&mut items);
+    // 2) 飞书 / Lark 渲染缓存（Application Support 定点 walkdir）
+    scan_lark_caches(&mut items);
+    // 3) 工具链注册表：Go build / uv / Yarn / Bun / Deno / Playwright / CocoaPods /
+    //    Swift SPM / Composer / Ruby gem / Bundler（dev_cache 未覆盖的缺口）
+    items.extend(super::named_catalog::scan_toolchain_rules());
+    // 4) 已安装应用通用驱动：/Applications 下每个应用的 Caches / Logs / 容器缓存
+    items.extend(super::named_catalog::scan_installed_app_caches());
+    items
+}
+
+/// 微信缓存 + 日志：容器内定点定深枚举（Containers 被 fs_guard 拦截，不走 walkdir）。
+fn scan_wechat_caches(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+    let data = home.join("Library/Containers/com.tencent.xinWeChat/Data");
+    // 无授权 / 未安装：stat 失败直接返回（不 panic、不卡段）
+    if !data.is_dir() {
+        return;
+    }
+
+    // 日志（新老版本都在 Documents/app_data/log；新版另有 Documents/log）
+    let log_dir = data.join("Documents/app_data/log");
+    push_named_cache_item(
+        items,
+        &log_dir,
+        "微信日志",
+        "微信诊断日志与临时显示数据，删除后自动重建；聊天记录、账号与用户文件不受影响。清理前请退出微信。",
+        Recommend::CacheOnly,
+    );
+    let log_dir2 = data.join("Documents/log");
+    push_named_cache_item(
+        items,
+        &log_dir2,
+        "微信日志",
+        "微信诊断日志与临时显示数据，删除后自动重建；聊天记录、账号与用户文件不受影响。清理前请退出微信。",
+        Recommend::CacheOnly,
+    );
+
+    // Documents 根下的结构（新版微信为平铺，实测）：
+    // - 缓存目录直接平铺在根下：cacheDir / Caches / Cache / TPReportPluginCache；
+    // - mmkv（会话配置）、xwechat_files（聊天文件库）是用户数据，**绝不**下探；
+    // - 内置浏览器（radium）webview 缓存在
+    //   Documents/app_data/radium/web/profiles/<profile>/Cache（深度 7 层，实测路径）；
+    // - 其它目录按旧版 <uuid>/Cache/Cache_Data 结构再下一层匹配缓存名。
+    let docs_root = data.join("Documents");
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+    // 1) 新版平铺缓存目录
+    if let Ok(rd) = std::fs::read_dir(&docs_root) {
+        for entry in rd.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if matches!(
+                name.as_str(),
+                "cacheDir" | "Caches" | "Cache" | "TPReportPluginCache"
+            ) {
+                let size = dir_size(&p);
+                if size >= NAMED_CACHE_MIN {
+                    items.push(ScanItem {
+                        path: p.to_string_lossy().to_string(),
+                        size_bytes: size,
+                        category: "微信缓存".to_string(),
+                        selected: false,
+                        deletable: true,
+                        undeletable_reason: String::new(),
+                        batch_paths: Vec::new(),
+                        recommend: Recommend::CacheOnly,
+                        description: format!(
+                            "微信的网页 / 图片 / 视频 / 代码等临时缓存（{}），删除后可自动重建；聊天记录与收发文件不受影响。清理前请退出微信。",
+                            name
+                        ),
+                    });
+                }
+                continue;
+            }
+            if name.contains("xwechat")
+                || name.contains("mmkv")
+                || name.contains("Files")
+                || name.contains("confsdk")
+                || name.contains("app_data")
+            {
+                continue;
+            }
+            // 3) 旧版 <uuid> 用户根：下一层匹配缓存目录名
+            if let Ok(rd2) = std::fs::read_dir(&p) {
+                for e in rd2.filter_map(|e| e.ok()) {
+                    let cp = e.path();
+                    if !cp.is_dir() {
+                        continue;
+                    }
+                    let cname = e.file_name().to_string_lossy().to_string();
+                    if !is_cache_dir_name(&cname) {
+                        continue;
+                    }
+                    if !seen.insert(cp.clone()) {
+                        continue;
+                    }
+                    let size = dir_size(&cp);
+                    if size >= NAMED_CACHE_MIN {
+                        items.push(ScanItem {
+                            path: cp.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: "微信缓存".to_string(),
+                            selected: false,
+                            deletable: true,
+                            undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
+                            recommend: Recommend::CacheOnly,
+                            description: format!(
+                                "微信的网页 / 图片 / 视频 / 代码等临时缓存（{}），删除后可自动重建；聊天记录与收发文件不受影响。清理前请退出微信。",
+                                cname
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) 内置浏览器（radium）webview 缓存：
+    //    Documents/app_data/radium/web/profiles/<profile>/Cache|Cache_Data|GPUCache|…
+    //    只下探两层（profiles → profile → 缓存目录），数量有界，绝不下探 xwechat_files。
+    let radium_profiles = data.join("Documents/app_data/radium/web/profiles");
+    if let Ok(rd) = std::fs::read_dir(&radium_profiles) {
+        for profile in rd.filter_map(|e| e.ok()) {
+            let pp = profile.path();
+            if !pp.is_dir() {
+                continue;
+            }
+            if let Ok(rd2) = std::fs::read_dir(&pp) {
+                for e in rd2.filter_map(|e| e.ok()) {
+                    let cp = e.path();
+                    if !cp.is_dir() {
+                        continue;
+                    }
+                    let cname = e.file_name().to_string_lossy().to_string();
+                    if !is_cache_dir_name(&cname) {
+                        continue;
+                    }
+                    if !seen.insert(cp.clone()) {
+                        continue;
+                    }
+                    let size = dir_size(&cp);
+                    if size >= NAMED_CACHE_MIN {
+                        items.push(ScanItem {
+                            path: cp.to_string_lossy().to_string(),
+                            size_bytes: size,
+                            category: "微信缓存".to_string(),
+                            selected: false,
+                            deletable: true,
+                            undeletable_reason: String::new(),
+                            batch_paths: Vec::new(),
+                            recommend: Recommend::CacheOnly,
+                            description: format!(
+                                "微信内置浏览器的网页 / 代码渲染缓存（{}），删除后可自动重建；聊天记录与收发文件不受影响。清理前请退出微信。",
+                                cname
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 飞书 / Lark 渲染缓存：`~/Library/Application Support/LarkShell` 下按缓存目录名
+/// 匹配（Electron 的 DawnCache / GPUCache / Code Cache / Cache 等），深度有界。
+fn scan_lark_caches(items: &mut Vec<ScanItem>) {
+    let home = home_dir();
+    let lark_shell = home.join("Library/Application Support/LarkShell");
+    if !lark_shell.is_dir() {
+        return;
+    }
+
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for entry in walkdir::WalkDir::new(&lark_shell)
+        .max_depth(5)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() > 0 && e.file_type().is_dir() {
+                if crate::scanner::fs_guard::should_skip_traversal(e.path()) {
+                    return false;
+                }
+                if let Some(name) = e.file_name().to_str() {
+                    if name.starts_with('.') && e.depth() > 1 {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_dir() || entry.depth() == 0 {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if !is_cache_dir_name(&dir_name) {
+            continue;
+        }
+        let path = entry.path().to_path_buf();
+        if crate::safety::is_manifest_managed_path(&path) {
+            continue;
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let size = dir_size(&path);
+        if size >= NAMED_CACHE_MIN {
+            items.push(ScanItem {
+                path: path.to_string_lossy().to_string(),
+                size_bytes: size,
+                category: "飞书渲染缓存".to_string(),
+                selected: false,
+                deletable: true,
+                undeletable_reason: String::new(),
+                batch_paths: Vec::new(),
+                recommend: Recommend::CacheOnly,
+                description: format!(
+                    "飞书（Lark）的网页 / 代码 / 图形渲染缓存（{}），删除后可自动重建；消息、文件、工作区与登录态不受影响。清理前请退出飞书。",
+                    dir_name
+                ),
+            });
+        }
+    }
+}
+
+/// 定点推送一个命名缓存项：目录存在且体积达标才进列表。
+pub(crate) fn push_named_cache_item(
+    items: &mut Vec<ScanItem>,
+    dir: &std::path::Path,
+    category: &str,
+    description: &str,
+    recommend: Recommend,
+) {
+    if !dir.is_dir() {
+        return;
+    }
+    let size = dir_size(dir);
+    if size < NAMED_CACHE_MIN {
+        return;
+    }
+    items.push(ScanItem {
+        path: dir.to_string_lossy().to_string(),
+        size_bytes: size,
+        category: category.to_string(),
+        selected: false,
+        deletable: true,
+        undeletable_reason: String::new(),
+        batch_paths: Vec::new(),
+        recommend,
+        description: description.to_string(),
+    });
 }
 
 // =========================================================================
@@ -429,7 +714,7 @@ pub fn scan_app_support_caches() -> Vec<ScanItem> {
 }
 
 /// 检查目录名是否匹配已知缓存目录名（不区分大小写）
-fn is_cache_dir_name(name: &str) -> bool {
+pub(crate) fn is_cache_dir_name(name: &str) -> bool {
     let name_lower = name.to_lowercase();
     CACHE_DIR_NAMES
         .iter()
@@ -864,5 +1149,36 @@ mod tests {
         let absent: HashSet<String> =
             ["com.finder.other", "com.another.app"].iter().map(|s| s.to_string()).collect();
         assert_eq!(im_install_state(wx, &absent), Some(false));
+    }
+
+    #[test]
+    fn named_cache_dir_name_matches_chromium_and_im_caches() {
+        // 语义化命名段复用的缓存目录名匹配，必须覆盖 Electron / 微信的典型缓存目录
+        assert!(is_cache_dir_name("Cache_Data"));
+        assert!(is_cache_dir_name("DawnCache"));
+        assert!(is_cache_dir_name("GPUCache"));
+        assert!(is_cache_dir_name("Code Cache"));
+        assert!(is_cache_dir_name("cache"));
+        assert!(is_cache_dir_name("Logs"));
+        // 用户数据目录不得误命中
+        assert!(!is_cache_dir_name("Documents"));
+        assert!(!is_cache_dir_name("Messages"));
+        assert!(!is_cache_dir_name("Files"));
+        assert!(!is_cache_dir_name("profile_main"));
+    }
+
+    #[test]
+    fn push_named_cache_item_ignores_missing_or_tiny_dirs() {
+        // 定点推送：不存在的目录 / 体积不足的目录都不产生项（不触碰文件系统）
+        let mut items = Vec::new();
+        let missing = std::env::temp_dir().join("maclean_named_missing_xyz");
+        push_named_cache_item(
+            &mut items,
+            &missing,
+            "Go构建缓存",
+            "test",
+            Recommend::CacheOnly,
+        );
+        assert!(items.is_empty());
     }
 }

@@ -375,7 +375,11 @@ impl Scanner for UninstallScanner {
 /// 注意：~/Applications/ 下存在子目录存放 PWA 快捷方式（如
 /// `Chrome Apps.localized/`、Safari Web Apps），因此对用户 Applications
 /// 目录额外递归一层，否则 Chrome/Safari 安装的网页应用永远扫不到。
-fn collect_app_paths() -> Vec<PathBuf> {
+/// 枚举 `/Applications` 与 `~/Applications`（含一层子目录的 PWA）下的全部 `.app`。
+///
+/// 供 IM 容器数据判定与语义化清理项（named_catalog）复用：不依赖 Spotlight，
+/// 直接读文件系统。返回空 Vec 表示目录不可读（异常），调用方需保守处理。
+pub(crate) fn collect_app_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let home = home_dir();
 

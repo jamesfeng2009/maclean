@@ -19,6 +19,11 @@ pub mod apfs;
 pub mod app_cache;
 #[cfg(target_os = "macos")]
 pub mod app_data;
+// 语义化清理项目录（named catalog）：工具链注册表 + 已安装应用驱动，
+// 对标 MangoDisk 的 "WeChat application cache / Go build cache" 粒度。
+// 依赖 ~/Library/Containers 等 macOS 路径，仅 macOS。
+#[cfg(target_os = "macos")]
+pub mod named_catalog;
 pub mod cache_registry;
 pub mod dev_cache;
 // 文件系统遍历护栏（网络/FUSE 挂载点 + TCC 容器快跳）与有界阻塞 IO 池：

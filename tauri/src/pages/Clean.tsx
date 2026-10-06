@@ -33,6 +33,26 @@ function groupRisk(g: Group): GroupRisk {
   return "safe";
 }
 
+/** 清理前需关闭的应用（对标 MangoDisk 的 "Apps to close"）。按分类名前缀匹配。 */
+const APPS_TO_CLOSE: Array<[RegExp, string]> = [
+  [/^微信/, "微信、WeChatAppEx"],
+  [/^飞书/, "飞书、Lark Helper"],
+  [/^企业微信/, "企业微信"],
+  [/^钉钉/, "钉钉"],
+  [/^QQ/, "QQ"],
+  [/^Chrome/, "Chrome"],
+  [/^优酷/, "优酷"],
+  [/^百度网盘/, "百度网盘"],
+  [/^爱奇艺/, "爱奇艺"],
+];
+
+function appsToClose(category: string): string | null {
+  for (const [re, apps] of APPS_TO_CLOSE) {
+    if (re.test(category)) return apps;
+  }
+  return null;
+}
+
 /** 整组可删除项是否都属于安全/缓存（默认勾选只允许这种纯安全组） */
 function isPureSafe(g: Group): boolean {
   return g.deletableCount > 0 && g.advancedCount === 0 && g.cautionCount === 0;
@@ -501,6 +521,7 @@ export function Clean() {
               const isOpen = open.has(g.name);
               const disabled = g.deletableCount === 0;
               const risk = groupRisk(g);
+              const closeApps = appsToClose(g.name);
               const detail = [
                 `${g.deletableCount} 项可清理`,
                 g.advancedCount > 0 ? `${g.advancedCount} 项高级` : "",
@@ -553,7 +574,20 @@ export function Clean() {
                           )}
                         </span>
                       </div>
-                      <div className="d">{detail}</div>
+                      <div className="d">
+                        {detail}
+                        {closeApps && (
+                          <span
+                            style={{
+                              color: "rgba(217,119,6,.95)",
+                              fontWeight: 600,
+                              marginLeft: 6,
+                            }}
+                          >
+                            · 清理前请关闭：{closeApps}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <span
                       className={`sz${g.deletableCount === 0 ? " sz-readonly" : ""}`}
