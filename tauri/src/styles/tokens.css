@@ -370,6 +370,23 @@ body{
 /* 分类标题行内的风险徽章 */
 .cat-card{position:relative}
 .cat-card .meta .t{display:flex;align-items:center;gap:8px}
+
+/* 一级分类树布局（对标 MangoDisk Deep Cleanup 左侧栏 + 右侧明细） */
+.clean-layout{display:grid;grid-template-columns:236px 1fr;gap:14px;align-items:start}
+.clean-sb{display:flex;flex-direction:column;gap:2px;position:sticky;top:76px;max-height:calc(100vh - 150px);overflow-y:auto;padding-right:2px}
+.clean-sb-item{
+  display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:4px 8px;
+  padding:9px 10px;border:none;background:transparent;border-radius:10px;cursor:pointer;text-align:left;
+  border:1px solid transparent;transition:background .15s,border-color .15s;
+}
+.clean-sb-item:hover{background:var(--panel-2)}
+.clean-sb-item.on{background:var(--brand-50);border-color:var(--brand-30,color-mix(in srgb,var(--brand) 30%,transparent))}
+.csb-ico{grid-row:1/3;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:var(--panel-2);color:var(--brand)}
+.clean-sb-item.on .csb-ico{background:var(--brand);color:#fff}
+.csb-name{font-size:12.5px;font-weight:600;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.csb-size{font-size:11px;font-family:ui-monospace,Menlo,monospace;color:var(--text-2);white-space:nowrap}
+.csb-meta{grid-column:2/4;font-size:10.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.clean-main{min-width:0}
 .cat-tags{display:inline-flex;gap:6px}
 /* 卡片左侧风险色条（伪元素，不受选中/悬停边框影响） */
 .cat-card::before{

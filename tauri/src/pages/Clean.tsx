@@ -108,6 +108,68 @@ function groupIcon(name: string): string {
 }
 
 /**
+ * 一级分类（对标 MangoDisk Deep Cleanup 的左侧分类树：
+ * System caches / User cache files / Application caches / Browser data /
+ * Application optimization / AI models and caches / Developer tools /
+ * Xcode data / Container caches / Project build artifacts）。
+ * maclean 的细粒度 category（语义化命名清理项）经 groupOf 归入这些一级分类，
+ * 前端据此渲染左侧树 + 右侧分组明细。
+ */
+const CLEAN_GROUPS: Array<{ key: string; label: string; icon: string }> = [
+  { key: "system", label: "System caches", icon: "cpu" },
+  { key: "user", label: "User cache files", icon: "folder" },
+  { key: "app", label: "Application caches", icon: "app" },
+  { key: "browser", label: "Browser data", icon: "globe" },
+  { key: "appopt", label: "Application optimization", icon: "zap" },
+  { key: "ai", label: "AI models and caches", icon: "cpu" },
+  { key: "dev", label: "Developer tools", icon: "code" },
+  { key: "xcode", label: "Xcode data", icon: "code" },
+  { key: "container", label: "Container caches", icon: "container" },
+  { key: "project", label: "Project build artifacts", icon: "folder" },
+  { key: "other", label: "Other", icon: "folder" },
+];
+
+function groupOf(it: ScanItem): string {
+  const c = it.category;
+  const cl = c.toLowerCase();
+  const pl = it.path.toLowerCase();
+  // Xcode 派生数据 / 模拟器运行时 / 编译缓存
+  if (/xcode/i.test(cl) || pl.includes("xcode") || /deriveddata|simruntime|coresimulator|\.xcarchive/i.test(pl)) {
+    return "xcode";
+  }
+  // 浏览器数据
+  if (/浏览器/i.test(c) || (/chrome|edge|brave|firefox|safari/i.test(cl) && pl.includes("/library/caches/"))) {
+    return "browser";
+  }
+  // 系统缓存（~/Library/Caches 下的 com.apple.*）
+  if (/^com\.apple\./i.test(it.path.split("/").pop() ?? "") && pl.includes("/library/caches/")) {
+    return "system";
+  }
+  // AI 模型与缓存（huggingface / gguf / onnx / safetensors 等）
+  if (/ai|模型|huggingface|gguf|onnx|safetensors|torchhub|models--/i.test(c + " " + it.path)) {
+    return "ai";
+  }
+  // 容器缓存
+  if (/容器|docker|orbstack/i.test(c + " " + it.path)) {
+    return "container";
+  }
+  // 项目构建产物
+  if (/构建产物|build artifact|artifact/i.test(cl)) {
+    return "project";
+  }
+  // 开发者工具链（Go / Cargo / Java / pip / pnpm / npm / Homebrew 等）
+  if (/go|cargo|rust|java|gradle|maven|pip|poetry|pnpm|npm|yarn|homebrew|bun|deno|playwright|cocoapods|swift|composer|ruby|gem|bundler|uv|node|工具链|开发/i.test(cl)) {
+    return "dev";
+  }
+  // ~/Library/Caches 下的命名应用缓存目录 → User cache files（对标 MangoDisk）
+  if (pl.includes("/library/caches/")) {
+    return "user";
+  }
+  // 其余语义化缓存（Application Support / Containers 深层）→ Application caches
+  return "app";
+}
+
+/**
  * 受支持 IM 的 bundle id → 中文名。须与 maclean-core `im_data::IM_APPS`
  * 保持同步：仅用于 UI 层从扫描项路径识别"这是 IM"，权威判定仍在 Rust 侧。
  */
@@ -325,6 +387,27 @@ export function Clean() {
 
   const groups = useMemo(() => groupItems(items), [items]);
 
+  // 一级分类树（对标 MangoDisk Deep Cleanup 左侧栏）：category → group 聚合
+  const [activeGroup, setActiveGroup] = useState<string>("all");
+  const groupMeta = useMemo(() => {
+    const m = new Map<string, { size: number; protectedSize: number; deletableCount: number; protectedCount: number; selectedCount: number }>();
+    for (const g of groups) {
+      const key = groupOf(g.items[0]);
+      const e = m.get(key) ?? { size: 0, protectedSize: 0, deletableCount: 0, protectedCount: 0, selectedCount: 0 };
+      e.size += g.size;
+      e.protectedSize += g.protectedSize;
+      e.deletableCount += g.deletableCount;
+      e.protectedCount += g.protectedCount;
+      if (checked.has(g.name)) e.selectedCount += g.deletableCount;
+      m.set(key, e);
+    }
+    return m;
+  }, [groups, checked]);
+  const visibleGroups = useMemo(
+    () => (activeGroup === "all" ? groups : groups.filter((g) => groupOf(g.items[0]) === activeGroup)),
+    [groups, activeGroup]
+  );
+
   // 概览页点某分类卡片 → focusClean：自动展开该组、平滑滚动定位、短暂高亮；
   // 微信/QQ 等 IM 受保护组额外自动展开只读占用构成。以 nonce 为触发，重复点击同项也生效。
   useEffect(() => {
@@ -348,8 +431,8 @@ export function Clean() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cleanFocus?.nonce]);
 
-  // 可操作的分类（至少有 1 个可删除项）
-  const selectableGroups = useMemo(() => groups.filter((g) => g.deletableCount > 0), [groups]);
+  // 可操作的分类（至少有 1 个可删除项）；全选/仅安全作用于当前一级分类视图
+  const selectableGroups = useMemo(() => visibleGroups.filter((g) => g.deletableCount > 0), [visibleGroups]);
   const selectAll = useCallback(
     (mode: "all" | "safe" | "none") => {
       if (mode === "none") setChecked(new Set());
@@ -565,17 +648,58 @@ export function Clean() {
         />
       ) : (
         <>
+          {/* 左侧一级分类树 + 右侧明细（对标 MangoDisk Deep Cleanup） */}
+          <div className="clean-layout">
+            <aside className="clean-sb">
+              <button
+                className={`clean-sb-item${activeGroup === "all" ? " on" : ""}`}
+                onClick={() => setActiveGroup("all")}
+              >
+                <span className="csb-ico">
+                  <Icon name="folder" size={15} />
+                </span>
+                <span className="csb-name">全部</span>
+                <span className="csb-size">{fmt(selectableGroups.reduce((s, g) => s + g.size, 0))}</span>
+                <span className="csb-meta">{groups.length} 项</span>
+              </button>
+              {CLEAN_GROUPS.map((g) => {
+                const m = groupMeta.get(g.key);
+                if (!m || (m.deletableCount === 0 && m.protectedCount === 0)) return null;
+                return (
+                  <button
+                    key={g.key}
+                    className={`clean-sb-item${activeGroup === g.key ? " on" : ""}`}
+                    onClick={() => setActiveGroup(g.key)}
+                    title={`${m.deletableCount} 项可清理 · ${m.protectedCount} 项受保护`}
+                  >
+                    <span className="csb-ico">
+                      <Icon name={g.icon} size={15} />
+                    </span>
+                    <span className="csb-name">{g.label}</span>
+                    <span className="csb-size">
+                      {m.deletableCount > 0 ? fmt(m.size) : fmt(m.protectedSize)}
+                    </span>
+                    <span className="csb-meta">
+                      {fmt(m.deletableCount > 0 ? m.size : m.protectedSize)} · {m.deletableCount + m.protectedCount} items
+                    </span>
+                  </button>
+                );
+              })}
+            </aside>
+
+            <div className="clean-main">
           <div className="select-bar">
             <span className="select-info">
-              共 {selectableGroups.length} 个可清理分类 · 已选 {selectedItems.length} 项 · 可回收{" "}
-              {fmt(selectedSize)}
+              {activeGroup === "all" ? "全部可清理项" : CLEAN_GROUPS.find((g) => g.key === activeGroup)?.label}
+              {" · "}
+              {visibleGroups.length} 个分类 · 已选 {selectedItems.length} 项 · 可回收 {fmt(selectedSize)}
             </span>
             <div className="grow" />
             <button
               className="btn-secondary select-btn"
               onClick={() => selectAll("all")}
               disabled={scanning}
-              title="勾选所有可清理分类，包括注意/高级风险项"
+              title="勾选当前视图所有可清理分类，包括注意/高级风险项"
             >
               全选
             </button>
@@ -597,7 +721,7 @@ export function Clean() {
           </div>
 
           <div className="cat-list">
-            {groups.map((g) => {
+            {visibleGroups.map((g) => {
               const isOn = checked.has(g.name);
               const isOpen = open.has(g.name);
               const disabled = g.deletableCount === 0;
@@ -864,13 +988,16 @@ export function Clean() {
               );
             })}
           </div>
+            </div>
+          </div>
         </>
       )}
 
       {selectedItems.length > 0 && (
         <div className="summary-bar">
           <span className="sel">
-            已选 <b>{selectedItems.length}</b> 项 · 共 <b>{fmt(selectedSize)}</b>
+            Selected items <b>{selectedItems.length + Object.keys(checkedChildren).length} items</b> · Estimated space to free{" "}
+            <b>{fmt(selectedSize)}</b>
           </span>
           {hasRisk && (
             <span className="sel-risk">
