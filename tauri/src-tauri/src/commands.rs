@@ -1381,6 +1381,102 @@ pub fn settings_set(patch: serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+/* ============================== 登录启动 & 菜单栏 ============================== */
+
+/// 登录时启动（macOS）：LaunchAgent plist 是否存在即代表是否启用。
+/// 采用 `~/Library/LaunchAgents/com.maclean.app.plist`（RunAtLoad），
+/// 不依赖已废弃的旧版「登录项」接口；写入即生效（下次登录自动拉起）。
+fn launch_agent_path() -> PathBuf {
+    platform::home_dir().join("Library/LaunchAgents/com.maclean.app.plist")
+}
+
+/// 登录时启动当前状态（以 plist 存在性为准，不额外存 config）
+#[tauri::command]
+pub fn launch_at_login_get() -> bool {
+    launch_agent_path().exists()
+}
+
+/// 设置登录时启动：写入 / 删除 LaunchAgent plist，并尝试 launchctl 装载。
+/// launchctl 对未签名包可能拒绝（返回非零），此处宽容处理——plist 本身
+/// 已满足「下次登录自动启动」，装载失败不影响下一次登录。
+#[tauri::command]
+pub fn launch_at_login_set(enabled: bool) -> Result<(), String> {
+    let path = launch_agent_path();
+    let cmd = |args: &[&str]| {
+        std::process::Command::new("launchctl")
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())
+    };
+    if enabled {
+        if path.exists() {
+            return Ok(());
+        }
+        let exe = std::env::current_exe().map_err(|e| format!("无法定位可执行文件：{e}"))?;
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.maclean.app</string>
+  <key>ProgramArguments</key><array><string>{}</string></array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+"#,
+            exe.display()
+        );
+        let dir = path.parent().ok_or("LaunchAgents 路径无效")?;
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        std::fs::write(&path, plist).map_err(|e| format!("写入登录项失败：{e}"))?;
+        let uid = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        let _ = cmd(&[
+            "bootstrap",
+            &format!("gui/{}", uid.trim()),
+            path.to_str().unwrap_or(""),
+        ]);
+        Ok(())
+    } else {
+        if !path.exists() {
+            return Ok(());
+        }
+        let uid = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        let _ = cmd(&[
+            "bootout",
+            &format!("gui/{}", uid.trim()),
+            path.to_str().unwrap_or(""),
+        ]);
+        std::fs::remove_file(&path).map_err(|e| format!("移除登录项失败：{e}"))?;
+        Ok(())
+    }
+}
+
+/// 菜单栏图标状态（config.json 为准）
+#[tauri::command]
+pub fn menu_bar_status() -> bool {
+    config::load_config().settings_menubar_icon
+}
+
+/// 显示 / 隐藏 macOS 菜单栏托盘图标。托盘由 Tauri 侧持有（MenuBar State），
+/// 这里只负责同步 config 并调用壳层应用托盘（见 lib.rs::menu_bar_apply）。
+#[tauri::command]
+pub fn menu_bar_set(show: bool, app: AppHandle) -> Result<(), String> {
+    let mut cfg = config::load_config();
+    cfg.settings_menubar_icon = show;
+    config::save_config(&cfg);
+    crate::menu_bar_apply(&app, show)
+}
+
 /* ============================== 设计 token ============================== */
 
 /// 返回当前主题的完整色板（Rust 侧 design_tokens 是单一事实来源）。

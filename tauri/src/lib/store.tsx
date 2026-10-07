@@ -60,7 +60,7 @@ const emptyReady = (): Record<ResultScope, boolean> => ({
   apps: false,
 });
 
-export type Theme = "light" | "dark";
+export type Theme = "light" | "dark" | "system";
 export type Page =
   | "overview"
   | "analysis"
@@ -99,6 +99,7 @@ interface AppState {
   cleanFocus: { category: string; nonce: number } | null;
   focusClean: (category: string) => void;
   theme: Theme;
+  setTheme: (t: Theme) => void;
   toggleTheme: () => void;
   langEn: boolean;
   setLangEn: (en: boolean) => void;
@@ -192,13 +193,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [cleanFocus, setCleanFocus] = useState<{ category: string; nonce: number } | null>(null);
   const cleanFocusNonce = useRef(0);
   const [theme, setTheme] = useState<Theme>(() => {
-    // 优先用户手动选择；首次启动跟随系统外观
+    // 优先用户手动选择；默认跟随系统外观（Follow system）
     const saved = localStorage.getItem("maclean-theme") as Theme | null;
-    if (saved === "light" || saved === "dark") return saved;
-    return typeof window !== "undefined" &&
-      window.matchMedia?.("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
+    if (saved === "light" || saved === "dark" || saved === "system") return saved;
+    return "system";
   });
   const [langEn, setLangEnState] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -222,10 +220,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [cleanLogs, setCleanLogs] = useState<CleanLogEntry[]>([]);
   const toastId = useRef(0);
 
+  // 有效主题：system 跟随系统外观实时切换；手动选择直接生效
+  const effectiveTheme =
+    theme === "system"
+      ? typeof window !== "undefined" &&
+        window.matchMedia?.("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light"
+      : theme;
+
   // 主题即时生效 + 持久化
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.setAttribute("data-theme", effectiveTheme);
     localStorage.setItem("maclean-theme", theme);
+  }, [theme, effectiveTheme]);
+
+  // Follow system：监听系统外观变化，实时跟随
+  useEffect(() => {
+    if (theme !== "system" || typeof window === "undefined") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => document.documentElement.setAttribute("data-theme", mq.matches ? "dark" : "light");
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
   }, [theme]);
 
   // 启动时读 core 配置里的语言
@@ -462,6 +478,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       cleanFocus,
       focusClean,
       theme,
+      setTheme,
       toggleTheme: () => setTheme((t) => (t === "dark" ? "light" : "dark")),
       langEn,
       setLangEn,

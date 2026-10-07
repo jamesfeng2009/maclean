@@ -44,12 +44,16 @@ function Row({
 }
 
 export function Settings() {
-  const { langEn, setLangEn, toast } = useApp();
+  const { langEn, setLangEn, theme, setTheme, toast } = useApp();
   const [cfg, setCfg] = useState<AppSettings | null>(null);
   const [showLog, setShowLog] = useState(false);
+  // 登录时启动（LaunchAgent plist 是权威状态，进入设置页时实时读取）
+  const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
+  const [launchBusy, setLaunchBusy] = useState(false);
 
   useEffect(() => {
     ipc.settingsGet().then(setCfg).catch((e) => toast("warn", "读取设置失败：" + e));
+    ipc.launchAtLoginGet().then(setLaunchAtLogin).catch(() => setLaunchAtLogin(false));
   }, [toast]);
 
   if (!cfg) return <div className="empty">正在加载设置…</div>;
@@ -57,6 +61,27 @@ export function Settings() {
   const patch = (p: Partial<AppSettings>) => {
     setCfg((c) => (c ? { ...c, ...p } : c));
     ipc.settingsSet(p).catch((e) => toast("warn", "保存设置失败：" + e));
+  };
+
+  const toggleLaunch = (v: boolean) => {
+    setLaunchBusy(true);
+    setLaunchAtLogin(v);
+    ipc
+      .launchAtLoginSet(v)
+      .then(() => toast("success", v ? "已开启：下次登录自动启动 maclean" : "已关闭登录时启动"))
+      .catch((e) => {
+        setLaunchAtLogin(!v);
+        toast("warn", "设置登录启动失败：" + e);
+      })
+      .finally(() => setLaunchBusy(false));
+  };
+
+  const toggleMenubar = (v: boolean) => {
+    patch({ settings_menubar_icon: v });
+    ipc
+      .menuBarSet(v)
+      .then(() => toast("success", v ? "已显示菜单栏图标" : "已隐藏菜单栏图标"))
+      .catch((e) => toast("warn", "切换菜单栏图标失败：" + e));
   };
 
   return (
@@ -74,6 +99,37 @@ export function Settings() {
               English
             </button>
           </div>
+        </Row>
+        <Row title="主题" desc="使用浅色、深色或跟随系统的外观">
+          <div className="seg">
+            <button
+              className={theme === "system" ? "on" : ""}
+              onClick={() => setTheme("system")}
+            >
+              Follow system
+            </button>
+            <button
+              className={theme === "light" ? "on" : ""}
+              onClick={() => setTheme("light")}
+            >
+              Light
+            </button>
+            <button
+              className={theme === "dark" ? "on" : ""}
+              onClick={() => setTheme("dark")}
+            >
+              Dark
+            </button>
+          </div>
+        </Row>
+        <Row title="登录时启动" desc="登录系统后自动启动 maclean（写入 LaunchAgent，下次登录生效）">
+          <Switch on={!!launchAtLogin} disabled={launchBusy} onChange={toggleLaunch} />
+        </Row>
+        <Row title="在菜单栏显示" desc="在 macOS 菜单栏常驻图标，悬停可见磁盘用量，点击唤起主窗口">
+          <Switch
+            on={!!cfg.settings_menubar_icon}
+            onChange={toggleMenubar}
+          />
         </Row>
         <Row title="删除前确认高级风险项" desc="清理包含「注意/高级」等级项目时，强制弹出二次确认">
           <Switch

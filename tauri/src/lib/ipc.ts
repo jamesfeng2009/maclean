@@ -57,6 +57,13 @@ export const ipc = {
   },
 
   startups: () => invoke<StartupItem[]>("startups_list"),
+
+  /** 登录时启动（macOS LaunchAgent plist 存在性） */
+  launchAtLoginGet: () => invoke<boolean>("launch_at_login_get"),
+  launchAtLoginSet: (enabled: boolean) => invoke<void>("launch_at_login_set", { enabled }),
+  /** 菜单栏托盘开关 */
+  menuBarStatus: () => invoke<boolean>("menu_bar_status"),
+  menuBarSet: (show: boolean) => invoke<void>("menu_bar_set", { show }),
   startupSetEnabled: (
     label: string,
     plist: string,
