@@ -605,6 +605,10 @@ body{
 .modal-list::-webkit-scrollbar{width:7px}
 .modal-list::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:5px}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+.modal-exec{margin-top:14px;padding:9px 12px;border:1px solid var(--line-2);border-radius:10px;background:var(--panel-2)}
+.modal-exec-line{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-2);min-width:0}
+.modal-exec-line span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.modal-exec-timer{margin-top:4px;font-size:11px;color:var(--text-3);font-family:ui-monospace,Menlo,monospace}
 .warn-banner{
   display:flex;align-items:center;gap:10px;background:var(--danger-50);border:1px solid var(--danger-100);
   color:var(--danger);border-radius:10px;padding:10px 14px;font-size:12.5px;margin-bottom:14px;

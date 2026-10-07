@@ -15,10 +15,12 @@ import { shortPath } from "../lib/format";
 const CONFIRM_GUARD_MS = 700;
 
 export function ConfirmModal() {
-  const { confirmReq, closeConfirm } = useApp();
+  const { confirmReq, closeConfirm, cleanLogs } = useApp();
   const [busy, setBusy] = useState(false);
   const [toggleOn, setToggleOn] = useState(false);
   const [guarded, setGuarded] = useState(false);
+  // 删除计时：大目录（build/dist 等）删除可能持续数十秒，给出已用时间避免“卡死”错觉
+  const [elapsed, setElapsed] = useState(0);
 
   // 每次弹出新的确认框：勾选项恢复默认值，并进入"打开保护期"
   useEffect(() => {
@@ -26,9 +28,18 @@ export function ConfirmModal() {
     setToggleOn(!!confirmReq.confirmToggle?.defaultOn);
     setBusy(false);
     setGuarded(true);
+    setElapsed(0);
     const t = setTimeout(() => setGuarded(false), CONFIRM_GUARD_MS);
     return () => clearTimeout(t);
   }, [confirmReq]);
+
+  // 执行中每秒计时
+  useEffect(() => {
+    if (!busy) return;
+    setElapsed(0);
+    const t = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [busy]);
 
   // Esc 关闭；刻意不监听 Enter（回车不得触发确认）
   useEffect(() => {
@@ -115,6 +126,26 @@ export function ConfirmModal() {
           </label>
         )}
 
+        {/* 执行中：实时显示当前删除步骤（大目录删除可能持续数十秒）+ 已用时间 */}
+        {busy && (
+          <div className="modal-exec">
+            <div className="modal-exec-line">
+              {cleanLogs.length > 0 ? (
+                <>
+                  <Icon name="trash" size={13} />
+                  <span>{cleanLogs[cleanLogs.length - 1].line}</span>
+                </>
+              ) : (
+                <>
+                  <Icon name="zap" size={13} />
+                  <span>正在准备删除…</span>
+                </>
+              )}
+            </div>
+            <div className="modal-exec-timer">已用 {elapsed}s</div>
+          </div>
+        )}
+
         <div className="modal-actions">
           <button type="button" className="btn-secondary" onClick={closeConfirm} disabled={busy}>
             取消
@@ -126,7 +157,7 @@ export function ConfirmModal() {
             disabled={busy || guarded}
             title={guarded ? "请稍候确认，防止误触" : undefined}
           >
-            {busy ? "执行中…" : guarded ? "请确认…" : confirmReq.confirmText || "确认"}
+            {busy ? `执行中… ${elapsed}s` : guarded ? "请确认…" : confirmReq.confirmText || "确认"}
           </button>
         </div>
       </div>

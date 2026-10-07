@@ -1008,10 +1008,19 @@ pub async fn clean_execute(
                         last_ok = ok;
                         tick = true;
                     }
-                    DeleteMessage::Skip(..) | DeleteMessage::Info(_) => {
+                    DeleteMessage::Skip(..) => {
                         report.skipped += 1;
                         done_paths += 1;
                         tick = true;
+                    }
+                    DeleteMessage::Info(line) => {
+                        // 过程消息（如「正在删除…」「需要管理员权限」）：不计入
+                        // 成功/失败/跳过统计（旧逻辑误把 Info 计入 skipped），
+                        // 只推送给前端展示当前删除进度。
+                        let _ = app.emit(
+                            "clean-log",
+                            serde_json::json!({ "line": line, "path": "", "ok": false }),
+                        );
                     }
                     DeleteMessage::NeedPassword(v) => {
                         need_pw = Some(v);
@@ -1109,10 +1118,16 @@ pub async fn clean_execute(
                                     last_ok = ok;
                                     tick = true;
                                 }
-                                DeleteMessage::Skip(..) | DeleteMessage::Info(_) => {
+                                DeleteMessage::Skip(..) => {
                                     report.skipped += 1;
                                     done_paths += 1;
                                     tick = true;
+                                }
+                                DeleteMessage::Info(line) => {
+                                    let _ = app.emit(
+                                        "clean-log",
+                                        serde_json::json!({ "line": line, "path": "", "ok": false }),
+                                    );
                                 }
                                 DeleteMessage::NeedPassword(_) => {
                                     report.need_password += 1;

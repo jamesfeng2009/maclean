@@ -1368,6 +1368,7 @@ pub fn t_lang(lang_en: bool, key: &str) -> &'static str {
                 // 后台日志
                 "log_intercepted" => "Blocked: {} - {}",
                 "log_skipped" => "Skipped: {} - {}",
+                "log_deleting" => "Deleting: {}",
                 "log_deleted" => "Deleted [{}] {} (success {} / fail {})",
                 "log_deleted_sudo" => "Deleted [{}] {} (admin privileges)",
                 "log_deleted_touchid" => "Deleted [{}] {} (Touch ID)",
@@ -1837,6 +1838,7 @@ pub fn t_lang(lang_en: bool, key: &str) -> &'static str {
                 // 后台日志
                 "log_intercepted" => "已拦截: {} - {}",
                 "log_skipped" => "已跳过: {} - {}",
+                "log_deleting" => "正在删除: {}",
                 "log_deleted" => "已删除 [{}] {} (成功 {} / 失败 {})",
                 "log_deleted_sudo" => "已删除 [{}] {} (管理员权限)",
                 "log_deleted_touchid" => "已删除 [{}] {} (Touch ID)",

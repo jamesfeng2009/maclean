@@ -1255,6 +1255,13 @@ pub fn start_delete(
                         // 普通文件/目录删除 - 尽力删除模式
                         let p = std::path::Path::new(path.as_str());
 
+                        // 删除开始前发一条过程消息：大目录（如 build/dist）删除可能
+                        // 持续数十秒，UI 据此显示「正在删除…」而非一直停在无反馈状态。
+                        let _ = tx.send(DeleteMessage::Info(format!(
+                            "🗑 {}",
+                            crate::i18n::tf_lang(lang_en, "log_deleting", &[&path])
+                        )));
+
                         if !p.exists() && p.symlink_metadata().is_err() {
                             // 对齐：路径已不存在 → 记 SKIP，不计成功也不计失败。
                             // 之前记"✓ (已清理)"会让成功数虚高 —— 用户没做任何事，
