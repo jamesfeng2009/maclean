@@ -40,7 +40,7 @@ ctrlc = "3"
 embed-resource = "2"
 
 [features]
-default = ["gui"]
+default = []
 # GUI 壳（egui/eframe + 菜单栏）。裁剪掉后得到纯 CLI 二进制：
 #   cargo build --release --no-default-features
 # 核心能力（扫描 / 删除闸门 / 备份 / 启动项 / 优化 / 调度 / 提权）全部保留。

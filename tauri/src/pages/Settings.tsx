@@ -178,6 +178,15 @@ export function Settings() {
             onChange={(v) => patch({ settings_prefer_official_uninstaller: v })}
           />
         </Row>
+        <Row
+          title="保持提权会话"
+          desc="清理含注意/高级项时，先弹一次系统授权（Touch ID/密码）并后台保活 sudo 票据，整轮删除免重复弹窗；密码仅内存保留、不落盘"
+        >
+          <Switch
+            on={!!cfg.settings_keep_sudo}
+            onChange={(v) => patch({ settings_keep_sudo: v })}
+          />
+        </Row>
       </div>
 
       <div className="set-group">

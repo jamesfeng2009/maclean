@@ -14,13 +14,18 @@ use commands::{
     logs_read, logs_reveal, menu_bar_set, menu_bar_status, open_app_management_settings,
     open_full_disk_access_settings, optimize_list, optimize_run, palette, reveal_path,
     reveal_trash, scan, settings_get, settings_set, startup_set_enabled, startups_list,
+    sudo_keepalive_start, sudo_keepalive_status, sudo_keepalive_stop_cmd,
 };
-use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
 /// 菜单栏托盘持有者：`Some(tray)` = 已显示；`None` = 已隐藏。
 /// 由 `menu_bar_apply` 统一增删；定时刷新线程只读引用更新 tooltip。
 pub struct MenuBar(pub Mutex<Option<TrayIcon>>);
+
+/// 托盘菜单中的动态信息项（磁盘用量），供 60s 刷新线程更新文本
+pub struct MenuInfo(pub Mutex<Option<MenuItem<tauri::Wry>>>);
 
 /// 菜单栏 tooltip 文本：磁盘可用空间（复用 core 的真实磁盘信息）。
 fn menubar_tooltip() -> String {
@@ -30,8 +35,9 @@ fn menubar_tooltip() -> String {
     format!("maclean · 已用 {:.1}% · 可用 {:.1} GB / {:.1} GB", pct, free as f32 / 1e9, total as f32 / 1e9)
 }
 
-/// 应用 / 移除菜单栏托盘（幂等）。开启时创建托盘：左键单击唤起主窗口，
-/// tooltip 每 60 秒刷新一次磁盘用量；关闭时直接 drop 托盘图标。
+/// 应用 / 移除菜单栏托盘（幂等）。开启时创建托盘 HUD：
+/// 左键单击弹出原生菜单（磁盘用量信息 + 打开 maclean / 废纸篓 / 退出），
+/// 菜单信息项与 tooltip 每 60 秒刷新一次磁盘用量；关闭时直接 drop 托盘。
 pub fn menu_bar_apply(app: &tauri::AppHandle, show: bool) -> Result<(), String> {
     let state = app.state::<MenuBar>();
     let mut guard = state.0.lock().map_err(|_| "菜单栏状态锁被占用".to_string())?;
@@ -41,18 +47,26 @@ pub fn menu_bar_apply(app: &tauri::AppHandle, show: bool) -> Result<(), String> 
         }
         let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))
             .map_err(|e| format!("加载菜单栏图标失败：{e}"))?;
+        // HUD 菜单：动态磁盘信息 + 快捷操作（对标 egui 版托盘 HUD）
+        let info = MenuItem::with_id(app, "menubar-info", menubar_tooltip(), false, None::<&str>)
+            .map_err(|e| format!("创建菜单信息项失败：{e}"))?;
+        let open = MenuItem::with_id(app, "menubar-open", "打开 maclean", true, None::<&str>)
+            .map_err(|e| format!("创建菜单项失败：{e}"))?;
+        let trash = MenuItem::with_id(app, "menubar-trash", "在访达中打开废纸篓", true, None::<&str>)
+            .map_err(|e| format!("创建菜单项失败：{e}"))?;
+        let quit = MenuItem::with_id(app, "menubar-quit", "退出 maclean", true, None::<&str>)
+            .map_err(|e| format!("创建菜单项失败：{e}"))?;
+        let sep = PredefinedMenuItem::separator(app).map_err(|e| format!("创建分隔线失败：{e}"))?;
+        let menu = Menu::with_items(app, &[&info, &sep, &open, &trash, &quit])
+            .map_err(|e| format!("创建菜单失败：{e}"))?;
         let tray = TrayIconBuilder::with_id("maclean-menubar")
             .icon(icon)
             .tooltip(menubar_tooltip())
-            .show_menu_on_left_click(false)
+            .menu(&menu)
+            .show_menu_on_left_click(true)
             .on_tray_icon_event(|tray, event| {
-                // 左键单击：唤起主窗口（不重复开窗，仅显示+聚焦）
-                if let TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } = event
-                {
+                // 双击：直接唤起主窗口（左键已交给菜单，双击不干扰）
+                if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
                     if let Some(w) = tray.app_handle().get_webview_window("main") {
                         let _ = w.show();
                         let _ = w.unminimize();
@@ -62,7 +76,8 @@ pub fn menu_bar_apply(app: &tauri::AppHandle, show: bool) -> Result<(), String> 
             })
             .build(app)
             .map_err(|e| format!("创建菜单栏图标失败：{e}"))?;
-        // 定时刷新 tooltip：后台线程每 60s 重算磁盘信息，不影响主线程
+        *app.state::<MenuInfo>().0.lock().unwrap() = Some(info);
+        // 定时刷新 tooltip + 菜单信息项：后台线程每 60s 重算磁盘信息
         {
             let app = app.clone();
             std::thread::spawn(move || loop {
@@ -75,12 +90,20 @@ pub fn menu_bar_apply(app: &tauri::AppHandle, show: bool) -> Result<(), String> 
                         let _ = t.set_tooltip(Some(tip.as_str()));
                     }
                 }
+                let mi = app.state::<MenuInfo>();
+                let mg = mi.0.lock().ok();
+                if let Some(g) = mg {
+                    if let Some(item) = g.as_ref() {
+                        let _ = item.set_text(tip);
+                    }
+                }
             });
         }
         *guard = Some(tray);
     } else if let Some(t) = guard.take() {
         // drop TrayIcon 即从菜单栏移除
         drop(t);
+        app.state::<MenuInfo>().0.lock().unwrap().take();
     }
     Ok(())
 }
@@ -98,6 +121,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(MenuBar(Mutex::new(None)))
+        .manage(MenuInfo(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             disk_info,
             reveal_trash,
@@ -127,7 +151,27 @@ pub fn run() {
             launch_at_login_set,
             menu_bar_status,
             menu_bar_set,
+            sudo_keepalive_status,
+            sudo_keepalive_start,
+            sudo_keepalive_stop_cmd,
         ])
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "menubar-open" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+            "menubar-trash" => {
+                let dir = maclean_core::backup::trash_dir();
+                if !dir.is_empty() {
+                    let _ = std::process::Command::new("open").arg(&dir).status();
+                }
+            }
+            "menubar-quit" => app.exit(0),
+            _ => {}
+        })
         .setup(|app| {
             // 按配置恢复菜单栏图标（默认开启）
             if maclean_core::config::load_config().settings_menubar_icon {

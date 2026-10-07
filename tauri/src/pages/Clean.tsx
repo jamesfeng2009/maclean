@@ -573,6 +573,17 @@ export function Clean() {
       onConfirm: async (forceTrashSafe) => {
         setBusy(true);
         try {
+          // 含注意/高级项（可能需提权删除）时，预建立 sudo 保活会话：
+          // 只弹一次系统授权（Touch ID/密码），保活期内整轮清理免重复弹窗；
+          // 用户取消不阻塞删除，提权项会在删除阶段如实报失败。
+          if (hasRisk) {
+            try {
+              const active = await ipc.sudoKeepaliveStatus();
+              if (!active) await ipc.sudoKeepaliveStart();
+            } catch {
+              /* 忽略：由删除阶段兜底提示 */
+            }
+          }
           const rep = await executeClean(finalReqsBase, forceTrashSafe === true);
           if (rep.cancelled) {
             toast("warn", "清理已取消");

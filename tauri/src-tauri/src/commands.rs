@@ -12,7 +12,7 @@
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use maclean_core::config;
 use maclean_core::config::AppConfig;
@@ -969,6 +969,7 @@ pub async fn clean_execute(
         );
 
         let mut report = CleanReport::default();
+        let mut need_pw: Option<Vec<(String, String)>> = None;
         let mut done_paths: usize = 0;
         if let Some(rx) = delete_rx {
             let emit_progress =
@@ -1013,8 +1014,9 @@ pub async fn clean_execute(
                         tick = true;
                     }
                     DeleteMessage::NeedPassword(v) => {
-                        report.need_password += v.len();
-                        done_paths += v.len();
+                        need_pw = Some(v);
+                        report.need_password += need_pw.as_ref().map_or(0, |x| x.len());
+                        done_paths += need_pw.as_ref().map_or(0, |x| x.len());
                         tick = true;
                     }
                     DeleteMessage::BackupRecorded {
@@ -1038,6 +1040,101 @@ pub async fn clean_execute(
                         &last_path,
                         last_ok,
                     );
+                }
+            }
+            // 提权阶段：普通删除失败项需要 root。优先复用保活会话（免弹窗），
+            // 没有保活会话则先弹一次系统密码框建立（密码仅内存，不落盘）。
+            if let Some(failed) = need_pw {
+                if !failed.is_empty() {
+                    let pw: String = match sudo_keepalive_password() {
+                        Some(p) => p,
+                        None => {
+                            // 尝试弹原生密码框建立保活会话；用户取消则如实计入失败
+                            match sudo_keepalive_prompt_and_start() {
+                                Ok(_) => match sudo_keepalive_password() {
+                                    Some(p) => p,
+                                    None => {
+                                        for (path, category) in &failed {
+                                            let _ = app.emit(
+                                                "clean-log",
+                                                serde_json::json!({
+                                                    "line": format!("✗ {}（未提供管理员密码）", path),
+                                                    "path": path,
+                                                    "ok": false,
+                                                }),
+                                            );
+                                            let _ = path;
+                                            let _ = category;
+                                        }
+                                        return Err("需要管理员密码但未提供，提权删除已跳过".to_string());
+                                    }
+                                },
+                                Err(e) => {
+                                    for (path, _) in &failed {
+                                        let _ = app.emit(
+                                            "clean-log",
+                                            serde_json::json!({
+                                                "line": format!("✗ {}（{e}）", path),
+                                                "path": path,
+                                                "ok": false,
+                                            }),
+                                        );
+                                    }
+                                    return Err(format!("提权授权失败：{e}"));
+                                }
+                            }
+                        }
+                    };
+                    let cancel2 = Arc::new(AtomicBool::new(false));
+                    let mut rx2: Option<std::sync::mpsc::Receiver<DeleteMessage>> = None;
+                    ops::start_sudo_delete(failed, pw, lang_en, &mut rx2, cancel2);
+                    if let Some(rx) = rx2 {
+                        while let Ok(msg) = rx.recv() {
+                            let mut last_path = String::new();
+                            let mut last_ok = true;
+                            let mut tick = false;
+                            match msg {
+                                DeleteMessage::Log(line, path, _, ok) => {
+                                    let _ = app.emit(
+                                        "clean-log",
+                                        serde_json::json!({ "line": line, "path": path, "ok": ok }),
+                                    );
+                                    if ok {
+                                        report.deleted += 1;
+                                    } else {
+                                        report.intercepted += 1;
+                                    }
+                                    done_paths += 1;
+                                    last_path = path;
+                                    last_ok = ok;
+                                    tick = true;
+                                }
+                                DeleteMessage::Skip(..) | DeleteMessage::Info(_) => {
+                                    report.skipped += 1;
+                                    done_paths += 1;
+                                    tick = true;
+                                }
+                                DeleteMessage::NeedPassword(_) => {
+                                    report.need_password += 1;
+                                    done_paths += 1;
+                                    tick = true;
+                                }
+                                DeleteMessage::BackupRecorded { .. } => {}
+                                DeleteMessage::Cancelled => report.cancelled = true,
+                                DeleteMessage::Done => break,
+                            }
+                            if tick {
+                                emit_progress(
+                                    &app,
+                                    done_paths.min(total_paths),
+                                    total_paths,
+                                    &report,
+                                    &last_path,
+                                    last_ok,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1475,6 +1572,132 @@ pub fn menu_bar_set(show: bool, app: AppHandle) -> Result<(), String> {
     cfg.settings_menubar_icon = show;
     config::save_config(&cfg);
     crate::menu_bar_apply(&app, show)
+}
+
+/* ============================== sudo 保活 ============================== */
+
+/// 保活线程停止标志（与密码同锁保护）
+struct Keepalive {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// sudo 保活全局状态：密码仅存内存（不落盘），保活线程每 25s 用
+/// `sudo -n -v` 刷新票据（macOS 默认 5 分钟有效），使整轮清理免重复弹窗。
+static KEEPALIVE: Mutex<Option<Keepalive>> = Mutex::new(None);
+static SUDO_PASSWORD: Mutex<Option<String>> = Mutex::new(None);
+
+/// 当前是否有可用的 sudo 票据（`sudo -n -v` 非交互检测）
+pub fn sudo_keepalive_active() -> bool {
+    std::process::Command::new("/usr/bin/sudo")
+        .args(["-n", "-v"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// 已保活的密码（若有）
+pub fn sudo_keepalive_password() -> Option<String> {
+    SUDO_PASSWORD.lock().unwrap().clone()
+}
+
+/// 弹原生密码框收集密码 → `sudo -S -v` 验证 → 启动保活线程。
+/// 密码只存在于本进程内存，验证成功后立即从 stdin 管道释放。
+pub fn sudo_keepalive_prompt_and_start() -> Result<bool, String> {
+    // 已有活跃票据：直接复用，不重复弹框
+    if sudo_keepalive_active() {
+        return Ok(true);
+    }
+    // 停止旧保活线程、清理旧密码
+    sudo_keepalive_stop();
+    // 1) AppleScript 原生密码框（隐藏输入，系统样式，无额外依赖）
+    let script = "display dialog \"maclean 需要管理员权限以清理受保护项目\\n密码仅在本进程内存中保留，用于保持提权会话（可选 Touch ID / 密码）\" default answer \"\" with hidden answer";
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("无法弹出授权框：{e}"))?;
+    if !out.status.success() {
+        return Err("授权已取消".to_string());
+    }
+    let password = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if password.is_empty() {
+        return Err("未输入密码".to_string());
+    }
+    // 2) 验证密码（sudo -S -v，stdin 传入）
+    let ok = {
+        let mut child = std::process::Command::new("/usr/bin/sudo")
+            .args(["-S", "-p", "", "-v"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("无法启动 sudo：{e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = writeln!(stdin, "{}", password);
+        }
+        let o = child.wait_with_output().map_err(|e| format!("sudo 执行失败：{e}"))?;
+        if o.status.success() {
+            true
+        } else {
+            let err = String::from_utf8_lossy(&o.stderr);
+            return Err(if err.contains("incorrect") {
+                "密码错误".to_string()
+            } else {
+                format!("sudo 验证失败：{}", err.trim())
+            });
+        }
+    };
+    if !ok {
+        return Err("sudo 验证失败".to_string());
+    }
+    // 3) 启动保活线程：每 25s `sudo -n -v` 刷新票据，失败自动退出
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    std::thread::spawn(move || {
+        while !thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            for _ in 0..25 {
+                if thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            let r = std::process::Command::new("/usr/bin/sudo").args(["-n", "-v"]).output();
+            let ok = r.map(|o| o.status.success()).unwrap_or(false);
+            if !ok {
+                SUDO_PASSWORD.lock().unwrap().take();
+                return;
+            }
+        }
+    });
+    *KEEPALIVE.lock().unwrap() = Some(Keepalive { stop });
+    *SUDO_PASSWORD.lock().unwrap() = Some(password);
+    Ok(true)
+}
+
+/// 停止保活：停线程 + 清密码 + 清除 sudo 票据
+pub fn sudo_keepalive_stop() {
+    if let Some(k) = KEEPALIVE.lock().unwrap().take() {
+        k.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    SUDO_PASSWORD.lock().unwrap().take();
+    let _ = std::process::Command::new("/usr/bin/sudo").arg("-k").output();
+}
+
+#[tauri::command]
+pub fn sudo_keepalive_status() -> bool {
+    sudo_keepalive_active()
+}
+
+/// 前端「保持提权会话」开关：开启时预弹一次授权并后台保活，后续删除免弹
+#[tauri::command]
+pub fn sudo_keepalive_start() -> Result<bool, String> {
+    sudo_keepalive_prompt_and_start()
+}
+
+#[tauri::command]
+pub fn sudo_keepalive_stop_cmd() {
+    sudo_keepalive_stop();
 }
 
 /* ============================== 设计 token ============================== */

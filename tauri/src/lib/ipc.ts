@@ -64,6 +64,10 @@ export const ipc = {
   /** 菜单栏托盘开关 */
   menuBarStatus: () => invoke<boolean>("menu_bar_status"),
   menuBarSet: (show: boolean) => invoke<void>("menu_bar_set", { show }),
+  /** sudo 保活：开启时预弹一次授权并后台刷新票据，删除受保护项免重复弹窗 */
+  sudoKeepaliveStatus: () => invoke<boolean>("sudo_keepalive_status"),
+  sudoKeepaliveStart: () => invoke<boolean>("sudo_keepalive_start"),
+  sudoKeepaliveStop: () => invoke<void>("sudo_keepalive_stop_cmd"),
   startupSetEnabled: (
     label: string,
     plist: string,
