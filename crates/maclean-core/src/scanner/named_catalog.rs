@@ -23,7 +23,7 @@
 
 use std::path::PathBuf;
 
-use super::app_cache::{push_named_cache_item, NAMED_CACHE_MIN};
+use super::app_cache::push_named_cache_item;
 use super::{home_dir, Recommend, ScanItem};
 use crate::scanner::uninstall::{collect_app_paths, get_bundle_id};
 

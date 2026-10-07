@@ -6,10 +6,11 @@
 mod commands;
 
 use commands::{
-    app_open, app_uninstall, apps_inventory, apps_sizes, clean_execute, clean_preview, disk_info,
-    im_breakdown, logs_list, logs_read, logs_reveal, open_app_management_settings,
-    open_full_disk_access_settings, optimize_list, optimize_run, palette, reveal_path, reveal_trash,
-    scan, settings_get, settings_set, startup_set_enabled, startups_list,
+    app_open, app_uninstall, apps_inventory, apps_sizes, cache_children, clean_execute,
+    clean_preview, disk_info, im_breakdown, logs_list, logs_read, logs_reveal,
+    open_app_management_settings, open_full_disk_access_settings, optimize_list, optimize_run,
+    palette, reveal_path, reveal_trash, scan, settings_get, settings_set, startup_set_enabled,
+    startups_list,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -48,6 +49,7 @@ pub fn run() {
             app_uninstall,
             open_full_disk_access_settings,
             open_app_management_settings,
+            cache_children,
         ])
         .setup(|_app| Ok(()))
         .run(tauri::generate_context!())

@@ -1,20 +1,47 @@
+import { useEffect, useRef, useState } from "react";
 import { useApp, FULL_SEQUENCE, FULL_MODULE_LABEL } from "../lib/store";
 import { Icon } from "./Icon";
 
 /**
  * 后台扫描进度（非阻断）：
  * - 顶部一条细进度条，不拦截任何点击；
- * - 右下角浮动卡展示全量体检的各模块完成情况，扫描进行中用户仍可自由切换页面，
- *   哪个模块先完成，对应页面立刻可看。
+ * - 右下角浮动卡展示全量体检的各模块完成情况 + 卡片内可视进度条 + 已用计时器，
+ *   扫描进行中用户仍可自由切换页面，哪个模块先完成，对应页面立刻可看。
  */
 export function ScanOverlay() {
   const { scanning, scanPct, scanLabel, fullRunning, runningScopes, singleScope, ready } =
     useApp();
 
+  // 已用计时器：扫描开始时记起点，每秒刷新；结束后清零。
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (scanning) {
+      if (startRef.current === null) startRef.current = Date.now();
+      const t = setInterval(
+        () => setElapsed(Math.max(0, Math.floor((Date.now() - (startRef.current ?? Date.now())) / 1000))),
+        500,
+      );
+      return () => clearInterval(t);
+    }
+    startRef.current = null;
+    setElapsed(0);
+  }, [scanning]);
+
+  const fmtTime = (s: number) => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    return h > 0
+      ? `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
+      : `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+  };
+  const pct = Math.max(0, Math.min(100, Math.round(scanPct)));
+
   return (
     <>
       <div className={`scanprog${scanning ? " show" : ""}`}>
-        <i style={{ width: scanPct + "%" }} />
+        <i style={{ width: pct + "%" }} />
       </div>
 
       {scanning && (
@@ -33,7 +60,15 @@ export function ScanOverlay() {
               </div>
               <div className="sc-sub">只读扫描，不会删除任何文件 · 可继续浏览其它页面</div>
             </div>
-            <span className="sc-pct">{Math.round(scanPct)}%</span>
+            <span className="sc-pct">{pct}%</span>
+          </div>
+
+          <div className="sc-bar">
+            <i style={{ width: pct + "%" }} />
+          </div>
+          <div className="sc-meta">
+            <span className="grow">{scanLabel || "正在准备…"}</span>
+            <span className="sc-time">已用 {fmtTime(elapsed)}</span>
           </div>
 
           {fullRunning ? (

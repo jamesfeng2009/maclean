@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
   AppInventorySize,
+  CacheChild,
   CleanItemReq,
   CleanLogEntry,
   CleanProgress,
@@ -107,6 +108,8 @@ export const ipc = {
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   /** 对 IM 的 Documents 根做只读占用分析 */
   imBreakdown: (path: string) => invoke<ImBreakdown>("im_breakdown", { path }),
+  /** 缓存展开明细：点击展开后按需返回某缓存目录的直接子项（体积/文件数/最后修改时间） */
+  cacheChildren: (path: string) => invoke<CacheChild[]>("cache_children", { path }),
 
   /** 已安装应用轻量清单（元数据 + 真实图标，不含体积，打开页面秒回） */
   appsInventory: () => invoke<InstalledApp[]>("apps_inventory"),

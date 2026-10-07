@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { fmt, shortPath } from "../lib/format";
-import type { CleanItemReq, ImBreakdown, ScanItem } from "../lib/types";
+import type { CacheChild, CleanItemReq, ImBreakdown, ScanItem } from "../lib/types";
 import { useApp } from "../lib/store";
 import { useDeleteStrategy, planDelete, deleteSubText } from "../lib/deletePolicy";
 import { Icon } from "../components/Icon";
@@ -188,6 +188,69 @@ export function Clean() {
   const [imBusy, setImBusy] = useState<string | null>(null);
   const [imErr, setImErr] = useState<Record<string, string>>({});
 
+  // 缓存展开明细（对标 MangoDisk）：行项点击展开后按需加载子路径
+  // （每个子路径带体积 / 文件数 / 最后修改时间），并可对子路径单独勾选。
+  const [childOpen, setChildOpen] = useState<Set<string>>(new Set());
+  const [childData, setChildData] = useState<Record<string, CacheChild[]>>({});
+  const [childBusy, setChildBusy] = useState<string | null>(null);
+  const [childErr, setChildErr] = useState<Record<string, string>>({});
+  /** 每个展开项的「显示更多」页大小（默认 6 条，对标 MangoDisk 的 Show more） */
+  const [childLimit, setChildLimit] = useState<Record<string, number>>({});
+  /** 行级勾选的子路径：path → 所属分类 / 风险 / 体积，删除时并入删除集 */
+  const [checkedChildren, setCheckedChildren] = useState<
+    Record<string, { category: string; recommend: ScanItem["recommend"]; size_bytes: number }>
+  >({});
+
+  const fmtMtime = (s: number) => {
+    const d = new Date(s * 1000);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}/${p(d.getDate())}/${d.getFullYear()} ${p(d.getHours())}:${p(
+      d.getMinutes()
+    )}`;
+  };
+
+  // 展开 / 收起行项；首次展开按需拉取子路径明细（只读、后端有界统计）
+  const toggleChild = useCallback(
+    async (it: ScanItem) => {
+      if (childOpen.has(it.path)) {
+        setChildOpen((s) => {
+          const n = new Set(s);
+          n.delete(it.path);
+          return n;
+        });
+        return;
+      }
+      setChildOpen((s) => new Set(s).add(it.path));
+      if (!childData[it.path] && childBusy !== it.path) {
+        setChildBusy(it.path);
+        try {
+          const c = await ipc.cacheChildren(it.path);
+          setChildData((d) => ({ ...d, [it.path]: c }));
+        } catch (e) {
+          setChildErr((x) => ({ ...x, [it.path]: String(e) }));
+        } finally {
+          setChildBusy(null);
+        }
+      }
+    },
+    [childOpen, childData, childBusy]
+  );
+
+  // 子路径行级勾选（独立于整组勾选；删除时按子路径逐项过闸）
+  const toggleChildChecked = (it: ScanItem, child: CacheChild) => {
+    setCheckedChildren((s) => {
+      const n = { ...s };
+      if (n[child.path]) delete n[child.path];
+      else
+        n[child.path] = {
+          category: it.category,
+          recommend: it.recommend,
+          size_bytes: child.size_bytes,
+        };
+      return n;
+    });
+  };
+
   // 删除方式策略（smart=安全项永久删/风险项进废纸篓；trash=一律进废纸篓）
   const delStrategy = useDeleteStrategy();
 
@@ -303,9 +366,23 @@ export function Clean() {
       ),
     [items, checked]
   );
-  const selectedSize = selectedItems.reduce((s, i) => s + i.size_bytes, 0);
-  const selCaution = selectedItems.filter((i) => i.recommend === "Caution").length;
-  const selAdvanced = selectedItems.filter((i) => i.recommend === "Advanced").length;
+  // 行级勾选的子路径并入删除集（每个子路径独立过闸、独立删除）
+  const childReqs: CleanItemReq[] = Object.entries(checkedChildren).map(([p, v]) => ({
+    path: p,
+    category: v.category,
+    batch_paths: [],
+    size_bytes: v.size_bytes,
+    recommend: v.recommend,
+  }));
+  const selectedSize =
+    selectedItems.reduce((s, i) => s + i.size_bytes, 0) +
+    childReqs.reduce((s, r) => s + r.size_bytes, 0);
+  const selCaution =
+    selectedItems.filter((i) => i.recommend === "Caution").length +
+    childReqs.filter((r) => r.recommend === "Caution").length;
+  const selAdvanced =
+    selectedItems.filter((i) => i.recommend === "Advanced").length +
+    childReqs.filter((r) => r.recommend === "Advanced").length;
   const hasRisk = selAdvanced > 0 || selCaution > 0;
   // 已选中的风险分类名（确认弹窗里点名告知）
   const riskCatNames = useMemo(
@@ -331,13 +408,16 @@ export function Clean() {
     });
 
   const runClean = async () => {
-    const reqs: CleanItemReq[] = selectedItems.map((i) => ({
-      path: i.path,
-      category: i.category,
-      batch_paths: i.batch_paths,
-      size_bytes: i.size_bytes,
-      recommend: i.recommend,
-    }));
+    const reqs: CleanItemReq[] = [
+      ...selectedItems.map((i) => ({
+        path: i.path,
+        category: i.category,
+        batch_paths: i.batch_paths,
+        size_bytes: i.size_bytes,
+        recommend: i.recommend,
+      })),
+      ...childReqs,
+    ];
 
     // Rust 侧 dry-run 复核：safety 闸门 + 当前可删除性
     let preview;
@@ -424,6 +504,7 @@ export function Clean() {
             const removed = new Set(finalReqsBase.map((r) => r.path));
             removePaths("all", removed);
             setChecked(new Set());
+            setCheckedChildren({});
           }
         } catch (e) {
           toast("warn", "清理失败：" + String(e));
@@ -630,6 +711,21 @@ export function Clean() {
                           style={{ paddingLeft: 10, opacity: it.deletable ? 1 : 0.55 }}
                         >
                           {it.deletable ? <Badge r={it.recommend} /> : <Badge r="Protected" />}
+                          <span
+                            className={`chev-cat${childOpen.has(it.path) ? " open" : ""}`}
+                            title={it.deletable ? "展开缓存路径明细" : undefined}
+                            onClick={it.deletable ? (e) => { e.stopPropagation(); void toggleChild(it); } : undefined}
+                          >
+                            <Icon
+                              name="chev"
+                              size={14}
+                              style={{
+                                transition: "transform .2s",
+                                transform: childOpen.has(it.path) ? "rotate(90deg)" : "none",
+                                opacity: it.deletable ? 1 : 0.3,
+                              }}
+                            />
+                          </span>
                           <span className="fp" title={it.path}>
                             {shortPath(it.path)}
                           </span>
@@ -648,6 +744,69 @@ export function Clean() {
                           )}
                           <span className="sz">{fmt(it.size_bytes)}</span>
                         </div>
+
+                        {it.deletable && childOpen.has(it.path) && (
+                          <div className="cat-children">
+                            {childBusy === it.path ? (
+                              <span className="muted" style={{ fontSize: 11.5 }}>
+                                正在统计子路径（文件数 / 修改时间）…
+                              </span>
+                            ) : childErr[it.path] ? (
+                              <span className="muted" style={{ fontSize: 11.5 }}>
+                                明细加载失败：{childErr[it.path]}
+                              </span>
+                            ) : childData[it.path] ? (
+                              childData[it.path].length === 0 ? (
+                                <span className="muted" style={{ fontSize: 11.5 }}>
+                                  该目录下没有可展开的子路径
+                                </span>
+                              ) : (
+                                <>
+                                  {(childData[it.path] ?? []).slice(0, childLimit[it.path] ?? 6).map((child) => (
+                                    <div
+                                      key={child.path}
+                                      className={`cat-child${
+                                        checkedChildren[child.path] ? " checked" : ""
+                                      }`}
+                                    >
+                                      <span
+                                        className="cat-child-chek"
+                                        title={checkedChildren[child.path] ? "取消勾选该路径" : "勾选该路径（独立于整组）"}
+                                        onClick={() => toggleChildChecked(it, child)}
+                                      >
+                                        {checkedChildren[child.path] ? (
+                                          <Icon name="check" size={11} />
+                                        ) : null}
+                                      </span>
+                                      <span className="fp" title={child.path}>
+                                        {shortPath(child.path)}
+                                      </span>
+                                      <span className="child-meta">
+                                        {child.file_count.toLocaleString()} files · 最后修改{" "}
+                                        {fmtMtime(child.modified)}
+                                      </span>
+                                      <span className="sz">{fmt(child.size_bytes)}</span>
+                                    </div>
+                                  ))}
+                                  {(childData[it.path] ?? []).length > (childLimit[it.path] ?? 6) && (
+                                    <button
+                                      type="button"
+                                      className="btn-secondary child-more"
+                                      onClick={() =>
+                                        setChildLimit((s) => ({
+                                          ...s,
+                                          [it.path]: (s[it.path] ?? 6) + 20,
+                                        }))
+                                      }
+                                    >
+                                      展开更多 · {childData[it.path].length} 个路径
+                                    </button>
+                                  )}
+                                </>
+                              )
+                            ) : null}
+                          </div>
+                        )}
 
                         {im && (
                           <div className="im-guard">

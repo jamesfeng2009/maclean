@@ -1078,6 +1078,98 @@ fn scan_chromium_cache_subdirs(
     items
 }
 
+// =========================================================================
+//  展开明细：缓存路径子项（对标 MangoDisk 的展开视图）
+// =========================================================================
+
+/// 缓存目录的单个子项（展开时按需查询）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CacheChild {
+    pub path: String,
+    pub size_bytes: u64,
+    pub file_count: u64,
+    /// 最后修改时间（unix 秒；目录为其内部最新文件 mtime）
+    pub modified: i64,
+}
+
+/// 展开缓存项：返回 `path` 的**直接子项**（子目录/文件），每项带递归体积、
+/// 递归文件数与最新修改时间，按体积降序取前 [`CACHE_CHILD_LIMIT`] 个。
+///
+/// 对标 MangoDisk「点击展开 → 每个缓存路径 + N files + Last modified」：
+/// - 只读一层 read_dir，子项统计有界（walkdir 深度 ≤ 12、条目 ≤ 2 万，
+///   与删除期闸门的后代遍历上限一致），不会因超大目录卡死；
+/// - 行级勾选删除走既有安全闸门（按子项路径逐项复核）。
+pub const CACHE_CHILD_LIMIT: usize = 40;
+
+pub fn cache_children(path: &PathBuf) -> Vec<CacheChild> {
+    let mut entries: Vec<(std::path::PathBuf, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(path) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let is_dir = e
+                .file_type()
+                .map(|ft| ft.is_dir())
+                .unwrap_or_else(|_| p.is_dir());
+            if is_dir {
+                let size = dir_size(&p);
+                if size > 0 {
+                    entries.push((p, size));
+                }
+            } else if p.is_file() || p.is_symlink() {
+                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                if size > 0 {
+                    entries.push((p, size));
+                }
+            }
+        }
+    }
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.truncate(CACHE_CHILD_LIMIT);
+
+    let mut out = Vec::with_capacity(entries.len());
+    for (p, size) in entries {
+        // 有界递归统计：文件数 + 最新修改时间（单次遍历）
+        let mut file_count: u64 = 0;
+        let mut modified: i64 = 0;
+        const MAX_DEPTH: usize = 12;
+        const MAX_ENTRIES: usize = 20_000;
+        let mut visited = 0usize;
+        for entry in walkdir::WalkDir::new(&p)
+            .min_depth(1)
+            .max_depth(MAX_DEPTH)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            visited += 1;
+            if visited > MAX_ENTRIES {
+                break;
+            }
+            if entry.file_type().is_file() {
+                file_count += 1;
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(m) = meta.modified() {
+                        let secs = m
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        if secs > modified {
+                            modified = secs;
+                        }
+                    }
+                }
+            }
+        }
+        out.push(CacheChild {
+            path: p.to_string_lossy().to_string(),
+            size_bytes: size,
+            file_count,
+            modified,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

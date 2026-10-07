@@ -602,6 +602,35 @@ pub async fn scan(scope: String, app: AppHandle) -> Result<Vec<ScanItem>, String
 
 /* ============================== 启动项 ============================== */
 
+/// 缓存展开明细（对标 MangoDisk）：点击展开后按需返回某缓存目录的直接子项，
+/// 每项带体积 / 文件数 / 最后修改时间；只读、有界（≤40 个子项，统计有界）。
+#[derive(Debug, Serialize)]
+pub struct CacheChildDto {
+    pub path: String,
+    pub size_bytes: u64,
+    pub file_count: u64,
+    /// unix 秒（前端格式化展示）
+    pub modified: i64,
+}
+
+#[tauri::command]
+pub fn cache_children(path: String) -> Result<Vec<CacheChildDto>, String> {
+    if path.is_empty() {
+        return Err("路径为空".into());
+    }
+    Ok(scanner::app_cache::cache_children(&std::path::PathBuf::from(
+        path,
+    ))
+    .into_iter()
+    .map(|c| CacheChildDto {
+        path: c.path,
+        size_bytes: c.size_bytes,
+        file_count: c.file_count,
+        modified: c.modified,
+    })
+    .collect())
+}
+
 #[derive(Debug, Serialize)]
 pub struct StartupItemDto {
     pub label: String,
@@ -1495,6 +1524,28 @@ mod tests {
                 it.path,
                 it.undeletable_reason
             );
+        }
+    }
+
+    /// 缓存展开明细（cache_children）真实机器冒烟：go-build 等目录应能展开出
+    /// 子路径，且每条都带体积 / 文件数 / 最后修改时间（对标 MangoDisk 展开视图）。
+    /// 无对应目录的机器自动空转通过。
+    #[test]
+    fn cache_children_returns_real_subdirs_with_stats() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        for probe in [
+            format!("{home}/Library/Caches/go-build"),
+            format!("{home}/Library/Caches/com.tencent.workbuddy.mac.BundleMigration"),
+        ] {
+            if !std::path::Path::new(&probe).is_dir() {
+                continue;
+            }
+            let out = cache_children(probe.clone()).unwrap_or_else(|e| panic!("{probe}: {e}"));
+            assert!(!out.is_empty(), "{probe} 应能展开出子路径");
+            for c in out.iter().take(3) {
+                assert!(c.size_bytes > 0, "{c:?} 应有体积");
+                assert!(c.modified > 0, "{c:?} 应能取到最后修改时间");
+            }
         }
     }
 }

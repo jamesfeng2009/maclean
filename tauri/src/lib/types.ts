@@ -42,6 +42,15 @@ export interface CleanItemReq {
   use_trash?: boolean;
 }
 
+/** 缓存展开明细（cache_children 命令返回，对标 MangoDisk 展开视图） */
+export interface CacheChild {
+  path: string;
+  size_bytes: number;
+  file_count: number;
+  /** unix 秒，前端格式化 */
+  modified: number;
+}
+
 export interface PreviewItem {
   path: string;
   category: string;
