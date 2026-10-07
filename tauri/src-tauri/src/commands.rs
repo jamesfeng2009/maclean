@@ -468,17 +468,66 @@ fn run_full_scan(app: &AppHandle) -> Vec<ScanItem> {
         // 模块 all = 开发者缓存 + 应用缓存 + 应用数据与残留。
         // 三段内部维持串行（见函数文档：激进并行在 IO bound 场景无收益）；逐段保留
         // 已统计部分，任一段繁忙超时都不拖累其它段。
+        // 段级进度：all 权重 40，三段相对完成度 20/55/85 → 整体贡献 8/22/34，
+        // 每段完成立即上报（叠加其它已并行完成的模块权重），
+        // 避免「三模块并行但无一完成 → 进度恒卡 2%」的假死观感。
         let h_all = scope.spawn(|| {
-            run_module(app, &partial_scopes, &done_bits, "all", "缓存与应用数据", || {
-                let mut all = Vec::new();
-                let mut partial = false;
-                for key in ["dev_cache", "app_cache", "app_data"] {
-                    let (part, p) = run_scanner(key);
-                    all.extend(part);
-                    partial |= p;
+            use std::sync::atomic::Ordering;
+            let _ = app.emit(
+                "scan-module",
+                serde_json::json!({ "scope": "all", "status": "start", "items": [] }),
+            );
+            let pct_of = |bits: u32| -> u8 {
+                ["all", "large", "dup", "apps"]
+                    .iter()
+                    .filter(|k| bits & module_bit(k) != 0)
+                    .map(|k| module_weight(k))
+                    .sum::<u8>()
+                    .max(2)
+            };
+            let mut all = Vec::new();
+            let mut partial = false;
+            for (i, (key, label, cum)) in [
+                ("dev_cache", "开发者缓存", 20u8),
+                ("app_cache", "应用缓存", 55),
+                ("app_data", "应用数据与残留", 85),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // 整体进度 = 其它已完成模块权重 + all 段进度（40 × 段累计 / 100），
+                // 上限 99：all 完成事件（pct_of 含 all 权重）再收尾到 100。
+                let pct = (pct_of(done_bits.load(Ordering::Relaxed)) as u16
+                    + (module_weight("all") as u16 * cum as u16 / 100))
+                    .min(99) as u8;
+                let _ = app.emit(
+                    "scan-progress",
+                    serde_json::json!({
+                        "stage": "full",
+                        "label": format!("正在扫描：缓存与应用数据 · {label}（{}/3）", i + 1),
+                        "pct": pct,
+                    }),
+                );
+                let (part, p) = std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(key)))
+                    .unwrap_or_default();
+                all.extend(part);
+                partial |= p;
+            }
+            let _ = app.emit(
+                "scan-module",
+                serde_json::json!({ "scope": "all", "status": "done", "items": all.clone(), "partial": partial }),
+            );
+            if partial {
+                if let Ok(mut g) = partial_scopes.lock() {
+                    g.push("缓存与应用数据".to_string());
                 }
-                (all, partial)
-            })
+            }
+            let bits = done_bits.fetch_or(module_bit("all"), Ordering::AcqRel) | module_bit("all");
+            let _ = app.emit(
+                "scan-progress",
+                serde_json::json!({ "stage": "full", "label": "已完成：缓存与应用数据", "pct": pct_of(bits) }),
+            );
+            all
         });
         // 模块 large = 磁盘大文件 / 大目录
         let h_large = scope.spawn(|| {
