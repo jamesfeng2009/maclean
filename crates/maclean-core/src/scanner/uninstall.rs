@@ -454,7 +454,7 @@ fn scan_trash_apps() -> Vec<ScanItem> {
                 continue;
             }
             let size = dir_size(&path);
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: format!("废纸篓残留-{}", name.trim_end_matches(".app")),
@@ -506,7 +506,7 @@ fn scan_downloads_apps() -> Vec<ScanItem> {
                     name
                 )
             };
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: format!("下载残留-{}", name.trim_end_matches(".app")),
@@ -620,7 +620,7 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
 
     // 不可删除的系统关键 / 安全应用：只展示一个汇总项
     if is_critical {
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: app_path.to_string_lossy().to_string(),
             size_bytes: app_size + data_size + cache_size,
             category: app_name,
@@ -636,7 +636,7 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
 
     if let ProtectionLevel::RequiresOfficialUninstaller = protection {
         let vendor = app_protection::get_security_vendor(&bundle_id).unwrap_or("官方");
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: app_path.to_string_lossy().to_string(),
             size_bytes: app_size + data_size + cache_size,
             category: app_name,
@@ -660,7 +660,7 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
     //   3. 应用缓存（CacheOnly）：删 Caches/Logs/HTTPStorages
 
     // 1) 应用卸载项：只删 .app 包
-    items.push(ScanItem {
+    items.push(ScanItem { batch_mtimes: vec![],
         path: app_path.to_string_lossy().to_string(),
         size_bytes: app_size,
         category: format!("{} (卸载)", app_name),
@@ -690,7 +690,7 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
                 data_paths.len()
             )
         };
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: data_paths[0].clone(),
             size_bytes: data_size,
             category: format!("{} 数据", app_name),
@@ -705,7 +705,7 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
 
     // 3) 缓存清理项（CacheOnly）：Caches / Logs / HTTPStorages
     if cache_size > 0 && !cache_paths.is_empty() {
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: cache_paths[0].clone(),
             size_bytes: cache_size,
             category: format!("{} 缓存", app_name),
@@ -1547,7 +1547,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 if size_skipped {
                     description.push_str("（上次遍历卡死，大小可能不准）");
                 }
-                items.push(ScanItem {
+                items.push(ScanItem { batch_mtimes: vec![],
                     path: path_str,
                     size_bytes: size,
                     category: "App残留".to_string(),
@@ -1617,7 +1617,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 if size_skipped {
                     description.push_str("（上次遍历卡死，大小可能不准）");
                 }
-                items.push(ScanItem {
+                items.push(ScanItem { batch_mtimes: vec![],
                     path: path_str,
                     size_bytes: size,
                     category: "App残留缓存".to_string(),
@@ -1677,7 +1677,7 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     String::new()
                 };
 
-                items.push(ScanItem {
+                items.push(ScanItem { batch_mtimes: vec![],
                     path: path_str,
                     size_bytes: size,
                     category: "App残留配置".to_string(),
@@ -1919,7 +1919,7 @@ fn scan_vendor_subdir_leftovers(
             if size_skipped {
                 description.push_str("（上次遍历卡死，大小可能不准）");
             }
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: sub_str,
                 size_bytes: size,
                 category: category.to_string(),

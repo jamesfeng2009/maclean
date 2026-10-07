@@ -77,6 +77,12 @@ pub enum Recommend {
     Advanced,
 }
 
+impl Default for Recommend {
+    fn default() -> Self {
+        Self::Safe
+    }
+}
+
 // 2026-09-18 删除了 `Recommend::label` / `Recommend::description`：
 // 与 `i18n::translate_recommend` 重复且全仓零引用，UI 上的等级徽标统一走
 // `theme::recommend_label`（文案按设计稿 02 节）。留两套会各自漂移。
@@ -89,7 +95,7 @@ impl Recommend {
 }
 
 /// 扫描项 - 表示一个可清理的文件或目录
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ScanItem {
     /// 完整路径（或快照名称/UUID）
     pub path: String,
@@ -110,6 +116,9 @@ pub struct ScanItem {
     /// 批量删除的真实路径列表（用于 __pycache__ 等聚合项）
     /// 为空表示单项删除，使用 path 字段
     pub batch_paths: Vec<String>,
+    /// 批量路径的修改时间（unix 秒，与 `batch_paths` 一一对应，重复文件等场景展示用）
+    #[serde(default)]
+    pub batch_mtimes: Vec<i64>,
 }
 
 /// 扫描结果
@@ -535,16 +544,23 @@ pub fn retain_safe_batch_members(item: &mut ScanItem) -> bool {
     }
     let before = item.batch_paths.len();
     let mut removed_bytes: u64 = 0;
-    item.batch_paths.retain(|bp| {
+    // 同步过滤 batch_paths 与 batch_mtimes（安全闸门命中的成员在扫描期剔除）
+    let mut kept_paths: Vec<String> = Vec::with_capacity(before);
+    let mut kept_mtimes: Vec<i64> = Vec::with_capacity(before);
+    for (i, bp) in item.batch_paths.iter().enumerate() {
         match crate::safety::check_path_safety_with_category(bp, &item.category) {
-            crate::safety::SafetyCheck::Safe => true,
+            crate::safety::SafetyCheck::Safe => {
+                kept_paths.push(bp.clone());
+                kept_mtimes.push(item.batch_mtimes.get(i).copied().unwrap_or(0));
+            }
             // Danger / Warning 在执行层都会被跳过；扫描期就不应把它们算作可清理成员
             _ => {
                 removed_bytes = removed_bytes.saturating_add(path_disk_size(Path::new(bp)));
-                false
             }
         }
-    });
+    }
+    item.batch_paths = kept_paths;
+    item.batch_mtimes = kept_mtimes;
     if item.batch_paths.is_empty() {
         return false;
     }
@@ -608,7 +624,7 @@ mod tests {
             std::fs::write(p, vec![b'x'; n as usize]).unwrap();
         }
 
-        let mk = |paths: Vec<&std::path::Path>, size: u64| ScanItem {
+        let mk = |paths: Vec<&std::path::Path>, size: u64| ScanItem { batch_mtimes: vec![],
             path: format!("~/ 下的 .DS_Store 文件 ({} 个)", paths.len()),
             size_bytes: size,
             category: "DS_Store".to_string(),

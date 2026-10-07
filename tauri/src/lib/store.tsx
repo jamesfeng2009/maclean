@@ -130,6 +130,8 @@ interface AppState {
   startFullScan: () => Promise<void>;
   /** 删除/卸载后，从某模块缓存中移除已处理项（不触发勾选重置） */
   removePaths: (scope: ResultScope, paths: Set<string>) => void;
+  /** 重复文件页行级删除单个副本后的组内移除 */
+  removeDupCopy: (groupPath: string, copyPath: string) => void;
   startScan: (
     scope: ScanScope,
     onDone?: (items: ScanItem[]) => void
@@ -366,6 +368,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  /** 重复文件页：行级删除单个副本后，从组内移除该副本并回减大小（不整组移除） */
+  const removeDupCopy = useCallback((groupPath: string, copyPath: string) => {
+    setResults((prev) => ({
+      ...prev,
+      dup: prev.dup.map((i) => {
+        if (i.path !== groupPath) return i;
+        const idx = i.batch_paths.indexOf(copyPath);
+        if (idx === -1) return i;
+        const batch_paths = i.batch_paths.filter((_, k) => k !== idx);
+        const batch_mtimes = i.batch_mtimes.filter((_, k) => k !== idx);
+        if (batch_paths.length === 0) {
+          return {
+            ...i,
+            batch_paths,
+            batch_mtimes,
+            deletable: false,
+            undeletable_reason: "该组副本已全部删除",
+          };
+        }
+        // 同组文件等大，按份数估算单份大小并回减（近似展示，重扫后精确）
+        const per = i.size_bytes / (i.batch_paths.length + 1);
+        return {
+          ...i,
+          batch_paths,
+          batch_mtimes,
+          size_bytes: Math.max(0, Math.round(i.size_bytes - per)),
+        };
+      }),
+    }));
+  }, []);
+
   const setLangEn = useCallback((en: boolean) => {
     setLangEnState(en);
     ipc.settingsSet({ lang_en: en }).catch(() => undefined);
@@ -447,6 +480,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       lastScope,
       startFullScan,
       removePaths,
+      removeDupCopy,
       startScan,
       confirm: (req) => setConfirmReq(req),
       confirmReq,
@@ -480,6 +514,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       lastScope,
       startFullScan,
       removePaths,
+      removeDupCopy,
       startScan,
       confirmReq,
       executeClean,

@@ -15,6 +15,8 @@ export interface ScanItem {
   description: string;
   /** 聚合删除的真实路径（重复文件副本等）；为空表示单项 path */
   batch_paths: string[];
+  /** 与 batch_paths 一一对应的修改时间（unix 秒），重复文件逐行展示用 */
+  batch_mtimes: number[];
 }
 
 export interface DiskInfo {

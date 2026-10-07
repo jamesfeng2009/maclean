@@ -3704,7 +3704,7 @@ mod tests {
     // ---------- 抖动修复：App 卸载页一次性出结果 ----------
 
     fn mk_item(path: &str, size: u64) -> ScanItem {
-        ScanItem {
+        ScanItem { batch_mtimes: vec![],
             path: path.to_string(),
             size_bytes: size,
             category: "App残留".to_string(),

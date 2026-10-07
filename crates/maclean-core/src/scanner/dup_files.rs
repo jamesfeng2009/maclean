@@ -28,12 +28,12 @@ use super::{has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
 // 清单管理目录判定与删除阶段共用 safety 第 4.6 层，保证「扫不进/删不掉」一致
 use crate::safety::is_manifest_managed_path;
 
-/// 参与重复检测的最小文件大小（1MB）
-const MIN_SIZE: u64 = 1024 * 1024;
+/// 参与重复检测的最小文件大小（对齐 MangoDisk 的 ≥200KB）
+const MIN_SIZE: u64 = 200 * 1024;
 /// 预筛哈希只读前 64KB
 const PREFIX_LEN: u64 = 64 * 1024;
-/// 最多保留的重复组数（防内存/IO 失控）
-const MAX_GROUPS: usize = 200;
+/// 最多保留的重复组数（防内存/IO 失控；MangoDisk 同场景约 2.6k 组）
+const MAX_GROUPS: usize = 2000;
 
 /// 跳过的主目录子树（相对 home）
 ///
@@ -181,6 +181,18 @@ impl Scanner for DuplicateFileScanner {
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
+            // 每个可删副本的修改时间（unix 秒），供 UI 逐行展示（对标 MangoDisk 的 Last modified）
+            let batch_mtimes: Vec<i64> = batch_paths
+                .iter()
+                .map(|p| {
+                    p.metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0)
+                })
+                .collect();
             let keep_name = keep
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -212,6 +224,7 @@ impl Scanner for DuplicateFileScanner {
                     batch.join(", ")
                 ),
                 batch_paths: batch,
+                batch_mtimes,
             });
         }
 

@@ -1520,6 +1520,7 @@ mod tests {
             recommend: Recommend::Safe,
             description: String::new(),
             batch_paths: batch.into_iter().map(|s| s.to_string()).collect(),
+            batch_mtimes: vec![],
         }
     }
 

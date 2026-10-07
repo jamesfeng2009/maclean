@@ -267,7 +267,7 @@ fn scan_rule_root(root: &Path, rule: &CleanRule, running: &[String]) -> Vec<Scan
                         format!("required_stopped_processes:{}", still_running.join(", "));
                 }
             }
-            Some(ScanItem {
+            Some(ScanItem { batch_mtimes: vec![],
                 path: p_str,
                 size_bytes: size,
                 category: rule.category.clone(),

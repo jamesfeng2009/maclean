@@ -208,7 +208,7 @@ fn scan_large_files() -> ScanResult {
                 .unwrap_or("unknown")
                 .to_string();
             let category = file_category(&name);
-            ScanItem {
+            ScanItem { batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: category.to_string(),
@@ -406,7 +406,7 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
             format!("📄 {} — {}", name, format_size(size))
         };
 
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: category.to_string(),

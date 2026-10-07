@@ -431,6 +431,34 @@ body{
 .dup-file .keep{color:var(--safe);font-size:11px;font-weight:600;background:var(--safe-50);padding:2px 7px;border-radius:6px;white-space:nowrap}
 .dup-file .sz{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:nowrap}
 .dup-file .fp{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46%}
+/* 重复文件：每行修改时间（对标 MangoDisk Last modified）+ hover 垃圾桶行级删除 */
+.dup-file-mtime{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:10.5px;color:var(--text-3);white-space:nowrap;flex:0 0 auto}
+.row-del{
+  flex:0 0 26px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+  border-radius:7px;color:var(--danger);background:var(--danger-50);cursor:pointer;
+  opacity:0;transition:opacity .15s,background .15s,transform .1s;margin-left:2px;
+}
+.dup-file:hover .row-del{opacity:1}
+.row-del:hover{background:var(--danger);color:#fff;transform:scale(1.06)}
+/* 顶部统计（Found N groups · can reclaim up to X） */
+.dup-stats{display:flex;align-items:center;gap:12px;margin:2px 0 12px;flex-wrap:wrap}
+.dup-found{font-size:13px;color:var(--text-2)}
+.dup-found b{font-weight:700;color:var(--text-1);font-family:ui-monospace,Menlo,monospace}
+.dup-size-filter{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-3)}
+.dup-size-filter select{
+  height:30px;padding:0 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);
+  color:var(--text-1);font-size:12px;
+}
+/* 文件类型分类标签 */
+.dup-kinds{display:flex;gap:6px;margin:0 0 12px;flex-wrap:wrap}
+.dup-kind{
+  display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);
+  border-radius:15px;background:var(--panel-2);color:var(--text-2);font-size:12.5px;cursor:pointer;
+  transition:all .15s;
+}
+.dup-kind:hover{border-color:var(--brand);color:var(--brand)}
+.dup-kind.on{background:var(--brand);border-color:var(--brand);color:#fff}
+.dup-kind-n{font-size:11px;opacity:.75;font-family:ui-monospace,Menlo,monospace}
 
 /* IM（微信/QQ/企业微信）受保护数据：只引导到 App 内清理，不提供删除 */
 .im-guard{padding:10px 16px 11px 44px;background:var(--brand-50);border-bottom:1px solid var(--line)}

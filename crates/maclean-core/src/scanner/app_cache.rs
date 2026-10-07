@@ -199,7 +199,7 @@ fn scan_wechat_caches(items: &mut Vec<ScanItem>) {
             ) {
                 let size = dir_size(&p);
                 if size >= NAMED_CACHE_MIN {
-                    items.push(ScanItem {
+                    items.push(ScanItem { batch_mtimes: vec![],
                         path: p.to_string_lossy().to_string(),
                         size_bytes: size,
                         category: "微信缓存".to_string(),
@@ -240,7 +240,7 @@ fn scan_wechat_caches(items: &mut Vec<ScanItem>) {
                     }
                     let size = dir_size(&cp);
                     if size >= NAMED_CACHE_MIN {
-                        items.push(ScanItem {
+                        items.push(ScanItem { batch_mtimes: vec![],
                             path: cp.to_string_lossy().to_string(),
                             size_bytes: size,
                             category: "微信缓存".to_string(),
@@ -285,7 +285,7 @@ fn scan_wechat_caches(items: &mut Vec<ScanItem>) {
                     }
                     let size = dir_size(&cp);
                     if size >= NAMED_CACHE_MIN {
-                        items.push(ScanItem {
+                        items.push(ScanItem { batch_mtimes: vec![],
                             path: cp.to_string_lossy().to_string(),
                             size_bytes: size,
                             category: "微信缓存".to_string(),
@@ -351,7 +351,7 @@ fn scan_lark_caches(items: &mut Vec<ScanItem>) {
         }
         let size = dir_size(&path);
         if size >= NAMED_CACHE_MIN {
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "飞书渲染缓存".to_string(),
@@ -397,7 +397,7 @@ pub(crate) fn push_named_cache_item(
             }
             _ => (true, String::new()),
         };
-    items.push(ScanItem {
+    items.push(ScanItem { batch_mtimes: vec![],
         path: path_str,
         size_bytes: size,
         category: category.to_string(),
@@ -474,7 +474,7 @@ pub fn scan_containers() -> Vec<ScanItem> {
                 // 微信/QQ/企业微信仍安装：聊天记录库 + 收发的图片/视频/文件，
                 // 物理上可删但代价极高（可能永久丢失聊天记录），标记为不可删除，
                 // 只做只读展示 + 引导（App 内清理 / 访达中打开 Documents）。
-                Some(ScanItem {
+                Some(ScanItem { batch_mtimes: vec![],
                     path,
                     size_bytes: docs_size,
                     category: format!("{} 聊天数据（受保护）", im.name),
@@ -495,7 +495,7 @@ pub fn scan_containers() -> Vec<ScanItem> {
                 // App 已卸载：沙盒容器里残留的聊天数据已无主，转为可清理。
                 // 仍属高价值数据 → Advanced、默认不勾；删除出口在后端被强制
                 // 移入废纸篓（可在清空前恢复），不做永久删除。
-                Some(ScanItem {
+                Some(ScanItem { batch_mtimes: vec![],
                     path,
                     size_bytes: docs_size,
                     category: format!("{} 残留数据（App 已卸载）", im.name),
@@ -710,7 +710,7 @@ pub fn scan_app_support_caches() -> Vec<ScanItem> {
         let app_name = extract_app_name_from_path(&path, &app_support);
         let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("缓存");
 
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: format!("{} 缓存", app_name),
@@ -786,7 +786,7 @@ pub fn scan_system_caches() -> Vec<ScanItem> {
             .and_then(|n| n.to_str())
             .unwrap_or("缓存")
             .to_string();
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: format!("系统缓存-{}", name),
@@ -815,7 +815,7 @@ pub fn scan_logs() -> Vec<ScanItem> {
     if logs_dir.is_dir() {
         let size = dir_size(&logs_dir);
         if size >= CACHE_MIN {
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: logs_dir.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "系统日志".to_string(),
@@ -915,7 +915,7 @@ pub fn scan_browser_caches() -> Vec<ScanItem> {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            items.push(ScanItem {
+                            items.push(ScanItem { batch_mtimes: vec![],
                                 path: cache_path.to_string_lossy().to_string(),
                                 size_bytes: size,
                                 category: "浏览器缓存".to_string(),
@@ -941,7 +941,7 @@ pub fn scan_browser_caches() -> Vec<ScanItem> {
     if safari_cache.is_dir() {
         let size = dir_size(&safari_cache);
         if size >= 10 * 1024 * 1024 {
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: safari_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "浏览器缓存".to_string(),
@@ -960,7 +960,7 @@ pub fn scan_browser_caches() -> Vec<ScanItem> {
     if webkit_cache.is_dir() {
         let size = dir_size(&webkit_cache);
         if size >= 10 * 1024 * 1024 {
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: webkit_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "浏览器缓存".to_string(),
@@ -1030,7 +1030,7 @@ fn scan_chromium_cache_subdirs(
                     | "ZxcvbnData"
                     | "WasmTtsEngine"
             );
-            items.push(ScanItem {
+            items.push(ScanItem { batch_mtimes: vec![],
                 path: cache_path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "浏览器缓存".to_string(),
@@ -1056,7 +1056,7 @@ fn scan_chromium_cache_subdirs(
             if cache_path.is_dir() {
                 let size = dir_size(&cache_path);
                 if size >= 10 * 1024 * 1024 {
-                    items.push(ScanItem {
+                    items.push(ScanItem { batch_mtimes: vec![],
                         path: cache_path.to_string_lossy().to_string(),
                         size_bytes: size,
                         category: "浏览器缓存".to_string(),
@@ -1176,7 +1176,7 @@ mod tests {
     use crate::scanner::Recommend;
 
     fn mk(path: &str, size: u64) -> ScanItem {
-        ScanItem {
+        ScanItem { batch_mtimes: vec![],
             path: path.to_string(),
             size_bytes: size,
             category: "test".to_string(),

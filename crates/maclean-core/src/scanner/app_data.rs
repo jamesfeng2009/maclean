@@ -131,7 +131,7 @@ fn scan_application_support() -> Vec<ScanItem> {
         .collect();
 
     for (path, size, name) in sized {
-        items.push(ScanItem {
+        items.push(ScanItem { batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: name,
