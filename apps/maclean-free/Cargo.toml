@@ -1,37 +1,35 @@
 [package]
-name = "maclean"
+name = "maclean-free"
 version = "0.2.0"
 edition = "2021"
-description = "macOS 磁盘清理 GUI 工具 - 专注开发者缓存与深度清理"
+description = "maclean Free 桌面应用（egui 壳 + CLI）—— Open Core 公开产品"
+license = "Apache-2.0"
+repository = "https://github.com/jamesfeng2009/maclean"
 
-# UI 改造阶段 0（2026-10）：核心逻辑抽到独立 crate `maclean-core`
-# （ops / safety / scanner / scheduler 及其支撑模块），egui 壳与未来的
-# Tauri 壳都只依赖 core，删除安全闸门只有一份实现。
-[workspace]
-resolver = "2"
-members = ["crates/maclean-core", "tauri/src-tauri"]
+# Open Core 公开产品（strategy §3.1 apps/maclean-free）。
+# 本包 = egui 壳 + CLI 分发入口；核心逻辑在 maclean-core，
+# 公开契约在 maclean-types。egui 壳与未来的 Tauri 壳都只依赖 core，
+# 删除安全闸门只有一份实现。
+#
+# 注意：本包从仓库根移动而来（原根包 `maclean`，2026-10-07 Open Core 拆分）。
+# bin 名为 `maclean`（Phase 8 后 maclean-keygen 移入私有 Pro 仓库，见 strategy §17）。
 
 [dependencies]
-maclean-core = { path = "crates/maclean-core", version = "0.2.0" }
+maclean-core = { path = "../../crates/maclean-core", version = "0.2.0" }
+maclean-types = { path = "../../crates/maclean-types", version = "0.2.0" }
+maclean-cli = { path = "../../crates/maclean-cli", version = "0.2.0" }
 # GUI 层：默认启用。`--no-default-features` 构建出纯 CLI 二进制
 # （服务器 / CI / 容器场景，不链接任何窗口系统依赖）。
 eframe = { version = "0.29", optional = true }
 egui = { version = "0.29", optional = true }
-walkdir = "2.5"
-rayon = "1.10"
 dirs = "5.0"
-libc = "0.2"
 tray-icon = { version = "0.14", optional = true }
-image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 sha2 = "0.10"
+ed25519-dalek = "2"
 # CLI: Ctrl+C 优雅取消（进度中断时以退出码 7 结束）
-ctrlc = "3"
 
 [build-dependencies]
 # 把 .ico / manifest 编进 Windows exe。选它而不是 winres，是因为它支持
@@ -55,12 +53,3 @@ dev-mode = []
 [[bin]]
 name = "maclean"
 path = "src/main.rs"
-
-[[bin]]
-name = "maclean-keygen"
-path = "src/bin/keygen.rs"
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1

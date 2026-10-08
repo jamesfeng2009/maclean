@@ -164,10 +164,7 @@ fn post_check(items: &mut Vec<ScanItem>) {
                 items.remove(i);
                 continue;
             }
-        } else if matches!(
-            items[i].recommend,
-            Recommend::Safe | Recommend::CacheOnly
-        ) {
+        } else if matches!(items[i].recommend, Recommend::Safe | Recommend::CacheOnly) {
             // 默认可选单项：必须过 safety 闸门，否则不进安全清理集合
             if let SafetyCheck::Danger(r) | SafetyCheck::Warning(r) =
                 safety::check_path_safety_with_category(&items[i].path, &items[i].category)
@@ -311,7 +308,7 @@ fn run_app_cache_segmented() -> (Vec<ScanItem>, bool) {
             break;
         }
         let budget = TOTAL_BUDGET.saturating_sub(elapsed).min(PER_SEG_CAP);
-        match scanner::scan_with_timeout(budget, move || seg_fn()) {
+        match scanner::scan_with_timeout(budget, seg_fn) {
             Some(part) => items.extend(part),
             None => {
                 partial = true;
@@ -531,15 +528,25 @@ fn run_full_scan(app: &AppHandle) -> Vec<ScanItem> {
         });
         // 模块 large = 磁盘大文件 / 大目录
         let h_large = scope.spawn(|| {
-            run_module(app, &partial_scopes, &done_bits, "large", "磁盘大文件", || {
-                run_scanner("large")
-            })
+            run_module(
+                app,
+                &partial_scopes,
+                &done_bits,
+                "large",
+                "磁盘大文件",
+                || run_scanner("large"),
+            )
         });
         // 模块 apps = 已安装应用
         let h_apps = scope.spawn(|| {
-            run_module(app, &partial_scopes, &done_bits, "apps", "已安装应用", || {
-                run_scanner("apps")
-            })
+            run_module(
+                app,
+                &partial_scopes,
+                &done_bits,
+                "apps",
+                "已安装应用",
+                || run_scanner("apps"),
+            )
         });
 
         for h in [h_all, h_large, h_apps] {
@@ -558,10 +565,7 @@ fn run_full_scan(app: &AppHandle) -> Vec<ScanItem> {
             .into_iter()
             .filter(|name| seen.insert(name.clone()))
             .collect();
-        let _ = app.emit(
-            "scan-partial",
-            serde_json::json!({ "scopes": labels }),
-        );
+        let _ = app.emit("scan-partial", serde_json::json!({ "scopes": labels }));
     }
 
     let _ = app.emit(
@@ -625,8 +629,8 @@ pub async fn scan(scope: String, app: AppHandle) -> Result<Vec<ScanItem>, String
             }
         } else {
             // 单扫描器（dup / large / apps / dev_cache…）：繁忙时返回部分结果。
-            let (v, p) =
-                std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(&scope))).unwrap_or_default();
+            let (v, p) = std::panic::catch_unwind(AssertUnwindSafe(|| run_scanner(&scope)))
+                .unwrap_or_default();
             if p {
                 let _ = app.emit(
                     "scan-partial",
@@ -667,17 +671,17 @@ pub fn cache_children(path: String) -> Result<Vec<CacheChildDto>, String> {
     if path.is_empty() {
         return Err("路径为空".into());
     }
-    Ok(scanner::app_cache::cache_children(&std::path::PathBuf::from(
-        path,
-    ))
-    .into_iter()
-    .map(|c| CacheChildDto {
-        path: c.path,
-        size_bytes: c.size_bytes,
-        file_count: c.file_count,
-        modified: c.modified,
-    })
-    .collect())
+    Ok(
+        scanner::app_cache::cache_children(&std::path::PathBuf::from(path))
+            .into_iter()
+            .map(|c| CacheChildDto {
+                path: c.path,
+                size_bytes: c.size_bytes,
+                file_count: c.file_count,
+                modified: c.modified,
+            })
+            .collect(),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -858,15 +862,13 @@ pub fn clean_preview(items: Vec<CleanItemReq>) -> Vec<PreviewItemDto> {
             // “仅选安全项却提示 1 项未通过安全检查”）。
             let (allowed, reason) = if !it.batch_paths.is_empty() {
                 let (safe_n, blocked_n) =
-                    it.batch_paths
-                        .iter()
-                        .fold((0usize, 0usize), |(s, b), bp| {
-                            match safety::check_path_safety_with_category(bp, &it.category) {
-                                SafetyCheck::Safe => (s + 1, b),
-                                // Danger/Warning 成员在执行层都会被跳过，不计入可删成员
-                                _ => (s, b + 1),
-                            }
-                        });
+                    it.batch_paths.iter().fold((0usize, 0usize), |(s, b), bp| {
+                        match safety::check_path_safety_with_category(bp, &it.category) {
+                            SafetyCheck::Safe => (s + 1, b),
+                            // Danger/Warning 成员在执行层都会被跳过，不计入可删成员
+                            _ => (s, b + 1),
+                        }
+                    });
                 if safe_n == 0 {
                     (false, "该组所有成员均未通过安全检查".to_string())
                 } else if blocked_n > 0 {
@@ -1237,12 +1239,19 @@ pub async fn apps_sizes(
 /// safety 闸门并移入废纸篓（M-2 备份清单）。前端传入的路径不被信任，
 /// 删除前在 Rust 侧重新校验。
 #[tauri::command]
-pub async fn app_uninstall(app_path: String, lang_en: bool) -> Result<ops::UninstallAppReport, String> {
+pub async fn app_uninstall(
+    app_path: String,
+    lang_en: bool,
+) -> Result<ops::UninstallAppReport, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ops::UninstallAppReport, String> {
         // 官方卸载器开关来自 core 配置（设置页同一把锁）
         let prefer_official_uninstaller =
             config::load_config().settings_prefer_official_uninstaller;
-        Ok(ops::uninstall_app(&app_path, lang_en, prefer_official_uninstaller))
+        Ok(ops::uninstall_app(
+            &app_path,
+            lang_en,
+            prefer_official_uninstaller,
+        ))
     })
     .await
     .map_err(|e| format!("卸载任务异常: {e}"))?
@@ -1327,9 +1336,7 @@ pub fn logs_reveal() -> Result<(), String> {
                 .arg(&target)
                 .status()
         } else {
-            std::process::Command::new("open")
-                .arg(&dir)
-                .status()
+            std::process::Command::new("open").arg(&dir).status()
         };
         status
             .map_err(|e| format!("无法打开访达: {e}"))?
@@ -1420,19 +1427,19 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 /// 入参路径必须严格位于 `~/Library/Containers/<受支持IM>/Data/Documents`，
 /// 否则拒绝；全程只统计目录大小，不删除、不修改任何内容。
 #[tauri::command]
-pub async fn im_breakdown(path: String) -> Result<maclean_core::im_data::ImBreakdown, String> {    // 微信 Documents 可达数十 GB、含几十万小文件，遍历是 CPU/IO 密集操作，
+pub async fn im_breakdown(path: String) -> Result<maclean_core::im_data::ImBreakdown, String> {
+    // 微信 Documents 可达数十 GB、含几十万小文件，遍历是 CPU/IO 密集操作，
     // 必须放到阻塞线程池——若在主线程同步跑（旧实现），点击概览卡片后整个窗口
     // 会无响应直到统计结束，表现为“点击微信聊天数据卡顿”。
-    tauri::async_runtime::spawn_blocking(move || -> Result<maclean_core::im_data::ImBreakdown, String> {
-        let p = std::path::Path::new(&path);
-        let app = maclean_core::im_data::im_app_for_docs_path(p)
-            .ok_or_else(|| "该路径不是受支持 IM 的数据目录，已拒绝分析".to_string())?;
-        maclean_core::log_scan_step(&format!(
-            "IM 占用分析（只读）: {} — {}",
-            app.name, path
-        ));
-        Ok(maclean_core::im_data::analyze(p))
-    })
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<maclean_core::im_data::ImBreakdown, String> {
+            let p = std::path::Path::new(&path);
+            let app = maclean_core::im_data::im_app_for_docs_path(p)
+                .ok_or_else(|| "该路径不是受支持 IM 的数据目录，已拒绝分析".to_string())?;
+            maclean_core::log_scan_step(&format!("IM 占用分析（只读）: {} — {}", app.name, path));
+            Ok(maclean_core::im_data::analyze(p))
+        },
+    )
     .await
     .map_err(|e| format!("IM 占用分析任务执行失败: {e}"))?
 }
@@ -1651,7 +1658,9 @@ pub fn sudo_keepalive_prompt_and_start() -> Result<bool, String> {
             use std::io::Write;
             let _ = writeln!(stdin, "{}", password);
         }
-        let o = child.wait_with_output().map_err(|e| format!("sudo 执行失败：{e}"))?;
+        let o = child
+            .wait_with_output()
+            .map_err(|e| format!("sudo 执行失败：{e}"))?;
         if o.status.success() {
             true
         } else {
@@ -1677,7 +1686,9 @@ pub fn sudo_keepalive_prompt_and_start() -> Result<bool, String> {
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            let r = std::process::Command::new("/usr/bin/sudo").args(["-n", "-v"]).output();
+            let r = std::process::Command::new("/usr/bin/sudo")
+                .args(["-n", "-v"])
+                .output();
             let ok = r.map(|o| o.status.success()).unwrap_or(false);
             if !ok {
                 SUDO_PASSWORD.lock().unwrap().take();
@@ -1696,7 +1707,9 @@ pub fn sudo_keepalive_stop() {
         k.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     SUDO_PASSWORD.lock().unwrap().take();
-    let _ = std::process::Command::new("/usr/bin/sudo").arg("-k").output();
+    let _ = std::process::Command::new("/usr/bin/sudo")
+        .arg("-k")
+        .output();
 }
 
 #[tauri::command]
@@ -1755,8 +1768,11 @@ mod tests {
 
     /// 在 HOME 下建一次性测试目录，返回其路径（测试结束自行清理）
     fn home_tmp(tag: &str) -> std::path::PathBuf {
-        let p = std::path::PathBuf::from(std::env::var("HOME").unwrap())
-            .join(format!(".maclean_preview_test_{}_{}", tag, std::process::id()));
+        let p = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(format!(
+            ".maclean_preview_test_{}_{}",
+            tag,
+            std::process::id()
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -1778,13 +1794,13 @@ mod tests {
 
         let out = clean_preview(vec![req(
             "~/ 下的 .DS_Store 文件 (2 个)",
-            vec![
-                safe1.to_str().unwrap(),
-                safe2.to_str().unwrap(),
-            ],
+            vec![safe1.to_str().unwrap(), safe2.to_str().unwrap()],
         )]);
         assert_eq!(out.len(), 1);
-        assert!(out[0].allowed, "含可删成员的聚合项必须放行，旧逻辑会误拦整组");
+        assert!(
+            out[0].allowed,
+            "含可删成员的聚合项必须放行，旧逻辑会误拦整组"
+        );
         assert!(out[0].reason.is_empty(), "全部成员安全时不应有提示");
 
         // 混入一个受保护成员（node_modules 内）仍应放行，仅提示会跳过该成员
@@ -1792,13 +1808,17 @@ mod tests {
         touch(&guarded);
         let out2 = clean_preview(vec![req(
             "~/ 下的 .DS_Store 文件 (3 个)",
-            vec![
-                safe1.to_str().unwrap(),
-                guarded.to_str().unwrap(),
-            ],
+            vec![safe1.to_str().unwrap(), guarded.to_str().unwrap()],
         )]);
-        assert!(out2[0].allowed, "部分成员受保护不应拖累整组，执行层会单独跳过");
-        assert!(out2[0].reason.contains("跳过"), "应告知有成员被跳过: {}", out2[0].reason);
+        assert!(
+            out2[0].allowed,
+            "部分成员受保护不应拖累整组，执行层会单独跳过"
+        );
+        assert!(
+            out2[0].reason.contains("跳过"),
+            "应告知有成员被跳过: {}",
+            out2[0].reason
+        );
 
         // 所有成员都在受保护目录时才整组拒绝
         let out3 = clean_preview(vec![req(
@@ -1831,7 +1851,10 @@ mod tests {
         // 注意/高级：即使前端请求永久删除(false)，后端也强制进废纸篓
         assert!(resolve_use_trash("Advanced", false));
         assert!(resolve_use_trash("Caution", false));
-        assert!(resolve_use_trash(" Advanced ", false), "trim 后应识别为高级");
+        assert!(
+            resolve_use_trash(" Advanced ", false),
+            "trim 后应识别为高级"
+        );
         // 未知 / 缺失 / 大小写异常等级：默认保守，一律进废纸篓
         assert!(resolve_use_trash("", false));
         assert!(resolve_use_trash("advanced", false));
@@ -1905,8 +1928,7 @@ mod tests {
             assert!(
                 !it.deletable,
                 "含应用资源的 BundleMigration 目录必须被闸门锁定: {} ({})",
-                it.path,
-                it.undeletable_reason
+                it.path, it.undeletable_reason
             );
         }
     }

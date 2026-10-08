@@ -533,9 +533,9 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
-version = "1.8.3"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
 name = "bit-set"
@@ -1219,7 +1219,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 2.0.118",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1589,13 +1589,12 @@ dependencies = [
 
 [[package]]
 name = "ed25519-dalek"
-version = "2.2.0"
+version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+checksum = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "rand_core",
  "serde",
  "sha2",
  "subtle",
@@ -3232,26 +3231,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
-name = "maclean"
+name = "maclean-cli"
 version = "0.2.0"
 dependencies = [
- "base64 0.22.1",
  "clap",
  "ctrlc",
- "dirs 5.0.1",
- "ed25519-dalek",
- "eframe",
- "egui",
- "embed-resource 2.5.2",
- "image",
- "libc",
  "maclean-core",
- "rand_core",
- "rayon",
+ "maclean-types",
  "serde",
  "serde_json",
- "sha2",
- "tray-icon 0.14.3",
+ "uuid",
  "walkdir",
 ]
 
@@ -3263,6 +3252,7 @@ dependencies = [
  "dirs 5.0.1",
  "dispatch2",
  "libc",
+ "maclean-types",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -3274,6 +3264,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "maclean-free"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "dirs 5.0.1",
+ "ed25519-dalek",
+ "eframe",
+ "egui",
+ "embed-resource 2.5.2",
+ "maclean-cli",
+ "maclean-core",
+ "maclean-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tray-icon 0.14.3",
+]
+
+[[package]]
+name = "maclean-platform"
+version = "0.2.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "maclean-storage"
+version = "0.2.0"
+dependencies = [
+ "maclean-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "maclean-tauri"
 version = "0.3.0"
 dependencies = [
@@ -3282,6 +3308,15 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+]
+
+[[package]]
+name = "maclean-types"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3538,7 +3573,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -5587,7 +5622,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -7448,9 +7483,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.9.0"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 
 [[package]]
 name = "zerotrie"

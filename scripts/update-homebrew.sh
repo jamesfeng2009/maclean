@@ -15,7 +15,7 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+VERSION=$(grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
 REPO="${MACLEAN_GITHUB_REPO:-jamesfeng2009/maclean}"
 FORMULA="homebrew/maclean.rb"
 BASE="https://github.com/$REPO/releases/download/v$VERSION"

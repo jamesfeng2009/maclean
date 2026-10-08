@@ -11,9 +11,9 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="maclean"
 # 版本号单一来源：Cargo.toml
 # 不要在这里手写版本号——Cargo.toml / Makefile / 本脚本曾出现 0.2.0 / 0.1.0 / 0.2.0 三处不一致
-VERSION=$(grep -m1 '^version' "$PROJECT_DIR/Cargo.toml" | cut -d'"' -f2)
+VERSION=$(grep -m1 '^version' "$PROJECT_DIR/apps/maclean-free/Cargo.toml" | cut -d'"' -f2)
 if [ -z "$VERSION" ]; then
-    echo "错误：无法从 Cargo.toml 读取版本号" >&2
+    echo "错误：无法从 apps/maclean-free/Cargo.toml 读取版本号" >&2
     exit 1
 fi
 BUILD_DIR="$PROJECT_DIR/target/release"

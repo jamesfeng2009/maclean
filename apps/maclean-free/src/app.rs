@@ -1735,6 +1735,7 @@ mod tests {
             recommend: Recommend::Safe,
             description: String::new(),
             batch_paths: Vec::new(),
+            batch_mtimes: Vec::new(),
         }
     }
 
@@ -1856,7 +1857,7 @@ mod tests {
     fn delete_pipeline_writes_a_manifest_and_reports_it_back() {
         // 反向验证的对象是"接线"本身：backup::record 存在不等于被调用。
         // 拆掉 start_delete 里的 record / BackupRecorded 任一段，这条就红。
-        let ops = include_str!("../crates/maclean-core/src/ops/mod.rs");
+        let ops = include_str!("../../../crates/maclean-core/src/ops/mod.rs");
         assert!(
             ops.contains("crate::backup::record("),
             "删除链路必须写备份清单"
@@ -2036,6 +2037,16 @@ mod tests {
     fn show_protected_items_defaults_off_and_persists() {
         // 「显示受保护/系统项」默认关：普通用户看不到系统保护项，
         // 避免"勾选 → 授权 → 失败"循环；开关打开后必须持久化。
+        //
+        // 隔离用户真实配置：本测试断言"默认值"，而 config.json 可能已是
+        // 用户真实设置（如用户开启过该开关）。先备份并覆盖为默认配置，
+        // 跑完再恢复，保证测试幂等且不污染用户数据。
+        let cfg_path = crate::config::config_json_path();
+        let backup = std::fs::read(&cfg_path).ok();
+        let default_cfg =
+            serde_json::to_string_pretty(&crate::config::AppConfig::default()).unwrap();
+        std::fs::write(&cfg_path, default_cfg).unwrap();
+
         let app = App::new();
         assert!(
             !app.settings_show_protected_items,
@@ -2051,12 +2062,22 @@ mod tests {
         // 还原：避免污染后续测试读取的 user_config
         app2.settings_show_protected_items = false;
         app2.save_settings();
+
+        // 恢复用户真实配置（无则删除测试生成的 config.json）
+        match backup {
+            Some(bytes) => {
+                let _ = std::fs::write(&cfg_path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&cfg_path);
+            }
+        }
     }
 
     #[test]
     fn official_uninstaller_preference_reaches_the_delete_thread() {
         // 设置项到位 ≠ 删除线程收到。拆掉任一个调用点，这条就红。
-        let ops = include_str!("../crates/maclean-core/src/ops/mod.rs");
+        let ops = include_str!("../../../crates/maclean-core/src/ops/mod.rs");
         assert!(
             ops.contains("prefer_official_uninstaller: bool,"),
             "start_delete 没有接收该偏好"

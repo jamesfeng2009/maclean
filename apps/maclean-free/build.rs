@@ -33,8 +33,17 @@ fn embed_windows_resources() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    let icon = manifest_dir.join("assets/icon/maclean.ico");
-    let app_manifest = manifest_dir.join("assets/windows.manifest");
+    // Open Core 拆分后本包位于 apps/maclean-free（2026-10-07），
+    // assets/ 仍在仓库根：apps/maclean-free → 仓库根（上溯三级）。
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.clone());
+
+    let icon = repo_root.join("assets/icon/maclean.ico");
+    let app_manifest = repo_root.join("assets/windows.manifest");
 
     if !icon.exists() {
         panic!("缺少图标资源: {}（应先从 PNG 生成 .ico）", icon.display());
@@ -98,9 +107,9 @@ END
     let rc_path = out_dir.join("maclean.rc");
     fs::write(&rc_path, rc_src).expect("写入 maclean.rc 失败");
 
-    // 资源文件变了要重新跑构建脚本
-    println!("cargo:rerun-if-changed=assets/icon/maclean.ico");
-    println!("cargo:rerun-if-changed=assets/windows.manifest");
+    // 资源文件变了要重新跑构建脚本（绝对路径：cargo 的 rerun-if-changed 相对 manifest 目录解析）
+    println!("cargo:rerun-if-changed={}", icon.display());
+    println!("cargo:rerun-if-changed={}", app_manifest.display());
 
     // embed_resource::compile 的契约（2.5.2）：
     // - Windows 宿主：找不到 rc.exe 或编译失败会直接 panic —— 这正是 CI 需要的硬门禁，

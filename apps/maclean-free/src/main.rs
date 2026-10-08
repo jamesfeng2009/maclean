@@ -24,7 +24,6 @@ use maclean_core::{
 };
 
 mod app;
-mod cli;
 mod license;
 mod ops;
 mod touchid;
@@ -93,8 +92,9 @@ fn main() {
     // 初始化日志系统（CLI 和 GUI 模式都需要）
     logger::init();
 
-    // CLI 模式：有子命令时执行并退出（带语义退出码），无子命令时启动 GUI
-    if let Some(code) = cli::run_cli() {
+    // CLI 模式：有子命令时执行并退出（带语义退出码），无子命令时启动 GUI。
+    // Phase 6 后 CLI handler 在 maclean-cli crate，这里是 thin adapter。
+    if let Some(code) = maclean_cli::run_cli() {
         logger::info("CLI 模式执行完毕，退出");
         std::process::exit(code as i32);
     }

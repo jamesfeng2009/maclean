@@ -3,7 +3,7 @@
 # maclean Makefile
 
 # 版本号单一来源：Cargo.toml（不要在 Makefile 里再写一份，否则三处不一致）
-VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+VERSION := $(shell grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
 
 ## 编译 debug 版本
 build:

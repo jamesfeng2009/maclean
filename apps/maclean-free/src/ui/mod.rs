@@ -6791,7 +6791,7 @@ pub(crate) fn render_settings_panel(ui: &mut egui::Ui, app: &mut App) {
                         } else {
                             app.tf(
                                 "schedule_last_run",
-                                &[&crate::cli::format_timestamp(app.schedule_last_run)],
+                                &[&maclean_cli::format_timestamp(app.schedule_last_run)],
                             )
                         };
                         ui.colored_label(
@@ -7443,6 +7443,7 @@ mod tests {
             recommend: Recommend::Safe,
             description: String::new(),
             batch_paths: Vec::new(),
+            batch_mtimes: Vec::new(),
         }
     }
 
@@ -7664,6 +7665,7 @@ mod tests {
             recommend,
             description: String::new(),
             batch_paths: Vec::new(),
+            batch_mtimes: Vec::new(),
         }
     }
 
@@ -7841,6 +7843,7 @@ mod disk_analyzer_tests {
             batch_paths: Vec::new(),
             recommend: crate::scanner::Recommend::Safe,
             description: String::new(),
+            batch_mtimes: Vec::new(),
         }
     }
 

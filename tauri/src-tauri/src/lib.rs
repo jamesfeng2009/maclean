@@ -31,8 +31,17 @@ pub struct MenuInfo(pub Mutex<Option<MenuItem<tauri::Wry>>>);
 fn menubar_tooltip() -> String {
     let (total, free) = maclean_core::platform::disk_info();
     let used = total.saturating_sub(free);
-    let pct = if total > 0 { used as f32 / total as f32 * 100.0 } else { 0.0 };
-    format!("maclean · 已用 {:.1}% · 可用 {:.1} GB / {:.1} GB", pct, free as f32 / 1e9, total as f32 / 1e9)
+    let pct = if total > 0 {
+        used as f32 / total as f32 * 100.0
+    } else {
+        0.0
+    };
+    format!(
+        "maclean · 已用 {:.1}% · 可用 {:.1} GB / {:.1} GB",
+        pct,
+        free as f32 / 1e9,
+        total as f32 / 1e9
+    )
 }
 
 /// 应用 / 移除菜单栏托盘（幂等）。开启时创建托盘 HUD：
@@ -40,7 +49,10 @@ fn menubar_tooltip() -> String {
 /// 菜单信息项与 tooltip 每 60 秒刷新一次磁盘用量；关闭时直接 drop 托盘。
 pub fn menu_bar_apply(app: &tauri::AppHandle, show: bool) -> Result<(), String> {
     let state = app.state::<MenuBar>();
-    let mut guard = state.0.lock().map_err(|_| "菜单栏状态锁被占用".to_string())?;
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "菜单栏状态锁被占用".to_string())?;
     if show {
         if guard.is_some() {
             return Ok(());
@@ -52,8 +64,14 @@ pub fn menu_bar_apply(app: &tauri::AppHandle, show: bool) -> Result<(), String> 
             .map_err(|e| format!("创建菜单信息项失败：{e}"))?;
         let open = MenuItem::with_id(app, "menubar-open", "打开 maclean", true, None::<&str>)
             .map_err(|e| format!("创建菜单项失败：{e}"))?;
-        let trash = MenuItem::with_id(app, "menubar-trash", "在访达中打开废纸篓", true, None::<&str>)
-            .map_err(|e| format!("创建菜单项失败：{e}"))?;
+        let trash = MenuItem::with_id(
+            app,
+            "menubar-trash",
+            "在访达中打开废纸篓",
+            true,
+            None::<&str>,
+        )
+        .map_err(|e| format!("创建菜单项失败：{e}"))?;
         let quit = MenuItem::with_id(app, "menubar-quit", "退出 maclean", true, None::<&str>)
             .map_err(|e| format!("创建菜单项失败：{e}"))?;
         let sep = PredefinedMenuItem::separator(app).map_err(|e| format!("创建分隔线失败：{e}"))?;
@@ -66,7 +84,11 @@ pub fn menu_bar_apply(app: &tauri::AppHandle, show: bool) -> Result<(), String> 
             .show_menu_on_left_click(true)
             .on_tray_icon_event(|tray, event| {
                 // 双击：直接唤起主窗口（左键已交给菜单，双击不干扰）
-                if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
+                if let TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } = event
+                {
                     if let Some(w) = tray.app_handle().get_webview_window("main") {
                         let _ = w.show();
                         let _ = w.unminimize();
