@@ -1,0 +1,28 @@
+[package]
+name = "maclean-cli"
+version = "0.2.0"
+edition = "2021"
+description = "maclean CLI：命令解析 / envelope 渲染 / 语义退出码 / 人类可读输出（Open Core）"
+license = "Apache-2.0"
+repository = "https://github.com/jamesfeng2009/maclean"
+
+# CLI 层（strategy §21 / split 02 §3 maclean-cli / split 03 Phase 6）。
+# 职责：命令解析、JSON/JSONL envelope 格式化、退出码、人类可读渲染。
+# CLI 只调用 core 服务（scan/clean/safety/backup/scheduler），
+# 参数处理器内不含文件系统删除实现（P6-4，删除在 maclean-core::ops）。
+#
+# 2026-10-08：handler（原 apps/maclean-free/src/cli.rs，2695 行）已迁入
+# 本 crate；free 的 main 只做 thin adapter。
+
+[dependencies]
+maclean-types = { path = "../maclean-types", version = "0.2.0" }
+maclean-core = { path = "../maclean-core", version = "0.2.0" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ctrlc = "3"
+walkdir = "2.5"
+# request_id 生成（envelope 契约要求一次请求一个 ID）
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
