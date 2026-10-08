@@ -1,0 +1,18 @@
+path,decision,target,reason
+src/cache_registry.rs,MOVE,maclean-core::scanner::registry,basic scanner registry
+src/dev_cache.rs,MOVE,maclean-core::scanner::developer,developer cache discovery
+src/app_cache.rs,MOVE,maclean-core::scanner::application,application cache discovery
+src/apfs.rs,MOVE,maclean-platform::macos::apfs,macOS-specific filesystem behavior
+src/large_files.rs,MOVE,maclean-core::scanner::large_files,basic inventory
+src/residual_match.rs,MOVE,maclean-core::scanner::residuals,residual discovery
+src/windows_apps.rs,REWRITE,maclean-platform::windows::apps,Windows-specific implementation needs contract separation
+src/uninstall.rs,REWRITE,maclean-core + maclean-platform,uninstall mixes policy/platform concerns
+license.rs,REWRITE,public verifier + private issuer,verification can be public but issuance must remain private
+advanced dashboard,PRIVATE,maclean-pro-ui,commercial UX
+growth intelligence,PRIVATE,maclean-pro-intelligence,commercial intelligence
+forecast,PRIVATE,maclean-pro-forecast,commercial intelligence
+policy engine,PRIVATE,maclean-pro-policy,commercial automation
+scheduler,PRIVATE,maclean-pro-automation,commercial automation
+AI explanation,PRIVATE,maclean-pro-ai,commercial feature
+Stripe integration,PRIVATE,maclean-license-server,secret/payment boundary
+license private key,PRIVATE,KMS/license-server,security secret

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+
+# This manifest is a template for the PRIVATE repository.
+# Public crates are consumed as released/pinned packages or a controlled
+# private source checkout. Do not place this manifest in the public repo.
+
+members = [
+    "crates/maclean-pro-intelligence",
+    "crates/maclean-pro-history",
+    "crates/maclean-pro-forecast",
+    "crates/maclean-pro-policy",
+    "crates/maclean-pro-automation",
+    "crates/maclean-pro-ai",
+    "crates/maclean-pro-entitlement",
+    "crates/maclean-pro-ui",
+]

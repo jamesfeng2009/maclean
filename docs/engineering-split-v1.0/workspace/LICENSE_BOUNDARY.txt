@@ -1,0 +1,7 @@
+PUBLIC WORKSPACE:
+Apache-2.0
+
+PRIVATE WORKSPACE:
+Proprietary / commercial license.
+
+Do not copy this file into the private repo as a substitute for a real EULA.

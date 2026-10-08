@@ -1,5 +1,50 @@
 # maclean
 
+**Open Core · Free Edition · Storage Intelligence Engine**
+
+maclean 是面向开发者的磁盘清理与存储智能引擎：扫描结果会标注**删了会怎样**
+（要重新下载 / 要重新编译 / 含用户数据需确认），删除前对受保护应用单独拦一道，
+缓存永久删、大文件走废纸篓。Rust + egui/eframe，macOS / Windows 双平台 GUI + CLI。
+
+## 开源与商业边界（Open Core）
+
+| 版本 | 仓库 | 许可 | 能力 |
+|---|---|---|---|
+| **maclean Free**（本仓库） | `github.com/jamesfeng2009/maclean` | Apache-2.0 | 扫描 / 清单 / 分类 / 安全 / 基础清理 / 还原（独立编译，无需任何商业服务） |
+| **maclean Pro**（私有） | `github.com/jamesfeng2009/maclean-pro` | Proprietary | 存储智能 / 完整历史 / 预测 / 智能策略 / 定时自动化 / 高级规则 / 本地 AI 解释 / Pro Dashboard |
+
+- 本仓库（公开）可独立构建：`cargo build` / `cargo test` / `cargo run`；
+  不依赖 Stripe、license-server、maclean-pro、Team Server。
+- Pro 命令（`history / growth / forecast / policy / automation`）在 CLI 中
+  为契约占位，实现在私有仓库。
+- 目录级许可矩阵：`docs/governance/LICENSE_BOUNDARY.md`。
+
+## 构建
+
+```bash
+cargo build --workspace                    # 全量
+cargo test --workspace                     # 测试
+cargo build --release -p maclean-free      # egui GUI
+cargo build --release --no-default-features -p maclean-free   # 纯 CLI
+cd tauri && npm install && npm run tauri build                # Tauri dmg
+```
+
+## 仓库结构
+
+```text
+maclean/
+├── crates/   types · core(scanner/inventory/classification/cleanup/safety/restore) · storage · platform · cli
+├── apps/     maclean-free（egui 壳 + CLI 入口）
+├── tauri/    Tauri 2 壳（独立 workspace 成员）
+├── schemas/  JSON / migrations
+├── examples/ tests/  docs/  scripts/
+├── Cargo.toml  LICENSE  NOTICE  README.md
+```
+
+---
+
+# maclean
+
 面向开发者的磁盘清理工具。Rust + egui/eframe，macOS / Windows 双平台 GUI + CLI。
 
 不是"扫一遍报个数字"的玩具：扫描结果会标注**删了会怎样**（要重新下载 / 要重新编译 /

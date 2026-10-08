@@ -1,0 +1,64 @@
+# cargo-deny 配置（P9-10，2026-10-08）
+# 用法：cargo install cargo-deny && cargo deny check
+# 目标：license 兼容 / banned / advisories 三道门禁。
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+# 严重性阈值：高于此级别的 advisory 视为错误
+severity-threshold = "high"
+# 未处理的 advisory 全部视为错误（生产依赖）
+unmaintained = "deny"
+yanked = "deny"
+# 工作区内的私有 crate 不检查 advisory（未发布）
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# 禁止出现在依赖图中的 crate（一般留空，按需增补）
+deny = []
+# 跳过对自身 workspace 成员的检查
+skip = []
+skip-tree = []
+
+[licenses]
+# 允许的 license 集合（SPDX 标识）
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "OpenSSL",
+    "MPL-2.0",
+    "BSL-1.0",
+]
+# 禁止 copyleft 传染（商业侧会与 Proprietary 冲突）
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-3.0",
+    "LGPL-3.0",
+]
+# license 文本缺失时的处理：警告（人工核对后决定）
+unlicensed = "warn"
+confidence-threshold = 0.8
+# 私有 crate（publish=false）不强制 license 匹配
+exceptions = [
+    # 示例：若某依赖 license 识别失败且人工核对可接受，在此声明
+]
+
+[[licenses.clarify]]
+name = "ring"
+version = "*"
+expression = "ISC"
+license-files = [{ path = "LICENSE", hash = 0 }]
+
+[versions]
+# 版本冲突策略（默认 warn；生产依赖建议 deny）
+default = "warn"
