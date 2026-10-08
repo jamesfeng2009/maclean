@@ -226,19 +226,16 @@ fn walk_classify(dir: &Path, forced: Option<usize>) -> (u64, [u64; 7]) {
     }
 
     // 多核并行递归各子树并归约
-    let (sub_total, sub_acc) = subs
-        .par_iter()
-        .map(|(p, k)| walk_classify(p, *k))
-        .reduce(
-            || (0u64, [0u64; 7]),
-            |(t1, a1), (t2, a2)| {
-                let mut a = [0u64; 7];
-                for i in 0..7 {
-                    a[i] = a1[i].saturating_add(a2[i]);
-                }
-                (t1.saturating_add(t2), a)
-            },
-        );
+    let (sub_total, sub_acc) = subs.par_iter().map(|(p, k)| walk_classify(p, *k)).reduce(
+        || (0u64, [0u64; 7]),
+        |(t1, a1), (t2, a2)| {
+            let mut a = [0u64; 7];
+            for i in 0..7 {
+                a[i] = a1[i].saturating_add(a2[i]);
+            }
+            (t1.saturating_add(t2), a)
+        },
+    );
 
     let mut merged = [0u64; 7];
     for i in 0..7 {
@@ -294,7 +291,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_root(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("maclean_im_test_{}_{}", tag, std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("maclean_im_test_{}_{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
@@ -323,7 +321,11 @@ mod tests {
     fn classify_dir_indices() {
         assert_eq!(classify_im_dir("db_storage", false), Some(0));
         assert_eq!(classify_im_dir("video", true), Some(1));
-        assert_eq!(classify_im_dir("video", false), None, "非 msg 父目录的 video 不算");
+        assert_eq!(
+            classify_im_dir("video", false),
+            None,
+            "非 msg 父目录的 video 不算"
+        );
         assert_eq!(classify_im_dir("attach", true), Some(2));
         assert_eq!(classify_im_dir("file", true), Some(3));
         assert_eq!(classify_im_dir("backup", false), Some(4));
@@ -355,7 +357,11 @@ mod tests {
 
         // 各分类都被统计到、且不超过总量；分类之和等于总量
         for p in &b.parts {
-            assert!(p.size_bytes > 0 && p.size_bytes <= b.total_bytes, "{} 越界", p.key);
+            assert!(
+                p.size_bytes > 0 && p.size_bytes <= b.total_bytes,
+                "{} 越界",
+                p.key
+            );
         }
         let sum: u64 = b.parts.iter().map(|p| p.size_bytes).sum();
         assert_eq!(sum, b.total_bytes, "各分类之和应等于总量");
@@ -371,9 +377,19 @@ mod tests {
         mk_file(&root, "x/w/msg/video/db_storage/x.db", 1000);
         mk_file(&root, "x/w/msg/video/loose.bin", 1000);
         let b = analyze(&root);
-        let get = |k: &str| b.parts.iter().find(|p| p.key == k).map(|p| p.size_bytes).unwrap_or(0);
+        let get = |k: &str| {
+            b.parts
+                .iter()
+                .find(|p| p.key == k)
+                .map(|p| p.size_bytes)
+                .unwrap_or(0)
+        };
         assert_eq!(get("video"), b.total_bytes, "video 子树应整体计入视频");
-        assert_eq!(get("db"), 0, "已在 video 子树内的 db_storage 不应再被识别为数据库");
+        assert_eq!(
+            get("db"),
+            0,
+            "已在 video 子树内的 db_storage 不应再被识别为数据库"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

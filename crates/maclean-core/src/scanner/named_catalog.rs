@@ -226,7 +226,11 @@ pub fn scan_installed_app_caches() -> Vec<ScanItem> {
 
 /// 容器内定点缓存探测：`Data/Library/Caches` 整目录 + `Data/Library/Application
 /// Support` 一层缓存目录名匹配。失败（TCC 未授权 / 不存在）即静默返回。
-fn scan_container_cache_layer(items: &mut Vec<ScanItem>, data_root: &std::path::Path, app_name: &str) {
+fn scan_container_cache_layer(
+    items: &mut Vec<ScanItem>,
+    data_root: &std::path::Path,
+    app_name: &str,
+) {
     // Data/Library/Caches（整目录，含子缓存）
     let caches = data_root.join("Library/Caches");
     push_app_item(

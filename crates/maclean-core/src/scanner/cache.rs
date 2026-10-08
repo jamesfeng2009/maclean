@@ -229,7 +229,8 @@ mod tests {
         std::fs::write(&real, vec![0u8; 1024]).expect("写入临时文件失败");
 
         let result = ScanResult {
-            items: vec![ScanItem { batch_mtimes: vec![],
+            items: vec![ScanItem {
+                batch_mtimes: vec![],
                 path: real.to_string_lossy().to_string(),
                 size_bytes: 1024,
                 category: "test".to_string(),
@@ -262,7 +263,8 @@ mod tests {
     // ---------- P1-13: 缓存加载必须重新校验路径（TOCTOU） ----------
 
     fn mk_item(path: &str, size: u64, batch: Vec<String>) -> ScanItem {
-        ScanItem { batch_mtimes: vec![],
+        ScanItem {
+            batch_mtimes: vec![],
             path: path.to_string(),
             size_bytes: size,
             category: "test".to_string(),

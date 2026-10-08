@@ -34,8 +34,7 @@ use std::sync::{mpsc, Arc};
 use crate::app_protection::{self, ProtectionLevel};
 use crate::i18n::{self, tf_lang};
 use crate::scanner::uninstall::{
-    find_associated_files, get_app_display_name, get_bundle_id, is_cache_like_path,
-    path_size_fast,
+    find_associated_files, get_app_display_name, get_bundle_id, is_cache_like_path, path_size_fast,
 };
 use crate::{logger, scanner};
 
@@ -456,7 +455,10 @@ mod tests {
             tcc_domain_of_path("/Users/x/Library/Caches/com.example.app"),
             TccDomain::Other
         );
-        assert_eq!(tcc_domain_of_path("/Users/x/Downloads/a.txt"), TccDomain::Other);
+        assert_eq!(
+            tcc_domain_of_path("/Users/x/Downloads/a.txt"),
+            TccDomain::Other
+        );
     }
 
     #[test]
@@ -465,14 +467,23 @@ mod tests {
         // （这些分支不触碰文件系统，任何机器上都能测）
         #[cfg(target_os = "macos")]
         {
-            assert!(!crate::ops::sudo_move_app_to_trash("/Users/x/foo.app", false));
+            assert!(!crate::ops::sudo_move_app_to_trash(
+                "/Users/x/foo.app",
+                false
+            ));
             assert!(!crate::ops::sudo_move_app_to_trash("/tmp/foo.app", false));
             assert!(!crate::ops::sudo_move_app_to_trash(
                 "/Applications/evil$(rm -rf /).app",
                 false
             ));
-            assert!(!crate::ops::sudo_move_app_to_trash("/Applications/evil'.app", false));
-            assert!(!crate::ops::sudo_move_app_to_trash("/Applications/notanapp", false));
+            assert!(!crate::ops::sudo_move_app_to_trash(
+                "/Applications/evil'.app",
+                false
+            ));
+            assert!(!crate::ops::sudo_move_app_to_trash(
+                "/Applications/notanapp",
+                false
+            ));
         }
     }
 

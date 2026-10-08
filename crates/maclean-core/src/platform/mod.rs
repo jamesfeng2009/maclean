@@ -164,7 +164,7 @@ pub fn move_to_trash(path: &str) -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        return macos_trash::move_to_trash_impl(path);
+        macos_trash::move_to_trash_impl(path)
     }
 
     #[cfg(target_os = "windows")]

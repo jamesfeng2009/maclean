@@ -397,7 +397,8 @@ pub(crate) fn push_named_cache_item(
             }
             _ => (true, String::new()),
         };
-    items.push(ScanItem { batch_mtimes: vec![],
+    items.push(ScanItem {
+        batch_mtimes: vec![],
         path: path_str,
         size_bytes: size,
         category: category.to_string(),
@@ -710,7 +711,8 @@ pub fn scan_app_support_caches() -> Vec<ScanItem> {
         let app_name = extract_app_name_from_path(&path, &app_support);
         let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("缓存");
 
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: format!("{} 缓存", app_name),
@@ -786,7 +788,8 @@ pub fn scan_system_caches() -> Vec<ScanItem> {
             .and_then(|n| n.to_str())
             .unwrap_or("缓存")
             .to_string();
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: format!("系统缓存-{}", name),
@@ -815,7 +818,8 @@ pub fn scan_logs() -> Vec<ScanItem> {
     if logs_dir.is_dir() {
         let size = dir_size(&logs_dir);
         if size >= CACHE_MIN {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: logs_dir.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "系统日志".to_string(),
@@ -915,7 +919,8 @@ pub fn scan_browser_caches() -> Vec<ScanItem> {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            items.push(ScanItem { batch_mtimes: vec![],
+                            items.push(ScanItem {
+                                batch_mtimes: vec![],
                                 path: cache_path.to_string_lossy().to_string(),
                                 size_bytes: size,
                                 category: "浏览器缓存".to_string(),
@@ -941,7 +946,8 @@ pub fn scan_browser_caches() -> Vec<ScanItem> {
     if safari_cache.is_dir() {
         let size = dir_size(&safari_cache);
         if size >= 10 * 1024 * 1024 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: safari_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "浏览器缓存".to_string(),
@@ -960,7 +966,8 @@ pub fn scan_browser_caches() -> Vec<ScanItem> {
     if webkit_cache.is_dir() {
         let size = dir_size(&webkit_cache);
         if size >= 10 * 1024 * 1024 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: webkit_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "浏览器缓存".to_string(),
@@ -1030,7 +1037,8 @@ fn scan_chromium_cache_subdirs(
                     | "ZxcvbnData"
                     | "WasmTtsEngine"
             );
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: cache_path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "浏览器缓存".to_string(),
@@ -1056,7 +1064,8 @@ fn scan_chromium_cache_subdirs(
             if cache_path.is_dir() {
                 let size = dir_size(&cache_path);
                 if size >= 10 * 1024 * 1024 {
-                    items.push(ScanItem { batch_mtimes: vec![],
+                    items.push(ScanItem {
+                        batch_mtimes: vec![],
                         path: cache_path.to_string_lossy().to_string(),
                         size_bytes: size,
                         category: "浏览器缓存".to_string(),
@@ -1176,7 +1185,8 @@ mod tests {
     use crate::scanner::Recommend;
 
     fn mk(path: &str, size: u64) -> ScanItem {
-        ScanItem { batch_mtimes: vec![],
+        ScanItem {
+            batch_mtimes: vec![],
             path: path.to_string(),
             size_bytes: size,
             category: "test".to_string(),
@@ -1246,13 +1256,17 @@ mod tests {
         assert_eq!(im_install_state(wx, &HashSet::new()), None);
 
         // 命中：仍安装
-        let present: HashSet<String> =
-            [wx, "com.tencent.qq", "com.something.else"].iter().map(|s| s.to_string()).collect();
+        let present: HashSet<String> = [wx, "com.tencent.qq", "com.something.else"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(im_install_state(wx, &present), Some(true));
 
         // 未命中：App 已卸载 → 孤儿
-        let absent: HashSet<String> =
-            ["com.finder.other", "com.another.app"].iter().map(|s| s.to_string()).collect();
+        let absent: HashSet<String> = ["com.finder.other", "com.another.app"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(im_install_state(wx, &absent), Some(false));
     }
 

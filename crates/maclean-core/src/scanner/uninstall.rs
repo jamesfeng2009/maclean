@@ -454,7 +454,8 @@ fn scan_trash_apps() -> Vec<ScanItem> {
                 continue;
             }
             let size = dir_size(&path);
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: format!("废纸篓残留-{}", name.trim_end_matches(".app")),
@@ -506,7 +507,8 @@ fn scan_downloads_apps() -> Vec<ScanItem> {
                     name
                 )
             };
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: format!("下载残留-{}", name.trim_end_matches(".app")),
@@ -620,7 +622,8 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
 
     // 不可删除的系统关键 / 安全应用：只展示一个汇总项
     if is_critical {
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: app_path.to_string_lossy().to_string(),
             size_bytes: app_size + data_size + cache_size,
             category: app_name,
@@ -636,7 +639,8 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
 
     if let ProtectionLevel::RequiresOfficialUninstaller = protection {
         let vendor = app_protection::get_security_vendor(&bundle_id).unwrap_or("官方");
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: app_path.to_string_lossy().to_string(),
             size_bytes: app_size + data_size + cache_size,
             category: app_name,
@@ -660,7 +664,8 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
     //   3. 应用缓存（CacheOnly）：删 Caches/Logs/HTTPStorages
 
     // 1) 应用卸载项：只删 .app 包
-    items.push(ScanItem { batch_mtimes: vec![],
+    items.push(ScanItem {
+        batch_mtimes: vec![],
         path: app_path.to_string_lossy().to_string(),
         size_bytes: app_size,
         category: format!("{} (卸载)", app_name),
@@ -690,7 +695,8 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
                 data_paths.len()
             )
         };
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: data_paths[0].clone(),
             size_bytes: data_size,
             category: format!("{} 数据", app_name),
@@ -705,7 +711,8 @@ fn scan_app(app_path: &Path) -> Vec<ScanItem> {
 
     // 3) 缓存清理项（CacheOnly）：Caches / Logs / HTTPStorages
     if cache_size > 0 && !cache_paths.is_empty() {
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: cache_paths[0].clone(),
             size_bytes: cache_size,
             category: format!("{} 缓存", app_name),
@@ -1020,7 +1027,6 @@ pub(crate) fn get_app_version(app_path: &Path) -> Option<String> {
 ///
 /// `~/Library/Group Containers` 不再整目录枚举：改在 [`find_associated_files`]
 /// 内按 `<bundle_id>` / `group.<bundle_id>` 定点 stat，避免卸载被大目录 read_dir 拖住。
-
 pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<String> {
     let home = home_dir();
     let mut paths = Vec::new();
@@ -1547,7 +1553,8 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 if size_skipped {
                     description.push_str("（上次遍历卡死，大小可能不准）");
                 }
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: path_str,
                     size_bytes: size,
                     category: "App残留".to_string(),
@@ -1617,7 +1624,8 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                 if size_skipped {
                     description.push_str("（上次遍历卡死，大小可能不准）");
                 }
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: path_str,
                     size_bytes: size,
                     category: "App残留缓存".to_string(),
@@ -1677,7 +1685,8 @@ fn scan_app_leftovers(items: &mut Vec<ScanItem>) {
                     String::new()
                 };
 
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: path_str,
                     size_bytes: size,
                     category: "App残留配置".to_string(),
@@ -1919,7 +1928,8 @@ fn scan_vendor_subdir_leftovers(
             if size_skipped {
                 description.push_str("（上次遍历卡死，大小可能不准）");
             }
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: sub_str,
                 size_bytes: size,
                 category: category.to_string(),
@@ -2139,11 +2149,7 @@ pub(crate) fn detect_pwa_kind(
     let shortcut = read_plist_string(app_path, "CrAppModeShortcutID");
     let executable = read_plist_string(app_path, "CFBundleExecutable");
     let host = read_plist_string(app_path, "CrBundleIdentifier");
-    pwa_kind_from_shim(
-        shortcut.as_deref(),
-        executable.as_deref(),
-        host.as_deref(),
-    )
+    pwa_kind_from_shim(shortcut.as_deref(), executable.as_deref(), host.as_deref())
 }
 
 /// 扫描全部已安装应用，返回完整清单（按应用本体大小降序）
@@ -2577,10 +2583,7 @@ fn extract_app_icon_data_url(app_path: &Path) -> Option<String> {
     if bytes.len() < 16 {
         return None;
     }
-    Some(format!(
-        "data:image/png;base64,{}",
-        base64_encode(&bytes)
-    ))
+    Some(format!("data:image/png;base64,{}", base64_encode(&bytes)))
 }
 
 #[cfg(test)]
@@ -2914,7 +2917,9 @@ mod tests {
             "/Users/u/Applications/Doubao Apps.localized/Some.webapp.app"
         ));
         // /Applications 顶层、~/Applications 顶层普通应用都不应触发 plist 特征判定
-        assert!(!in_localized_app_container("/Applications/Google Chrome.app"));
+        assert!(!in_localized_app_container(
+            "/Applications/Google Chrome.app"
+        ));
         assert!(!in_localized_app_container("/Users/u/Applications/Foo.app"));
     }
 
@@ -3044,7 +3049,10 @@ mod tests {
     fn app_inventory_sizes_bounded_never_blocks_past_budget() {
         use std::time::Duration;
         // 空输入立即返回
-        assert!(app_inventory_sizes_bounded(Vec::new(), 2, Duration::from_millis(50), |_| {}).is_empty());
+        assert!(
+            app_inventory_sizes_bounded(Vec::new(), 2, Duration::from_millis(50), |_| {})
+                .is_empty()
+        );
 
         // 非法路径在 worker 内被快速跳过（completed 计数），必须很快结束、不挂死
         let t = Instant::now();
@@ -3094,7 +3102,9 @@ mod tests {
             assert!(xapp.is_pwa);
             assert_eq!(xapp.pwa_kind, "chrome");
             assert!(
-                xapp.icon.as_deref().is_some_and(|s| s.starts_with("data:image/png;base64,")),
+                xapp.icon
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("data:image/png;base64,")),
                 "X PWA 应带真实图标 data URL"
             );
         }
@@ -3109,10 +3119,14 @@ mod tests {
             candidate
         } else {
             let k = PathBuf::from("/Applications/Keynote.app");
-            if k.exists() { k } else { return; }
+            if k.exists() {
+                k
+            } else {
+                return;
+            }
         };
         let p = target.to_string_lossy().to_string();
-        let sizes = app_inventory_sizes_for(&[p.clone()]);
+        let sizes = app_inventory_sizes_for(std::slice::from_ref(&p));
         assert_eq!(sizes.len(), 1);
         assert_eq!(sizes[0].path, p);
         // 本体必然非零（.app 内含文件）

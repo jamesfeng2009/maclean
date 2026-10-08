@@ -116,7 +116,8 @@ fn scan_rust_caches() -> Vec<ScanItem> {
     for base in get_project_search_paths() {
         for target_dir in search_dirs(&base, "target", 3) {
             let size = dir_size(&target_dir);
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: target_dir.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Rust编译".to_string(),
@@ -134,7 +135,8 @@ fn scan_rust_caches() -> Vec<ScanItem> {
     let cargo_registry = home.join(".cargo/registry");
     if cargo_registry.is_dir() {
         let size = dir_size(&cargo_registry);
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: cargo_registry.to_string_lossy().to_string(),
             size_bytes: size,
             category: "Rust编译".to_string(),
@@ -178,7 +180,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                     // > 1MB 才展示
                     // 提取项目名（DerivedData 目录名格式：ProjectName-xxxxxxxx）
                     let project_name = name.split('-').next().unwrap_or(name);
-                    items.push(ScanItem { batch_mtimes: vec![],
+                    items.push(ScanItem {
+                        batch_mtimes: vec![],
                         path: path.to_string_lossy().to_string(),
                         size_bytes: size,
                         category: format!("Xcode编译-{}", project_name),
@@ -220,7 +223,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
 
         for (i, (version, path, size)) in versions.iter().enumerate() {
             let is_latest = i == versions.len().saturating_sub(1);
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: *size,
                 category: format!("iOS设备-{}", version),
@@ -263,7 +267,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
                         let size = dir_size(&archive_path);
                         if size > 1024 * 1024 {
                             // > 1MB
-                            items.push(ScanItem { batch_mtimes: vec![],
+                            items.push(ScanItem {
+                                batch_mtimes: vec![],
                                 path: archive_path.to_string_lossy().to_string(),
                                 size_bytes: size,
                                 category: format!("Xcode归档-{}", date_name),
@@ -315,7 +320,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     if sim_caches.is_dir() && !safety::is_simulator_running() {
         let size = dir_size(&sim_caches);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: sim_caches.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "模拟器缓存".to_string(),
@@ -339,7 +345,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
         // 值，但部分子目录会触发 Permission denied，du 处理 mount point 更准确。
         let size = get_simulator_cryptex_size().unwrap_or(0);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: sim_cryptex.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "模拟器Cryptex".to_string(),
@@ -360,7 +367,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     if doc_cache.is_dir() {
         let size = dir_size(&doc_cache);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: doc_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Xcode文档缓存".to_string(),
@@ -379,7 +387,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     if device_logs.is_dir() {
         let size = dir_size(&device_logs);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: device_logs.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Xcode设备日志".to_string(),
@@ -398,7 +407,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     if offline_docs.is_dir() {
         let size = dir_size(&offline_docs);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: offline_docs.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Xcode离线文档".to_string(),
@@ -417,7 +427,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     if watch_support.is_dir() {
         let size = dir_size(&watch_support);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: watch_support.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "watchOS设备".to_string(),
@@ -436,7 +447,8 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     if connector_support.is_dir() {
         let size = dir_size(&connector_support);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: connector_support.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Xcode连接日志".to_string(),
@@ -480,7 +492,8 @@ fn scan_node_caches() -> Vec<ScanItem> {
     for base in get_project_search_paths() {
         for nm_dir in search_dirs(&base, "node_modules", 3) {
             let size = dir_size(&nm_dir);
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: nm_dir.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Node依赖".to_string(),
@@ -516,7 +529,8 @@ fn scan_node_caches() -> Vec<ScanItem> {
     };
     if pnpm_store.is_dir() {
         let size = dir_size(&pnpm_store);
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: pnpm_store.to_string_lossy().to_string(),
             size_bytes: size,
             category: "pnpm缓存".to_string(),
@@ -533,7 +547,8 @@ fn scan_node_caches() -> Vec<ScanItem> {
     let npm_cache = home.join(".npm");
     if npm_cache.is_dir() {
         let size = dir_size(&npm_cache);
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: npm_cache.to_string_lossy().to_string(),
             size_bytes: size,
             category: "npm缓存".to_string(),
@@ -562,7 +577,8 @@ fn scan_go_caches() -> Vec<ScanItem> {
     let go_mod = home.join("go/pkg/mod");
     if go_mod.is_dir() {
         let size = dir_size(&go_mod);
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: go_mod.to_string_lossy().to_string(),
             size_bytes: size,
             category: "Go模块".to_string(),
@@ -591,7 +607,8 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
     let brew_cache = home.join("Library/Caches/Homebrew");
     if brew_cache.is_dir() {
         let size = dir_size(&brew_cache);
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: brew_cache.to_string_lossy().to_string(),
             size_bytes: size,
             category: "Homebrew缓存".to_string(),
@@ -609,7 +626,8 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
     if brew_downloads.is_dir() {
         let size = dir_size(&brew_downloads);
         if size > 10 * 1024 * 1024 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: brew_downloads.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Homebrew下载".to_string(),
@@ -662,7 +680,8 @@ fn scan_homebrew_caches() -> Vec<ScanItem> {
                                 old_paths.push(v.path().to_string_lossy().to_string());
                             }
                             if total_old_size > 10 * 1024 * 1024 {
-                                items.push(ScanItem { batch_mtimes: vec![],
+                                items.push(ScanItem {
+                                    batch_mtimes: vec![],
                                     path: format!("{} ({}个旧版本)", cask_name, old_paths.len()),
                                     size_bytes: total_old_size,
                                     category: "Homebrew旧版".to_string(),
@@ -775,7 +794,8 @@ fn scan_pip_caches() -> Vec<ScanItem> {
     };
     if pip_cache.is_dir() {
         let size = dir_size(&pip_cache);
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: pip_cache.to_string_lossy().to_string(),
             size_bytes: size,
             category: "pip缓存".to_string(),
@@ -863,7 +883,8 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
             for (dir_name, _) in versions.iter().skip(1) {
                 let dir_path = jb_support.join(dir_name);
                 let size = dir_size(&dir_path);
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: dir_path.to_string_lossy().to_string(),
                     size_bytes: size,
                     category: "IDE旧版".to_string(),
@@ -881,7 +902,8 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
     // 2. 缓存根目录 - 重启 IDE 会自动重建，可安全删除
     if jb_caches.is_dir() {
         let size = dir_size(&jb_caches);
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: jb_caches.to_string_lossy().to_string(),
             size_bytes: size,
             category: "IDE缓存".to_string(),
@@ -1056,7 +1078,8 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
     let gradle_caches = home.join(".gradle/caches");
     if let Ok(size) = dir_size_checked(&gradle_caches) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: gradle_caches.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Gradle缓存".to_string(),
@@ -1074,7 +1097,8 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
     let gradle_dists = home.join(".gradle/wrapper/dists");
     if let Ok(size) = dir_size_checked(&gradle_dists) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: gradle_dists.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Gradle版本".to_string(),
@@ -1092,7 +1116,8 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
     let m2_repo = home.join(".m2/repository");
     if let Ok(size) = dir_size_checked(&m2_repo) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: m2_repo.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Maven仓库".to_string(),
@@ -1117,7 +1142,8 @@ fn scan_java_caches(items: &mut Vec<ScanItem>) {
             if let Ok(size) = dir_size_checked(&dir) {
                 if size > 10 * 1024 * 1024 {
                     // > 10MB
-                    items.push(ScanItem { batch_mtimes: vec![],
+                    items.push(ScanItem {
+                        batch_mtimes: vec![],
                         path: dir.to_string_lossy().to_string(),
                         size_bytes: size,
                         category: "Java编译".to_string(),
@@ -1161,7 +1187,8 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
     };
     if let Ok(size) = dir_size_checked(&pip_cache) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: pip_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "pip缓存".to_string(),
@@ -1179,7 +1206,8 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
     let conda_pkgs = home.join(".conda/pkgs");
     if let Ok(size) = dir_size_checked(&conda_pkgs) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: conda_pkgs.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Conda缓存".to_string(),
@@ -1238,7 +1266,8 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
             }
         }
         if !safe_dirs.is_empty() {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: format!("{} 个 Poetry 缓存子目录", safe_dirs.len()),
                 size_bytes: poetry_size,
                 category: "Poetry缓存".to_string(),
@@ -1266,7 +1295,8 @@ fn scan_python_caches(items: &mut Vec<ScanItem>) {
     }
     if all_pycache_size > 10 * 1024 * 1024 {
         // > 10MB 才展示
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: format!("{}个 __pycache__ 目录", all_pycache_paths.len()),
             size_bytes: all_pycache_size,
             category: "Python缓存".to_string(),
@@ -1358,7 +1388,8 @@ fn scan_build_artifacts(items: &mut Vec<ScanItem>) {
                 if let Ok(size) = dir_size_checked(&dir) {
                     if size > 10 * 1024 * 1024 {
                         // > 10MB
-                        items.push(ScanItem { batch_mtimes: vec![],
+                        items.push(ScanItem {
+                            batch_mtimes: vec![],
                             path: dir.to_string_lossy().to_string(),
                             size_bytes: size,
                             category: category.to_string(),
@@ -1465,7 +1496,8 @@ fn scan_installer_files(items: &mut Vec<ScanItem>) {
             )
         };
 
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path,
             size_bytes: size,
             category: "安装包".to_string(),
@@ -1668,7 +1700,8 @@ fn scan_k8s_caches() -> Vec<ScanItem> {
     let kube_cache = home.join(".kube/cache");
     if let Ok(size) = dir_size_checked(&kube_cache) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: kube_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "K8s缓存".to_string(),
@@ -1688,7 +1721,8 @@ fn scan_k8s_caches() -> Vec<ScanItem> {
     let kube_http = home.join(".kube/http-cache");
     if let Ok(size) = dir_size_checked(&kube_http) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: kube_http.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "K8sHTTP缓存".to_string(),
@@ -1706,7 +1740,8 @@ fn scan_k8s_caches() -> Vec<ScanItem> {
     let helm_repo = home.join(".cache/helm/repository");
     if let Ok(size) = dir_size_checked(&helm_repo) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: helm_repo.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Helm缓存".to_string(),
@@ -1724,7 +1759,8 @@ fn scan_k8s_caches() -> Vec<ScanItem> {
     let helm_plugins = home.join(".cache/helm/plugins");
     if let Ok(size) = dir_size_checked(&helm_plugins) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: helm_plugins.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Helm插件缓存".to_string(),
@@ -1969,7 +2005,8 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     if is_docker_available() {
         let reclaimable = get_docker_reclaimable_size();
         if reclaimable > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 // 特殊路径标记，删除时走 docker prune 分支
                 path: "docker:system-prune".to_string(),
                 size_bytes: reclaimable,
@@ -1993,7 +2030,8 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     let buildx_cache = home.join(".docker/buildx/cache");
     if let Ok(size) = dir_size_checked(&buildx_cache) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: buildx_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Docker构建缓存".to_string(),
@@ -2032,7 +2070,8 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     let docker_cache = home.join("Library/Containers/com.docker.docker/Data/cache");
     if let Ok(size) = dir_size_checked(&docker_cache) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: docker_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Docker缓存".to_string(),
@@ -2065,7 +2104,8 @@ fn scan_docker_caches() -> Vec<ScanItem> {
                 } else {
                     "OrbStack 数据（只展示，不直接删除；清理请用 orbctl）".to_string()
                 };
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: odir.to_string_lossy().to_string(),
                     size_bytes: size,
                     category: cat.to_string(),
@@ -2140,7 +2180,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
                 let size = dir_size(&path);
                 if size > 10 * 1024 * 1024 {
                     // > 10MB 才展示
-                    items.push(ScanItem { batch_mtimes: vec![],
+                    items.push(ScanItem {
+                        batch_mtimes: vec![],
                         path: path.to_string_lossy().to_string(),
                         size_bytes: size,
                         category: "AI模型-HF".to_string(),
@@ -2160,7 +2201,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
     let hf_datasets = home.join(".cache/huggingface/datasets");
     if let Ok(size) = dir_size_checked(&hf_datasets) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: hf_datasets.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "AI缓存-HF".to_string(),
@@ -2178,7 +2220,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
     let hf_transformers = home.join(".cache/huggingface/transformers");
     if let Ok(size) = dir_size_checked(&hf_transformers) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: hf_transformers.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "AI缓存-HF".to_string(),
@@ -2209,7 +2252,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
                 "Ollama 本地模型，删除后需 ollama pull 重新下载".to_string()
             };
 
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: ollama_models.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Ollama模型".to_string(),
@@ -2227,7 +2271,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
     let torch_cache = home.join(".cache/torch");
     if let Ok(size) = dir_size_checked(&torch_cache) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: torch_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "PyTorch缓存".to_string(),
@@ -2260,7 +2305,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
     };
     if let Ok(size) = dir_size_checked(&llama_cache) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: llama_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "llama缓存".to_string(),
@@ -2296,7 +2342,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: p.to_string_lossy().to_string(),
                     size_bytes: size,
                     category: "ComfyUI模型".to_string(),
@@ -2318,7 +2365,8 @@ fn scan_ai_model_caches() -> Vec<ScanItem> {
     let minimax_dir = home.join("Downloads/myproject/MiniMax-H3");
     if let Ok(size) = dir_size_checked(&minimax_dir) {
         if size > 100 * 1024 * 1024 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: minimax_dir.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "MiniMax模型".to_string(),
@@ -2484,7 +2532,8 @@ fn scan_monorepo_caches() -> Vec<ScanItem> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| monorepo_root.to_string_lossy().to_string());
 
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: format!("Monorepo: {} ({} 个子包)", root_name, pkg_count),
                 size_bytes: total_size,
                 category: "Monorepo依赖".to_string(),
@@ -2579,7 +2628,8 @@ fn scan_orphaned_launchd() -> Vec<ScanItem> {
                 )
             };
 
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category,
@@ -2907,7 +2957,8 @@ fn scan_windows_temp() -> Vec<ScanItem> {
     if temp_dir.is_dir() {
         let size = dir_size(&temp_dir);
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: temp_dir.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Windows临时文件".to_string(),
@@ -2927,7 +2978,8 @@ fn scan_windows_temp() -> Vec<ScanItem> {
         if win_update.is_dir() {
             let size = dir_size(&win_update);
             if size > 0 {
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: win_update.to_string_lossy().to_string(),
                     size_bytes: size,
                     category: "Windows更新缓存".to_string(),
@@ -2964,7 +3016,8 @@ fn scan_windows_temp() -> Vec<ScanItem> {
                 }
             }
             if thumb_size > 0 {
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: thumb_cache.to_string_lossy().to_string(),
                     size_bytes: thumb_size,
                     category: "Windows缩略图".to_string(),

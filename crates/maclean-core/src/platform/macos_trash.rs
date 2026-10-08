@@ -18,7 +18,6 @@
 //!    删除工作线程在后台等待 completion（用户输密码可能较慢，给 5 分钟预算）。
 //!
 //! 安全承诺不变：两条进程内路径都失败时返回 `false`、**绝不**降级为永久删除。
-#![cfg(target_os = "macos")]
 
 use std::ptr::NonNull;
 use std::sync::{Arc, Condvar, Mutex};

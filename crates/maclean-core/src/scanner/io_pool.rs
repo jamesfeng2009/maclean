@@ -77,9 +77,8 @@ fn pool() -> &'static Pool {
                                 // gated_run 负责自适应并发闸门（繁忙时限在途 IO）与执行
                                 // 延迟反馈；catch_unwind 兜底确保任务 panic 不杀死 worker
                                 //（否则池容量会悄悄缩小）。
-                                let _ = catch_unwind(AssertUnwindSafe(|| {
-                                    super::load::gated_run(task)
-                                }));
+                                let _ =
+                                    catch_unwind(AssertUnwindSafe(|| super::load::gated_run(task)));
                             }
                             // 所有发送端释放（进程退出）时 recv 报错，worker 干净退出。
                             Err(_) => break,

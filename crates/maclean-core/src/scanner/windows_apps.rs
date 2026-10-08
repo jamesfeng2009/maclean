@@ -1586,7 +1586,8 @@ fn scan_windows_app_leftovers(items: &mut Vec<ScanItem>) {
                 continue;
             }
 
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "App残留".to_string(),
@@ -1634,7 +1635,8 @@ fn scan_programs_subdirs(
             continue;
         }
 
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: "App残留".to_string(),
@@ -1710,7 +1712,8 @@ fn scan_user_appdata_cache(base: &Path) -> Vec<ScanItem> {
                     let cache_path = sub.path();
                     let size = dir_size(&cache_path);
                     if size > 0 {
-                        items.push(ScanItem { batch_mtimes: vec![],
+                        items.push(ScanItem {
+                            batch_mtimes: vec![],
                             path: cache_path.to_string_lossy().to_string(),
                             size_bytes: size,
                             category: format!("{} 缓存", app_name),
@@ -1770,7 +1773,8 @@ fn scan_program_files_cache_dir(base: &Path) -> Vec<ScanItem> {
                     let size = dir_size(&cache_path);
                     if size > 1024 * 1024 {
                         // 只显示 >1MB 的目录
-                        items.push(ScanItem { batch_mtimes: vec![],
+                        items.push(ScanItem {
+                            batch_mtimes: vec![],
                             path: cache_path.to_string_lossy().to_string(),
                             size_bytes: size,
                             category: format!("{} 缓存", app_name),
@@ -1940,7 +1944,8 @@ fn scan_user_appdata_data(base: &Path) -> Vec<ScanItem> {
         let size = dir_size(&app_dir);
         if size > 10 * 1024 * 1024 {
             // > 10MB
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: app_dir.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: format!("{} 数据", app_name),
@@ -2140,7 +2145,8 @@ impl Scanner for WindowsUninstallScanner {
             };
 
             // 1) 应用卸载项：只卸载应用本体
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: uninstall_path,
                 size_bytes: size,
                 category: format!("{} (卸载)", app.name),
@@ -2169,7 +2175,8 @@ impl Scanner for WindowsUninstallScanner {
                         data_paths.len()
                     )
                 };
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: data_paths[0].clone(),
                     size_bytes: data_size,
                     category: format!("{} 数据", app.name),
@@ -2184,7 +2191,8 @@ impl Scanner for WindowsUninstallScanner {
 
             // 3) 缓存清理项（CacheOnly）：Cache / GPUCache / Code Cache 等
             if deletable && cache_size > 0 && !cache_paths.is_empty() {
-                items.push(ScanItem { batch_mtimes: vec![],
+                items.push(ScanItem {
+                    batch_mtimes: vec![],
                     path: cache_paths[0].clone(),
                     size_bytes: cache_size,
                     category: format!("{} 缓存", app.name),

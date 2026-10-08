@@ -210,7 +210,8 @@ pub fn windows_optimize_tasks() -> Vec<ScanItem> {
 /// - `size_bytes`: 0（操作项无大小）
 /// - `recommend`: Safe（均为安全操作）
 fn make_task(name: &str, description: &str, recommend: Recommend) -> ScanItem {
-    ScanItem { batch_mtimes: vec![],
+    ScanItem {
+        batch_mtimes: vec![],
         path: name.to_string(),
         size_bytes: 0,
         category: "系统优化".to_string(),

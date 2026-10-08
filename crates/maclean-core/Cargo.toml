@@ -8,6 +8,9 @@ description = "maclean 核心逻辑：扫描 / 安全闸门 / 删除执行 / 调
 # 都只通过本 crate 的公开 API 触达文件系统；任何删除都必须经过 safety 闸门。
 # 本 crate 不依赖任何窗口 / Web 技术，可在 CI / 容器中独立编译测试。
 [dependencies]
+# Open Core 公开契约层（2026-10-07）：domain 类型 / SafetyCheck / 退出码
+# 迁入 maclean-types，本 crate 通过 re-export 保持既有引用路径不变。
+maclean-types = { path = "../maclean-types", version = "0.2.0" }
 walkdir = "2.5"
 rayon = "1.10"
 dirs = "5.0"

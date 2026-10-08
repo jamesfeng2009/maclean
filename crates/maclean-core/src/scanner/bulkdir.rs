@@ -360,8 +360,7 @@ mod tests {
 
     #[test]
     fn bulk_empty_and_missing_dir() {
-        let tmp =
-            std::env::temp_dir().join(format!("maclean_bulk_empty_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("maclean_bulk_empty_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let got = list_dir(&tmp).unwrap();
@@ -376,8 +375,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bulk_unreadable_dir_does_not_panic() {
-        let tmp =
-            std::env::temp_dir().join(format!("maclean_bulk_noacc_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("maclean_bulk_noacc_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let orig = fs::metadata(&tmp).unwrap().permissions().mode();

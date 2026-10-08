@@ -168,8 +168,7 @@ impl Store {
             version: FORMAT_VERSION,
             entries: std::mem::take(&mut self.entries),
         };
-        let text = serde_json::to_string_pretty(&payload)
-            .map_err(std::io::Error::other)?;
+        let text = serde_json::to_string_pretty(&payload).map_err(std::io::Error::other)?;
         // save 会消费 entries（take），仅在真正写成功时才算提交；失败需回填。
         let write_result = (|| -> std::io::Result<()> {
             let tmp = self.path.with_extension(format!(
@@ -253,10 +252,11 @@ pub fn dir_size_accurate_cached(path: &Path) -> (u64, bool) {
     let key = path.to_string_lossy().to_string();
     let now = now_secs();
 
-    if let Some(bytes) = global()
-        .lock()
-        .expect("sizecache poisoned")
-        .get(&key, &meta, now, CACHE_TTL_SECS)
+    if let Some(bytes) =
+        global()
+            .lock()
+            .expect("sizecache poisoned")
+            .get(&key, &meta, now, CACHE_TTL_SECS)
     {
         return (bytes, false);
     }
@@ -378,9 +378,18 @@ mod tests {
             None
         );
         // inode / mtime / 目录大小任一变化：miss。
-        assert_eq!(s2.get("/a", &meta(101, 1000, 5, 4096), 9000, CACHE_TTL_SECS), None);
-        assert_eq!(s2.get("/a", &meta(100, 1001, 5, 4096), 9000, CACHE_TTL_SECS), None);
-        assert_eq!(s2.get("/a", &meta(100, 1000, 5, 8192), 9000, CACHE_TTL_SECS), None);
+        assert_eq!(
+            s2.get("/a", &meta(101, 1000, 5, 4096), 9000, CACHE_TTL_SECS),
+            None
+        );
+        assert_eq!(
+            s2.get("/a", &meta(100, 1001, 5, 4096), 9000, CACHE_TTL_SECS),
+            None
+        );
+        assert_eq!(
+            s2.get("/a", &meta(100, 1000, 5, 8192), 9000, CACHE_TTL_SECS),
+            None
+        );
         // 未知 key：miss。
         assert_eq!(s2.get("/b", &m, 9000, CACHE_TTL_SECS), None);
         let _ = std::fs::remove_file(&p);
@@ -426,8 +435,14 @@ mod tests {
         s.save().unwrap();
 
         let s2 = Store::open(p.clone());
-        assert_eq!(s2.get("/x", &meta(7, 50, 9, 1024), 1, CACHE_TTL_SECS), Some(4096));
-        assert_eq!(s2.get("/y", &meta(8, 51, 9, 2048), 1, CACHE_TTL_SECS), Some(8192));
+        assert_eq!(
+            s2.get("/x", &meta(7, 50, 9, 1024), 1, CACHE_TTL_SECS),
+            Some(4096)
+        );
+        assert_eq!(
+            s2.get("/y", &meta(8, 51, 9, 2048), 1, CACHE_TTL_SECS),
+            Some(8192)
+        );
         let _ = std::fs::remove_file(&p);
     }
 }

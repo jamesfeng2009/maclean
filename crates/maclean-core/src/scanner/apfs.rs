@@ -79,7 +79,8 @@ fn scan_local_snapshots() -> Vec<ScanItem> {
                 line.to_string()
             };
 
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: name,
                 size_bytes: 0, // 快照大小无法直接获取，UI 上标注"未知"
                 category: "APFS快照".to_string(),
@@ -179,7 +180,8 @@ fn scan_simulator_runtimes() -> Vec<ScanItem> {
                 format!("{} | {}", current_context, uuid)
             };
 
-            items.push(ScanItem { batch_mtimes: vec![],
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: display_path,
                 size_bytes: 0, // 运行时大小无法直接获取
                 category: "模拟器运行时".to_string(),

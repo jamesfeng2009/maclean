@@ -75,12 +75,20 @@ mod imp {
 
     /// 把 `statfs` 里的 `[c_char; N]` C 字符串字段转成小写 `String`。
     fn c_char_array_to_string(buf: &[i8]) -> String {
-        let bytes: Vec<u8> = buf.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        let bytes: Vec<u8> = buf
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
         String::from_utf8_lossy(&bytes).to_ascii_lowercase()
     }
 
     fn c_char_array_to_osstring(buf: &[i8]) -> OsString {
-        let bytes: Vec<u8> = buf.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        let bytes: Vec<u8> = buf
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
         OsString::from_vec(bytes)
     }
 
@@ -123,7 +131,8 @@ mod imp {
 
 /// 取（带 TTL 缓存的）远程/FUSE 挂载点列表。
 fn remote_mount_points_cached() -> Vec<PathBuf> {
-    let slot = MOUNT_CACHE.get_or_init(|| Mutex::new((Instant::now() - MOUNT_CACHE_TTL, Vec::new())));
+    let slot =
+        MOUNT_CACHE.get_or_init(|| Mutex::new((Instant::now() - MOUNT_CACHE_TTL, Vec::new())));
     let mut guard = match slot.lock() {
         Ok(g) => g,
         // 中毒只说明上次持锁线程 panic，直接重建即可。
@@ -142,7 +151,9 @@ fn remote_mount_points_cached() -> Vec<PathBuf> {
 /// 用 [`Path::starts_with`]（按 path component 比较），因此 `/Orb` 不会
 /// 误匹配 `/OrbStack`，也无需自己拼尾部斜杠。
 fn is_within_any(path: &Path, mounts: &[PathBuf]) -> bool {
-    mounts.iter().any(|m| path == m.as_path() || path.starts_with(m))
+    mounts
+        .iter()
+        .any(|m| path == m.as_path() || path.starts_with(m))
 }
 
 /// `path` 是否位于网络 / FUSE / 虚拟化共享挂载点之内（含挂载点本身）。

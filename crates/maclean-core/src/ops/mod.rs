@@ -2684,7 +2684,10 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
         || path.contains("$(")
         || path.contains('\'')
     {
-        crate::logger::warn(&format!("[trash-sudo] 路径含危险字符，拒绝提权回收: {}", path));
+        crate::logger::warn(&format!(
+            "[trash-sudo] 路径含危险字符，拒绝提权回收: {}",
+            path
+        ));
         return false;
     }
     // 4) 目标 ~/.Trash：必须存在且与源同卷
@@ -2729,10 +2732,7 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
         dst = trash.join(alt);
         n += 1;
         if n > 999 {
-            crate::logger::warn(&format!(
-                "[trash-sudo] 废纸篓同名条目过多，放弃: {}",
-                path
-            ));
+            crate::logger::warn(&format!("[trash-sudo] 废纸篓同名条目过多，放弃: {}", path));
             return false;
         }
     }
@@ -3711,7 +3711,8 @@ mod tests {
     // ---------- 抖动修复：App 卸载页一次性出结果 ----------
 
     fn mk_item(path: &str, size: u64) -> ScanItem {
-        ScanItem { batch_mtimes: vec![],
+        ScanItem {
+            batch_mtimes: vec![],
             path: path.to_string(),
             size_bytes: size,
             category: "App残留".to_string(),

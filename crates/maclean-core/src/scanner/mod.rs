@@ -22,10 +22,10 @@ pub mod app_data;
 // 语义化清理项目录（named catalog）：工具链注册表 + 已安装应用驱动，
 // 对标 MangoDisk 的 "WeChat application cache / Go build cache" 粒度。
 // 依赖 ~/Library/Containers 等 macOS 路径，仅 macOS。
-#[cfg(target_os = "macos")]
-pub mod named_catalog;
 pub mod cache_registry;
 pub mod dev_cache;
+#[cfg(target_os = "macos")]
+pub mod named_catalog;
 // 文件系统遍历护栏（网络/FUSE 挂载点 + TCC 容器快跳）与有界阻塞 IO 池：
 // 必须先于各扫描器声明，供 dir_size / read_dir 及具体扫描器复用。
 pub mod fs_guard;
@@ -36,9 +36,9 @@ pub(crate) mod bulkdir;
 pub mod sizecache;
 // 负载自适应（后台 QoS / 负载信号 / 自适应并发闸门 / 繁忙看门狗参数）。
 // 全平台可编译：非 macOS 上 apply_bg_priority 为 no-op。
-pub mod load;
 pub mod dup_files;
 pub mod large_files;
+pub mod load;
 pub mod optimize;
 // startup/uninstall 刻意不加 cfg（2026-09-28）：cli/ui/app 里的调用点
 // （App.startup_items 字段类型、CLI startup/uninstall 子命令、启动项面板）
@@ -64,73 +64,12 @@ pub mod win_protection;
 // 零测试；只有真正 spawn 进程的几行放在 cfg(macos) 里。
 pub mod official_uninstaller;
 
-/// 推荐等级 - 帮助用户判断是否应该清理
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Recommend {
-    /// 推荐清理 - 安全可删，重新构建/使用时会自动恢复
-    Safe,
-    /// 应用缓存 - 只含缓存/日志，删除后应用可正常运行并自动重建
-    CacheOnly,
-    /// 谨慎清理 - 删除后可能需要重新下载或配置
-    Caution,
-    /// 高级用户 - 需要了解风险后自行判断
-    Advanced,
-}
-
-impl Default for Recommend {
-    fn default() -> Self {
-        Self::Safe
-    }
-}
-
-// 2026-09-18 删除了 `Recommend::label` / `Recommend::description`：
-// 与 `i18n::translate_recommend` 重复且全仓零引用，UI 上的等级徽标统一走
-// `theme::recommend_label`（文案按设计稿 02 节）。留两套会各自漂移。
-
-impl Recommend {
-    /// 是否默认被"智能选择"勾选
-    pub fn default_selected(self) -> bool {
-        matches!(self, Recommend::Safe | Recommend::CacheOnly)
-    }
-}
-
-/// 扫描项 - 表示一个可清理的文件或目录
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct ScanItem {
-    /// 完整路径（或快照名称/UUID）
-    pub path: String,
-    /// 大小（字节）
-    pub size_bytes: u64,
-    /// 分类名称，如 "Rust编译"、"Xcode编译"、"APFS快照" 等
-    pub category: String,
-    /// 是否被用户选中（用于 UI 交互）
-    pub selected: bool,
-    /// 是否可删除（部分系统级目录不可直接删除）
-    pub deletable: bool,
-    /// 不可删除的原因（deletable=false 时显示给用户）
-    pub undeletable_reason: String,
-    /// 推荐等级
-    pub recommend: Recommend,
-    /// 该项的说明（告诉用户这是什么，删除后有什么影响）
-    pub description: String,
-    /// 批量删除的真实路径列表（用于 __pycache__ 等聚合项）
-    /// 为空表示单项删除，使用 path 字段
-    pub batch_paths: Vec<String>,
-    /// 批量路径的修改时间（unix 秒，与 `batch_paths` 一一对应，重复文件等场景展示用）
-    #[serde(default)]
-    pub batch_mtimes: Vec<i64>,
-}
-
-/// 扫描结果
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ScanResult {
-    /// 所有扫描到的项目
-    pub items: Vec<ScanItem>,
-    /// 总大小（字节）
-    pub total_size: u64,
-    /// 扫描耗时（毫秒）
-    pub scan_time_ms: u64,
-}
+/// 推荐等级 / 扫描项 / 扫描结果 —— Open Core 拆分后迁移至公开契约层
+/// `maclean-types::domain`（2026-10-07，tasks.md P3-1/P3-4）。
+///
+/// 这里只做 re-export：全仓既有 `crate::scanner::Recommend` /
+/// `ScanItem` / `ScanResult` 引用路径不变，序列化形状逐字保留。
+pub use maclean_types::domain::{Recommend, ScanItem, ScanResult};
 
 /// 扫描器 trait - 所有具体扫描器都需实现此接口
 pub trait Scanner {
@@ -276,20 +215,15 @@ where
 pub fn read_dir_with_timeout(dir: &Path) -> Option<Vec<PathBuf>> {
     // 远程 / TCC 快跳、本地繁忙退避重试的统一看门狗在 run_dir_io 内处理。
     let d = dir.to_path_buf();
-    let paths = run_dir_io(
-        dir,
-        DIR_SCAN_TIMEOUT,
-        LOCAL_RETRY_TIMEOUT,
-        move || {
-            let mut paths: Vec<PathBuf> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&d) {
-                for e in entries.flatten() {
-                    paths.push(e.path());
-                }
+    let paths = run_dir_io(dir, DIR_SCAN_TIMEOUT, LOCAL_RETRY_TIMEOUT, move || {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for e in entries.flatten() {
+                paths.push(e.path());
             }
-            paths
-        },
-    );
+        }
+        paths
+    });
     match paths {
         Some(paths) => Some(paths),
         None => {
@@ -464,8 +398,7 @@ fn visit_dir<'scope>(
         }
     };
 
-    w.bytes
-        .fetch_add(listing.files_bytes, Ordering::Relaxed);
+    w.bytes.fetch_add(listing.files_bytes, Ordering::Relaxed);
 
     // 下钻前快跳网络 / FUSE 挂载点：挂载点是真目录、不跟随链接挡不住，在此剪枝才能
     // 避免对其子项发起走网络、会卡在内核的枚举。
@@ -501,7 +434,6 @@ fn spawn_children<'scope>(
         visit_dir(s, w, d, depth, mode);
     }
 }
-
 
 /// 取一个路径占用的磁盘大小：普通文件取其长度，目录/其它递归统计。
 /// 仅用于在“从聚合项中剔除个别危险成员”时回减大小（罕见路径）。
@@ -624,7 +556,8 @@ mod tests {
             std::fs::write(p, vec![b'x'; n as usize]).unwrap();
         }
 
-        let mk = |paths: Vec<&std::path::Path>, size: u64| ScanItem { batch_mtimes: vec![],
+        let mk = |paths: Vec<&std::path::Path>, size: u64| ScanItem {
+            batch_mtimes: vec![],
             path: format!("~/ 下的 .DS_Store 文件 ({} 个)", paths.len()),
             size_bytes: size,
             category: "DS_Store".to_string(),
@@ -633,23 +566,36 @@ mod tests {
             undeletable_reason: String::new(),
             recommend: Recommend::Safe,
             description: String::new(),
-            batch_paths: paths.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            batch_paths: paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
         };
 
         // 3 个成员（2 安全 + 1 受保护）→ 剔除受保护成员，计数/大小同步
         let mut item = mk(vec![&safe1, &bad, &safe2], 60);
-        assert!(retain_safe_batch_members(&mut item), "仍有安全成员应保留该项");
+        assert!(
+            retain_safe_batch_members(&mut item),
+            "仍有安全成员应保留该项"
+        );
         assert_eq!(item.batch_paths.len(), 2);
         assert!(
             !item.batch_paths.iter().any(|p| p.contains("node_modules")),
             "受保护成员必须被剔除"
         );
         assert_eq!(item.size_bytes, 30, "应回减被剔除成员的 30 字节");
-        assert!(item.path.contains("(2 个)"), "计数应同步为 2: {}", item.path);
+        assert!(
+            item.path.contains("(2 个)"),
+            "计数应同步为 2: {}",
+            item.path
+        );
 
         // 全部受保护 → 返回 false，调用方整条移除
         let mut all_bad = mk(vec![&bad], 30);
-        assert!(!retain_safe_batch_members(&mut all_bad), "无安全成员应整条丢弃");
+        assert!(
+            !retain_safe_batch_members(&mut all_bad),
+            "无安全成员应整条丢弃"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -796,7 +742,10 @@ mod tests {
 
         // 快速统计：深度 50 以上被整段截断，链上唯一文件不被计入
         let fast = dir_size_impl(&base).0;
-        assert_eq!(fast, 0, "快速统计受深度截断，深链唯一文件应为 0，实际 {fast}");
+        assert_eq!(
+            fast, 0,
+            "快速统计受深度截断，深链唯一文件应为 0，实际 {fast}"
+        );
         assert!(fast < acc, "准确统计必须不小于被深度截断的快速统计");
         let _ = std::fs::remove_dir_all(&base);
     }

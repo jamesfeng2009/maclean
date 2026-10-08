@@ -9,16 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// 安全检查结果
-#[derive(Debug, Clone)]
-pub enum SafetyCheck {
-    /// 安全，可以删除
-    Safe,
-    /// 危险，拒绝删除，附带原因
-    Danger(String),
-    /// 警告，需要额外确认
-    Warning(String),
-}
+/// 安全检查结果 —— Open Core 拆分后迁移至公开契约层
+/// `maclean-types::safety`（2026-10-07，tasks.md P3-1/P4-3）。
+///
+/// 这里只做 re-export：既有 `crate::safety::SafetyCheck` 引用路径不变。
+pub use maclean_types::safety::SafetyCheck;
 
 // 2026-09-18 删除了 `check_path_safety`（无 category 的兼容版本）：全仓零调用点，
 // 留着只会让人以为"不传 category 也行"。所有入口必须显式传分类。
@@ -2347,14 +2342,27 @@ mod tests {
     fn app_support_data_root_boundaries() {
         use std::path::PathBuf;
         let h = PathBuf::from("/Users/tester");
-        let f = |rel: &str| app_support_data_root_with_homes(&h.join(rel), &[h.clone()]);
+        let f =
+            |rel: &str| app_support_data_root_with_homes(&h.join(rel), std::slice::from_ref(&h));
         // Application Support 的直接子项才识别为应用数据根
         assert!(f("Library/Application Support/JetBrains"));
-        assert!(f("Library/Application Support/TRAE SOLO CN"), "含空格 App 名");
+        assert!(
+            f("Library/Application Support/TRAE SOLO CN"),
+            "含空格 App 名"
+        );
         // 根本身、再深一层、Toolbox 深层、其它 home 子树都不放行
-        assert!(!f("Library/Application Support"), "Application Support 根不放行");
-        assert!(!f("Library/Application Support/JetBrains/PyCharmCE2025.2"), "嵌套不放行");
-        assert!(!f("Library/Application Support/JetBrains/Toolbox/apps"), "深层不放行");
+        assert!(
+            !f("Library/Application Support"),
+            "Application Support 根不放行"
+        );
+        assert!(
+            !f("Library/Application Support/JetBrains/PyCharmCE2025.2"),
+            "嵌套不放行"
+        );
+        assert!(
+            !f("Library/Application Support/JetBrains/Toolbox/apps"),
+            "深层不放行"
+        );
         assert!(!f("Library/Caches/pypoetry"), "Caches 不是应用数据根");
         assert!(!f("Documents/proj"), "其它 home 子树不是");
         assert!(!f("Library/Containers/com.x/Data"), "沙盒容器本次不放开");
@@ -2366,11 +2374,17 @@ mod tests {
         let h = PathBuf::from("/Users/u");
         let wl = |rel: &str| check_whitelist(&h.join(rel), &h, "应用缓存");
         // IM（微信 / QQ / 企微）Documents 根：App 已卸载后的孤儿数据可清理
-        assert!(wl("Library/Containers/com.tencent.xinWeChat/Data/Documents"));
+        assert!(wl(
+            "Library/Containers/com.tencent.xinWeChat/Data/Documents"
+        ));
         assert!(wl("Library/Containers/com.tencent.qq/Data/Documents"));
-        assert!(wl("Library/Containers/com.tencent.WeWorkMac/Data/Documents"));
+        assert!(wl(
+            "Library/Containers/com.tencent.WeWorkMac/Data/Documents"
+        ));
         // IM Documents 内的子项：尾斜杠规则，保持原有放行
-        assert!(wl("Library/Containers/com.tencent.xinWeChat/Data/Documents/x/video.dat"));
+        assert!(wl(
+            "Library/Containers/com.tencent.xinWeChat/Data/Documents/x/video.dat"
+        ));
         // 非 IM 沙盒 App 的 Documents 根不放行（最小权限，避免扩大删除面）
         assert!(!wl("Library/Containers/com.some.editor/Data/Documents"));
         // IM 容器的 Data 层本身、其它层级不放行
@@ -2385,8 +2399,9 @@ mod tests {
 
         // 1) App 根内捆绑、仅与虚拟环境同名的目录（PyCharm typeshed 存根 venv）
         //    不应锁死整个应用数据根 —— 复现 JetBrains 4.1GB 无法清理的误判。
-        let app = Path::new(&home)
-            .join(format!("Library/Application Support/maclean_test_app_{pid}"));
+        let app = Path::new(&home).join(format!(
+            "Library/Application Support/maclean_test_app_{pid}"
+        ));
         let stub = app.join("plugins/python-ce/helpers/typeshed/stdlib/venv");
         std::fs::create_dir_all(&stub).unwrap();
         std::fs::write(stub.join("__init__.pyi"), "").unwrap();
@@ -2416,8 +2431,7 @@ mod tests {
         );
 
         // 3) 非应用数据根（Caches 下祖先含虚拟环境）仍受 4.6 层保护。
-        let cache =
-            Path::new(&home).join(format!("Library/Caches/maclean_test_venv_{pid}"));
+        let cache = Path::new(&home).join(format!("Library/Caches/maclean_test_venv_{pid}"));
         std::fs::create_dir_all(cache.join("some/virtualenvs/proj")).unwrap();
         let cp = cache.to_string_lossy().into_owned();
         let r3 = check_path_safety_with_category(&cp, "maclean_test_venv");
@@ -2433,7 +2447,8 @@ mod tests {
     fn reclaimable_cache_roots_whitelist_boundaries() {
         use std::path::PathBuf;
         let h = PathBuf::from("/Users/tester");
-        let f = |rel: &str| reclaimable_cache_root_with_homes(&h.join(rel), &[h.clone()]);
+        let f =
+            |rel: &str| reclaimable_cache_root_with_homes(&h.join(rel), std::slice::from_ref(&h));
 
         // 公认可再生缓存根：放行（内部含 node_modules/site-packages 也不拦）
         assert!(f(".npm"), "~/.npm 必须放行（npm cache clean）");
@@ -2456,7 +2471,7 @@ mod tests {
         // home 之外的同名目录不放行
         assert!(!reclaimable_cache_root_with_homes(
             &PathBuf::from("/Volumes/External/.npm"),
-            &[h.clone()]
+            std::slice::from_ref(&h)
         ));
     }
 
@@ -2466,7 +2481,7 @@ mod tests {
         let f = |rel: &str| {
             let p = h.join(rel);
             let s = p.to_string_lossy().to_string();
-            check_home_paths_for_platform(&p, &s, &[h.clone()], false)
+            check_home_paths_for_platform(&p, &s, std::slice::from_ref(&h), false)
         };
 
         // kubectl 发现缓存：整目录可再生，放行进后续层

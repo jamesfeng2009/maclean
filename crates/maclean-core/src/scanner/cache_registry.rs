@@ -397,7 +397,8 @@ impl Scanner for RegistryScanner {
             if path.is_dir() {
                 let size = dir_size(path);
                 if size > 0 {
-                    items.push(ScanItem { batch_mtimes: vec![],
+                    items.push(ScanItem {
+                        batch_mtimes: vec![],
                         path: expanded,
                         size_bytes: size,
                         category: def.name.to_string(),
@@ -407,7 +408,6 @@ impl Scanner for RegistryScanner {
                         batch_paths: Vec::new(),
                         recommend: def.recommend,
                         description: def.desc_zh.to_string(),
-                        ..Default::default()
                     });
                 }
             }

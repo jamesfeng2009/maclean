@@ -63,10 +63,7 @@ const DEP_CACHE_DIRS: &[&str] = &[
 
 /// 主目录第一层下整体跳过的目录：系统 / 应用数据与 TCC 保护、非个人大文件区
 fn skip_top_level_dir(name: &str) -> bool {
-    matches!(
-        name,
-        "Library" | "Public" | "Applications" | "Sites"
-    )
+    matches!(name, "Library" | "Public" | "Applications" | "Sites")
 }
 
 /// bundle / 资源库目录后缀：进入后会被拆散成内部文件，且应走卸载/专门入口
@@ -123,13 +120,13 @@ fn file_category(name: &str) -> &'static str {
     };
     let cat = match ext.as_str() {
         // 视频
-        "mp4" | "mov" | "mkv" | "avi" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg"
-        | "3gp" | "ts" | "rmvb" | "rm" => "视频",
+        "mp4" | "mov" | "mkv" | "avi" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg" | "3gp"
+        | "ts" | "rmvb" | "rm" => "视频",
         // 音频
         "mp3" | "wav" | "flac" | "ape" | "aac" | "m4a" | "ogg" | "wma" => "音频",
         // 磁盘镜像 / 虚拟机
-        "dmg" | "iso" | "img" | "qcow2" | "qcow" | "vmdk" | "vdi" | "vhd" | "vhdx"
-        | "raw" | "sparseimage" | "sparsebundle" => "磁盘镜像",
+        "dmg" | "iso" | "img" | "qcow2" | "qcow" | "vmdk" | "vdi" | "vhd" | "vhdx" | "raw"
+        | "sparseimage" | "sparsebundle" => "磁盘镜像",
         // 压缩包
         "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" => "压缩包",
         // AI / ML 模型权重
@@ -187,7 +184,11 @@ fn collect_large_files_under(root: &Path, threshold: u64) -> Vec<(PathBuf, u64)>
 fn scan_large_files() -> ScanResult {
     let start = Instant::now();
     if !has_home() {
-        return ScanResult { items: Vec::new(), total_size: 0, scan_time_ms: 0 };
+        return ScanResult {
+            items: Vec::new(),
+            total_size: 0,
+            scan_time_ms: 0,
+        };
     }
     let home = home_dir();
     let res = catch_unwind(AssertUnwindSafe(|| {
@@ -195,7 +196,10 @@ fn scan_large_files() -> ScanResult {
     }))
     .unwrap_or_default();
 
-    crate::log_scan_step(&format!("磁盘分析: 大文件扫描完成, {} 个 ≥100MB 文件", res.len()));
+    crate::log_scan_step(&format!(
+        "磁盘分析: 大文件扫描完成, {} 个 ≥100MB 文件",
+        res.len()
+    ));
 
     let mut total_size = 0u64;
     let items = res
@@ -208,7 +212,8 @@ fn scan_large_files() -> ScanResult {
                 .unwrap_or("unknown")
                 .to_string();
             let category = file_category(&name);
-            ScanItem { batch_mtimes: vec![],
+            ScanItem {
+                batch_mtimes: vec![],
                 path: path.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: category.to_string(),
@@ -222,7 +227,11 @@ fn scan_large_files() -> ScanResult {
         })
         .collect();
 
-    ScanResult { items, total_size, scan_time_ms: start.elapsed().as_millis() as u64 }
+    ScanResult {
+        items,
+        total_size,
+        scan_time_ms: start.elapsed().as_millis() as u64,
+    }
 }
 
 /// 已知会导致崩溃、极慢或权限问题的目录/文件（大目录视图沿用的历史过滤）
@@ -406,7 +415,8 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
             format!("📄 {} — {}", name, format_size(size))
         };
 
-        items.push(ScanItem { batch_mtimes: vec![],
+        items.push(ScanItem {
+            batch_mtimes: vec![],
             path: path.to_string_lossy().to_string(),
             size_bytes: size,
             category: category.to_string(),
@@ -451,10 +461,8 @@ mod tests {
     impl TmpDir {
         fn new() -> Self {
             let n = SEQ.fetch_add(1, Ordering::Relaxed);
-            let p = std::env::temp_dir().join(format!(
-                "maclean_large_test_{}_{n}",
-                std::process::id()
-            ));
+            let p =
+                std::env::temp_dir().join(format!("maclean_large_test_{}_{n}", std::process::id()));
             fs::create_dir_all(&p).unwrap();
             TmpDir(p)
         }
@@ -493,14 +501,39 @@ mod tests {
     fn test_skip_dir_rules() {
         let root = PathBuf::from("/home/tester");
         // 第一层系统/应用数据目录
-        assert!(skip_large_file_dir(&root.join("Library"), "Library", 1, &root));
-        assert!(skip_large_file_dir(&root.join("Applications"), "Applications", 1, &root));
+        assert!(skip_large_file_dir(
+            &root.join("Library"),
+            "Library",
+            1,
+            &root
+        ));
+        assert!(skip_large_file_dir(
+            &root.join("Applications"),
+            "Applications",
+            1,
+            &root
+        ));
         // 非保护的第一层普通目录进入
-        assert!(!skip_large_file_dir(&root.join("Projects"), "Projects", 1, &root));
+        assert!(!skip_large_file_dir(
+            &root.join("Projects"),
+            "Projects",
+            1,
+            &root
+        ));
         // 任意深度隐藏目录
-        assert!(skip_large_file_dir(&root.join("a/.cache"), ".cache", 2, &root));
+        assert!(skip_large_file_dir(
+            &root.join("a/.cache"),
+            ".cache",
+            2,
+            &root
+        ));
         // 依赖/缓存目录
-        assert!(skip_large_file_dir(&root.join("p/node_modules"), "node_modules", 2, &root));
+        assert!(skip_large_file_dir(
+            &root.join("p/node_modules"),
+            "node_modules",
+            2,
+            &root
+        ));
         assert!(skip_large_file_dir(&root.join("p/.git"), ".git", 3, &root));
         // bundle 目录
         assert!(skip_large_file_dir(&root.join("X.app"), "X.app", 1, &root));
@@ -511,7 +544,12 @@ mod tests {
             3,
             &root
         ));
-        assert!(!skip_large_file_dir(&root.join("Projects/pkg"), "pkg", 2, &root));
+        assert!(!skip_large_file_dir(
+            &root.join("Projects/pkg"),
+            "pkg",
+            2,
+            &root
+        ));
     }
 
     #[test]
@@ -522,7 +560,7 @@ mod tests {
         tmp.put("a/big.mkv", 10);
         tmp.put("sub/deep/model.gguf", 8);
         tmp.put("installer.dmg", 9); // 磁盘镜像文件必须保留
-        // 低于阈值
+                                     // 低于阈值
         tmp.put("small.txt", 2);
         // 应被剪枝的目录内，即使有大文件也不出现
         tmp.put("node_modules/pkg/big.mkv", 10);
@@ -537,15 +575,36 @@ mod tests {
             .map(|(p, _)| p.strip_prefix(root).unwrap().to_string_lossy().to_string())
             .collect();
 
-        assert!(names.contains(&"a/big.mkv".to_string()), "应包含深层视频: {names:?}");
+        assert!(
+            names.contains(&"a/big.mkv".to_string()),
+            "应包含深层视频: {names:?}"
+        );
         assert!(names.contains(&"sub/deep/model.gguf".to_string()));
-        assert!(names.contains(&"installer.dmg".to_string()), ".dmg 是文件应保留: {names:?}");
+        assert!(
+            names.contains(&"installer.dmg".to_string()),
+            ".dmg 是文件应保留: {names:?}"
+        );
         assert!(!names.iter().any(|n| n.contains("small.txt")));
-        assert!(!names.iter().any(|n| n.contains("node_modules")), "依赖目录应剪枝: {names:?}");
-        assert!(!names.iter().any(|n| n.starts_with(".hidden")), "隐藏目录应剪枝: {names:?}");
-        assert!(!names.iter().any(|n| n.contains("Foo.app")), "bundle 应剪枝: {names:?}");
-        assert!(!names.iter().any(|n| n.contains("go/pkg/mod")), "go mod 缓存应剪枝: {names:?}");
-        assert!(!names.iter().any(|n| n.starts_with("Library")), "Library 应剪枝: {names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("node_modules")),
+            "依赖目录应剪枝: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with(".hidden")),
+            "隐藏目录应剪枝: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("Foo.app")),
+            "bundle 应剪枝: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("go/pkg/mod")),
+            "go mod 缓存应剪枝: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("Library")),
+            "Library 应剪枝: {names:?}"
+        );
 
         // 按大小降序
         let sizes: Vec<u64> = got.iter().map(|(_, s)| *s).collect();
