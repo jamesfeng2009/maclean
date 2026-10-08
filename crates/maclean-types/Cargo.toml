@@ -1,0 +1,20 @@
+[package]
+name = "maclean-types"
+version = "0.2.0"
+edition = "2021"
+description = "maclean 公开契约层：领域模型 / CLI envelope / 错误码 / Feature 门控"
+license = "Apache-2.0"
+
+# 公开契约 crate（Open Core 公共边界）。
+# 规则：
+# - 只允许依赖公开、permissive 许可的 crate（serde / clap 等）；
+# - 严禁依赖私有 Pro crate 或高层公开 crate（本 crate 只向下依赖基础库）；
+# - 类型一旦发布即视为兼容性敏感（strategy §19/§46）：改名、改语义需 contract_version 升级。
+#
+# 依赖特意保持最小：本 crate 不碰文件系统、不碰任何平台 API。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
