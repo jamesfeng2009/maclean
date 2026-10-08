@@ -1,0 +1,22 @@
+[package]
+name = "maclean-storage"
+version = "0.2.0"
+edition = "2021"
+description = "maclean 本地持久化：JSON-first 存储 + 迁移框架 + 仓储层（Open Core）"
+license = "Apache-2.0"
+repository = "https://github.com/jamesfeng2009/maclean"
+
+# 本地持久化层（strategy §20：核心 schema 公开；隐藏私有语义而非普通数据库工程）。
+# 2026-10-07 落地决策：当前 maclean 的持久化是 **JSON 文件**（config.json /
+# apps.json / sizecache 增量缓存），没有 SQLite。因此本 crate 采用 JSON-first
+# 存储 + schema_version 迁移框架，并为未来 SQLite 迁移保留统一仓储接口。
+#
+# 规则：存储结构化观测，不存原始文件内容（strategy §20/§50）。
+
+[dependencies]
+maclean-types = { path = "../maclean-types", version = "0.2.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
