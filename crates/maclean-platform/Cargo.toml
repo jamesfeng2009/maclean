@@ -1,0 +1,20 @@
+[package]
+name = "maclean-platform"
+version = "0.2.0"
+edition = "2021"
+description = "maclean 平台适配器契约：Trash / 路径安全 / 注册表 / 磁盘信息（Open Core）"
+license = "Apache-2.0"
+repository = "https://github.com/jamesfeng2009/maclean"
+
+# 平台适配层（strategy §3.1 crates/maclean-platform）。
+# 2026-10-07 落地决策（记录于 tasks.md P5-2/P5-3）：
+# - `apfs.rs` / `windows_apps.rs` 当前保留在 maclean-core —— 它们是扫描器，
+#   深度耦合 core 的 io_pool / bulkdir / fs_guard / 安全闸门，提前拆分会在
+#   迁移期破坏构建且零收益；maclean-platform 先立契约，后续按需迁移实现。
+# - 本 crate 承载**平台能力契约**：Trash / 路径 / 注册表 / 磁盘信息，
+#   实现跨平台可编译，OS 差异通过 trait 抽象。
+#
+# 规则：本 crate 不触碰扫描与删除业务逻辑；纯平台适配。
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
