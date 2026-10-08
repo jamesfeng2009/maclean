@@ -238,7 +238,7 @@
 - [ ] **G-5** `windows-ci.yml` 对齐公开 workspace（去掉对私有内容的引用）
 - [ ] **G-6** 防泄漏规则落 CI：grep 私有包名 / Stripe 模式 / license 私钥模式 / Team 服务 URL（strategy §90）
 - [ ] **G-7** 分支保护与发布权限清单化（main 保护 / 必需 CI / review；GitHub 控制台配置为外部待办）
-- [ ] **G-8** 私密仓库 GitHub 控制台配置（maclean-pro / maclean-license-server 创建）为外部待办
+- [x] **G-8** maclean-pro 私有仓库已建并推送（github + gitee，2026-10-08）；maclean-license-server 仍为外部待办（Phase 8 之后）
 
 ---
 
@@ -246,11 +246,11 @@
 
 > 来源：split `07_MIGRATION_COMMANDS.md` §12
 
-- [ ] **F-1** 按 10 个推荐 commit 分层提交（freeze / domain contracts / core / platform / cli / free app / private pro / commercial intelligence / license+governance / CI 硬化），不做巨型 commit
-- [ ] **F-2** 每个阶段独立可回滚（git tag/commit 粒度），严禁 `rm -rf old-source` 自动化
-- [ ] **F-3** 完成定义核对（split `03` §5）：公开构建通过 ∧ 私有 Pro 构建通过 ∧ 公开仓库无私有依赖 ∧ 无商业密钥 ∧ 安全测试等价 ∧ UNKNOWN 清零
-- [ ] **F-4** 双端 push（github ssh / gitee）+ 三端 HEAD 核验
-- [ ] **F-5** 本文件状态总表全量更新 + present_files 交付
+- [x] **F-1** 分层提交完成（2026-10-08）：公开仓库 9 commits（freeze/types/core/storage/platform/cli/app/governance/ci；private pro 与 commercial intelligence 在公开仓库无内容，由私有 maclean-pro 仓库单独提交）
+- [x] **F-2** 每阶段独立 commit（13fe0f5..aee71c9），可单独回滚；无 rm -rf 自动化
+- [x] **F-3** 完成定义核对（2026-10-08）：公开 check/test/validate.sh ✓；私有 maclean-pro check ✓；公开零私有依赖 ✓；密钥扫描零命中 ✓；477 tests ✓；UNKNOWN=0 ✓
+- [x] **F-4** 四端 push + 核验（2026-10-08）：maclean github/gitee main=open-core/migration-v1=aee71c9；maclean-pro github/gitee main=294fae8
+- [x] **F-5** 状态总表已更新；tasks.md 已 present_files 交付
 
 ---
 
@@ -272,7 +272,7 @@
 | 12 | P11 平台验证+打包 | P1 | 11 | 🔄 | macOS AS 构建+冒烟+dmg 已过；Intel/Windows/签名/7 产物留待 |
 | 13 | C 商业化文档落地 | P1 | 13 | 🔄 | C-1/C-2/C-3 已归档；README Open Core 版已更新；C-4~C-8 待做 |
 | 14 | G CI/GitHub 治理 | P1 | 14 | ☐ | CODEOWNERS/dependabot/secret scan |
-| 15 | F 分层提交+交付 | P0 | 15 | ☐ | 10 commits + 双端 push |
+| 15 | F 分层提交+交付 | P0 | 15 | ☑ | 公开 9 commits + 私有 1 commit；四端 push + 核验一致（2026-10-08） |
 
 ---
 
