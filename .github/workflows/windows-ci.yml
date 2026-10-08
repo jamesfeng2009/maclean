@@ -94,7 +94,7 @@ jobs:
         # 这里产出带版本号的 zip + SHA256，版本号从 Cargo.toml 取（唯一来源）。
         shell: bash
         run: |
-          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          VERSION=$(grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
           echo "版本: $VERSION"
           mkdir -p dist
           cp target/x86_64-pc-windows-msvc/release/maclean.exe dist/

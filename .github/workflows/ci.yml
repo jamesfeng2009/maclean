@@ -84,7 +84,7 @@ jobs:
 
       - name: 校验 Makefile / 打包脚本与 Cargo.toml 版本一致
         run: |
-          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          CARGO_VERSION=$(grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
           echo "Cargo.toml 版本: $CARGO_VERSION"
           if grep -n '^VERSION' Makefile | grep -q "0\.1\.0\|0\.2\.0"; then
             echo "错误：Makefile 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
