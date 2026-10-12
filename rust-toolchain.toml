@@ -1,0 +1,5 @@
+# 固定工具链（P1，2026-10-12）：发布构建与本地一致，避免 stable 漂移。
+# 选择 1.90.0（当前本地工具链）；MSRV 为 1.77（edition 2024 要求 ≥1.85）。
+[toolchain]
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]

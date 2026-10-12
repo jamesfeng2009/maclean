@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- MacLean 最小 entitlements（P1，2026-10-12）：
+     仅 hardened runtime 需要，不授予额外能力；
+     如需 JIT/资源访问等能力，按最小权限在此显式添加。 -->
+<dict/>
+</plist>

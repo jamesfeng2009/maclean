@@ -20,8 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (pinned 1.90.0)
+        uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: rustfmt, clippy
 
@@ -54,8 +54,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (pinned 1.90.0)
+        uses: dtolnay/rust-toolchain@1.90.0
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -95,3 +95,34 @@ jobs:
             exit 1
           fi
           echo "✅ 版本号来源唯一（Cargo.toml）"
+
+  security:
+    name: cargo audit · cargo deny（漏洞/许可/来源门禁）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (pinned 1.90.0)
+        uses: dtolnay/rust-toolchain@1.90.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-security-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-security-
+
+      - name: Install cargo-audit / cargo-deny
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      # P1（2026-10-12）：漏洞扫描 + 依赖治理（deny.toml 已入库）
+      - name: cargo audit（已知漏洞扫描）
+        run: cargo audit
+
+      - name: cargo deny check（许可/来源/重复依赖）
+        run: cargo deny check
