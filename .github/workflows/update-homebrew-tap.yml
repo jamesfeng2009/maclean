@@ -1,0 +1,98 @@
+name: Update Homebrew Tap
+
+# 发布 Release（或手动触发）后，自动把 jamesfeng2009/homebrew-maclean 的
+# Formula/maclean.rb 更新到最新版本：version + 源码 tarball sha256 一次回填。
+#
+# 依赖 secrets.MACLEAN_HOMEBREW_TOKEN（GitHub PAT，repo 权限，能推送
+# homebrew-maclean 仓库）。未配置时本 workflow 明确失败 —— 不做静默降级。
+#
+# 本地等价命令：./scripts/update-homebrew-formula.sh
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  update-tap:
+    name: Update homebrew-maclean Formula
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 读取当前版本
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "当前版本: v$VERSION"
+
+      - name: 下载源码 tarball 并计算 sha256
+        id: sha
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz"
+          curl -fsSL "$URL" -o /tmp/maclean.tar.gz
+          SHA=$(shasum -a 256 /tmp/maclean.tar.gz | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "sha256: $SHA"
+
+      # 检查 tap 推送凭据：缺失即失败（不静默跳过，避免公式停在旧版本）
+      - name: 校验 Homebrew PAT
+        env:
+          TOKEN: ${{ secrets.MACLEAN_HOMEBREW_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::缺少 secrets.MACLEAN_HOMEBREW_TOKEN（GitHub PAT，repo 权限）。" >&2
+            echo "::error::配置后 tap 仓库 Formula 才能在发布时自动更新。" >&2
+            exit 1
+          fi
+
+      - name: 检出 tap 仓库并更新 Formula
+        env:
+          TOKEN: ${{ secrets.MACLEAN_HOMEBREW_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          git clone "https://x-access-token:${TOKEN}@github.com/jamesfeng2009/homebrew-maclean.git" /tmp/tap
+          cd /tmp/tap
+          python3 - <<'PY'
+          import re, os
+
+          path = "Formula/maclean.rb"
+          version = os.environ["VERSION"]
+          sha = os.environ["SHA256"]
+
+          with open(path, encoding="utf-8") as f:
+              text = f.read()
+
+          text = re.sub(
+              r'^\s*url "[^"]+"',
+              f'  url "https://github.com/jamesfeng2009/maclean/archive/refs/tags/v{version}.tar.gz"',
+              text, count=1, flags=re.M,
+          )
+          text = re.sub(
+              r'^\s*sha256 "[0-9a-f]+"',
+              f'  sha256 "{sha}"',
+              text, count=1, flags=re.M,
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
+          PY
+
+          git config user.name "maclean-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/maclean.rb
+          if git diff --cached --quiet; then
+            echo "Formula 无变化，跳过提交"
+          else
+            git commit -m "Update maclean to v${{ steps.version.outputs.version }}"
+            git push origin HEAD:main
+          fi
