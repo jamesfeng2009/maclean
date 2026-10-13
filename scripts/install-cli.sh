@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
-# maclean CLI 安装脚本
+# maclean CLI 安装脚本（2026-10-13 商业化边界调整）
+#
+# 公开仓库 = 纯 CLI（永久免费 · Apache-2.0 开源）。
+# maclean 二进制就是 CLI 本身：无参数运行提示用法，带子命令走
+# scan / clean / schedule / check-disk / list / apps / uninstall / log /
+# backups / restore / startup / optimize / dup-ignore。
 #
 # 用法：
 #   ./scripts/install-cli.sh                # 构建 release 并安装到 ~/.local/bin
 #   ./scripts/install-cli.sh --system       # 安装到 /usr/local/bin（需 sudo）
 #   ./scripts/install-cli.sh --bin PATH     # 使用已构建的二进制，跳过 cargo build
 #
-# 说明：
-#   maclean 是"单二进制"设计（GUI + CLI 同一可执行文件）：
-#   - 无参数启动 GUI
-#   - 带子命令走 CLI（scan/clean/startup/optimize/check-disk ...）
-#   因此"独立 CLI crate"不作为单独二进制交付，安装脚本只负责把同一个
-#   release 二进制放到 PATH 里。若你确实需要"只有 CLI 的二进制"，
-#   可用 --feature 裁剪（见 Cargo.toml 的 feature 定义）。
+# GUI App（14 天试用 / 付费）位于私有 maclean-pro 仓库，与本脚本无关。
 # =============================================================================
 set -euo pipefail
 
@@ -21,16 +20,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_NAME="maclean"
 DEST_DIR="${HOME}/.local/bin"
 SKIP_BUILD=0
-CLI_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --system)
             DEST_DIR="/usr/local/bin"
-            shift
-            ;;
-        --cli-only)
-            CLI_ONLY=1
             shift
             ;;
         --bin)
@@ -51,14 +45,8 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
         exit 1
     fi
 else
-    if [[ "$CLI_ONLY" == "1" ]]; then
-        # 纯 CLI 二进制：不链接 GUI 库（服务器 / CI / 容器场景）
-        echo "==> cargo build --release --no-default-features（纯 CLI，裁剪 GUI 壳）"
-        (cd "$ROOT" && cargo build --release --no-default-features)
-    else
-        echo "==> cargo build --release（完整版：GUI + CLI）"
-        (cd "$ROOT" && cargo build --release)
-    fi
+    echo "==> cargo build --release（纯 CLI，无 GUI / License 依赖）"
+    (cd "$ROOT" && cargo build --release)
     BIN_PATH="$ROOT/target/release/$BIN_NAME"
 fi
 
@@ -71,10 +59,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 fi
 
 echo "==> 已安装到 $DEST_DIR/$BIN_NAME"
-if [[ "$CLI_ONLY" == "1" ]]; then
-    echo "    形态: 纯 CLI（无 GUI；未带子命令时提示用法）"
-fi
 echo "    验证: $DEST_DIR/$BIN_NAME --help"
+echo "    形态: 纯 CLI（无 GUI；未带子命令时提示用法）"
 
 # 提示 PATH
 case ":$PATH:" in

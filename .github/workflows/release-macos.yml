@@ -1,9 +1,12 @@
-name: Release macOS (signed & notarized)
+name: Release CLI (signed & notarized)
 
-# macOS 发布流水线（P1，2026-10-12）：
-# 构建 universal binary → 签名（Developer ID + hardened runtime）→ DMG/zip 打包
-# → notarize + staple → SHA256 产物。
+# maclean CLI 发布流水线（2026-10-13 商业化边界调整）：
+# 构建 universal binary（arm64 + x86_64）→ 签名（Developer ID + hardened
+# runtime）→ zip 公证（notarize + staple）→ tar.gz + SHA256 产物。
 # 无签名/公证凭据时直接失败 —— 禁止静默 ad-hoc 降级（Gatekeeper 会拦截）。
+#
+# 说明：GUI App（DMG）的打包/公证在私有 maclean-pro 仓库的独立流水线，
+# 不在这里。
 
 on:
   workflow_dispatch:
@@ -59,6 +62,11 @@ jobs:
           MACLEAN_NOTARY_KEY_P8: ${{ secrets.MACLEAN_NOTARY_KEY_P8 }}
           MACLEAN_NOTARY_TEAM_ID: ${{ secrets.MACLEAN_NOTARY_TEAM_ID }}
 
+      - name: 读取版本号（单一来源 Cargo.toml）
+        run: |
+          VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
       - name: Build universal binary
         run: |
           cargo build --release --target aarch64-apple-darwin
@@ -81,13 +89,12 @@ jobs:
           security import /tmp/maclean_cert.p12 -k maclean-ci.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -k ci maclean-ci.keychain
 
-      - name: 签名（hardened runtime + entitlements + timestamp）
+      - name: 签名（hardened runtime + timestamp）
         env:
           MACLEAN_SIGN_IDENTITY: ${{ secrets.MACLEAN_SIGN_IDENTITY }}
         run: |
           codesign --force --options runtime --timestamp \
             --sign "$MACLEAN_SIGN_IDENTITY" \
-            --entitlements packaging/maclean.entitlements \
             dist/maclean
 
       - name: 校验签名
@@ -95,45 +102,41 @@ jobs:
           codesign --verify --deep --strict dist/maclean
           spctl --assess --type execute dist/maclean
 
-      - name: 打包 DMG 与 zip
+      - name: 打包 tar.gz 与公证用 zip
         run: |
-          VERSION=$(grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
-          mkdir -p dist/dmg
-          cp dist/maclean dist/dmg/
-          hdiutil create -volname MacLean -srcfolder dist/dmg -ov -format UDZO \
-            "dist/MacLean-${VERSION}-universal.dmg"
-          (cd dist && zip -r "MacLean-${VERSION}-universal.zip" maclean)
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          VERSION="${{ env.VERSION }}"
+          mkdir -p dist/cli
+          cp dist/maclean dist/cli/maclean
+          tar -C dist/cli -czf "dist/maclean-${VERSION}-universal.tar.gz" maclean
+          (cd dist/cli && zip -r "../maclean-${VERSION}-universal.zip" maclean)
 
-      - name: 公证（notarize DMG + zip）
+      - name: 公证（notarize zip）
         env:
           MACLEAN_NOTARY_KEY_ID: ${{ secrets.MACLEAN_NOTARY_KEY_ID }}
           MACLEAN_NOTARY_KEY_P8: ${{ secrets.MACLEAN_NOTARY_KEY_P8 }}
           MACLEAN_NOTARY_TEAM_ID: ${{ secrets.MACLEAN_NOTARY_TEAM_ID }}
         run: |
           VERSION="${{ env.VERSION }}"
-          for f in "dist/MacLean-${VERSION}-universal.dmg" "dist/MacLean-${VERSION}-universal.zip"; do
-            echo "notarizing: $f"
-            xcrun notarytool submit "$f" \
-              --key-id "$MACLEAN_NOTARY_KEY_ID" \
-              --key "$MACLEAN_NOTARY_KEY_P8" \
-              --team-id "$MACLEAN_NOTARY_TEAM_ID" \
-              --wait
-            xcrun stapler staple "$f"
-            xcrun stapler validate "$f"
-          done
+          f="dist/maclean-${VERSION}-universal.zip"
+          echo "notarizing: $f"
+          xcrun notarytool submit "$f" \
+            --key-id "$MACLEAN_NOTARY_KEY_ID" \
+            --key "$MACLEAN_NOTARY_KEY_P8" \
+            --team-id "$MACLEAN_NOTARY_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$f"
 
       - name: 生成 SHA256
         run: |
           VERSION="${{ env.VERSION }}"
-          shasum -a 256 "dist/MacLean-${VERSION}-universal.dmg" "dist/MacLean-${VERSION}-universal.zip" > dist/SHA256SUMS.txt
+          shasum -a 256 "dist/maclean-${VERSION}-universal.tar.gz" "dist/maclean-${VERSION}-universal.zip" > dist/SHA256SUMS.txt
           cat dist/SHA256SUMS.txt
 
       - name: 上传发布产物
         uses: actions/upload-artifact@v5
         with:
-          name: maclean-macos-release-${{ env.VERSION }}
+          name: maclean-cli-release-${{ env.VERSION }}
           path: |
-            dist/MacLean-*-universal.dmg
-            dist/MacLean-*-universal.zip
+            dist/maclean-*-universal.tar.gz
+            dist/maclean-*-universal.zip
             dist/SHA256SUMS.txt

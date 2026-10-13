@@ -44,8 +44,8 @@ jobs:
         # 门禁应当真正生效 —— 否则新告警会一直被静默放行。
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: 单元测试
-        run: cargo test --bin maclean
+      - name: 单元测试（workspace = 5 公开 crate + CLI）
+        run: cargo test --workspace
 
   macos-build:
     name: macOS release build
@@ -84,14 +84,14 @@ jobs:
 
       - name: 校验 Makefile / 打包脚本与 Cargo.toml 版本一致
         run: |
-          CARGO_VERSION=$(grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
+          CARGO_VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
           echo "Cargo.toml 版本: $CARGO_VERSION"
           if grep -n '^VERSION' Makefile | grep -q "0\.1\.0\|0\.2\.0"; then
             echo "错误：Makefile 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
             exit 1
           fi
-          if grep -n 'VERSION=' scripts/build-package.sh | grep -q '"[0-9]'; then
-            echo "错误：build-package.sh 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
+          if grep -n 'VERSION=' scripts/build-cli-package.sh | grep -q '"[0-9]'; then
+            echo "错误：build-cli-package.sh 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
             exit 1
           fi
           echo "✅ 版本号来源唯一（Cargo.toml）"

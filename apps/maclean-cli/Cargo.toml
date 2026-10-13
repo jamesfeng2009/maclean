@@ -1,0 +1,36 @@
+[package]
+name = "maclean"
+version = "0.2.0"
+edition = "2021"
+description = "maclean CLI — 永久免费开源的 macOS 磁盘清理与存储智能命令行工具"
+license = "Apache-2.0"
+repository = "https://github.com/jamesfeng2009/maclean"
+rust-version = "1.77"
+
+# ============================================================
+# maclean 公开仓库的唯一发行产物（2026-10-13 商业化边界调整）
+#
+# 产品分层（DECISION BASELINE 2026-10-13）：
+#   - maclean CLI（本包）   ：永久免费 · Apache-2.0 开源
+#   - maclean App（GUI）    ：14 天完整试用，试用后付费解锁（私有 maclean-pro 仓库）
+#
+# 本包是纯 CLI 二进制，具备以下独立性约束（MAC-CLI-001/004）：
+#   - 零 GUI 依赖（无 eframe/egui/tauri/tray-icon）
+#   - 零商业依赖（无 license-server / 授权 SDK / Stripe / 试用状态机）
+#   - 不因试用过期、服务器宕机、付款失败而失效
+#   - 不包含任何商业私钥 / 签名材料 / 许可证凭据
+#
+# 删除安全闸门、扫描引擎、JSON envelope、退出码全部来自公开 crates
+# （maclean-core / maclean-cli / maclean-types），无私有实现。
+# ============================================================
+
+[dependencies]
+maclean-cli = { path = "../../crates/maclean-cli", version = "0.2.0" }
+maclean-core = { path = "../../crates/maclean-core", version = "0.2.0" }
+
+[[bin]]
+name = "maclean"
+path = "src/main.rs"
+
+[dev-dependencies]
+# 集成测试：验证 CLI 在无许可证 / 无网络环境下的行为（见 tests/）

@@ -1,15 +1,15 @@
 .PHONY: build release package clean install test
 
-# maclean Makefile
+# maclean Makefile（2026-10-13 商业化边界调整：公开仓库 = 纯 CLI）
 
 # 版本号单一来源：Cargo.toml（不要在 Makefile 里再写一份，否则三处不一致）
-VERSION := $(shell grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
+VERSION := $(shell grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
 
-## 编译 debug 版本
+## 编译 debug 版本（纯 CLI）
 build:
 	cargo build
 
-## 编译 release 版本
+## 编译 release 版本（纯 CLI）
 release:
 	cargo build --release
 
@@ -17,38 +17,17 @@ release:
 run: build
 	./target/debug/maclean
 
-## 开发者模式运行（跳过 License/额度限制）
-## 走编译期 feature，不再读 MACLEAN_DEV 环境变量（避免发布包被运行时绕过）
-dev:
-	cargo run --features dev-mode
-
-## 开发者模式运行（release）
-dev-release:
-	cargo run --release --features dev-mode
-
 ## 运行 (release)
 run-release: release
 	./target/release/maclean
 
-## 打包 .pkg 和 .dmg
+## 打包 CLI 发行产物（tar.gz + SHA256，供 GitHub Release 使用）
 package: release
-	@bash scripts/build-package.sh
+	@bash scripts/build-cli-package.sh
 
 ## 快速打包 (跳过编译)
 package-only:
-	@bash scripts/build-package.sh
-
-## 安装 GUI app 到 /Applications (需要 sudo)
-install-app: package
-	@echo "安装 maclean.app 到 /Applications..."
-	@bash scripts/install-app.sh
-	@echo "安装完成，请在 Launchpad 或 /Applications 中打开 maclean"
-
-## 卸载 GUI app
-uninstall-app:
-	@echo "卸载 maclean.app..."
-	@bash scripts/uninstall-app.sh
-	@echo "卸载完成"
+	@bash scripts/build-cli-package.sh
 
 ## 安装到系统 (需要 sudo)
 install: release
@@ -72,9 +51,9 @@ clean:
 check:
 	cargo check
 
-## 运行测试
+## 运行测试（workspace = 5 公开 crate + CLI）
 test:
-	cargo test --bin maclean
+	cargo test --workspace
 
 ## 代码格式检查
 fmt:
@@ -89,18 +68,18 @@ help:
 	@echo "maclean Makefile"
 	@echo ""
 	@echo "可用命令:"
-	@echo "  make build       - 编译 debug 版本"
-	@echo "  make release     - 编译 release 版本"
+	@echo "  make build       - 编译 debug 版本（纯 CLI）"
+	@echo "  make release     - 编译 release 版本（纯 CLI）"
 	@echo "  make run         - 运行 debug 版本"
-	@echo "  make dev         - 开发者模式运行（无 License 限制）"
-	@echo "  make dev-release - 开发者模式运行 release 版本"
 	@echo "  make run-release - 运行 release 版本"
-	@echo "  make package     - 打包 .pkg 和 .dmg"
+	@echo "  make package     - 打包 CLI 发行产物（tar.gz + SHA256）"
 	@echo "  make install     - 安装到 /usr/local/bin"
 	@echo "  make uninstall   - 卸载"
 	@echo "  make clean       - 清理构建产物"
 	@echo "  make check       - 检查编译"
-	@echo "  make test        - 运行单元测试"
+	@echo "  make test        - 运行全部测试（workspace）"
 	@echo "  make fmt         - 检查代码格式"
 	@echo "  make lint        - Clippy 静态检查（-D warnings）"
 	@echo "  当前版本: $(VERSION)"
+	@echo ""
+	@echo "GUI App（14 天试用 / 付费）在私有 maclean-pro 仓库构建，不在本仓库。"

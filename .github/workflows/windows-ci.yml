@@ -58,43 +58,26 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-build-
 
       - name: Build release
-        # 注意：release 构建不得启用 dev-mode feature，否则打出的 exe 人人免费用
+        # 纯 CLI 构建（workspace 默认成员 apps/maclean-cli），无 GUI / 无 license 逻辑
         run: cargo build --release --target x86_64-pc-windows-msvc
 
-      - name: 校验资源已嵌入 exe
-        # 光"构建成功"不能说明图标/manifest 进去了 —— 从 macOS 交叉编译时
-        # embed-resource 找不到编译器是**静默跳过**的（build.rs 只打 warning）。
-        #
-        # 这里直接查 exe 本体，而不是查中间产物 maclean.lib：
-        # 中间产物可能被 actions/cache 恢复的旧 target/ 污染（假阳性），
-        # 而 exe 路径是唯一的，查它才是真的在验"要发出去的那个文件"。
-        #
-        # 用 pwsh 而不是 bash grep，因为两种资源在文件里的编码不同：
-        #   - manifest（RT_MANIFEST）按原文件字节存，XML 是 UTF-8/ASCII
-        #   - VERSIONINFO 的字符串是 **UTF-16LE**
-        # 拿 ASCII 去 grep "sunge.men" 永远命中不了（实测确认过），
-        # 那样只会得到一个永远红的 CI。所以分别按两种编码解码后再查。
+      - name: 冒烟验证 exe
+        # 直接执行 exe 验证：存在 + --help 可用。
         shell: pwsh
         run: |
           $exe = "target/x86_64-pc-windows-msvc/release/maclean.exe"
           if (-not (Test-Path $exe)) { throw "未找到 $exe" }
 
-          $bytes = [System.IO.File]::ReadAllBytes($exe)
-          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
-          $utf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
-
-          if (-not $ascii.Contains("longPathAware")) { throw "manifest 未嵌入：缺 longPathAware" }
-          if (-not $ascii.Contains("permonitorv2"))  { throw "manifest 未嵌入：缺 dpiAwareness" }
-          if (-not $utf16.Contains("sunge.men"))     { throw "VERSIONINFO 未嵌入：缺 CompanyName" }
-
-          Write-Host "资源已嵌入 exe：manifest（长路径 + DPI）+ 版本信息"
+          $help = & $exe --help 2>&1 | Out-String
+          if ($help -notmatch "scan") { throw "--help 未输出命令列表" }
+          Write-Host "CLI 冒烟通过：--help 可用"
 
       - name: 打包发布产物
         # 之前只上传裸 exe，用户下载后没有校验手段、也没有版本标识。
         # 这里产出带版本号的 zip + SHA256，版本号从 Cargo.toml 取（唯一来源）。
         shell: bash
         run: |
-          VERSION=$(grep -m1 '^version' apps/maclean-free/Cargo.toml | cut -d'"' -f2)
+          VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
           echo "版本: $VERSION"
           mkdir -p dist
           cp target/x86_64-pc-windows-msvc/release/maclean.exe dist/

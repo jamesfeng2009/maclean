@@ -1,19 +1,29 @@
-# maclean Open Core 公开仓库 · 虚拟 workspace（2026-10-07 拆分）
+# maclean 公开仓库 · 虚拟 workspace（2026-10-13 商业化边界调整）
 #
-# 拓扑（strategy §3.1 / §7.1 + split 02_CARGO_WORKSPACE_SPLIT.md）：
+# 产品分层（DECISION BASELINE 2026-10-13）：
+#   - maclean CLI（apps/maclean-cli）：永久免费 · Apache-2.0 开源，
+#     本仓库的唯一发行产物。
+#   - maclean App（GUI）：14 天完整试用，试用后付费解锁；
+#     位于私有 maclean-pro 仓库，不在本公开仓库构建/分发。
+#
+# 拓扑：
 #
 #   crates/maclean-types    公开契约层（零私有依赖，最底层）
 #   crates/maclean-core     核心引擎（scanner / safety / ops / scheduler）
 #   crates/maclean-storage  本地持久化（JSON-first 存储 + 迁移框架）
 #   crates/maclean-platform 平台适配器契约（Trash / 路径 / 注册表）
 #   crates/maclean-cli      CLI 契约（命令解析 / envelope / 渲染）
-#   apps/maclean-free       公开产品（egui 壳 + CLI 入口，产物名 maclean）
-#   tauri/src-tauri         Tauri 壳（maclean-tauri）
+#   apps/maclean-cli        公开产品（纯 CLI 二进制，产物名 maclean）
 #
-# 规则：
-# - 公开 workspace 必须独立编译（不依赖任何私有仓库/密钥）；
+# 规则（MAC-CLI-001/004）：
+# - 公开 workspace 必须独立编译（不依赖任何私有仓库/密钥/GUI）；
 # - `cargo build --workspace` / `cargo test --workspace` 可无私有访问完成；
-# - 默认构建 apps/maclean-free（default-members），产物名保持 `maclean`。
+# - 默认构建 apps/maclean-cli（default-members），产物名保持 `maclean`；
+# - CLI 不含 license / trial / 授权服务器逻辑，不因试用或付款失败失效。
+#
+# 历史备注：apps/maclean-free（egui 壳）与 tauri/（Tauri 壳）已于
+# 2026-10-13 迁出公开仓库，移入 maclean-production-v1.0/pro-app/ 作为
+# 私有 maclean-pro 仓库的种子（见 docs/governance/LICENSE_BOUNDARY.md）。
 
 [workspace]
 resolver = "3"
@@ -23,10 +33,14 @@ members = [
     "crates/maclean-storage",
     "crates/maclean-platform",
     "crates/maclean-cli",
-    "apps/maclean-free",
-    "tauri/src-tauri",
+    "apps/maclean-cli",
 ]
-default-members = ["apps/maclean-free"]
+# 私有包目录不属于公开 workspace（独立 workspace 见各目录内 Cargo.toml）
+exclude = [
+    "maclean-license-server-v1.0",
+    "maclean-production-v1.0",
+]
+default-members = ["apps/maclean-cli"]
 
 [workspace.package]
 version = "0.2.0"

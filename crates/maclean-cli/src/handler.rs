@@ -3,7 +3,7 @@
 //! Phase 6（2026-10-08）从 `apps/maclean-free/src/cli.rs`（2695 行）迁入本 crate。
 //! 职责：命令分发 + 输出渲染；业务逻辑全部调用 [`maclean_core`] 服务，
 //! 参数处理器内**不含任何文件系统删除实现**（删除在 core::ops）。
-//! 无子命令时返回 None，由壳（free GUI）决定启动 GUI。
+//! 无子命令时返回帮助/错误信息（CLI 独立运行，不依赖任何 GUI 壳）。
 
 use clap::Parser;
 use std::io::IsTerminal;

@@ -1,6 +1,12 @@
 # Website (独立仓库: https://github.com/jamesfeng2009/macleanwebsite.git)
 website/
 
+# 私有仓库工作副本（独立仓库，绝不进入公开仓库）
+# - maclean-license-server：许可证服务器（私有）
+# - maclean-production-v1.0：生产部署包 + Pro App 种子（maclean-pro 私有仓库）
+maclean-license-server-v1.0/
+maclean-production-v1.0/
+
 # TRAE 文档
 .trae/
 
@@ -26,3 +32,9 @@ target/
 *.zip
 /installers/
 homebrew/.DS_Store
+
+# 文档不入库（2026-10-13 决策：*.md 不提交）
+*.md
+
+# 内部审查资料（docx/pdf 非代码，不公开）
+MacLean-技术审查与上线整改报告/
