@@ -22,9 +22,80 @@
 
 use maclean_core::logger;
 
+/// 匿名首跑上报（MAC-TELE-001）
+///
+/// 目的：Homebrew 安装无公开下载计数，用 CLI 首次运行一次匿名打点作为
+/// 「真实安装/使用」代理口径（私有看板 brew 板块数据源）。
+///
+/// 设计约束（延续 CLI 独立性契约，不破坏 MAC-CLI-001/004）：
+/// - 仅首跑上报一次（`~/.maclean/telemetry.json` 标记）；
+/// - 匿名：随机 UUID，不含路径/主机名/邮箱/命令参数；
+/// - 完全可关：`MACLEAN_NO_TELEMETRY=1` 环境变量；
+/// - 失败静默：网络不可用 / 超时 / 服务器宕机均不影响 CLI 主流程；
+/// - 独立线程 + 3s 超时，绝不阻塞命令执行。
+mod telemetry {
+    use serde::{Deserialize, Serialize};
+    use std::{env, fs, path::PathBuf};
+
+    #[derive(Serialize, Deserialize)]
+    struct TelemetryState {
+        id: String,
+    }
+
+    const MARKER: &str = ".maclean/telemetry.json";
+    const ENDPOINT: &str = "https://stats.getmaclean.com/t";
+
+    pub fn report_once(version: &str) {
+        if env::var_os("MACLEAN_NO_TELEMETRY").is_some() {
+            return;
+        }
+        let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let marker = home.join(MARKER);
+
+        // 已上报过 → 跳过（每台机器/用户只打一次点）
+        if fs::read_to_string(&marker)
+            .ok()
+            .and_then(|s| serde_json::from_str::<TelemetryState>(&s).ok())
+            .is_some()
+        {
+            return;
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let os = if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "linux"
+        };
+        let body = serde_json::json!({ "id": id, "os": os, "version": version });
+        let marker_for_thread = marker.clone();
+
+        // 独立线程上报；无论成败都落标记，避免每次运行重试
+        std::thread::spawn(move || {
+            let _ = ureq::post(ENDPOINT)
+                .timeout(std::time::Duration::from_secs(3))
+                .send_json(body);
+            if let Some(dir) = marker_for_thread.parent() {
+                let _ = fs::create_dir_all(dir);
+            }
+            let _ = fs::write(
+                &marker_for_thread,
+                serde_json::to_string(&TelemetryState { id }).unwrap_or_default(),
+            );
+        });
+    }
+}
+
 fn main() {
     // 初始化日志系统（CLI 与后台任务共用）
     logger::init();
+
+    // 匿名首跑上报（brew 安装代理口径；静默、可关、单线程不阻塞）
+    telemetry::report_once(env!("CARGO_PKG_VERSION"));
 
     // CLI 分发：所有子命令经 maclean-cli-contract crate 处理，返回语义退出码。
     // run_cli() 返回 Some(code) 表示已执行并应退出；None 表示未提供子命令。
