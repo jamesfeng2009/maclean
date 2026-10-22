@@ -33,8 +33,9 @@ target/
 /installers/
 homebrew/.DS_Store
 
-# 文档不入库（2026-10-13 决策：*.md 不提交）
+# 文档不入库（2026-10-13 决策：*.md 不提交；根 README 例外——仓库门面）
 *.md
+!README.md
 
 # 内部审查资料（docx/pdf 非代码，不公开）
 MacLean-技术审查与上线整改报告/
