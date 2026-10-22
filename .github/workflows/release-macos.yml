@@ -44,7 +44,7 @@ jobs:
       # 凭据校验：任一缺失即失败（不再 ad-hoc 降级）
       - name: 校验签名/公证凭据
         run: |
-          required=(MACLEAN_CERT_P12_B64 MACLEAN_CERT_PASSWORD MACLEAN_SIGN_IDENTITY MACLEAN_NOTARY_KEY_ID MACLEAN_NOTARY_KEY_P8 MACLEAN_NOTARY_TEAM_ID)
+          required=(MACLEAN_CERT_P12_B64 MACLEAN_CERT_PASSWORD MACLEAN_SIGN_IDENTITY MACLEAN_NOTARY_KEY_ID MACLEAN_NOTARY_KEY_P8 MACLEAN_NOTARY_ISSUER_ID)
           missing=0
           for v in "${required[@]}"; do
             val="${!v:-}"
@@ -60,7 +60,7 @@ jobs:
           MACLEAN_SIGN_IDENTITY: ${{ secrets.MACLEAN_SIGN_IDENTITY }}
           MACLEAN_NOTARY_KEY_ID: ${{ secrets.MACLEAN_NOTARY_KEY_ID }}
           MACLEAN_NOTARY_KEY_P8: ${{ secrets.MACLEAN_NOTARY_KEY_P8 }}
-          MACLEAN_NOTARY_TEAM_ID: ${{ secrets.MACLEAN_NOTARY_TEAM_ID }}
+          MACLEAN_NOTARY_ISSUER_ID: ${{ secrets.MACLEAN_NOTARY_ISSUER_ID }}
 
       - name: 读取版本号（单一来源 Cargo.toml）
         run: |
@@ -97,10 +97,9 @@ jobs:
             --sign "$MACLEAN_SIGN_IDENTITY" \
             dist/maclean
 
-      - name: 校验签名
+      - name: 校验签名（结构；Gatekeeper 信任需公证后）
         run: |
           codesign --verify --deep --strict dist/maclean
-          spctl --assess --type execute dist/maclean
 
       - name: 打包 tar.gz 与公证用 zip
         run: |
@@ -110,11 +109,11 @@ jobs:
           tar -C dist/cli -czf "dist/maclean-${VERSION}-universal.tar.gz" maclean
           (cd dist/cli && zip -r "../maclean-${VERSION}-universal.zip" maclean)
 
-      - name: 公证（notarize zip）
+      - name: 公证（notarize zip；notarytool API key 用 --issuer 认证）
         env:
           MACLEAN_NOTARY_KEY_ID: ${{ secrets.MACLEAN_NOTARY_KEY_ID }}
           MACLEAN_NOTARY_KEY_P8: ${{ secrets.MACLEAN_NOTARY_KEY_P8 }}
-          MACLEAN_NOTARY_TEAM_ID: ${{ secrets.MACLEAN_NOTARY_TEAM_ID }}
+          MACLEAN_NOTARY_ISSUER_ID: ${{ secrets.MACLEAN_NOTARY_ISSUER_ID }}
         run: |
           VERSION="${{ env.VERSION }}"
           f="dist/maclean-${VERSION}-universal.zip"
@@ -122,9 +121,13 @@ jobs:
           xcrun notarytool submit "$f" \
             --key-id "$MACLEAN_NOTARY_KEY_ID" \
             --key "$MACLEAN_NOTARY_KEY_P8" \
-            --team-id "$MACLEAN_NOTARY_TEAM_ID" \
+            --issuer "$MACLEAN_NOTARY_ISSUER_ID" \
             --wait
           xcrun stapler staple "$f"
+          xcrun stapler validate "$f"
+          # Gatekeeper 信任复检（解压后对可执行文件 assess）
+          unzip -q -o "$f" -d /tmp/spctl-check
+          spctl --assess --type execute /tmp/spctl-check/maclean
 
       - name: 生成 SHA256
         run: |
