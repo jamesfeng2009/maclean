@@ -116,17 +116,17 @@ jobs:
           cd ..
           # 可移植备选 zip：setup.exe + README + sha256（不想装的可直接解压用）
           powershell -Command "Compress-Archive -Path 'dist/*' -DestinationPath 'maclean-windows-x86_64-$VERSION.zip' -Force"
-          ls -la maclean-windows-x86_64-$VERSION.zip
-          ls -la packaging/windows/maclean-setup-$VERSION.exe
+          # 统一产物到 workspace root（upload-artifact 多路径会保留目录前缀，
+          # 导致 release glob 匹配不到，这里全部平铺到 root 单路径）
+          cp packaging/windows/maclean-setup-$VERSION.exe ./maclean-setup-$VERSION.exe
+          cp dist/maclean-setup-$VERSION.sha256 ./maclean-setup-$VERSION.sha256
+          ls -la maclean-windows-x86_64-$VERSION.zip maclean-setup-$VERSION.exe maclean-setup-$VERSION.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: maclean-windows-x86_64
-          path: |
-            maclean-windows-x86_64-*.zip
-            dist/maclean-setup-*
-            dist/maclean-*.sha256
+          path: maclean-*
 
   windows-release:
     name: Publish Windows release (tag only)
