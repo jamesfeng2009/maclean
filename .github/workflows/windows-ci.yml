@@ -95,9 +95,10 @@ jobs:
           done
           [ -z "$MAKENSIS" ] && { echo "错误：makensis 未找到" >&2; exit 1; }
           echo "makensis: $MAKENSIS"
+          # maclean.exe 复制到脚本同目录（NSIS File 相对脚本目录解析）
+          cp target/x86_64-pc-windows-msvc/release/maclean.exe packaging/windows/maclean.exe
           # MSYS_NO_PATHCONV=1：防止 Git Bash 把 /D 参数当 POSIX 路径转换
-          # EXE_PATH 必须绝对路径：NSIS File 指令相对脚本目录解析
-          MSYS_NO_PATHCONV=1 "$MAKENSIS" -DVERSION="$VERSION" "-DEXE_PATH=$GITHUB_WORKSPACE/dist/maclean.exe" packaging/windows/installer.nsi
+          MSYS_NO_PATHCONV=1 "$MAKENSIS" -DVERSION="$VERSION" packaging/windows/installer.nsi
           ls -la packaging/windows/maclean-setup-$VERSION.exe
           cp packaging/windows/maclean-setup-$VERSION.exe dist/
           cp README.md dist/ 2>/dev/null || echo "（无 README，跳过）"

@@ -16,9 +16,6 @@ ${UnStrRep}
 !ifndef APP_VERSION
   !define APP_VERSION "0.2.0"
 !endif
-!ifndef EXE_PATH
-  !error "EXE_PATH 未定义：请用 /DEXE_PATH=dist\maclean.exe 指定 maclean.exe"
-!endif
 
 !define APP_NAME "maclean"
 !define APP_EXE "maclean.exe"
@@ -43,7 +40,8 @@ Unicode true
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File "${EXE_PATH}"
+  ; maclean.exe 由 CI 复制到本脚本同目录（NSIS File 相对脚本目录解析）
+  File "maclean.exe"
 
   ; ---- 追加 PATH（HKCU，免提权）----
   ReadRegStr $0 HKCU "Environment" "Path"
