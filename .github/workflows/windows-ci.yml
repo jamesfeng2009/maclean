@@ -3,6 +3,7 @@ name: Windows Build CI
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
@@ -73,8 +74,8 @@ jobs:
           Write-Host "CLI 冒烟通过：--help 可用"
 
       - name: 打包发布产物
-        # 之前只上传裸 exe，用户下载后没有校验手段、也没有版本标识。
-        # 这里产出带版本号的 zip + SHA256，版本号从 Cargo.toml 取（唯一来源）。
+        # 产出带版本号的 zip（exe + README + SHA256）+ 独立 .sha256 文件，
+        # 版本号从 Cargo.toml 取（唯一来源）。release job 直接上传这两个文件。
         shell: bash
         run: |
           VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
@@ -95,10 +96,34 @@ jobs:
             echo "错误：未能生成 SHA256 校验和" >&2; exit 1; }
           cat maclean.exe.sha256
           cd ..
-          mv dist "maclean-windows-x86_64-$VERSION"
+          # 规范命名：zip 内含 exe + README + maclean.exe.sha256
+          powershell -Command "Compress-Archive -Path 'dist/*' -DestinationPath 'maclean-windows-x86_64-$VERSION.zip' -Force"
+          # 独立 .sha256 文件（release asset，site 构建期可 fetch 显示）
+          cp dist/maclean.exe.sha256 maclean-windows-x86_64-$VERSION.sha256
+          ls -la maclean-windows-x86_64-$VERSION.*
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: maclean-windows-x86_64
           path: maclean-windows-x86_64-*
+
+  windows-release:
+    name: Publish Windows release (tag only)
+    runs-on: ubuntu-latest
+    needs: windows-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: maclean-windows-x86_64
+          path: dist
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/maclean-windows-x86_64-*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
