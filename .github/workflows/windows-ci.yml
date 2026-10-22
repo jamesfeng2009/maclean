@@ -88,7 +88,14 @@ jobs:
           mkdir -p dist
           cp target/x86_64-pc-windows-msvc/release/maclean.exe dist/
           # --- NSIS 安装器：双击安装 + 自动加 PATH（HKCU，免提权）---
-          makensis "/DVERSION=$VERSION" '/DEXE_PATH=dist\maclean.exe' packaging/windows/installer.nsi
+          # choco nsis 是便携包，makensis 不在 PATH，需探测完整路径
+          MAKENSIS=""
+          for p in "$(command -v makensis 2>/dev/null)" "C:/ProgramData/chocolatey/lib/nsis/tools/NSIS/makensis.exe" "C:/Program Files (x86)/NSIS/makensis.exe"; do
+            if [ -n "$p" ] && [ -f "$p" ]; then MAKENSIS="$p"; break; fi
+          done
+          [ -z "$MAKENSIS" ] && { echo "错误：makensis 未找到" >&2; exit 1; }
+          echo "makensis: $MAKENSIS"
+          "$MAKENSIS" "/DVERSION=$VERSION" '/DEXE_PATH=dist\maclean.exe' packaging/windows/installer.nsi
           ls -la packaging/windows/maclean-setup-$VERSION.exe
           cp packaging/windows/maclean-setup-$VERSION.exe dist/
           cp README.md dist/ 2>/dev/null || echo "（无 README，跳过）"
