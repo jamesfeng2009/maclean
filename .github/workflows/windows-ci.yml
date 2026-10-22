@@ -126,7 +126,10 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: maclean-windows-x86_64
-          path: maclean-*
+          path: |
+            maclean-windows-x86_64-*.zip
+            maclean-setup-*.exe
+            maclean-setup-*.sha256
 
   windows-release:
     name: Publish Windows release (tag only)
