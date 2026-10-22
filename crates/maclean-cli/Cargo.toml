@@ -1,8 +1,8 @@
 [package]
-name = "maclean-cli"
+name = "maclean-cli-contract"
 version = "0.2.0"
 edition = "2021"
-description = "maclean CLI：命令解析 / envelope 渲染 / 语义退出码 / 人类可读输出（Open Core）"
+description = "maclean CLI 契约层：命令解析 / envelope 渲染 / 语义退出码 / 人类可读输出（Open Core）"
 license = "Apache-2.0"
 repository = "https://github.com/jamesfeng2009/maclean"
 

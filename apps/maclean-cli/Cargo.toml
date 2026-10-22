@@ -1,5 +1,5 @@
 [package]
-name = "maclean"
+name = "maclean-cli"
 version = "0.2.0"
 edition = "2021"
 description = "maclean CLI — 永久免费开源的 macOS 磁盘清理与存储智能命令行工具"
@@ -25,7 +25,7 @@ rust-version = "1.77"
 # ============================================================
 
 [dependencies]
-maclean-cli = { path = "../../crates/maclean-cli", version = "0.2.0" }
+maclean-cli-contract = { path = "../../crates/maclean-cli", version = "0.2.0" }
 maclean-core = { path = "../../crates/maclean-core", version = "0.2.0" }
 
 [[bin]]

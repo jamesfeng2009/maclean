@@ -26,9 +26,9 @@ fn main() {
     // 初始化日志系统（CLI 与后台任务共用）
     logger::init();
 
-    // CLI 分发：所有子命令经 maclean-cli crate 处理，返回语义退出码。
+    // CLI 分发：所有子命令经 maclean-cli-contract crate 处理，返回语义退出码。
     // run_cli() 返回 Some(code) 表示已执行并应退出；None 表示未提供子命令。
-    if let Some(code) = maclean_cli::run_cli() {
+    if let Some(code) = maclean_cli_contract::run_cli() {
         std::process::exit(code as i32);
     }
 
