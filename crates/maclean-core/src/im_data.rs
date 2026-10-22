@@ -10,7 +10,6 @@
 //! `xwechat_files/<wxid>/…`，老版本与 QQ 布局不同，未命中的部分一律落入
 //! "其它数据"，绝不因识别不出而误判。
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use rayon::prelude::*;
@@ -148,14 +147,23 @@ const OTHER_IDX: usize = 6;
 
 /// 单个文件的真实磁盘占用（字节）：优先 `st_blocks×512`（与全项目其它扫描口径
 /// 一致，APFS 稀疏文件不虚高）；拿不到块信息时退回逻辑长度。
+/// Windows 无块概念，直接返回逻辑长度（该模块为 macOS IM 分析，仅保证可编译）。
+#[cfg(unix)]
 #[inline]
 fn file_disk_bytes(md: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
     let blocks = md.blocks();
     if blocks > 0 {
         blocks.saturating_mul(512)
     } else {
         md.len()
     }
+}
+
+#[cfg(not(unix))]
+#[inline]
+fn file_disk_bytes(md: &std::fs::Metadata) -> u64 {
+    md.len()
 }
 
 /// 依据目录名（及父目录是否为 `msg`）判定整棵子树的归属分类下标。

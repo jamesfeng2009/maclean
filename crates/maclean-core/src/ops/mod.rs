@@ -335,7 +335,6 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
         rename_to_staging(path)?
     };
 
-    let path_str = path.to_string_lossy().to_string();
     let deleted_str = deleted_path.to_string_lossy().to_string();
     let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
 
@@ -817,6 +816,7 @@ pub fn start_delete(
     delete_rx: &mut Option<mpsc::Receiver<DeleteMessage>>,
     auto_restore: bool,
     // 卸载 .app 时优先交给厂商自带的官方卸载器（M-1，仅 macOS 有意义）
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     prefer_official_uninstaller: bool,
     // P0-3：删除取消标志。UI 点「停止」置 true，worker 在子项边界检查，
     // 未处理的项原地保留，已删项照常落清单。
