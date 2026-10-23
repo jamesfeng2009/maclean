@@ -39,6 +39,7 @@ allow = [
     "OpenSSL",
     "MPL-2.0",
     "BSL-1.0",
+    "CDLA-Permissive-2.0",
 ]
 # license 识别失败即报错（原 unlicensed 字段已移除）；
 # 需要人工确认的 crate 在 clarify 中声明
