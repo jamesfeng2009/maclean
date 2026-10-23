@@ -117,10 +117,15 @@ jobs:
         run: |
           VERSION="${{ env.VERSION }}"
           f="dist/maclean-${VERSION}-universal.zip"
+          # MACLEAN_NOTARY_KEY_P8 存的是 .p8 文件原始内容（PEM 文本，以 -----BEGIN 开头）。
+          # notarytool --key 需要的是文件路径，直接把内容当参数会因 PEM 以 '-' 开头被
+          # 解析为无效选项（Invalid option）。故先落盘为临时文件再引用。
+          printf '%s\n' "$MACLEAN_NOTARY_KEY_P8" > /tmp/maclean_auth.p8
+          chmod 600 /tmp/maclean_auth.p8
           echo "notarizing: $f"
           xcrun notarytool submit "$f" \
             --key-id "$MACLEAN_NOTARY_KEY_ID" \
-            --key "$MACLEAN_NOTARY_KEY_P8" \
+            --key /tmp/maclean_auth.p8 \
             --issuer "$MACLEAN_NOTARY_ISSUER_ID" \
             --wait
           xcrun stapler staple "$f"
