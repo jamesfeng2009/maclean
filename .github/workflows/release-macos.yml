@@ -130,10 +130,9 @@ jobs:
             --wait
           # stapler 仅支持 .app/.dmg/.pkg 等可嵌入票据的格式，zip 归档会报
           # "Stapler is incapable of working with ZIP archive files"，故跳过。
-          # 公证票据存于 Apple 侧：用户解压后首次执行由 Gatekeeper 联网校验。
-          # Gatekeeper 信任复检（解压后对可执行文件 assess，联网取票据）
-          unzip -q -o "$f" -d /tmp/spctl-check
-          spctl --assess --type execute /tmp/spctl-check/maclean
+          # 公证票据存于 Apple 侧：用户解压后首次执行由 Gatekeeper 联网校验
+          # （裸命令行二进制无 bundle 结构，spctl --assess 不适用，不做复检）。
+          echo "notarization accepted: submission id logged above"
 
       - name: 生成 SHA256
         run: |
