@@ -13,16 +13,16 @@ ${StrRep}
 ${UnStrStr}
 ${UnStrRep}
 
-!ifndef APP_VERSION
-  !define APP_VERSION "0.2.0"
+!ifndef VERSION
+  !define VERSION "0.2.0"
 !endif
 
 !define APP_NAME "maclean"
 !define APP_EXE "maclean.exe"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\maclean"
 
-Name "maclean ${APP_VERSION}"
-OutFile "maclean-setup-${APP_VERSION}.exe"
+Name "maclean ${VERSION}"
+OutFile "maclean-setup-${VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\maclean"
 RequestExecutionLevel user
 Unicode true
@@ -60,8 +60,8 @@ Section "Install"
 
   ; ---- 卸载器 + 卸载信息 ----
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "maclean ${APP_VERSION}"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "maclean ${VERSION}"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "maclean"
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
