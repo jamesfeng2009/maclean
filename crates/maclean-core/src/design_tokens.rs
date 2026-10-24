@@ -43,55 +43,55 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// 浅色（交互稿 `:root`）。
+    /// 浅色（对齐官网 getmaclean.com：奶油底 + 墨绿主色 + mint 选中浅底）。
     pub const LIGHT: Palette = Palette {
-        bg: "#F6F7F9",
+        bg: "#fbfaf5",
         panel: "#FFFFFF",
-        panel_2: "#FBFCFE",
+        panel_2: "#fffdf8",
         rail_bg: "#FFFFFF",
-        text: "#111827",
-        text_2: "#4B5563",
+        text: "#10232b",
+        text_2: "#526873",
         text_3: "#9CA3AF",
-        line: "#E8EAEE",
-        line_2: "#DDE1E7",
-        brand: "#4F46E5",
-        brand_600: "#4338CA",
-        brand_50: "#EEF2FF",
-        brand_100: "#E0E7FF",
-        safe: "#10B981",
-        safe_50: "#E7F8F1",
-        cache: "#3B82F6",
-        cache_50: "#EBF2FE",
-        caution: "#F59E0B",
-        caution_50: "#FDF3E3",
+        line: "#dce8df",
+        line_2: "#cfe0d6",
+        brand: "#123c37",
+        brand_600: "#102f2d",
+        brand_50: "#dff2e6",
+        brand_100: "#c9e6d1",
+        safe: "#1aaf7c",
+        safe_50: "#dff4e5",
+        cache: "#2389f7",
+        cache_50: "#e7f0fd",
+        caution: "#ffb13b",
+        caution_50: "#fff0cc",
         danger: "#EF4444",
         danger_50: "#FEECEC",
         danger_100: "#FBD5D5",
     };
 
-    /// 深色（交互稿 `[data-theme="dark"]`）。
+    /// 深色（墨绿深色：深底上品牌主色提亮为薄荷绿，保证对比可读）。
     pub const DARK: Palette = Palette {
-        bg: "#0E1013",
-        panel: "#171A20",
-        panel_2: "#1D2128",
-        rail_bg: "#13161B",
-        text: "#F2F4F7",
-        text_2: "#B6BDC7",
-        text_3: "#7C8491",
-        line: "#262B33",
-        line_2: "#2E343E",
-        brand: "#7C7DF0",
-        brand_600: "#9B9CF5",
-        brand_50: "#262A4A",
-        brand_100: "#2E3357",
-        safe: "#34D399",
-        safe_50: "#12352B",
-        cache: "#60A5FA",
-        cache_50: "#16283E",
-        caution: "#FBBF24",
-        caution_50: "#3A2F14",
-        danger: "#F87171",
-        danger_50: "#421B1D",
+        bg: "#0e1413",
+        panel: "#161d1b",
+        panel_2: "#1c2421",
+        rail_bg: "#121917",
+        text: "#e8efeb",
+        text_2: "#a7b6b0",
+        text_3: "#71807a",
+        line: "#25302b",
+        line_2: "#303c37",
+        brand: "#4fb894",
+        brand_600: "#66c9a8",
+        brand_50: "#1d352e",
+        brand_100: "#28463d",
+        safe: "#34d399",
+        safe_50: "#16352c",
+        cache: "#60a5fa",
+        cache_50: "#16283e",
+        caution: "#fbbf24",
+        caution_50: "#3a2f14",
+        danger: "#f87171",
+        danger_50: "#421b1d",
         danger_100: "#562428",
     };
 
@@ -217,18 +217,18 @@ mod tests {
         }
     }
 
-    /// 钉住交互稿评审版关键品牌/背景色，防止悄悄回退到旧 v2 色板。
+    /// 钉住对齐官网后的关键品牌/背景色，防止悄悄回退到旧紫 v2 色板。
     #[test]
     fn key_tokens_match_reviewed_mockup() {
-        assert_eq!(Palette::LIGHT.bg, "#F6F7F9");
-        assert_eq!(Palette::LIGHT.brand, "#4F46E5");
-        assert_eq!(Palette::LIGHT.brand_600, "#4338CA");
-        assert_eq!(Palette::LIGHT.safe, "#10B981");
-        assert_eq!(Palette::LIGHT.cache, "#3B82F6");
-        assert_eq!(Palette::LIGHT.caution, "#F59E0B");
+        assert_eq!(Palette::LIGHT.bg, "#fbfaf5");
+        assert_eq!(Palette::LIGHT.brand, "#123c37");
+        assert_eq!(Palette::LIGHT.brand_600, "#102f2d");
+        assert_eq!(Palette::LIGHT.safe, "#1aaf7c");
+        assert_eq!(Palette::LIGHT.cache, "#2389f7");
+        assert_eq!(Palette::LIGHT.caution, "#ffb13b");
         assert_eq!(Palette::LIGHT.danger, "#EF4444");
-        assert_eq!(Palette::DARK.bg, "#0E1013");
-        assert_eq!(Palette::DARK.panel, "#171A20");
+        assert_eq!(Palette::DARK.bg, "#0e1413");
+        assert_eq!(Palette::DARK.panel, "#161d1b");
         assert_eq!(Radii::TOKEN.lg, 16);
         assert_eq!(Radii::TOKEN.md, 12);
         assert_eq!(Radii::TOKEN.sm, 8);
