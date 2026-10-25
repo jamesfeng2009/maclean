@@ -24,11 +24,16 @@ echo "  $URL"
 echo "=========================================="
 
 TMP="$(mktemp -t maclean_sha)"
-if ! curl -fsSL "$URL" -o "$TMP"; then
-    echo "错误：无法下载 $URL" >&2
-    echo "      请确认 v$VERSION tag 已推送" >&2
-    rm -f "$TMP"
-    exit 1
+# github.com 不可达时退回 codeload（同一归档，字节一致，sha256 相同）
+if ! curl -fsSL --connect-timeout 10 "$URL" -o "$TMP"; then
+    CODELOAD="https://codeload.github.com/$REPO/tar.gz/refs/tags/v$VERSION"
+    echo "  github.com 直连失败，改用 codeload: $CODELOAD" >&2
+    if ! curl -fsSL --connect-timeout 10 "$CODELOAD" -o "$TMP"; then
+        echo "错误：无法下载 $URL" >&2
+        echo "      请确认 v$VERSION tag 已推送" >&2
+        rm -f "$TMP"
+        exit 1
+    fi
 fi
 SHA=$(shasum -a 256 "$TMP" | awk '{print $1}')
 rm -f "$TMP"
