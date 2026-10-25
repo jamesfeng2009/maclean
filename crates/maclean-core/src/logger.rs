@@ -53,6 +53,14 @@ pub fn log_dir() -> PathBuf {
 /// 在 main() 开头调用。创建日志目录，打开当天的日志文件，
 /// 设置 panic hook，清理过期日志。
 pub fn init() {
+    init_with_version(env!("CARGO_PKG_VERSION"));
+}
+
+/// 初始化日志系统，并指定启动横幅中展示的版本号
+///
+/// 供 CLI 等上层二进制传入自身版本（`env!("CARGO_PKG_VERSION")`），
+/// 避免横幅显示的是本库的版本号。
+pub fn init_with_version(version: &str) {
     let log_dir = log_dir();
 
     // 创建日志目录
@@ -76,10 +84,7 @@ pub fn init() {
             let _ = LOGGER.set(mutex);
 
             // 写入启动分隔
-            info(&format!(
-                "========== maclean v{} 启动 ==========",
-                env!("CARGO_PKG_VERSION")
-            ));
+            info(&format!("========== maclean v{} 启动 ==========", version));
             info(&format!("日志文件: {}", log_file.display()));
             info(&format!("平台: {}", std::env::consts::OS));
             info(&format!("架构: {}", std::env::consts::ARCH));

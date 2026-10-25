@@ -91,8 +91,8 @@ mod telemetry {
 }
 
 fn main() {
-    // 初始化日志系统（CLI 与后台任务共用）
-    logger::init();
+    // 初始化日志系统（CLI 与后台任务共用）；横幅展示 CLI 自身版本
+    logger::init_with_version(env!("CARGO_PKG_VERSION"));
 
     // 匿名首跑上报（brew 安装代理口径；静默、可关、单线程不阻塞）
     telemetry::report_once(env!("CARGO_PKG_VERSION"));
