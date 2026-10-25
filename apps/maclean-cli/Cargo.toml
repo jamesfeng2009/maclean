@@ -1,6 +1,6 @@
 [package]
 name = "maclean-cli"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 description = "maclean CLI — 永久免费开源的 macOS 磁盘清理与存储智能命令行工具"
 license = "Apache-2.0"
