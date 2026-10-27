@@ -88,12 +88,34 @@ const SKIP_DIR_NAMES: &[&str] = &[
 ];
 
 /// 重复文件扫描器
-#[derive(Debug, Default)]
-pub struct DuplicateFileScanner;
+#[derive(Debug, Clone, Copy)]
+pub struct DuplicateFileScanner {
+    /// 参与重复检测的最小文件大小（字节），默认 200KB
+    pub min_bytes: u64,
+    /// 最多保留的重复组数，默认 2000
+    pub max_groups: usize,
+}
+
+impl Default for DuplicateFileScanner {
+    fn default() -> Self {
+        Self {
+            min_bytes: MIN_SIZE,
+            max_groups: MAX_GROUPS,
+        }
+    }
+}
 
 impl DuplicateFileScanner {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// 自定义最小文件大小（低于 1KB 会被抬到 1KB，避免把大量小文件拖进哈希）
+    pub fn with_min_bytes(min_bytes: u64) -> Self {
+        Self {
+            min_bytes: min_bytes.max(1024),
+            ..Self::default()
+        }
     }
 }
 
@@ -153,7 +175,7 @@ impl Scanner for DuplicateFileScanner {
             }
             let Ok(meta) = entry.metadata() else { continue };
             let size = meta.len();
-            if size >= MIN_SIZE {
+            if size >= self.min_bytes {
                 by_size.entry(size).or_default().push(path.to_path_buf());
             }
         }
@@ -167,7 +189,7 @@ impl Scanner for DuplicateFileScanner {
 
         // 4. 组装 ScanItem（每组一个聚合项）
         let mut items: Vec<ScanItem> = Vec::new();
-        for group in candidates.into_iter().take(MAX_GROUPS) {
+        for group in candidates.into_iter().take(self.max_groups) {
             // 安全判定在 select_duplicate_keep 内：包根分桶 / git 项目边界 /
             // 保留者选择（返回 None = 整组不呈现）。
             let Some((keep, batch_paths)) = select_duplicate_keep(group, &home) else {

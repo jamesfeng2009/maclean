@@ -71,6 +71,8 @@ impl Scanner for DevCacheScanner {
         #[cfg(target_os = "macos")]
         items.extend(scan_docker_caches());
         items.extend(scan_ai_model_caches());
+        // AI CLI 的会话历史属于用户数据：只展示，绝不参与清理
+        items.extend(scan_ai_cli_history_info());
         items.extend(scan_monorepo_caches());
 
         // 安装包清理（跨平台，按平台扩展名过滤）
@@ -2148,6 +2150,43 @@ fn scan_docker_caches() -> Vec<ScanItem> {
 // =========================================================================
 //  AI 模型缓存扫描
 // =========================================================================
+
+/// AI CLI 会话历史（Claude Code / Codex）：只展示，不可清理
+///
+/// 这些目录里是用户的对话记录和会话状态，不是可重建的缓存。
+/// 之前完全没有出现在列表里，用户可能用别的清理工具误删；这里显式列出并
+/// 标记 `deletable: false`，让清理工具和用户都知道"这是用户数据"。
+fn scan_ai_cli_history_info() -> Vec<ScanItem> {
+    let home = home_dir();
+    let mut items = Vec::new();
+    for (rel, name) in [
+        (".claude/projects", "Claude Code 会话历史"),
+        (".codex/sessions", "Codex 会话历史"),
+    ] {
+        let path = home.join(rel);
+        if !path.is_dir() {
+            continue;
+        }
+        let size = dir_size(&path);
+        if size == 0 {
+            continue;
+        }
+        items.push(ScanItem {
+            batch_mtimes: vec![],
+            path: path.to_string_lossy().to_string(),
+            size_bytes: size,
+            category: name.to_string(),
+            selected: false,
+            deletable: false,
+            undeletable_reason: "用户数据（对话/会话记录），不参与清理；如需释放空间请手动归档"
+                .to_string(),
+            recommend: Recommend::Caution,
+            description: format!("{}：用户数据，不可清理", name),
+            batch_paths: Vec::new(),
+        });
+    }
+    items
+}
 
 /// 扫描 AI/ML 模型相关缓存
 ///

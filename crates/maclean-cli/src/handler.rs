@@ -9,7 +9,7 @@ use clap::Parser;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::args::{Cli, Commands, DupIgnoreAction, OptimizeAction, StartupAction};
+use crate::args::{ApfsAction, Cli, Commands, DupIgnoreAction, OptimizeAction, StartupAction};
 use maclean_types::cli::CliEnvelope;
 
 #[cfg(target_os = "macos")]
@@ -124,6 +124,8 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Scan { .. } => "scan",
         Commands::Clean { .. } => "clean",
         Commands::Schedule { .. } => "schedule",
+        Commands::SystemData => "system-data",
+        Commands::Apfs { .. } => "apfs",
         Commands::CheckDisk { .. } => "check-disk",
         Commands::List => "list",
         Commands::Apps => "apps",
@@ -146,22 +148,51 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
     let prog = progress_enabled(no_progress);
     CURRENT_COMMAND.with(|c| *c.borrow_mut() = command_name(&cmd));
     let code = match cmd {
-        Commands::Scan { tab, deep } => cmd_scan(tab, deep, format, color, prog),
+        Commands::Scan {
+            tab,
+            deep,
+            large_min_mb,
+            dup_min_kb,
+        } => cmd_scan(
+            tab,
+            deep,
+            large_min_mb,
+            dup_min_kb,
+            format,
+            color,
+            prog,
+        ),
         Commands::Clean {
             tab,
             safe_only,
             dry_run,
             scheduled,
+            only_if_due,
             yes,
             privileged,
+            large_min_mb,
+            dup_min_kb,
         } => cmd_clean(
-            tab, safe_only, dry_run, scheduled, yes, privileged, format, color, prog,
+            tab,
+            safe_only,
+            dry_run,
+            scheduled,
+            only_if_due,
+            yes,
+            privileged,
+            large_min_mb,
+            dup_min_kb,
+            format,
+            color,
+            prog,
         ),
         Commands::Schedule {
             install,
             remove,
             days,
         } => cmd_schedule(install, remove, days, format),
+        Commands::SystemData => cmd_system_data(format),
+        Commands::Apfs { action } => cmd_apfs(action, format),
         Commands::CheckDisk { breakdown } => cmd_check_disk(breakdown, format),
         Commands::List => cmd_list(format),
         Commands::Apps => cmd_apps(format),
@@ -295,9 +326,13 @@ fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
     const TAB_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
     // 转 String 再 move：scan_with_timeout 要求闭包 'static，不能捕获 &str
     let tab_key_owned = tab_name.to_string();
+    // 阈值来自 config.json（CLI --large-min-mb / --dup-min-kb 写入）
+    let cfg = maclean_core::config::load_config();
+    let large_min = cfg.large_file_min_bytes;
+    let dup_min = cfg.dup_file_min_bytes;
     let scan = move || match tab_key_owned.as_str() {
         "dev-cache" => DevCacheScanner::new().scan().items,
-        "large-files" => LargeFileScanner::new().scan().items,
+        "large-files" => LargeFileScanner::with_min_bytes(large_min).scan().items,
         #[cfg(target_os = "macos")]
         "app-cache" => AppCacheScanner::new().scan().items,
         #[cfg(target_os = "macos")]
@@ -309,7 +344,7 @@ fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
         "apfs" => ApfsScanner::new().scan().items,
         #[cfg(target_os = "macos")]
         "dup-files" => {
-            maclean_core::scanner::dup_files::DuplicateFileScanner::new()
+            maclean_core::scanner::dup_files::DuplicateFileScanner::with_min_bytes(dup_min)
                 .scan()
                 .items
         }
@@ -380,13 +415,42 @@ struct JsonScan {
     total_size: u64,
 }
 
-fn cmd_scan(tab: Option<String>, deep: bool, format: OutputFormat, color: bool, prog: bool) -> u8 {
-    let tabs: Vec<(String, String)> = if deep {
-        ALL_TABS
-            .iter()
-            .filter(|(k, _)| tab_supported(k))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
+/// 把 CLI 阈值写入 config.json（GUI 与后续扫描共用同一份设置）
+fn apply_scan_thresholds(large_min_mb: Option<u64>, dup_min_kb: Option<u64>) {
+    if large_min_mb.is_none() && dup_min_kb.is_none() {
+        return;
+    }
+    let mut cfg = maclean_core::config::load_config();
+    if let Some(mb) = large_min_mb {
+        cfg.large_file_min_bytes = mb.max(1) * 1024 * 1024;
+    }
+    if let Some(kb) = dup_min_kb {
+        cfg.dup_file_min_bytes = kb.max(1) * 1024;
+    }
+    maclean_core::config::save_config(&cfg);
+}
+
+fn all_supported_tabs() -> Vec<(String, String)> {
+    ALL_TABS
+        .iter()
+        .filter(|(k, _)| tab_supported(k))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+fn cmd_scan(
+    tab: Option<String>,
+    deep: bool,
+    large_min_mb: Option<u64>,
+    dup_min_kb: Option<u64>,
+    format: OutputFormat,
+    color: bool,
+    prog: bool,
+) -> u8 {
+    apply_scan_thresholds(large_min_mb, dup_min_kb);
+    let tabs: Vec<(String, String)> = if deep || tab.as_deref() == Some("all") {
+        // `--deep` 与 `--tab all` 等价：扫描所有当前平台支持的 Tab
+        all_supported_tabs()
     } else if let Some(t) = &tab {
         vec![(
             t.clone(),
@@ -562,6 +626,9 @@ struct JsonCleanTab {
     skipped_snapshots: usize,
     /// true = 本次是预览（未删除任何文件）
     preview: bool,
+    /// 走废纸篓时生成的删除清单 id（可用 `maclean restore <id>` 还原）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -586,26 +653,65 @@ struct JsonClean {
     rejected: usize,
 }
 
+/// 扫描项 → 实际要删除的路径列表
+///
+/// `batch_paths` 非空时真正的删除目标是它们（重复文件是"保留 path，删 batch"，
+/// 聚合缓存是"批量路径全删"）；为空才是单个 `path`。旧实现只删 `path`，
+/// 对重复文件来说删掉的是要保留的那份，属于必须修正的行为。
+fn item_delete_targets(item: &ScanItem) -> Vec<(String, u64)> {
+    if item.batch_paths.is_empty() {
+        vec![(item.path.clone(), item.size_bytes)]
+    } else {
+        item.batch_paths
+            .iter()
+            .map(|p| (p.clone(), 0))
+            .collect()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_clean(
     tab: Option<String>,
     safe_only: bool,
     dry_run: bool,
     scheduled: bool,
+    only_if_due: bool,
     yes: bool,
     privileged: bool,
+    large_min_mb: Option<u64>,
+    dup_min_kb: Option<u64>,
     format: OutputFormat,
     color: bool,
     prog: bool,
 ) -> u8 {
-    // C-3：定时任务跑完就记账，设置页才显示得出"上次执行"时间
+    apply_scan_thresholds(large_min_mb, dup_min_kb);
+    // 无人值守的定时清理永远只动默认安全项：即使 plist 被改掉 --safe-only，
+    // 也不能让定时任务去删 Advanced/Caution 项。
+    let safe_only = safe_only || scheduled;
+
+    // 定时任务日志会无限增长（launchd 直接 append），每次跑之前先看是否需要轮转
     if scheduled {
-        let mut cfg = maclean_core::config::load_config();
-        cfg.schedule_last_run = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        maclean_core::config::save_config(&cfg);
+        let _ = maclean_core::scheduler::rotate_log_if_needed();
+    }
+
+    // 登录补偿：launchd RunAtLoad / 任务计划登录触发会调用本命令。
+    // 未到期就安静退出 —— 不写 last_run、不清理、不冒充成功。
+    if scheduled && only_if_due {
+        let cfg = maclean_core::config::load_config();
+        if !maclean_core::scheduler::is_due(
+            cfg.schedule_enabled,
+            cfg.schedule_interval_days,
+            cfg.schedule_last_run,
+            now_secs(),
+        ) {
+            if format == OutputFormat::Human {
+                println!(
+                    "⏭️  定时清理未到期（每 {} 天），本次跳过",
+                    cfg.schedule_interval_days
+                );
+            }
+            return EXIT_OK;
+        }
     }
 
     // 安全确认（P0）：
@@ -614,14 +720,37 @@ fn cmd_clean(
     // - 否则一律预览（不删除）；非交互终端（stdin 非 TTY）时拒绝执行并退出码 4
     let confirmed = yes || scheduled;
     let preview = dry_run || !confirmed;
+    // 只有真正执行了删除才记 last_run；预览/被确认保护挡下都不算"跑过"
+    let ran_to_completion = !preview;
     if !confirmed && !dry_run && !std::io::stdin().is_terminal() {
         // 非交互环境：不给预览的机会直接要求 --yes（脚本必须显式确认删除意图）
         eprintln!("非交互环境执行删除必须显式携带 --yes（仅预览请加 --dry-run）");
         return EXIT_CONFIRM_REQUIRED;
     }
 
-    let tabs: Vec<String> = if let Some(t) = &tab {
+    // 定时清理不再只清开发缓存：无人值守时覆盖所有"安全默认项"的缓存类 Tab，
+    // 但排除 app-uninstall（会把应用当清理项）与 apfs（快照需要授权）。
+    const SCHEDULED_SAFE_TABS: &[&str] = &[
+        "dev-cache",
+        "app-cache",
+        "app-data",
+        "optimize",
+        "custom-rules",
+    ];
+    let tabs: Vec<String> = if tab.as_deref() == Some("all") {
+        ALL_TABS
+            .iter()
+            .filter(|(k, _)| tab_supported(k))
+            .map(|(k, _)| k.to_string())
+            .collect()
+    } else if let Some(t) = &tab {
         vec![t.clone()]
+    } else if scheduled {
+        SCHEDULED_SAFE_TABS
+            .iter()
+            .filter(|k| tab_supported(k))
+            .map(|k| k.to_string())
+            .collect()
     } else {
         vec!["dev-cache".to_string()]
     };
@@ -691,16 +820,15 @@ fn cmd_clean(
                 label: tab_label.to_string(),
                 planned: to_clean
                     .iter()
-                    .map(|i| JsonPath {
-                        path: i.path.clone(),
-                        size_bytes: i.size_bytes,
-                    })
+                    .flat_map(|i| item_delete_targets(i))
+                    .map(|(path, size_bytes)| JsonPath { path, size_bytes })
                     .collect(),
                 deleted: Vec::new(),
                 failed: Vec::new(),
                 rejected: Vec::new(),
                 skipped_snapshots: 0,
                 preview: true,
+                backup_id: None,
             };
             if format == OutputFormat::Jsonl {
                 emit_json(&rec, format, false);
@@ -708,19 +836,42 @@ fn cmd_clean(
                 out.push(rec);
             } else {
                 for item in &to_clean {
-                    println!("    - [{}] {}", format_size(item.size_bytes), item.path);
+                    for (path, size) in item_delete_targets(item) {
+                        let shown = if size == 0 {
+                            "大小未知".to_string()
+                        } else {
+                            format_size(size)
+                        };
+                        println!("    - [{}] {}", shown, path);
+                    }
                 }
             }
             continue;
         }
 
         // 删除前复做安全校验（与 GUI 同一层 TOCTOU 防护）
-        let pairs: Vec<(String, String)> = to_clean
-            .iter()
-            .filter(|i| !i.path.starts_with("snapshot:"))
-            .map(|i| (i.path.clone(), i.category.clone()))
-            .collect();
-        let skipped_snapshots = to_clean.len() - pairs.len();
+        // 快照/模拟器运行时不是普通文件：best_effort_delete 只会失败。
+        // CLI 的删除入口是 `maclean apfs delete`（快照会走管理员授权）。
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut skipped_snapshots = 0usize;
+        for item in &to_clean {
+            if item.path.starts_with("snapshot:")
+                || item.category == "APFS快照"
+                || item.category == "模拟器运行时"
+            {
+                skipped_snapshots += 1;
+                continue;
+            }
+            for (path, _) in item_delete_targets(item) {
+                pairs.push((path, item.category.clone()));
+            }
+        }
+
+        // 删除策略：大文件/重复文件默认走废纸篓（可 restore），
+        // 用户把设置改成 "trash" 时全部走废纸篓；其余沿用永久删除。
+        let delete_cfg = maclean_core::config::load_config();
+        let use_trash = matches!(tab_key.as_str(), "large-files" | "dup-files")
+            || delete_cfg.settings_delete_strategy == "trash";
 
         let (allowed, rejected) = maclean_core::ops::sanitize_before_delete(pairs, false);
         g_rejected += rejected.len();
@@ -736,7 +887,7 @@ fn cmd_clean(
             }
             if skipped_snapshots > 0 {
                 println!(
-                    "  ⏭️  跳过 {} 个 APFS 快照（需特殊处理）",
+                    "  ⏭️  跳过 {} 个 APFS 快照/模拟器运行时（用 `maclean apfs list` 查看，`maclean apfs delete <名称> --yes` 删除）",
                     skipped_snapshots
                 );
             }
@@ -757,11 +908,14 @@ fn cmd_clean(
             rejected: Vec::new(),
             skipped_snapshots,
             preview: false,
+            backup_id: None,
         };
 
         // 实际删除（带进度与取消检查）
         let mut success = 0usize;
         let mut failed = 0usize;
+        // 走废纸篓的项：与删除清单一起落盘，之后可用 `maclean restore <id>`
+        let mut trash_entries: Vec<maclean_core::backup::BackupEntry> = Vec::new();
         // 权限类失败项单独收集：提权重试（--privileged）后再定成败，
         // 保证"失败计数只报真实再次失败项"（用户多次确认的口径）。
         let mut priv_needed: Vec<(String, String)> = Vec::new();
@@ -776,6 +930,67 @@ fn cmd_clean(
                 eprint!("\r  删除 {}/{} ...", done + 1, total);
             }
             done += 1;
+
+            // 可还原路径：移入废纸篓并记录清单。移入失败**绝不降级成永久删除**，
+            // 否则一次权限失败就会悄悄毁掉用户数据。
+            if use_trash {
+                let size = std::fs::symlink_metadata(path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if maclean_core::ops::move_to_trash(path) {
+                    rec.deleted.push(path.clone());
+                    success += 1;
+                    trash_entries.push(maclean_core::backup::BackupEntry {
+                        path: path.clone(),
+                        size_bytes: size,
+                        category: _category.clone(),
+                        restorable: maclean_core::backup::is_restorable_by_move(
+                            true,
+                            std::env::consts::OS,
+                        ),
+                    });
+                    if format == OutputFormat::Jsonl {
+                        emit_json(
+                            &JsonlCleanEvent {
+                                event: "deleted",
+                                tab: tab_key.clone(),
+                                path: path.clone(),
+                                size_bytes: size,
+                                reason: "trash".to_string(),
+                            },
+                            format,
+                            false,
+                        );
+                    } else if format == OutputFormat::Human {
+                        println!("  {} {}（已移入废纸篓）", paint(color, "32", "✅"), path);
+                    }
+                } else {
+                    let reason = "移入废纸篓失败（未删除任何内容）".to_string();
+                    maclean_core::logger::warn(&format!("[删除] 失败: {} — {}", path, reason));
+                    rec.failed.push(JsonFailure {
+                        path: path.clone(),
+                        reason: reason.clone(),
+                    });
+                    failed += 1;
+                    if format == OutputFormat::Jsonl {
+                        emit_json(
+                            &JsonlCleanEvent {
+                                event: "failed",
+                                tab: tab_key.clone(),
+                                path: path.clone(),
+                                size_bytes: 0,
+                                reason: reason.clone(),
+                            },
+                            format,
+                            false,
+                        );
+                    } else if format == OutputFormat::Human {
+                        println!("  {} {} — {}", paint(color, "31", "❌"), path, reason);
+                    }
+                }
+                continue;
+            }
+
             // P6-4：删除实现下沉到 core::ops（best_effort_delete_with_reason，
             // 含 TOCTOU staging / rm -rf / chflags·chmod 重试 / 失败归因）。
             // CLI 参数处理器不包含任何文件系统删除实现。
@@ -991,6 +1206,23 @@ fn cmd_clean(
         if prog {
             eprint!("\r\x1b[K");
         }
+
+        // 废纸篓删除落一份清单：`maclean backups` 能看到，`maclean restore <id>`
+        // 能把还在废纸篓里的项搬回去。清单写失败不阻断删除（但会明确提示）。
+        if !trash_entries.is_empty() {
+            let id = maclean_core::backup::record(trash_entries);
+            rec.backup_id = id.clone();
+            if format == OutputFormat::Human {
+                match id {
+                    Some(id) => println!(
+                        "\n  📋 已移入废纸篓，可用 `maclean restore {}` 还原",
+                        id
+                    ),
+                    None => println!("\n  ⚠️  删除已完成，但删除清单写入失败（无法用 restore 还原）"),
+                }
+            }
+        }
+
         g_success += success;
         g_failed += failed;
 
@@ -1031,6 +1263,18 @@ fn cmd_clean(
         );
     }
 
+    // C-3：只有真正执行过（不是预览、不是被确认保护挡下）才记账，
+    // 设置页的"上次执行"才不会被误报成成功。
+    if scheduled && ran_to_completion {
+        let mut cfg = maclean_core::config::load_config();
+        cfg.schedule_last_run = now_secs();
+        maclean_core::config::save_config(&cfg);
+        maclean_core::logger::info(&format!(
+            "[定时] 清理完成，schedule_last_run={}",
+            cfg.schedule_last_run
+        ));
+    }
+
     if cancelled() {
         EXIT_CANCELLED
     } else if g_failed > 0 || g_rejected > 0 {
@@ -1047,6 +1291,292 @@ struct JsonlCleanEvent {
     path: String,
     size_bytes: u64,
     reason: String,
+}
+
+/// 递归统计目录大小（有界：最多 20 万条目，避免扫到 / 或坏目录时卡死）
+///
+/// 不跟随符号链接：否则 `~/Library` 里的链接可能把统计带进循环或别的卷。
+fn dir_size_bounded(root: &std::path::Path) -> u64 {
+    const MAX_ENTRIES: usize = 200_000;
+    let mut total = 0u64;
+    let mut seen = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if seen >= MAX_ENTRIES {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            seen += 1;
+            if seen >= MAX_ENTRIES {
+                break;
+            }
+            let path = entry.path();
+            let Ok(md) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if md.is_dir() {
+                stack.push(path);
+            } else if md.is_file() {
+                total = total.saturating_add(md.len());
+            }
+        }
+    }
+    total
+}
+
+#[derive(serde::Serialize)]
+struct JsonSystemDataRow {
+    category: String,
+    bytes: u64,
+    detail: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonSystemData {
+    command: &'static str,
+    total_bytes: u64,
+    items: Vec<JsonSystemDataRow>,
+}
+
+/// System Data 聚合视图
+///
+/// Apple 的 “System Data” 是缓存、日志、本地快照、iOS 备份、App 支持文件等
+/// 多类数据的总和，不对应单个目录。这里逐项拆开，让用户知道每块是什么、
+/// 哪些能清、哪些只是展示。
+fn cmd_system_data(format: OutputFormat) -> u8 {
+    let home = maclean_core::platform::home_dir();
+    let sum = |items: &[ScanItem]| -> u64 { items.iter().map(|i| i.size_bytes).sum() };
+
+    let (dev, _) = scan_tab("dev-cache");
+    let (app_cache, _) = scan_tab("app-cache");
+    let (app_data, _) = scan_tab("app-data");
+    let (apfs, _) = scan_tab("apfs");
+
+    let logs = dir_size_bounded(&home.join("Library").join("Logs"))
+        + dir_size_bounded(std::path::Path::new("/Library/Logs"));
+    let ios_backup = dir_size_bounded(
+        &home.join("Library")
+            .join("Application Support")
+            .join("MobileSync")
+            .join("Backup"),
+    );
+    let containers = dir_size_bounded(&home.join("Library").join("Containers"))
+        + dir_size_bounded(&home.join("Library").join("Group Containers"));
+
+    let snapshot_count = apfs.iter().filter(|i| i.category == "APFS快照").count();
+    let snapshot_known: u64 = apfs
+        .iter()
+        .filter(|i| i.category == "APFS快照")
+        .map(|i| i.size_bytes)
+        .sum();
+
+    let rows = vec![
+        JsonSystemDataRow {
+            category: "缓存（应用）".to_string(),
+            bytes: sum(&app_cache),
+            detail: "~/Library/Caches 等应用缓存，可在 App 缓存页清理".to_string(),
+            paths: vec![],
+        },
+        JsonSystemDataRow {
+            category: "缓存（开发者）".to_string(),
+            bytes: sum(&dev),
+            detail: "Xcode / npm / Docker / AI 模型等开发缓存".to_string(),
+            paths: vec![],
+        },
+        JsonSystemDataRow {
+            category: "日志".to_string(),
+            bytes: logs,
+            detail: "~/Library/Logs 与 /Library/Logs（系统日志不建议手动删）".to_string(),
+            paths: vec![
+                home.join("Library/Logs").display().to_string(),
+                "/Library/Logs".to_string(),
+            ],
+        },
+        JsonSystemDataRow {
+            category: "本地快照".to_string(),
+            bytes: snapshot_known,
+            detail: format!(
+                "{} 个 APFS 本地快照（Time Machine 本地快照）；用 `maclean apfs list` 查看",
+                snapshot_count
+            ),
+            paths: vec![],
+        },
+        JsonSystemDataRow {
+            category: "iOS 备份".to_string(),
+            bytes: ios_backup,
+            detail: "~/Library/Application Support/MobileSync/Backup".to_string(),
+            paths: vec![home
+                .join("Library/Application Support/MobileSync/Backup")
+                .display()
+                .to_string()],
+        },
+        JsonSystemDataRow {
+            category: "应用支持".to_string(),
+            bytes: sum(&app_data),
+            detail: "Application Support 中的应用数据".to_string(),
+            paths: vec![],
+        },
+        JsonSystemDataRow {
+            category: "容器与沙盒".to_string(),
+            bytes: containers,
+            detail: "~/Library/Containers 与 Group Containers（仅展示，清理需确认）".to_string(),
+            paths: vec![],
+        },
+    ];
+
+    let total: u64 = rows.iter().map(|r| r.bytes).sum();
+    if format != OutputFormat::Human {
+        emit_json(
+            &JsonSystemData {
+                command: "system-data",
+                total_bytes: total,
+                items: rows,
+            },
+            format,
+            true,
+        );
+        return EXIT_OK;
+    }
+
+    println!("\nSystem Data 拆分（合计 {}）：\n", format_size(total));
+    for r in &rows {
+        let size = if r.bytes == 0 && r.category == "本地快照" {
+            "大小未知".to_string()
+        } else {
+            format_size(r.bytes)
+        };
+        println!("  {:<14} {:>10}  {}", r.category, size, r.detail);
+    }
+    println!(
+        "\n提示：缓存类可用 `maclean clean --tab all --safe-only --yes` 清理；\n\
+         iOS 备份 / 容器数据请先确认不再需要；本地快照用 `maclean apfs` 管理。"
+    );
+    EXIT_OK
+}
+
+#[derive(serde::Serialize)]
+struct JsonApfsItem {
+    path: String,
+    category: String,
+    size_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct JsonApfs {
+    command: &'static str,
+    action: &'static str,
+    items: Vec<JsonApfsItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deleted: Option<String>,
+}
+
+/// APFS 本地快照 / 模拟器运行时：列出与删除
+///
+/// `clean --tab apfs` 会跳过 `snapshot:` 项（快照不是普通文件），
+/// 这个命令是 CLI 唯一的快照删除入口。删除快照时非 root 会走
+/// osascript 管理员授权（Touch ID / 密码）。
+fn cmd_apfs(action: ApfsAction, format: OutputFormat) -> u8 {
+    let (items, _timed_out) = scan_tab("apfs");
+
+    match action {
+        ApfsAction::List => {
+            if format != OutputFormat::Human {
+                emit_json(
+                    &JsonApfs {
+                        command: "apfs",
+                        action: "list",
+                        items: items
+                            .iter()
+                            .map(|i| JsonApfsItem {
+                                path: i.path.clone(),
+                                category: i.category.clone(),
+                                size_bytes: i.size_bytes,
+                            })
+                            .collect(),
+                        deleted: None,
+                    },
+                    format,
+                    true,
+                );
+                return EXIT_OK;
+            }
+            println!("\nAPFS 快照 / 模拟器运行时：\n");
+            if items.is_empty() {
+                println!("  （无）");
+            } else {
+                for item in &items {
+                    let size = if item.size_bytes == 0 {
+                        "大小未知".to_string()
+                    } else {
+                        format_size(item.size_bytes)
+                    };
+                    println!("  - {}  [{}]  {}", item.path, item.category, size);
+                }
+                println!(
+                    "\n删除：maclean apfs delete <名称> --yes\n（快照删除需要管理员权限，会弹系统授权）"
+                );
+            }
+            EXIT_OK
+        }
+        ApfsAction::Delete { target, yes } => {
+            if !yes {
+                eprintln!("删除前需确认：maclean apfs delete '{}' --yes", target);
+                eprintln!("（快照/模拟器运行时删除不可恢复）");
+                return EXIT_CONFIRM_REQUIRED;
+            }
+
+            // 用扫描结果确认类别；扫描拿不到时按名称形态兜底
+            let matched = items.iter().find(|i| {
+                i.path == target
+                    || i.path.ends_with(&format!("| {}", target))
+                    || i.path.ends_with(target.as_str())
+            });
+            let category = matched.map(|i| i.category.as_str()).unwrap_or_else(|| {
+                if target.contains("com.apple.TimeMachine.") {
+                    "APFS快照"
+                } else {
+                    "模拟器运行时"
+                }
+            });
+
+            let result = if category == "APFS快照" {
+                maclean_core::scanner::apfs::delete_snapshot(&target)
+            } else {
+                maclean_core::scanner::apfs::delete_simulator_runtime(&target)
+            };
+
+            match result {
+                Ok(()) => {
+                    maclean_core::logger::info(&format!("[APFS] 已删除: {}", target));
+                    if format != OutputFormat::Human {
+                        emit_json(
+                            &JsonApfs {
+                                command: "apfs",
+                                action: "delete",
+                                items: Vec::new(),
+                                deleted: Some(target.clone()),
+                            },
+                            format,
+                            true,
+                        );
+                    } else {
+                        println!("✅ 已删除 {}", target);
+                    }
+                    EXIT_OK
+                }
+                Err(e) => {
+                    maclean_core::logger::warn(&format!("[APFS] 删除失败: {} — {}", target, e));
+                    eprintln!("❌ 删除失败：{}", e);
+                    EXIT_FAILURE
+                }
+            }
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1167,11 +1697,27 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
     let mut total_count: usize = 0;
     let mut scanned: Vec<String> = Vec::new();
 
-    for key in keys {
-        if !tab_supported(key) {
-            continue;
+    // 6 个 Tab 串行扫描在一台装满缓存的机器上会明显拖慢 breakdown。
+    // 用 scoped thread 分组并行（每批 3 个，避免 6 路 IO 抢元数据反而更慢）。
+    let mut results: Vec<(&str, Vec<ScanItem>, bool)> = Vec::new();
+    std::thread::scope(|scope| {
+        for chunk in keys.chunks(3) {
+            let handles: Vec<(&str, std::thread::ScopedJoinHandle<(Vec<ScanItem>, bool)>)> = chunk
+                .iter()
+                .filter(|k| tab_supported(k))
+                .map(|k| {
+                    let key = *k;
+                    (key, scope.spawn(move || scan_tab(key)))
+                })
+                .collect();
+            for (key, handle) in handles {
+                let (items, timed_out) = handle.join().unwrap_or_default();
+                results.push((key, items, timed_out));
+            }
         }
-        let (items, _tab_timed_out) = scan_tab(key);
+    });
+
+    for (key, items, _timed_out) in results {
         scanned.push(key.to_string());
         total_count += items.len();
         for item in &items {
@@ -1433,6 +1979,8 @@ fn cmd_uninstall(app_arg: &str, yes: bool, format: OutputFormat) -> u8 {
 struct JsonSchedule<'a> {
     command: &'a str,
     enabled: bool,
+    /// 系统里是否真的注册了定时任务（`enabled` 只代表配置开关）
+    registered: bool,
     interval_days: u32,
     last_run: u64,
     due: bool,
@@ -1471,19 +2019,22 @@ fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, format: OutputFo
     } else if remove {
         cfg.schedule_enabled = false;
         maclean_core::config::save_config(&cfg);
-        let (prog, args) = maclean_core::scheduler::uninstall_command();
-        result = Some(match std::process::Command::new(prog).args(args).output() {
-            Ok(o) if o.status.success() => "定时任务已移除".to_string(),
-            Ok(o) => format!("移除失败：{}", String::from_utf8_lossy(&o.stderr).trim()),
+        // macOS 上要同时 bootout 当前标签与旧标签，并删除 plist 文件；
+        // 只跑一条 launchctl 命令会留下升级前的旧任务。
+        result = Some(match maclean_core::scheduler::uninstall() {
+            Ok(_) => "定时任务已移除".to_string(),
             Err(e) => format!("移除失败：{}", e),
         });
     }
+
+    let registered = maclean_core::scheduler::is_registered();
 
     if format != OutputFormat::Human {
         emit_json(
             &JsonSchedule {
                 command: "schedule",
                 enabled: cfg.schedule_enabled,
+                registered,
                 interval_days: cfg.schedule_interval_days,
                 last_run: cfg.schedule_last_run,
                 due: maclean_core::scheduler::is_due(
@@ -1503,12 +2054,17 @@ fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, format: OutputFo
     println!("\n定时清理：\n");
     println!(
         "  状态：{}",
-        if cfg.schedule_enabled {
-            "已开启"
-        } else {
-            "未开启"
+        match (cfg.schedule_enabled, registered) {
+            (true, true) => "已开启（系统任务已注册）",
+            // 只写 config 不算数：任务可能被 bootout 或 plist 被删，
+            // 这时"已开启"会让用户误以为会自动清理。
+            (true, false) => "已开启（配置），但系统里没有注册任务，不会自动执行",
+            (false, _) => "未开启",
         }
     );
+    if cfg.schedule_enabled && !registered {
+        println!("  提示：执行 `maclean schedule --install --days {}` 重新注册", cfg.schedule_interval_days);
+    }
     println!("  间隔：每 {} 天", cfg.schedule_interval_days);
     println!(
         "  上次执行：{}",
@@ -1932,6 +2488,63 @@ fn cmd_dup_ignore(action: DupIgnoreAction, format: OutputFormat) -> u8 {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(serde::Serialize)]
+struct JsonLoginItems {
+    command: &'static str,
+    count: usize,
+    items: Vec<String>,
+}
+
+/// 读取系统设置里的登录项（Login Items）
+///
+/// 这些项由 backgroundtaskmanagementagent 管理，不是 LaunchAgents plist，
+/// 只能通过 System Events 查询。首次调用会触发"自动化"授权（TCC）。
+#[cfg(target_os = "macos")]
+fn read_login_items() -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            r#"tell application "System Events" to get the name of every login item"#,
+        ])
+        .output()
+        .map_err(|e| format!("无法调用 osascript: {}", e))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "读取登录项失败（需在系统设置 > 隐私与安全性 > 自动化 中允许控制 System Events）: {}",
+            err
+        ));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Ok(raw
+        .trim()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_login_items() -> Result<Vec<String>, String> {
+    Err("登录项管理仅支持 macOS".to_string())
+}
+
+/// 打开系统设置 → 通用 → 登录项与扩展
+fn open_login_items_settings() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
     let backup_root = default_startup_backup_root();
     match action {
@@ -2129,6 +2742,56 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
                     }
                     EXIT_FAILURE
                 }
+            }
+        }
+        StartupAction::LoginItems { open } => {
+            #[cfg(target_os = "macos")]
+            {
+                let mut code = EXIT_OK;
+                match read_login_items() {
+                    Ok(items) => {
+                        if format != OutputFormat::Human {
+                            emit_json(
+                                &JsonLoginItems {
+                                    command: "startup",
+                                    count: items.len(),
+                                    items: items.clone(),
+                                },
+                                format,
+                                true,
+                            );
+                        } else {
+                            println!("\n登录项（{} 项）：", items.len());
+                            if items.is_empty() {
+                                println!("  （无）");
+                            } else {
+                                for name in &items {
+                                    println!("  - {}", name);
+                                }
+                            }
+                            println!(
+                                "\n禁用/删除需在系统设置中操作：maclean startup login-items --open\n\
+                                 （这些项不是 LaunchAgents plist，不能像 startup disable 那样搬走）"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // 读不到不等于列表为空：必须明确报错，不能让用户误以为没有登录项
+                        eprintln!("{e}");
+                        code = EXIT_FAILURE;
+                    }
+                }
+                if open && !open_login_items_settings() {
+                    eprintln!("无法打开系统设置，请手动前往：系统设置 > 通用 > 登录项与扩展");
+                    code = EXIT_FAILURE;
+                }
+                code
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = open;
+                eprintln!("登录项管理仅支持 macOS");
+                EXIT_FAILURE
             }
         }
     }
@@ -2386,6 +3049,7 @@ mod tests {
                 }],
                 skipped_snapshots: 0,
                 preview: true,
+                backup_id: None,
             }],
             success: 0,
             failed: 0,

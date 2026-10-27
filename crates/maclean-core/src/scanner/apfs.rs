@@ -112,15 +112,13 @@ fn scan_local_snapshots() -> Vec<ScanItem> {
 /// - `Ok(())`: 删除成功
 /// - `Err(String)`: 删除失败，包含错误信息
 pub fn delete_snapshot(name: &str) -> Result<(), String> {
-    // 从快照名称中提取时间戳
-    // 名称格式: com.apple.TimeMachine.2024-01-15-100000.local
-    // 时间戳: 2024-01-15-100000
-    let timestamp = name
-        .strip_prefix("com.apple.TimeMachine.")
-        .and_then(|s| s.strip_suffix(".local"))
-        .unwrap_or(name);
+    let timestamp = extract_snapshot_timestamp(name);
+    // 快照名来自 tmutil 输出或 CLI 参数：进入 shell/AppleScript 之前必须校验，
+    // 否则一个带引号/分号的"名字"就能变成任意命令执行。
+    if !is_safe_snapshot_timestamp(timestamp) {
+        return Err(format!("非法的快照时间戳: {}", timestamp));
+    }
 
-    // 执行 tmutil deletelocalsnapshots 命令
     let output = Command::new("tmutil")
         .arg("deletelocalsnapshots")
         .arg(timestamp)
@@ -128,10 +126,87 @@ pub fn delete_snapshot(name: &str) -> Result<(), String> {
         .map_err(|e| format!("执行 tmutil 失败: {}", e))?;
 
     if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if is_permission_denied(&stderr) {
+        #[cfg(target_os = "macos")]
+        {
+            // 非 root 时 tmutil 会拒绝删除本地快照（即使文件属主是当前用户）。
+            // 走系统授权弹窗（Touch ID / 密码），成功后仍是同一个 tmutil 命令。
+            if !is_euid_root() {
+                return delete_snapshot_with_privileges(timestamp);
+            }
+        }
+    }
+    Err(format!(
+        "删除快照失败: {}（可执行 sudo tmutil deletelocalsnapshots {} 重试）",
+        stderr, timestamp
+    ))
+}
+
+/// 从快照名提取 tmutil 需要的时间戳
+///
+/// 输入 `com.apple.TimeMachine.2024-01-15-100000.local` → `2024-01-15-100000`。
+/// 已经是时间戳的原样返回（幂等）。
+pub fn extract_snapshot_timestamp(name: &str) -> &str {
+    name.strip_prefix("com.apple.TimeMachine.")
+        .and_then(|s| s.strip_suffix(".local"))
+        .unwrap_or(name)
+}
+
+/// 快照时间戳白名单：数字、字母、`-`、`_`、`.`
+///
+/// tmutil 时间戳形如 `2024-01-15-100000`；不允许任何 shell/AppleScript 元字符。
+pub fn is_safe_snapshot_timestamp(ts: &str) -> bool {
+    !ts.is_empty()
+        && ts.len() <= 64
+        && ts
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// 判断 tmutil 的报错是否属于"需要管理员权限"
+pub fn is_permission_denied(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("operation not permitted")
+        || s.contains("permission denied")
+        || s.contains("must be run as root")
+        || s.contains("not authorized")
+        || s.contains("authorization")
+}
+
+#[cfg(target_os = "macos")]
+fn is_euid_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// 通过系统授权弹窗执行 `tmutil deletelocalsnapshots`
+///
+/// `osascript ... with administrator privileges` 会弹 Touch ID / 密码框，
+/// 等价于用户手动执行 `sudo tmutil deletelocalsnapshots <ts>`。
+#[cfg(target_os = "macos")]
+fn delete_snapshot_with_privileges(timestamp: &str) -> Result<(), String> {
+    let shell_cmd = format!("/usr/bin/tmutil deletelocalsnapshots {}", timestamp);
+    let script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        shell_cmd.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|e| format!("无法发起管理员授权: {}", e))?;
+
+    if output.status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("删除快照失败: {}", stderr.trim()))
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!(
+            "删除快照需要管理员权限，授权未完成或被取消: {}（也可执行 sudo tmutil deletelocalsnapshots {}）",
+            err, timestamp
+        ))
     }
 }
 
@@ -144,58 +219,82 @@ pub fn delete_snapshot(name: &str) -> Result<(), String> {
 /// 执行 `xcrun simctl runtime list` 命令，解析输出中的运行时 UUID。
 /// 由于无法直接获取运行时占用大小，size_bytes 设为 0。
 fn scan_simulator_runtimes() -> Vec<ScanItem> {
-    let mut items = Vec::new();
-
-    // 执行 xcrun simctl runtime list 命令
+    // -j 输出稳定的 JSON 映射（UUID -> 元数据）。旧实现按行抓 UUID，
+    // 会把 parentIdentifier 之类的无关 UUID 一起当成 runtime；JSON 解析
+    // 还能直接拿到系统标注的 deletable 与 sizeBytes。
     let output = Command::new("xcrun")
-        .args(["simctl", "runtime", "list"])
+        .args(["simctl", "runtime", "list", "-j"])
         .output();
 
-    let output = match output {
-        Ok(o) => o,
-        Err(_) => return items, // xcrun 不可用，直接返回空列表
+    let Ok(output) = output else {
+        return Vec::new(); // xcrun 不可用
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_simulator_runtimes_json(&output.stdout)
+}
+
+/// `xcrun simctl runtime list -j` 的单条元数据
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SimRuntimeMeta {
+    #[serde(default)]
+    runtime_identifier: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    deletable: Option<bool>,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    mount_path: Option<String>,
+}
+
+/// 解析 `xcrun simctl runtime list -j`（纯函数，便于单测）
+///
+/// 只保留系统标记为可删除的运行时候选；正在使用/被依赖的 runtime 不列出，
+/// 避免用户勾选后删除失败。`path` 格式为 `显示名 | UUID`，删除时取右半段。
+pub fn parse_simulator_runtimes_json(raw: &[u8]) -> Vec<ScanItem> {
+    let Ok(map) = serde_json::from_slice::<std::collections::BTreeMap<String, SimRuntimeMeta>>(raw)
+    else {
+        return Vec::new();
     };
 
-    // 解析命令输出，查找 UUID
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // 记录当前上下文（如 "== Runtime: iOS 17.2 ==" 这样的行）
-    // 用于在 UUID 附近提取运行时名称信息
-    let mut current_context = String::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-
-        // 更新上下文（遇到 "== " 开头或包含 "Runtime:" 的行时更新）
-        if trimmed.starts_with("== ") || trimmed.contains("Runtime:") {
-            current_context = trimmed.to_string();
-        }
-
-        // 在当前行中查找 UUID
-        if let Some(uuid) = extract_uuid(trimmed) {
-            // path 字段存储 UUID（删除时需要用 UUID）
-            // 如果有上下文信息，将其附加在 UUID 前面以便用户识别
-            let display_path = if current_context.is_empty() {
-                uuid.clone()
-            } else {
-                format!("{} | {}", current_context, uuid)
+    map.into_iter()
+        .filter(|(_, m)| m.deletable.unwrap_or(false))
+        .map(|(uuid, m)| {
+            let label = match (m.platform.as_deref(), m.version.as_deref()) {
+                (Some(p), Some(v)) => format!("{} {}", p, v),
+                _ => m
+                    .runtime_identifier
+                    .clone()
+                    .unwrap_or_else(|| "iOS Simulator Runtime".to_string()),
             };
-
-            items.push(ScanItem {
+            let display_path = format!("{} | {}", label, uuid);
+            ScanItem {
                 batch_mtimes: vec![],
                 path: display_path,
-                size_bytes: 0, // 运行时大小无法直接获取
+                // 有 sizeBytes 就用真实大小；老版本没有该字段时仍标 0（未知）
+                size_bytes: m.size_bytes.unwrap_or(0),
                 category: "模拟器运行时".to_string(),
                 selected: false,
                 deletable: true,
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
                 recommend: Recommend::Caution,
-                description: "iOS 模拟器运行时，删除后需重新下载".to_string(),
-            });
-        }
-    }
-
-    items
+                description: format!(
+                    "iOS 模拟器运行时{}，删除后需重新下载",
+                    m.mount_path
+                        .as_deref()
+                        .map(|p| format!("（{}）", p))
+                        .unwrap_or_default()
+                ),
+            }
+        })
+        .collect()
 }
 
 /// 删除 iOS 模拟器运行时
@@ -229,42 +328,63 @@ pub fn delete_simulator_runtime(uuid: &str) -> Result<(), String> {
 //  辅助函数
 // =========================================================================
 
-/// 从文本中提取 UUID
-///
-/// UUID 格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (8-4-4-4-12 十六进制字符)
-/// 在文本中搜索匹配此模式的子串。
-fn extract_uuid(text: &str) -> Option<String> {
-    let len = text.len();
-    if len < 36 {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_timestamp_is_extracted_idempotently() {
+        let name = "com.apple.TimeMachine.2024-01-15-100000.local";
+        assert_eq!(extract_snapshot_timestamp(name), "2024-01-15-100000");
+        assert_eq!(
+            extract_snapshot_timestamp("2024-01-15-100000"),
+            "2024-01-15-100000"
+        );
     }
 
-    for i in 0..=(len - 36) {
-        // 使用 get 方法避免 UTF-8 边界 panic
-        if let Some(candidate) = text.get(i..i + 36) {
-            if is_valid_uuid(candidate) {
-                return Some(candidate.to_string());
-            }
-        }
+    #[test]
+    fn dangerous_snapshot_names_are_rejected() {
+        // 进入 osascript/shell 前必须挡住命令注入
+        assert!(is_safe_snapshot_timestamp("2024-01-15-100000"));
+        assert!(!is_safe_snapshot_timestamp("2024-01-15-100000; rm -rf /"));
+        assert!(!is_safe_snapshot_timestamp("2024-01-15\"quote"));
+        assert!(!is_safe_snapshot_timestamp(""));
+        assert!(!is_safe_snapshot_timestamp(&"a".repeat(65)));
     }
-    None
-}
 
-/// 验证字符串是否为有效的 UUID 格式
-///
-/// UUID 格式: 8-4-4-4-12 十六进制字符，用连字符分隔
-/// 如: 12345678-1234-1234-1234-123456789abc
-fn is_valid_uuid(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 5 {
-        return false;
+    #[test]
+    fn permission_errors_are_classified() {
+        assert!(is_permission_denied("tmutil: Operation not permitted"));
+        assert!(is_permission_denied("Permission denied"));
+        assert!(is_permission_denied("This command must be run as root"));
+        assert!(!is_permission_denied("No snapshot found"));
     }
-    // 各部分长度应为 8, 4, 4, 4, 12
-    let lengths = [8, 4, 4, 4, 12];
-    parts
-        .iter()
-        .zip(lengths.iter())
-        .all(|(part, &expected_len)| {
-            part.len() == expected_len && part.chars().all(|c| c.is_ascii_hexdigit())
-        })
+
+    #[test]
+    fn simulator_runtimes_parse_from_json_not_line_scanning() {
+        let raw = br#"{
+          "0A1B2C3D-0000-1111-2222-333344445555": {
+            "platform": "iOS",
+            "version": "17.2",
+            "deletable": true,
+            "sizeBytes": 1234567890,
+            "mountPath": "/Library/Developer/CoreSimulator/Volumes/iOS_22F77"
+          },
+          "FFFFFFFF-AAAA-BBBB-CCCC-DDDDDDDDDDDD": {
+            "platform": "iOS",
+            "version": "16.4",
+            "deletable": false
+          }
+        }"#;
+        let items = parse_simulator_runtimes_json(raw);
+        assert_eq!(items.len(), 1, "不可删除的 runtime 不应列出");
+        assert_eq!(items[0].size_bytes, 1_234_567_890);
+        assert!(items[0].path.ends_with("0A1B2C3D-0000-1111-2222-333344445555"));
+        assert_eq!(items[0].category, "模拟器运行时");
+    }
+
+    #[test]
+    fn invalid_simulator_json_yields_empty_not_garbage() {
+        assert!(parse_simulator_runtimes_json(b"not json").is_empty());
+    }
 }

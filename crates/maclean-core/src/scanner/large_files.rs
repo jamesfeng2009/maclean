@@ -181,7 +181,7 @@ fn collect_large_files_under(root: &Path, threshold: u64) -> Vec<(PathBuf, u64)>
 }
 
 /// 大文件视图：扫描用户主目录下的超大单文件
-fn scan_large_files() -> ScanResult {
+fn scan_large_files(threshold: u64) -> ScanResult {
     let start = Instant::now();
     if !has_home() {
         return ScanResult {
@@ -192,13 +192,14 @@ fn scan_large_files() -> ScanResult {
     }
     let home = home_dir();
     let res = catch_unwind(AssertUnwindSafe(|| {
-        collect_large_files_under(&home, LARGE_FILE_THRESHOLD)
+        collect_large_files_under(&home, threshold)
     }))
     .unwrap_or_default();
 
     crate::log_scan_step(&format!(
-        "磁盘分析: 大文件扫描完成, {} 个 ≥100MB 文件",
-        res.len()
+        "磁盘分析: 大文件扫描完成, {} 个 ≥{} 文件",
+        res.len(),
+        format_size(threshold)
     ));
 
     let mut total_size = 0u64;
@@ -272,12 +273,30 @@ fn should_skip_home_dir(name: &str) -> bool {
 }
 
 /// 磁盘分析器扫描器
-#[derive(Debug, Default)]
-pub struct LargeFileScanner;
+#[derive(Debug, Clone, Copy)]
+pub struct LargeFileScanner {
+    /// 单文件阈值（字节）。默认 100MB；CLI 可用 `--large-min-mb` 覆盖。
+    pub min_bytes: u64,
+}
+
+impl Default for LargeFileScanner {
+    fn default() -> Self {
+        Self {
+            min_bytes: LARGE_FILE_THRESHOLD,
+        }
+    }
+}
 
 impl LargeFileScanner {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// 自定义阈值（低于 1MB 会被抬到 1MB，避免把整棵主目录都扫成"大文件"）
+    pub fn with_min_bytes(min_bytes: u64) -> Self {
+        Self {
+            min_bytes: min_bytes.max(1024 * 1024),
+        }
     }
 }
 
@@ -296,7 +315,7 @@ impl Scanner for LargeFileScanner {
         let home = home_dir();
 
         // 大文件（递归单文件，按类型分类；放在前，默认视图）
-        let mut result = scan_large_files();
+        let mut result = scan_large_files(self.min_bytes);
         // 大目录（主目录直接子项占用排行，category 恒为「目录」/「文件」）
         let dirs = scan_directory(&home);
 

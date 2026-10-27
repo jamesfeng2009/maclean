@@ -1,6 +1,6 @@
 [package]
 name = "maclean-cli-contract"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "maclean CLI 契约层：命令解析 / envelope 渲染 / 语义退出码 / 人类可读输出（Open Core）"
 license = "Apache-2.0"
@@ -16,7 +16,8 @@ repository = "https://github.com/jamesfeng2009/maclean"
 
 [dependencies]
 maclean-types = { path = "../maclean-types", version = "0.2.0" }
-maclean-core = { path = "../maclean-core", version = "0.2.0" }
+# 0.2.2：handler 使用 scheduler::is_registered（状态判定修复）
+maclean-core = { path = "../maclean-core", version = "0.2.2" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

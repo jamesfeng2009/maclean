@@ -47,6 +47,14 @@ pub enum Commands {
         /// 深度扫描（扫描所有 Tab）
         #[arg(long)]
         deep: bool,
+
+        /// 大文件阈值（MB），写入 config.json 并立即生效（默认 100）
+        #[arg(long)]
+        large_min_mb: Option<u64>,
+
+        /// 重复文件最小大小（KB），写入 config.json 并立即生效（默认 200）
+        #[arg(long)]
+        dup_min_kb: Option<u64>,
     },
 
     /// 清理安全可删除的项目
@@ -77,9 +85,25 @@ pub enum Commands {
         #[arg(long)]
         scheduled: bool,
 
+        /// 定时任务的登录补偿：未到期直接跳过（配合 --scheduled 使用）
+        ///
+        /// launchd 的 RunAtLoad / 任务计划的登录触发会在每次登录时调用一次；
+        /// 带上它，命令先检查 schedule_last_run + 间隔，未到期就安静退出，
+        /// 到期了才真正清理 —— 既补上错过的执行，又不会每次登录都清一遍。
+        #[arg(long)]
+        only_if_due: bool,
+
         /// 权限失败项自动提权删除（macOS 弹 Touch ID / 密码授权；非交互环境不可用）
         #[arg(long)]
         privileged: bool,
+
+        /// 大文件阈值（MB），写入 config.json 并立即生效（默认 100）
+        #[arg(long)]
+        large_min_mb: Option<u64>,
+
+        /// 重复文件最小大小（KB），写入 config.json 并立即生效（默认 200）
+        #[arg(long)]
+        dup_min_kb: Option<u64>,
     },
 
     /// 查看 / 注册 / 注销定时清理任务（C-3）
@@ -95,6 +119,21 @@ pub enum Commands {
         /// 设置间隔（天）：1 / 7 / 30，其它值会被夹到最近的档位
         #[arg(long)]
         days: Option<u32>,
+    },
+
+    /// System Data 聚合视图（缓存 / 日志 / 本地快照 / iOS 备份 / App 支持）
+    ///
+    /// 对应 Apple 储存空间里的 “System Data” 分类：它不是某一个目录，
+    /// 而是若干类数据的总和。这里给出可解释的拆分明细。
+    SystemData,
+
+    /// APFS 本地快照 / 模拟器运行时管理
+    ///
+    /// `clean --tab apfs` 只会跳过快照（快照不是文件，不能直接删除）。
+    /// 这个命令是 CLI 里唯一能真正删除快照的入口，删除时按需弹系统授权。
+    Apfs {
+        #[command(subcommand)]
+        action: ApfsAction,
     },
 
     /// 检查磁盘空间使用情况；--breakdown 输出分类占比
@@ -188,6 +227,20 @@ pub enum Commands {
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum ApfsAction {
+    /// 列出本地快照与模拟器运行时
+    List,
+    /// 删除指定快照/运行时（target 来自 `apfs list` 的 path）
+    Delete {
+        /// 快照名（com.apple.TimeMachine.<timestamp>.local）或运行时 UUID
+        target: String,
+        /// 确认删除（CLI 必须显式携带，避免误删）
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum StartupAction {
     /// 列出启动项（含已加载状态）
     List,
@@ -200,6 +253,16 @@ pub enum StartupAction {
     Enable {
         /// launchd Label
         label: String,
+    },
+    /// 列出 macOS 登录项（Login Items）
+    ///
+    /// LaunchAgents/Daemons 之外，系统设置里的"登录项"由
+    /// backgroundtaskmanagement 管理，只能通过 System Events 读取。
+    /// 禁用/删除需在系统设置中操作，这里提供一键跳转。
+    LoginItems {
+        /// 直接打开系统设置的登录项页面
+        #[arg(long)]
+        open: bool,
     },
 }
 
@@ -330,5 +393,47 @@ mod tests {
             Cli::try_parse_from(["maclean", "dup-ignore", "list"]).is_ok(),
             "dup-ignore 带子命令应可解析"
         );
+        assert!(
+            Cli::try_parse_from(["maclean", "apfs", "list"]).is_ok(),
+            "apfs list 应可解析"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "maclean",
+                "apfs",
+                "delete",
+                "com.apple.TimeMachine.2024-01-15-100000.local",
+                "--yes"
+            ])
+            .is_ok(),
+            "apfs delete 应可解析"
+        );
+    }
+
+    #[test]
+    fn clean_parses_scheduled_and_only_if_due() {
+        // 定时任务 plist 里写的就是这两个参数组合；解析失败会让定时清理
+        // 在启动时直接报参数错误，永远不执行。
+        let args = Cli::try_parse_from([
+            "maclean",
+            "clean",
+            "--safe-only",
+            "--scheduled",
+            "--only-if-due",
+        ])
+        .unwrap();
+        match args.command {
+            Some(Commands::Clean {
+                scheduled,
+                only_if_due,
+                safe_only,
+                ..
+            }) => {
+                assert!(scheduled);
+                assert!(only_if_due);
+                assert!(safe_only);
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
     }
 }

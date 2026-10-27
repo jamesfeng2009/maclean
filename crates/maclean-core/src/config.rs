@@ -86,6 +86,15 @@ pub struct AppConfig {
     /// 自己声明"这些目录/文件绝不参与重复清理"，CLI 用
     /// `maclean dup-ignore add/remove/list` 维护。
     pub dup_ignore_patterns: Vec<String>,
+    /// 大文件阈值（字节）：默认 100MB
+    ///
+    /// CLI 用 `scan --large-min-mb N` / `clean --large-min-mb N` 覆盖，
+    /// 也可直接改 config.json。
+    pub large_file_min_bytes: u64,
+    /// 重复文件最小大小（字节）：默认 200KB
+    ///
+    /// CLI 用 `--dup-min-kb N` 覆盖。
+    pub dup_file_min_bytes: u64,
 }
 
 impl Default for AppConfig {
@@ -107,6 +116,8 @@ impl Default for AppConfig {
             settings_auto_restore_point: true,
             dark_mode: false,
             dup_ignore_patterns: Vec::new(),
+            large_file_min_bytes: 100 * 1024 * 1024,
+            dup_file_min_bytes: 200 * 1024,
         }
     }
 }

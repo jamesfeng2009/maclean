@@ -235,8 +235,11 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
 
         let staging = rename_to_staging(path)?;
         let Some(staging_meta) = std::fs::symlink_metadata(&staging).ok() else {
-            let _ = std::fs::rename(&staging, path); // 尽力恢复原路径
-            return Err(DeleteFailure::Other);
+            // staging 不存在有两种可能：rename 时源对象已被并发删除（此时
+            // rename_to_staging 返回的就是原路径），或 staging 刚被其他进程清掉。
+            // 两种情况目标状态都已达成，不能判为失败（定时清理与手动清理
+            // 同时跑时曾因此误报 "失败 1 项、退出码 8"）。
+            return Ok(());
         };
         if (staging_meta.dev(), staging_meta.ino()) != identity {
             // 验证后原路径被替换成新对象：恢复原位并拒绝删除（fail-closed）
@@ -337,6 +340,11 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
 
     let deleted_str = deleted_path.to_string_lossy().to_string();
     let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
+    // 与 macOS 分支对称：源对象在存在性检查与 rename 之间被并发删除时，
+    // deleted_path 就是原路径且已不存在，目标状态已达成。
+    if gone(&deleted_path) {
+        return Ok(());
+    }
 
     let cmd_out = if deleted_path.is_dir() {
         std::process::Command::new("cmd")
@@ -3868,6 +3876,32 @@ mod tests {
         assert!(target.exists(), "恢复后原路径应存在");
         assert!(!staging.exists(), "staging 应清空");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn concurrent_delete_of_same_path_both_succeed() {
+        // 回归：定时清理与手动清理同时删同一个目录时，后到的一方 rename 会拿到
+        // ENOENT，旧实现返回 Err(Other)，导致"失败 1 项、退出码 8"的误报。
+        // 目标状态其实已经达成，两个调用都必须返回 Ok。
+        let base = std::env::temp_dir().join(format!("maclean_race_{}", std::process::id()));
+        for round in 0..40 {
+            let target = base.join(format!("round_{round}"));
+            std::fs::create_dir_all(&target).unwrap();
+            for i in 0..8 {
+                std::fs::write(target.join(format!("f{i}.txt")), b"x").unwrap();
+            }
+            let a = target.clone();
+            let b = target.clone();
+            let (ra, rb) = std::thread::scope(|s| {
+                let ha = s.spawn(move || best_effort_delete_with_reason(&a));
+                let hb = s.spawn(move || best_effort_delete_with_reason(&b));
+                (ha.join().unwrap(), hb.join().unwrap())
+            });
+            assert!(ra.is_ok(), "并发删除 A 失败: {ra:?}（round {round}）");
+            assert!(rb.is_ok(), "并发删除 B 失败: {rb:?}（round {round}）");
+            assert!(!target.exists(), "目标应已不存在（round {round}）");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
