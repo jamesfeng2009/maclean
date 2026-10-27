@@ -1,0 +1,198 @@
+name: Backfill release channel
+
+# 发布流水线某个渠道失败时的补发工具（不重建、不重签名、不移动 tag）。
+#
+# 为什么不能直接重跑失败的 run：
+#   1. GitHub 重跑用的是**该 run 创建时的** workflow 文件。v0.4.2 的 tag 上
+#      带着有 bug 的 R2 步骤，重跑只会再失败一次。
+#   2. tag 也不能移动 —— Homebrew formula 的 sha256 是对
+#      archive/refs/tags/v0.4.2.tar.gz 算的，tag 一改，源码 tarball 变，
+#      formula 立刻失效，所有 brew 用户装不上。
+#
+# 所以补发走 workflow_dispatch：跑 main 上的最新逻辑，产物直接从已发布的
+# GitHub Release 下载。幂等，可以反复跑。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要补发的版本号（不含 v 前缀）'
+        required: true
+        type: string
+      channels:
+        description: '补哪个渠道'
+        required: true
+        type: choice
+        options: [all, r2, site]
+        default: all
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  r2:
+    name: Upload to Cloudflare R2
+    if: inputs.channels == 'all' || inputs.channels == 'r2'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 从 GitHub Release 下载产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist
+          gh release download "v${VERSION}" \
+            --pattern "maclean-${VERSION}-universal.tar.gz" \
+            --pattern "maclean-${VERSION}-universal.zip" \
+            --pattern "SHA256SUMS.txt" \
+            --dir dist
+          ls -l dist
+
+      - name: 生成 latest.json
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          cd dist
+          TAR="maclean-${VERSION}-universal.tar.gz"
+          # SHA256SUMS.txt 第二列带 `dist/` 前缀，不能直接用 " ${TAR}$" grep
+          SHA=$(awk -v f="$TAR" 'index($2,f)==length($2)-length(f)+1 {print $1}' SHA256SUMS.txt)
+          if [ -z "$SHA" ]; then
+            echo "::error::SHA256SUMS.txt 里找不到 ${TAR}" >&2
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$TAR")
+          python3 - "$VERSION" "$SHA" "$SIZE" <<'PY'
+          import json, os, sys
+          version, sha, size = sys.argv[1:4]
+          latest = {
+              "version": version,
+              "platforms": {
+                  "macos": {
+                      "url": f"https://downloads.getmaclean.com/maclean-cli/v{version}/maclean-{version}-universal.tar.gz",
+                      "sha256": sha,
+                      "size": int(size),
+                      "published_at": os.popen("date -u +%Y-%m-%dT%H:%M:%SZ").read().strip(),
+                      "notes": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/v{version}",
+                  }
+              },
+          }
+          with open("latest.json", "w", encoding="utf-8") as f:
+              json.dump(latest, f, ensure_ascii=False, indent=2)
+          PY
+          cat latest.json
+
+      - name: 上传 R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+          export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+          export AWS_EC2_METADATA_DISABLED=true
+
+          for f in "maclean-${VERSION}-universal.tar.gz" "maclean-${VERSION}-universal.zip" "SHA256SUMS.txt"; do
+            case "$f" in
+              *.tar.gz) CT="application/gzip" ;;
+              *.zip)    CT="application/zip" ;;
+              *.txt)    CT="text/plain; charset=utf-8" ;;
+              *)        CT="application/octet-stream" ;;
+            esac
+            aws s3 cp "dist/$f" "s3://${R2_BUCKET}/maclean-cli/v${VERSION}/$f" \
+              --endpoint-url "$ENDPOINT" --region auto \
+              --content-type "$CT" \
+              --cache-control "public,max-age=31536000,immutable"
+          done
+
+          aws s3 cp dist/latest.json "s3://${R2_BUCKET}/maclean-cli/latest.json" \
+            --endpoint-url "$ENDPOINT" --region auto \
+            --content-type "application/json" \
+            --cache-control "no-cache"
+
+      - name: 回读复核
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          BODY=$(curl -fsS "https://downloads.getmaclean.com/maclean-cli/latest.json") || {
+            echo "::error::latest.json 回读失败（检查 R2 自定义域 / 公共访问）" >&2
+            exit 1
+          }
+          echo "$BODY"
+          echo "$BODY" | grep -q "\"version\": \"${VERSION}\"" || {
+            echo "::error::latest.json 里的版本不是 ${VERSION}" >&2
+            exit 1
+          }
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://downloads.getmaclean.com/maclean-cli/v${VERSION}/maclean-${VERSION}-universal.tar.gz")
+          echo "tar.gz HTTP ${CODE}"
+          [ "$CODE" = "200" ] || { echo "::error::产物 404" >&2; exit 1; }
+          echo "✅ R2 补发完成"
+
+  site:
+    name: Sync maclean-site
+    if: inputs.channels == 'all' || inputs.channels == 'site'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: 克隆官网仓库
+        env:
+          TOKEN: ${{ secrets.MACLEAN_HOMEBREW_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${TOKEN}@github.com/jamesfeng2009/maclean-site.git" /tmp/site
+
+      - name: 同步版本号与更新日志
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/sync-site-release.mjs /tmp/site "$VERSION"
+
+      - name: 提交并推送
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          cd /tmp/site
+          git config user.name "maclean-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/data/site.ts src/i18n/en.ts src/i18n/zh.ts
+          if git diff --cached --quiet; then
+            echo "官网已是 v${VERSION}，无需提交"
+            exit 0
+          fi
+          git commit -m "chore(site): 同步站点版本到 v${VERSION} 并更新更新日志"
+          git push origin HEAD:main
+
+      - name: 触发 Cloudflare 重新构建（可选）
+        env:
+          HOOK: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "未配置 CLOUDFLARE_DEPLOY_HOOK，依赖 Cloudflare Git 集成自动构建"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" -o /dev/null
+          echo "已触发 Deploy Hook"
+
+      - name: 回读线上版本
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          for _ in $(seq 1 24); do
+            if curl -s "https://www.getmaclean.com/download/" \
+                 | grep -q "\"softwareVersion\":\"${VERSION}\""; then
+              echo "✅ www.getmaclean.com 已显示 v${VERSION}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::官网 4 分钟内未更新到 v${VERSION}。若 Cloudflare 未开启 Git 集成，需在 maclean-site 手动 npm run deploy。"
