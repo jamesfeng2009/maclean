@@ -5,7 +5,7 @@
 //! 参数处理器内**不含任何文件系统删除实现**（删除在 core::ops）。
 //! 无子命令时返回帮助/错误信息（CLI 独立运行，不依赖任何 GUI 壳）。
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -88,7 +88,14 @@ fn progress_enabled(no_progress: bool) -> bool {
 
 /// 运行 CLI 命令，返回退出码（无子命令时返回 None 由 main 启动 GUI）
 pub fn run_cli() -> Option<u8> {
-    let cli = Cli::parse();
+    // 契约 crate 被独立使用（如测试）时没有上层二进制版本，退回自身版本
+    run_cli_with_version(env!("CARGO_PKG_VERSION"))
+}
+
+/// macOS 发行二进制用：`--version` 必须显示 CLI 自身版本，而不是契约 crate 版本
+pub fn run_cli_with_version(version: &'static str) -> Option<u8> {
+    let matches = Cli::command().version(version).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     match cli.command {
         None => None, // 无子命令，启动 GUI
@@ -153,15 +160,7 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
             deep,
             large_min_mb,
             dup_min_kb,
-        } => cmd_scan(
-            tab,
-            deep,
-            large_min_mb,
-            dup_min_kb,
-            format,
-            color,
-            prog,
-        ),
+        } => cmd_scan(tab, deep, large_min_mb, dup_min_kb, format, color, prog),
         Commands::Clean {
             tab,
             safe_only,
@@ -329,6 +328,8 @@ fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
     // 阈值来自 config.json（CLI --large-min-mb / --dup-min-kb 写入）
     let cfg = maclean_core::config::load_config();
     let large_min = cfg.large_file_min_bytes;
+    // dup-files 只有 macOS 扫描器；其它平台上该变量不会进闭包
+    #[allow(unused_variables)]
     let dup_min = cfg.dup_file_min_bytes;
     let scan = move || match tab_key_owned.as_str() {
         "dev-cache" => DevCacheScanner::new().scan().items,
@@ -662,10 +663,7 @@ fn item_delete_targets(item: &ScanItem) -> Vec<(String, u64)> {
     if item.batch_paths.is_empty() {
         vec![(item.path.clone(), item.size_bytes)]
     } else {
-        item.batch_paths
-            .iter()
-            .map(|p| (p.clone(), 0))
-            .collect()
+        item.batch_paths.iter().map(|p| (p.clone(), 0)).collect()
     }
 }
 
@@ -1214,11 +1212,10 @@ fn cmd_clean(
             rec.backup_id = id.clone();
             if format == OutputFormat::Human {
                 match id {
-                    Some(id) => println!(
-                        "\n  📋 已移入废纸篓，可用 `maclean restore {}` 还原",
-                        id
-                    ),
-                    None => println!("\n  ⚠️  删除已完成，但删除清单写入失败（无法用 restore 还原）"),
+                    Some(id) => println!("\n  📋 已移入废纸篓，可用 `maclean restore {}` 还原", id),
+                    None => {
+                        println!("\n  ⚠️  删除已完成，但删除清单写入失败（无法用 restore 还原）")
+                    }
                 }
             }
         }
@@ -1360,7 +1357,8 @@ fn cmd_system_data(format: OutputFormat) -> u8 {
     let logs = dir_size_bounded(&home.join("Library").join("Logs"))
         + dir_size_bounded(std::path::Path::new("/Library/Logs"));
     let ios_backup = dir_size_bounded(
-        &home.join("Library")
+        &home
+            .join("Library")
             .join("Application Support")
             .join("MobileSync")
             .join("Backup"),
@@ -1544,10 +1542,21 @@ fn cmd_apfs(action: ApfsAction, format: OutputFormat) -> u8 {
                 }
             });
 
-            let result = if category == "APFS快照" {
-                maclean_core::scanner::apfs::delete_snapshot(&target)
-            } else {
-                maclean_core::scanner::apfs::delete_simulator_runtime(&target)
+            let result: Result<(), String> = {
+                #[cfg(target_os = "macos")]
+                {
+                    if category == "APFS快照" {
+                        maclean_core::scanner::apfs::delete_snapshot(&target)
+                    } else {
+                        maclean_core::scanner::apfs::delete_simulator_runtime(&target)
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // 非 macOS 没有 APFS 快照 / 模拟器运行时，明确拒绝而不是静默成功
+                    let _ = category;
+                    Err("APFS 快照 / 模拟器运行时管理仅支持 macOS".to_string())
+                }
             };
 
             match result {
@@ -1702,14 +1711,14 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
     let mut results: Vec<(&str, Vec<ScanItem>, bool)> = Vec::new();
     std::thread::scope(|scope| {
         for chunk in keys.chunks(3) {
-            let handles: Vec<(&str, std::thread::ScopedJoinHandle<(Vec<ScanItem>, bool)>)> = chunk
+            let handles = chunk
                 .iter()
                 .filter(|k| tab_supported(k))
                 .map(|k| {
                     let key = *k;
                     (key, scope.spawn(move || scan_tab(key)))
                 })
-                .collect();
+                .collect::<Vec<_>>();
             for (key, handle) in handles {
                 let (items, timed_out) = handle.join().unwrap_or_default();
                 results.push((key, items, timed_out));
@@ -2063,7 +2072,10 @@ fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, format: OutputFo
         }
     );
     if cfg.schedule_enabled && !registered {
-        println!("  提示：执行 `maclean schedule --install --days {}` 重新注册", cfg.schedule_interval_days);
+        println!(
+            "  提示：执行 `maclean schedule --install --days {}` 重新注册",
+            cfg.schedule_interval_days
+        );
     }
     println!("  间隔：每 {} 天", cfg.schedule_interval_days);
     println!(
@@ -2524,12 +2536,8 @@ fn read_login_items() -> Result<Vec<String>, String> {
         .collect())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn read_login_items() -> Result<Vec<String>, String> {
-    Err("登录项管理仅支持 macOS".to_string())
-}
-
 /// 打开系统设置 → 通用 → 登录项与扩展
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn open_login_items_settings() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -2545,6 +2553,7 @@ fn open_login_items_settings() -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
     let backup_root = default_startup_backup_root();
     match action {
@@ -2963,6 +2972,7 @@ fn cmd_optimize(action: OptimizeAction, format: OutputFormat, color: bool) -> u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     // -----------------------------------------------------------------
     //  C-4 · 结构化输出（--json）

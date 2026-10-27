@@ -180,7 +180,8 @@ fn scan_containers() -> Vec<ScanItem> {
                     selected: false,
                     deletable: false,
                     undeletable_reason: if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        "需要“完全磁盘访问权限”：系统设置 > 隐私与安全性 > 完全磁盘访问权限".to_string()
+                        "需要“完全磁盘访问权限”：系统设置 > 隐私与安全性 > 完全磁盘访问权限"
+                            .to_string()
                     } else {
                         format!("无法读取目录: {}", e)
                     },
@@ -229,8 +230,9 @@ fn scan_containers() -> Vec<ScanItem> {
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
                 recommend: Recommend::Advanced,
-                description: "⚠️ 高风险：沙盒容器内的应用本地数据，删除后应用会丢失配置/缓存/登录状态"
-                    .to_string(),
+                description:
+                    "⚠️ 高风险：沙盒容器内的应用本地数据，删除后应用会丢失配置/缓存/登录状态"
+                        .to_string(),
             });
         }
     }

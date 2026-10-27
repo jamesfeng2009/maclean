@@ -379,7 +379,9 @@ mod tests {
         let items = parse_simulator_runtimes_json(raw);
         assert_eq!(items.len(), 1, "不可删除的 runtime 不应列出");
         assert_eq!(items[0].size_bytes, 1_234_567_890);
-        assert!(items[0].path.ends_with("0A1B2C3D-0000-1111-2222-333344445555"));
+        assert!(items[0]
+            .path
+            .ends_with("0A1B2C3D-0000-1111-2222-333344445555"));
         assert_eq!(items[0].category, "模拟器运行时");
     }
 

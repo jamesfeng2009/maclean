@@ -217,7 +217,7 @@ pub fn uninstall_command() -> (String, Vec<String>) {
     {
         (
             "launchctl".to_string(),
-            macos_bootout_args(&LAUNCHD_LABEL, &launchd_plist_path()),
+            macos_bootout_args(LAUNCHD_LABEL, &launchd_plist_path()),
         )
     }
     #[cfg(target_os = "windows")]
@@ -330,7 +330,11 @@ pub fn install(interval_days: u32) -> Result<(), String> {
 
     let uid = unsafe { libc::getuid() };
     let out = std::process::Command::new("launchctl")
-        .args(["bootstrap", &format!("gui/{}", uid), &path.to_string_lossy()])
+        .args([
+            "bootstrap",
+            &format!("gui/{}", uid),
+            &path.to_string_lossy(),
+        ])
         .output();
     match out {
         Ok(o) if o.status.success() => Ok(()),
@@ -343,8 +347,7 @@ pub fn install(interval_days: u32) -> Result<(), String> {
             {
                 Ok(fallback) if fallback.status.success() => Ok(()),
                 Ok(fallback) => {
-                    let fallback_err =
-                        String::from_utf8_lossy(&fallback.stderr).trim().to_string();
+                    let fallback_err = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
                     Err(if bootstrap_err.is_empty() {
                         fallback_err
                     } else {
@@ -453,7 +456,10 @@ mod tests {
         // 同样必须带 --scheduled，否则 schtasks 跑起来会被确认保护挡掉
         let tr = args.iter().position(|a| a == "/tr").unwrap();
         let cmd = &args[tr + 1];
-        assert!(cmd.contains("--scheduled"), "schtasks 命令缺少 --scheduled: {cmd}");
+        assert!(
+            cmd.contains("--scheduled"),
+            "schtasks 命令缺少 --scheduled: {cmd}"
+        );
         assert!(cmd.contains("--only-if-due"));
         assert!(cmd.contains("--safe-only"));
     }

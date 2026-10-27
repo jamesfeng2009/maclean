@@ -99,7 +99,7 @@ fn main() {
 
     // CLI 分发：所有子命令经 maclean-cli-contract crate 处理，返回语义退出码。
     // run_cli() 返回 Some(code) 表示已执行并应退出；None 表示未提供子命令。
-    if let Some(code) = maclean_cli_contract::run_cli() {
+    if let Some(code) = maclean_cli_contract::run_cli_with_version(env!("CARGO_PKG_VERSION")) {
         std::process::exit(code as i32);
     }
 

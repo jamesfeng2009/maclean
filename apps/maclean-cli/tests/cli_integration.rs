@@ -26,7 +26,14 @@ fn scheduled_clean_dry_run_runs_without_terminal() {
     // launchd/schtasks 都是非交互环境：带 --scheduled 时不得以退出码 4 退出，
     // 否则定时清理永远跑不起来、last_run 也永远不会落盘。
     // 用 custom-rules 缩小扫描范围：确认逻辑与 Tab 无关，全量 Tab 会让测试慢一分钟。
-    let out = run(&["clean", "--safe-only", "--scheduled", "--dry-run", "--tab", "custom-rules"]);
+    let out = run(&[
+        "clean",
+        "--safe-only",
+        "--scheduled",
+        "--dry-run",
+        "--tab",
+        "custom-rules",
+    ]);
     assert_eq!(
         code(&out),
         0,
@@ -73,7 +80,12 @@ fn apfs_delete_rejects_unsafe_snapshot_name() {
 #[test]
 fn apfs_list_returns_parseable_json() {
     let out = run(&["apfs", "list", "--format", "json"]);
-    assert_eq!(code(&out), 0, "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("输出必须是合法 JSON");
     assert_eq!(v["command"], "apfs");
     assert!(v["data"]["items"].is_array(), "items 必须是数组");
@@ -82,7 +94,12 @@ fn apfs_list_returns_parseable_json() {
 #[test]
 fn schedule_json_exposes_registered_flag() {
     let out = run(&["schedule", "--format", "json"]);
-    assert_eq!(code(&out), 0, "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("输出必须是合法 JSON");
     let data = &v["data"];
     assert_eq!(data["command"], "schedule");

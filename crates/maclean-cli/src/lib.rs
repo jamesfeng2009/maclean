@@ -21,7 +21,7 @@ pub mod args;
 pub mod handler;
 pub mod output;
 
-pub use handler::{format_timestamp, install_cancel_handler, run_cli};
+pub use handler::{format_timestamp, install_cancel_handler, run_cli, run_cli_with_version};
 pub use maclean_types::cli::{
     ColorMode, OutputFormat, EXIT_CANCELLED, EXIT_CONFIRM_REQUIRED, EXIT_FAILURE, EXIT_OK,
     EXIT_SERIALIZE, EXIT_WARNINGS,

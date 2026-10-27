@@ -37,10 +37,10 @@ for TARGET in $TARGETS; do
     echo "=========================================="
 
     if [ "$TARGET" = "$HOST_TARGET" ]; then
-        cargo build --release -p maclean
+        cargo build --release -p maclean-cli
         BIN="target/release/maclean"
     else
-        cargo build --release -p maclean --target "$TARGET"
+        cargo build --release -p maclean-cli --target "$TARGET"
         BIN="target/$TARGET/release/maclean"
     fi
 
