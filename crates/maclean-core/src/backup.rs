@@ -277,7 +277,9 @@ pub fn is_restorable_by_move(via_trash: bool, platform: &str) -> bool {
 pub fn trash_dir() -> String {
     #[cfg(target_os = "macos")]
     {
-        crate::platform::home_dir()
+        // 用系统真实家目录而不是 $HOME：NSFileManager 回收时认的是前者，
+        // 两边不一致会让 restore 找不到刚删进废纸篓的文件。
+        crate::platform::real_home_dir()
             .join(".Trash")
             .to_string_lossy()
             .to_string()
@@ -354,6 +356,12 @@ pub fn restore_plan(manifest: &BackupManifest, trash_dir: &str) -> RestoreReport
     report
 }
 
+/// 还原顺序：按路径深度升序（祖先目录先回原位，子项再搬进去）
+fn sort_restore_order(mut paths: Vec<String>) -> Vec<String> {
+    paths.sort_by_key(|p| Path::new(p).components().count());
+    paths
+}
+
 /// 执行还原（尽力而为）
 ///
 /// 只处理废纸篓里的项：目标父目录不存在就跳过（用户可能已经重装系统或
@@ -368,7 +376,11 @@ pub fn restore(id: &str, trash_dir: &str) -> RestoreReport {
         ..Default::default()
     };
 
-    for target in plan.restored {
+    // 同一份清单里可能既有目录、又有目录内的文件。先还原子项会因父目录尚在
+    // 废纸篓里而失败，所以按路径深度升序：祖先目录先回原位，子项再搬进去。
+    let pending = sort_restore_order(plan.restored);
+
+    for target in pending {
         let name = Path::new(&target)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -404,6 +416,15 @@ mod tests {
             category: "test".to_string(),
             restorable,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trash_dir_follows_system_home_not_env_home() {
+        // 删除走 NSFileManager（系统真实家目录），还原必须去同一个废纸篓；
+        // 若这里退回 $HOME，覆盖 HOME 运行时就会"删得进去、还原不出来"。
+        let expected = crate::platform::real_home_dir().join(".Trash");
+        assert_eq!(std::path::Path::new(&trash_dir()), expected);
     }
 
     #[test]
@@ -445,6 +466,17 @@ mod tests {
         assert!(load("../../etc/passwd").is_none());
         assert!(load("a/b").is_none());
         assert!(load("..").is_none());
+    }
+
+    #[test]
+    fn restore_puts_parent_dirs_before_children() {
+        // 清单里同时有目录和目录内文件时，子项先还原会因父目录还在废纸篓而失败
+        let order = sort_restore_order(vec![
+            "/h/big/a.bin".to_string(),
+            "/h/big".to_string(),
+            "/h/big/b.bin".to_string(),
+        ]);
+        assert_eq!(order[0], "/h/big");
     }
 
     #[test]

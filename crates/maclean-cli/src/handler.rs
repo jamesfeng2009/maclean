@@ -667,6 +667,31 @@ fn item_delete_targets(item: &ScanItem) -> Vec<(String, u64)> {
     }
 }
 
+/// 去掉"已被同批其它项包含"的祖先目录
+///
+/// 大文件视图会同时列出目录和目录里的文件（磁盘分析需要两个视角），
+/// 但清理时若两个都删：目录会被单独移进废纸篓、成功数虚高、体积重复计算，
+/// 还原时还可能先还原子文件、父目录却已在废纸篓里 → 子项全部失败。
+/// 这里保留更深的项（尊重用户勾选），父目录留空即可。
+fn drop_covered_items(items: Vec<&ScanItem>) -> Vec<&ScanItem> {
+    let targets: Vec<std::path::PathBuf> = items
+        .iter()
+        .flat_map(|i| item_delete_targets(i))
+        .map(|(p, _)| std::path::PathBuf::from(p))
+        .collect();
+    items
+        .into_iter()
+        .filter(|item| {
+            !item_delete_targets(item).iter().any(|(p, _)| {
+                let cur = std::path::Path::new(p);
+                targets
+                    .iter()
+                    .any(|other| other != cur && other.starts_with(cur))
+            })
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_clean(
     tab: Option<String>,
@@ -778,6 +803,8 @@ fn cmd_clean(
         } else {
             items.iter().filter(|i| i.deletable).collect()
         };
+        // 大文件视图同时给出目录与其内部文件：清理只能删一遍，保留更深的项
+        let to_clean = drop_covered_items(to_clean);
 
         if to_clean.is_empty() {
             if format == OutputFormat::Human {
@@ -2973,6 +3000,33 @@ fn cmd_optimize(action: OptimizeAction, format: OutputFormat, color: bool) -> u8
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn scan_item(path: &str, size: u64) -> ScanItem {
+        ScanItem {
+            batch_mtimes: vec![],
+            path: path.to_string(),
+            size_bytes: size,
+            category: "文件".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
+            recommend: Recommend::Advanced,
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn clean_drops_parent_dir_when_children_are_selected() {
+        // 大文件视图同时列出目录和目录内文件：清理只删子项，父目录留空，
+        // 避免成功数虚高、体积重复计算，以及还原时父目录后到导致子项失败。
+        let dir = scan_item("/tmp/big", 300);
+        let a = scan_item("/tmp/big/a.bin", 150);
+        let b = scan_item("/tmp/big/b.bin", 120);
+        let kept = drop_covered_items(vec![&dir, &a, &b]);
+        let paths: Vec<&str> = kept.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, vec!["/tmp/big/a.bin", "/tmp/big/b.bin"]);
+    }
 
     // -----------------------------------------------------------------
     //  C-4 · 结构化输出（--json）

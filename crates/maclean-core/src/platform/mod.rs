@@ -42,6 +42,17 @@ pub fn home_dir() -> PathBuf {
     }
 }
 
+/// 系统真实家目录（macOS）
+///
+/// 与 [`NSFileManager`] 决定废纸篓位置时用的家目录一致：忽略 `$HOME` 覆盖，
+/// 沙盒环境下返回容器家目录。删除走 NSFileManager、还原按 `$HOME` 找的时候，
+/// 一旦 `$HOME` 被覆盖就会出现"删得进去、还原不出来"，两边必须用同一个家目录。
+#[cfg(target_os = "macos")]
+pub fn real_home_dir() -> PathBuf {
+    use objc2_foundation::NSHomeDirectory;
+    PathBuf::from(NSHomeDirectory().to_string())
+}
+
 /// maclean 应用数据目录（日志、缓存等）
 ///
 /// macOS: ~/.maclean/

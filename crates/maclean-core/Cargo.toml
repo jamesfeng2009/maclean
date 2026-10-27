@@ -1,6 +1,6 @@
 [package]
 name = "maclean-core"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "maclean 核心逻辑：扫描 / 安全闸门 / 删除执行 / 调度（UI 无关）"
 license = "Apache-2.0"
