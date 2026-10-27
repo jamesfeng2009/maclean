@@ -376,6 +376,13 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${TOKEN}@github.com/jamesfeng2009/maclean-site.git" /tmp/site
 
+      - name: 校验对官网仓库的写权限
+        # clone 成功 ≠ 能推。--dry-run 不产生提交，但能把 PAT 缺 maclean-site
+        # 写权限这件事提前暴露，而不是改完文件才在最后一步失败。
+        run: |
+          cd /tmp/site
+          git push --dry-run origin HEAD:main
+
       - name: 同步版本号与更新日志
         env:
           VERSION: ${{ needs.build-sign-notarize.outputs.version }}
