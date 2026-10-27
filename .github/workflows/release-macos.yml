@@ -6,6 +6,7 @@ name: Release CLI (signed & notarized)
 #
 #   build-sign-notarize ──┬─> publish-crates    crates.io（4 个 crate 按依赖顺序）
 #   （universal 签名+公证）├─> publish-r2        Cloudflare R2（downloads.getmaclean.com）
+#                        ├─> sync-site         官网 maclean-site（版本号 + 更新日志）
 #                        └─> update-homebrew   jamesfeng2009/homebrew-maclean
 #
 # 无签名/公证凭据时直接失败 —— 禁止静默 ad-hoc 降级（Gatekeeper 会拦截）。
@@ -20,7 +21,8 @@ name: Release CLI (signed & notarized)
 #   MACLEAN_NOTARY_KEY_ID / MACLEAN_NOTARY_KEY_P8 / MACLEAN_NOTARY_ISSUER_ID
 #   R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
 #   CARGO_REGISTRY_TOKEN          （crates.io，需 publish-new + publish-update 权限）
-#   MACLEAN_HOMEBREW_TOKEN        （GitHub PAT，能推送 homebrew-maclean）
+#   MACLEAN_HOMEBREW_TOKEN        （GitHub PAT，需能推送 homebrew-maclean 与 maclean-site）
+# 可选：CLOUDFLARE_DEPLOY_HOOK（maclean-site 靠 Git 集成部署时可留空）
 
 on:
   workflow_dispatch:
@@ -343,6 +345,86 @@ jobs:
           else
             echo "::warning::latest.json 回读 HTTP ${CODE}（上传成功，检查 R2 自定义域/公共访问配置）"
           fi
+
+  # ---------------------------------------------------------------- 官网同步
+  # www.getmaclean.com 是独立仓库 jamesfeng2009/maclean-site（Astro + wrangler
+  # deploy 到 Cloudflare Workers），站内有两处会因为发版而漂移：
+  #   - src/data/site.ts 的 version/updated（渲染进 JSON-LD softwareVersion）
+  #   - src/i18n/{en,zh}.ts 的 changelog.entries（旧的"当前版本"要降级）
+  # 2026-10-27 之前全靠手工改三个文件再手动部署，漏一次就是页面版本号和
+  # Cargo.toml 对不上。
+  #
+  # 变更条目正文从 release-notes/<version>.json 读（en/zh 两个等长数组）。
+  # 没有该文件时写占位条目并打 warning —— 机器不编造营销文案。
+  sync-site:
+    name: Sync version to maclean-site
+    needs: build-sign-notarize
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: 克隆官网仓库
+        env:
+          # 同一个 PAT 同时用于 homebrew-maclean 和 maclean-site（repo 权限）
+          TOKEN: ${{ secrets.MACLEAN_HOMEBREW_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${TOKEN}@github.com/jamesfeng2009/maclean-site.git" /tmp/site
+
+      - name: 同步版本号与更新日志
+        env:
+          VERSION: ${{ needs.build-sign-notarize.outputs.version }}
+        run: node scripts/sync-site-release.mjs /tmp/site "$VERSION"
+
+      - name: 提交并推送
+        env:
+          VERSION: ${{ needs.build-sign-notarize.outputs.version }}
+        run: |
+          cd /tmp/site
+          git config user.name "maclean-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/data/site.ts src/i18n/en.ts src/i18n/zh.ts
+          if git diff --cached --quiet; then
+            echo "官网已是 v${VERSION}，无需提交"
+            exit 0
+          fi
+          git commit -m "chore(site): 同步站点版本到 v${VERSION} 并更新更新日志"
+          git push origin HEAD:main
+
+      # Cloudflare 若是 Git 集成部署，上一步 push 已自动构建；有 Deploy Hook
+      # 就再显式触发一次（幂等）。两者都没有时下面的回读会暴露问题。
+      - name: 触发 Cloudflare 重新构建（可选）
+        env:
+          HOOK: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "未配置 CLOUDFLARE_DEPLOY_HOOK，依赖 Cloudflare Git 集成自动构建"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" -o /dev/null
+          echo "已触发 Deploy Hook"
+
+      - name: 回读线上版本（复核部署已生效）
+        env:
+          VERSION: ${{ needs.build-sign-notarize.outputs.version }}
+        run: |
+          # 只告警不失败：产物与源码仓库都已就绪，站点没跟上属于 Cloudflare
+          # 侧部署配置问题，不该把一次成功的发布标记成红色。但必须吼出来，
+          # 否则就是这次要修的那个"页面版本停在旧版"的老毛病。
+          for _ in $(seq 1 24); do
+            if curl -s "https://www.getmaclean.com/download/" \
+                 | grep -q "\"softwareVersion\":\"${VERSION}\""; then
+              echo "✅ www.getmaclean.com 已显示 v${VERSION}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::官网 4 分钟内未更新到 v${VERSION}。若 Cloudflare 未开启 Git 集成，需在 maclean-site 手动执行 npm run deploy（或配置 CLOUDFLARE_DEPLOY_HOOK）。"
 
   # ---------------------------------------------------------------- homebrew
   # 用可复用工作流直接调用，不依赖 `release: published` 事件 ——

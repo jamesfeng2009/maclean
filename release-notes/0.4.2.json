@@ -1,0 +1,14 @@
+{
+  "en": [
+    "--tab is now a typed enum covering all 10 categories; invalid values exit with code 2 instead of silently scanning nothing",
+    "All workspace members share one version, so maclean --version, the Homebrew formula and the release tag finally agree",
+    "Windows target compiles again; CI verifies dependency versions stay aligned",
+    "Pro app 0.4.2 rebuilt on maclean-core 0.4.2, Developer ID signed and notarized"
+  ],
+  "zh": [
+    "--tab 收紧为枚举（10 个类别穷举），非法值以退出码 2 报错，不再静默扫 0 项",
+    "所有 workspace 成员统一版本号，maclean --version、Homebrew formula 与 release tag 从此一致",
+    "修复 Windows 目标编译；CI 校验依赖版本必须对齐",
+    "Pro 0.4.2 基于 maclean-core 0.4.2 重建，完成 Developer ID 签名与 Apple 公证"
+  ]
+}
