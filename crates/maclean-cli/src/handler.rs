@@ -10,7 +10,7 @@ use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::args::{ApfsAction, Cli, Commands, DupIgnoreAction, OptimizeAction, StartupAction};
-use maclean_types::cli::CliEnvelope;
+use maclean_types::cli::{CliEnvelope, ScanTab};
 
 #[cfg(target_os = "macos")]
 use maclean_core::scanner::apfs::ApfsScanner;
@@ -291,32 +291,45 @@ fn pro_unavailable(cmd: &'static str, format: OutputFormat) -> u8 {
 
 // =========================================================================
 //  Tab 名称映射
+//
+//  类别清单的唯一事实来源是 `maclean_types::cli::ScanTab`（2026-10-27
+//  从这里原有的 `ALL_TABS` 字符串表迁走 —— 那张表让 `--tab` 只能是
+//  `Option<String>`，拼错的值一路传到 `scan_tab` 的 `_ => Vec::new()`
+//  分支，表现为"扫过了但没东西"）。这里只保留「当前平台有没有扫描器」
+//  这层判断，因为它依赖 cfg，不属于契约层。
 // =========================================================================
-
-const ALL_TABS: &[(&str, &str)] = &[
-    ("dev-cache", "开发者缓存"),
-    ("large-files", "大文件"),
-    ("app-cache", "App缓存"),
-    ("app-data", "App数据"),
-    ("app-uninstall", "App卸载"),
-    ("optimize", "系统优化"),
-    ("apfs", "APFS快照"),
-    ("dup-files", "重复文件"),
-    ("custom-rules", "自定义规则"),
-];
 
 /// 该扫描类别在当前平台是否有对应扫描器
 ///
 /// `scan_tab` 里 "apfs" 只有 `#[cfg(target_os = "macos")]` 分支，其它平台
 /// 落到 `_ => Vec::new()`。`--deep` 和 `list` 若不过滤，Windows 上会打印一个
 /// 恒为 0 项的「APFS快照」—— 用户以为扫过了没东西，其实是这个平台没有。
-fn tab_supported(name: &str) -> bool {
-    match name {
-        "apfs" => cfg!(target_os = "macos"),
+///
+/// 穷举 match 而非 `_ => true`：新增类别时编译器会强制在这里表态。
+fn tab_supported(tab: ScanTab) -> bool {
+    match tab {
+        ScanTab::Apfs => cfg!(target_os = "macos"),
         // dup-files 只实现了 macOS 扫描器；custom-rules 全平台
-        "dup-files" => cfg!(target_os = "macos"),
-        _ => true,
+        ScanTab::DupFiles => cfg!(target_os = "macos"),
+        ScanTab::DevCache
+        | ScanTab::LargeFiles
+        | ScanTab::AppCache
+        | ScanTab::AppData
+        | ScanTab::AppUninstall
+        | ScanTab::Optimize
+        | ScanTab::CustomRules => true,
+        // 展开标记，不是具体类别 —— 它不该出现在候选列表里
+        ScanTab::All => false,
     }
+}
+
+/// key → 人类可读标签；未知 key 原样返回（回放旧缓存时可能遇到）
+fn tab_label_for(key: &str) -> &str {
+    ScanTab::ALL_PUBLIC
+        .iter()
+        .find(|t| t.key() == key)
+        .map(|t| t.label())
+        .unwrap_or(key)
 }
 
 fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
@@ -432,15 +445,15 @@ fn apply_scan_thresholds(large_min_mb: Option<u64>, dup_min_kb: Option<u64>) {
 }
 
 fn all_supported_tabs() -> Vec<(String, String)> {
-    ALL_TABS
+    ScanTab::ALL_PUBLIC
         .iter()
-        .filter(|(k, _)| tab_supported(k))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .filter(|t| tab_supported(**t))
+        .map(|t| (t.key().to_string(), t.label().to_string()))
         .collect()
 }
 
 fn cmd_scan(
-    tab: Option<String>,
+    tab: Option<ScanTab>,
     deep: bool,
     large_min_mb: Option<u64>,
     dup_min_kb: Option<u64>,
@@ -449,20 +462,16 @@ fn cmd_scan(
     prog: bool,
 ) -> u8 {
     apply_scan_thresholds(large_min_mb, dup_min_kb);
-    let tabs: Vec<(String, String)> = if deep || tab.as_deref() == Some("all") {
+    let tabs: Vec<(String, String)> = if deep || tab == Some(ScanTab::All) {
         // `--deep` 与 `--tab all` 等价：扫描所有当前平台支持的 Tab
         all_supported_tabs()
-    } else if let Some(t) = &tab {
-        vec![(
-            t.clone(),
-            ALL_TABS
-                .iter()
-                .find(|(k, _)| *k == t.as_str())
-                .map(|(_, v)| v.to_string())
-                .unwrap_or_else(|| t.clone()),
-        )]
+    } else if let Some(t) = tab {
+        vec![(t.key().to_string(), t.label().to_string())]
     } else {
-        vec![("dev-cache".to_string(), "开发者缓存".to_string())]
+        vec![(
+            ScanTab::DevCache.key().to_string(),
+            ScanTab::DevCache.label().to_string(),
+        )]
     };
 
     let mut total_size: u64 = 0;
@@ -694,7 +703,7 @@ fn drop_covered_items(items: Vec<&ScanItem>) -> Vec<&ScanItem> {
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_clean(
-    tab: Option<String>,
+    tab: Option<ScanTab>,
     safe_only: bool,
     dry_run: bool,
     scheduled: bool,
@@ -753,29 +762,25 @@ fn cmd_clean(
 
     // 定时清理不再只清开发缓存：无人值守时覆盖所有"安全默认项"的缓存类 Tab，
     // 但排除 app-uninstall（会把应用当清理项）与 apfs（快照需要授权）。
-    const SCHEDULED_SAFE_TABS: &[&str] = &[
-        "dev-cache",
-        "app-cache",
-        "app-data",
-        "optimize",
-        "custom-rules",
+    const SCHEDULED_SAFE_TABS: &[ScanTab] = &[
+        ScanTab::DevCache,
+        ScanTab::AppCache,
+        ScanTab::AppData,
+        ScanTab::Optimize,
+        ScanTab::CustomRules,
     ];
-    let tabs: Vec<String> = if tab.as_deref() == Some("all") {
-        ALL_TABS
-            .iter()
-            .filter(|(k, _)| tab_supported(k))
-            .map(|(k, _)| k.to_string())
-            .collect()
-    } else if let Some(t) = &tab {
-        vec![t.clone()]
+    let tabs: Vec<String> = if tab == Some(ScanTab::All) {
+        all_supported_tabs().into_iter().map(|(k, _)| k).collect()
+    } else if let Some(t) = tab {
+        vec![t.key().to_string()]
     } else if scheduled {
         SCHEDULED_SAFE_TABS
             .iter()
-            .filter(|k| tab_supported(k))
-            .map(|k| k.to_string())
+            .filter(|t| tab_supported(**t))
+            .map(|t| t.key().to_string())
             .collect()
     } else {
-        vec!["dev-cache".to_string()]
+        vec![ScanTab::DevCache.key().to_string()]
     };
 
     let mut out: Vec<JsonCleanTab> = Vec::new();
@@ -787,11 +792,7 @@ fn cmd_clean(
         if cancelled() {
             return EXIT_CANCELLED;
         }
-        let tab_label = ALL_TABS
-            .iter()
-            .find(|(k, _)| *k == tab_key.as_str())
-            .map(|(_, v)| *v)
-            .unwrap_or(tab_key);
+        let tab_label = tab_label_for(tab_key);
 
         let (items, _tab_timed_out) = scan_tab(tab_key);
 
@@ -1721,12 +1722,12 @@ fn cmd_check_disk(breakdown: bool, format: OutputFormat) -> u8 {
 fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
     // 扫描主要缓存类别（跳过 optimize 这类"操作型"Tab）
     let keys = [
-        "dev-cache",
-        "large-files",
-        "app-cache",
-        "app-data",
-        "custom-rules",
-        "dup-files",
+        ScanTab::DevCache,
+        ScanTab::LargeFiles,
+        ScanTab::AppCache,
+        ScanTab::AppData,
+        ScanTab::CustomRules,
+        ScanTab::DupFiles,
     ];
     let mut categories: Vec<(String, u64)> = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -1740,9 +1741,9 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
         for chunk in keys.chunks(3) {
             let handles = chunk
                 .iter()
-                .filter(|k| tab_supported(k))
-                .map(|k| {
-                    let key = *k;
+                .filter(|t| tab_supported(**t))
+                .map(|t| {
+                    let key = t.key();
                     (key, scope.spawn(move || scan_tab(key)))
                 })
                 .collect::<Vec<_>>();
@@ -1765,7 +1766,8 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
             }
         }
     }
-    categories.sort_by(|a, b| b.1.cmp(&a.1));
+    // 按占用降序；sort_by_key 同样稳定，同尺寸类别保持首次出现顺序
+    categories.sort_by_key(|a| std::cmp::Reverse(a.1));
     categories.retain(|(_, s)| *s > 0);
 
     let entries: Vec<JsonBreakdownEntry> = categories
@@ -1837,10 +1839,10 @@ struct JsonList<'a> {
 }
 
 fn cmd_list(format: OutputFormat) -> u8 {
-    let supported: Vec<(&str, &str)> = ALL_TABS
+    let supported: Vec<(&str, &str)> = ScanTab::ALL_PUBLIC
         .iter()
-        .filter(|(k, _)| tab_supported(k))
-        .map(|(k, v)| (*k, *v))
+        .filter(|t| tab_supported(**t))
+        .map(|t| (t.key(), t.label()))
         .collect();
 
     if format != OutputFormat::Human {

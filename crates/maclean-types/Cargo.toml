@@ -1,6 +1,6 @@
 [package]
 name = "maclean-types"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "maclean 公开契约层：领域模型 / CLI envelope / 错误码 / Feature 门控"
 license = "Apache-2.0"

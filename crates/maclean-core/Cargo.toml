@@ -1,6 +1,6 @@
 [package]
 name = "maclean-core"
-version = "0.2.3"
+version.workspace = true
 edition = "2021"
 description = "maclean 核心逻辑：扫描 / 安全闸门 / 删除执行 / 调度（UI 无关）"
 license = "Apache-2.0"
@@ -12,7 +12,10 @@ repository = "https://github.com/jamesfeng2009/maclean"
 [dependencies]
 # Open Core 公开契约层（2026-10-07）：domain 类型 / SafetyCheck / 退出码
 # 迁入 maclean-types，本 crate 通过 re-export 保持既有引用路径不变。
-maclean-types = { path = "../maclean-types", version = "0.2.0" }
+#
+# 走 [workspace.dependencies]：内部依赖必须同时带 version，否则
+# `cargo publish` 拒绝打包（path-only 依赖无法发布到 registry）。
+maclean-types.workspace = true
 walkdir = "2.5"
 rayon = "1.10"
 dirs = "5.0"

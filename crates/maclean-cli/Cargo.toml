@@ -1,6 +1,6 @@
 [package]
 name = "maclean-cli-contract"
-version = "0.2.2"
+version.workspace = true
 edition = "2021"
 description = "maclean CLI 契约层：命令解析 / envelope 渲染 / 语义退出码 / 人类可读输出（Open Core）"
 license = "Apache-2.0"
@@ -15,9 +15,9 @@ repository = "https://github.com/jamesfeng2009/maclean"
 # 本 crate；free 的 main 只做 thin adapter。
 
 [dependencies]
-maclean-types = { path = "../maclean-types", version = "0.2.0" }
+maclean-types.workspace = true
 # 0.2.3：还原顺序修复（祖先目录先回原位）、大文件视图祖先去重
-maclean-core = { path = "../maclean-core", version = "0.2.3" }
+maclean-core.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

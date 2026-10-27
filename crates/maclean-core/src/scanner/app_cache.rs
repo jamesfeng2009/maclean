@@ -1132,7 +1132,8 @@ pub fn cache_children(path: &PathBuf) -> Vec<CacheChild> {
             }
         }
     }
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    // 按大小降序（u64 是 Copy，Reverse 比 sort_by 闭包更直白）
+    entries.sort_by_key(|a| std::cmp::Reverse(a.1));
     entries.truncate(CACHE_CHILD_LIMIT);
 
     let mut out = Vec::with_capacity(entries.len());

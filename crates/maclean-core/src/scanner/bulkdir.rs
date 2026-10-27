@@ -286,9 +286,15 @@ use imp_bulk::list_dir_bulk;
 
 // =========================================================================
 //  测试：枚举口径必须与标准 read_dir+metadata（st_blocks）逐字节一致
+//
+//  `unix` 限定：用例用 `MetadataExt::blocks()` 与 `std::os::unix::fs::symlink`
+//  做参照实现，这些 API 在 Windows 上不存在。Windows 侧走的是 std 回退路径
+//  （`list_dir` 的非 macOS 实现），没有 st_blocks 语义可对照 —— 强行给个
+//  跨平台版本只会测到标准库，测不到被测逻辑（这是本项目明确禁止的写法）。
+//  2026-10-27 修复 windows-ci 的 `cargo check --all-targets` 红灯。
 // =========================================================================
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

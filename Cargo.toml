@@ -43,7 +43,18 @@ exclude = [
 default-members = ["apps/maclean-cli"]
 
 [workspace.package]
-version = "0.2.0"
+# 单一版本事实来源（2026-10-27 统一）：
+# 所有 workspace 成员写 `version.workspace = true`，此处 bump 一次即全量生效。
+#
+# 历史问题：本字段长期停在 0.2.0，而 apps/maclean-cli 随每次 release 单独
+# bump（0.3.x → 0.4.x），crates/ 下的库 crate 又分别停在 0.2.0/0.2.2/0.2.3。
+# 结果是 `maclean --version` 报的版本、homebrew formula 拉的 tag、issue 里
+# 用户贴的版本号三者对不上。
+#
+# 0.4.1 = 上一个已发行版本（git tag v0.4.1）。
+# 0.4.2 = 本次修复版本：--tab 收紧为枚举、workspace 版本号对齐、
+#         Windows 目标编译修复。patch 级，无功能新增。
+version = "0.4.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/jamesfeng2009/maclean"
@@ -57,6 +68,21 @@ walkdir = "2.5"
 rayon = "1.10"
 dirs = "5.0"
 libc = "0.2"
+
+# ---- 内部 crate（path + version 双写，缺一不可）----
+#
+# path：工作区内始终编译本地源码，不依赖 registry 上的旧版本。
+# version：`cargo publish` 的硬性要求 —— 内部依赖只有 path 没有 version 时，
+#   发布直接失败：
+#     error: all dependencies must have a version specified when publishing.
+#   0.4.2 之前这几个 crate 是手写在各自 [dependencies] 里的，彼此漂移；
+#   bump 版本时要改 4 个文件，漏一个就发不出去。
+#
+# 现在收敛到这里：bump 只需改 [workspace.package] 和本节（scripts/bump-version.sh
+# 一次改完，CI 里 version-consistency 会校验两处必须相等）。
+maclean-types = { path = "crates/maclean-types", version = "0.4.2" }
+maclean-core = { path = "crates/maclean-core", version = "0.4.2" }
+maclean-cli-contract = { path = "crates/maclean-cli", version = "0.4.2" }
 
 # 发布优化（workspace 模式下 [profile.release] 必须在根声明，子包声明会被忽略）
 [profile.release]

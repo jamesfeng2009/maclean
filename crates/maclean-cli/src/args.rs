@@ -7,7 +7,7 @@
 //! 实现留在私有 Pro 仓库。
 
 use clap::{Parser, Subcommand};
-use maclean_types::cli::{ColorMode, OutputFormat};
+use maclean_types::cli::{ColorMode, OutputFormat, ScanTab};
 
 /// maclean — macOS 磁盘清理工具
 #[derive(Parser, Debug)]
@@ -40,9 +40,9 @@ pub struct Cli {
 pub enum Commands {
     /// 扫描可清理项目
     Scan {
-        /// 指定扫描的 Tab（dev-cache, large-files, app-cache, app-data, app-uninstall, optimize, apfs, dup-files, custom-rules）
-        #[arg(long)]
-        tab: Option<String>,
+        /// 指定扫描的 Tab（不指定时只扫 dev-cache；用 all 扫全部）
+        #[arg(long, value_enum)]
+        tab: Option<ScanTab>,
 
         /// 深度扫描（扫描所有 Tab）
         #[arg(long)]
@@ -62,9 +62,9 @@ pub enum Commands {
     /// 默认只预览不删除；加 --yes 才实际执行。定时任务（--scheduled）
     /// 视为用户已确认（无人值守自动清理，行为不变）。
     Clean {
-        /// 指定清理的 Tab
-        #[arg(long)]
-        tab: Option<String>,
+        /// 指定清理的 Tab（不指定时只清 dev-cache；用 all 清全部）
+        #[arg(long, value_enum)]
+        tab: Option<ScanTab>,
 
         /// 仅清理推荐安全项（Safe）
         #[arg(long)]

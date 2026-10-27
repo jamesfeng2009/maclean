@@ -1,10 +1,17 @@
 [package]
 name = "maclean-platform"
-version = "0.2.0"
+version.workspace = true
 edition = "2021"
 description = "maclean 平台适配器契约：Trash / 路径安全 / 注册表 / 磁盘信息（Open Core）"
 license = "Apache-2.0"
 repository = "https://github.com/jamesfeng2009/maclean"
+
+# 不上 crates.io：本 crate 目前是平台能力契约的空壳（apfs/windows_apps 的实际
+# 实现仍在 maclean-core），workspace 内暂无任何 crate 依赖它，外部也不会有
+# 消费者。发布它只会多一个需要长期维护的公开 API 面。
+# 若将来要发布：删掉本行，并把它排进 release-macos.yml 的 publish-crates
+# 顺序里（types → platform → core → cli-contract → cli）。
+publish = false
 
 # 平台适配层（strategy §3.1 crates/maclean-platform）。
 # 2026-10-07 落地决策（记录于 tasks.md P5-2/P5-3）：

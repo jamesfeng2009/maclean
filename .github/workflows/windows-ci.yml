@@ -83,7 +83,13 @@ jobs:
         # 版本号从 Cargo.toml 取（唯一来源）。release job 直接上传这些文件。
         shell: bash
         run: |
-          VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
+          # 版本号单一来源：根 Cargo.toml [workspace.package] version
+          VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml \
+            | grep -m1 '^version = "' | cut -d'"' -f2)
+          if [ -z "$VERSION" ]; then
+            echo "错误：无法从 Cargo.toml 读取 workspace 版本号" >&2
+            exit 1
+          fi
           echo "版本: $VERSION"
           mkdir -p dist
           cp target/x86_64-pc-windows-msvc/release/maclean.exe dist/

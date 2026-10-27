@@ -19,10 +19,15 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-# 版本号单一来源：Cargo.toml
-VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
+# 版本号单一来源：根 Cargo.toml 的 [workspace.package] version
+#
+# 2026-10-27：各成员改为 `version.workspace = true` 后，原来的
+# `grep '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2` 会取到
+# 字面量 "version.workspace = true"（没有引号可切），产物名直接写坏。
+VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml \
+    | grep -m1 '^version = "' | cut -d'"' -f2)
 if [ -z "$VERSION" ]; then
-    echo "错误：无法从 apps/maclean-cli/Cargo.toml 读取版本号" >&2
+    echo "错误：无法从 Cargo.toml 的 [workspace.package] 读取版本号" >&2
     exit 1
 fi
 

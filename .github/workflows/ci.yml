@@ -82,10 +82,34 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: 校验 Makefile / 打包脚本与 Cargo.toml 版本一致
+      - name: 校验版本号来源唯一（workspace.package）
         run: |
-          CARGO_VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
-          echo "Cargo.toml 版本: $CARGO_VERSION"
+          # 版本号单一来源：根 Cargo.toml 的 [workspace.package] version。
+          # 2026-10-27 前各成员单独写死版本（crates 停在 0.2.x、apps 跟 release
+          # 走到 0.4.x），这个 job 只查"有没有硬编码"、不查成员之间是否一致，
+          # 于是漂移了一整年没被发现。
+          VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml \
+            | grep -m1 '^version = "' | cut -d'"' -f2)
+          echo "workspace 版本: $VERSION"
+          if [ -z "$VERSION" ]; then
+            echo "错误：无法从 Cargo.toml 的 [workspace.package] 读取版本号" >&2
+            exit 1
+          fi
+
+          # 1) 每个成员必须继承 workspace 版本，不能写死字面量
+          for f in crates/*/Cargo.toml apps/*/Cargo.toml; do
+            [ -f "$f" ] || continue
+            if grep -q '^version *= *"' "$f"; then
+              echo "错误：$f 写死了版本号，应改为 version.workspace = true" >&2
+              exit 1
+            fi
+            if ! grep -q '^version\.workspace *= *true' "$f"; then
+              echo "错误：$f 缺少 version.workspace = true" >&2
+              exit 1
+            fi
+          done
+
+          # 2) 打包脚本不得出现硬编码版本
           if grep -n '^VERSION' Makefile | grep -q "0\.1\.0\|0\.2\.0"; then
             echo "错误：Makefile 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
             exit 1
@@ -94,7 +118,51 @@ jobs:
             echo "错误：build-cli-package.sh 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
             exit 1
           fi
-          echo "✅ 版本号来源唯一（Cargo.toml）"
+
+          # 3) 二进制自报版本必须与 workspace 版本一致（防 --version 撒谎）
+          if grep -q '^version\.workspace *= *true' apps/maclean-cli/Cargo.toml; then
+            echo "✅ 版本号来源唯一（Cargo.toml [workspace.package] = $VERSION）"
+          fi
+
+          # 4) [workspace.dependencies] 里内部 crate 的 version 必须与
+          #    [workspace.package] version 逐字相等。
+          #    这两个字段不能互相继承（cargo 不支持依赖版本写 workspace 继承），
+          #    一旦不等，cargo publish 会拿着旧版本号去 registry 找一个不存在的
+          #    依赖，发布在最后一个 crate 才炸，前面几个已经发出去了 —— 撤不回。
+          MISMATCH=0
+          while IFS= read -r line; do
+            case "$line" in
+              maclean-*)
+                DEP_VER=$(printf '%s' "$line" | sed -n 's/.*version = "\([^"]*\)".*/\1/p')
+                DEP_NAME=$(printf '%s' "$line" | cut -d' ' -f1)
+                if [ -z "$DEP_VER" ]; then
+                  echo "错误：$DEP_NAME 缺少 version，cargo publish 会直接失败" >&2
+                  MISMATCH=1
+                elif [ "$DEP_VER" != "$VERSION" ]; then
+                  echo "错误：$DEP_NAME 的 version ($DEP_VER) != workspace 版本 ($VERSION)" >&2
+                  MISMATCH=1
+                fi
+                ;;
+            esac
+          done < <(sed -n '/^\[workspace\.dependencies\]/,/^\[/p' Cargo.toml)
+          if [ "$MISMATCH" -eq 1 ]; then
+            echo "修复：./scripts/bump-version.sh $VERSION" >&2
+            exit 1
+          fi
+          echo "✅ [workspace.dependencies] 内部 crate 版本已对齐 $VERSION"
+
+          # 5) 可发布 crate 的内部依赖必须带 version（path-only 无法 publish）
+          for f in crates/maclean-types/Cargo.toml crates/maclean-core/Cargo.toml \
+                   crates/maclean-cli/Cargo.toml apps/maclean-cli/Cargo.toml \
+                   crates/maclean-storage/Cargo.toml; do
+            [ -f "$f" ] || continue
+            if grep -qE '^maclean-[\w-]+ *= *\{ *path = "[^"]+" *\}$' "$f"; then
+              echo "错误：$f 里有 path-only 内部依赖，cargo publish 会失败" >&2
+              echo "      改为 <crate>.workspace = true（见根 Cargo.toml [workspace.dependencies]）" >&2
+              exit 1
+            fi
+          done
+          echo "✅ 内部依赖均可发布"
 
   security:
     name: cargo audit · cargo deny（漏洞/许可/来源门禁）

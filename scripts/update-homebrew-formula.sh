@@ -13,7 +13,13 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
+# 版本号单一来源：根 Cargo.toml 的 [workspace.package] version
+VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml \
+    | grep -m1 '^version = "' | cut -d'"' -f2)
+if [ -z "$VERSION" ]; then
+    echo "错误：无法从 Cargo.toml 的 [workspace.package] 读取版本号" >&2
+    exit 1
+fi
 REPO="${MACLEAN_GITHUB_REPO:-jamesfeng2009/maclean}"
 FORMULA="homebrew/maclean.rb"
 URL="https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz"

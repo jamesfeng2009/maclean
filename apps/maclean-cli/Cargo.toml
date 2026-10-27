@@ -1,6 +1,8 @@
 [package]
 name = "maclean-cli"
-version = "0.4.1"
+# 版本号来自根 `[workspace.package] version`（2026-10-27 前是本文件里单独
+# 硬编码的 0.4.1，与 crates/ 下的 0.2.x 长期不一致）
+version.workspace = true
 edition = "2021"
 description = "maclean CLI — 永久免费开源的 macOS 磁盘清理与存储智能命令行工具"
 license = "Apache-2.0"
@@ -25,8 +27,8 @@ rust-version = "1.77"
 # ============================================================
 
 [dependencies]
-maclean-cli-contract = { path = "../../crates/maclean-cli", version = "0.2.2" }
-maclean-core = { path = "../../crates/maclean-core", version = "0.2.3" }
+maclean-cli-contract.workspace = true
+maclean-core.workspace = true
 # 匿名首跑上报（统计 brew 安装代理口径；MACLEAN_NO_TELEMETRY=1 可关）
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
