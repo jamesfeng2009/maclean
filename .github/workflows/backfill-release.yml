@@ -41,6 +41,8 @@ jobs:
       - name: 从 GitHub Release 下载产物
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 该 job 没有 checkout，gh 无法通过 git 推断仓库，必须显式指定
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
         run: |
           mkdir -p dist
