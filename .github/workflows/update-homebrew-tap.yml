@@ -1,7 +1,19 @@
 name: Update Homebrew Tap
 
-# 发布 Release（或手动触发）后，自动把 jamesfeng2009/homebrew-maclean 的
-# Formula/maclean.rb 更新到最新版本：version + 源码 tarball sha256 一次回填。
+# 把 jamesfeng2009/homebrew-maclean 的 Formula/maclean.rb 更新到指定版本：
+# version + 源码 tarball sha256 一次回填。
+#
+# 三个触发入口：
+#   1. workflow_call —— release-macos.yml 在 tag 发布时直接调用（主路径）
+#   2. release: published —— 手动在网页上发 Release 时兜底
+#   3. workflow_dispatch —— 本地/补救手动触发
+#
+# 为什么不让它只靠 `release: published`：
+# GitHub 的防递归规则 —— 用 GITHUB_TOKEN 创建 Release 所产生的 published
+# 事件**不会**触发新的 workflow 运行（workflow_dispatch / repository_dispatch
+# 例外）。release-macos.yml 正是用 GITHUB_TOKEN 建 Release，所以 0.3.3~0.4.1
+# 期间这个 workflow 从未被触发过，formula 全靠手工回填。改成 workflow_call
+# 直接调用后，链路不再依赖事件传播。
 #
 # 依赖 secrets.MACLEAN_HOMEBREW_TOKEN（GitHub PAT，repo 权限，能推送
 # homebrew-maclean 仓库）。未配置时本 workflow 明确失败 —— 不做静默降级。
@@ -10,6 +22,17 @@ name: Update Homebrew Tap
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "要回填的版本号（不含 v 前缀；留空则读 Cargo.toml）"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: "要回填的版本号（不含 v 前缀）"
+        required: true
+        type: string
   release:
     types: [published]
 
@@ -26,12 +49,30 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: 读取当前版本
+      - name: 读取目标版本
         id: version
         run: |
-          VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
+          # 优先级：workflow_call 入参 > 触发它的 Release tag > 当前 Cargo.toml。
+          #
+          # 关键：由 Release 事件触发时必须用 *该 Release 的 tag*，不能用
+          # Cargo.toml —— 补发一个旧版本 Release（如重发 v0.4.1）时，Cargo.toml
+          # 已经走到 0.4.2 了，用它会算出错误的 tarball URL 和 sha256。
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ] && [ -n "${{ github.event.release.tag_name }}" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          fi
+          if [ -z "$VERSION" ]; then
+            # 兜底：版本号单一来源 根 Cargo.toml [workspace.package] version
+            VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml \
+              | grep -m1 '^version = "' | cut -d'"' -f2)
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "错误：无法确定要回填的版本号" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "当前版本: v$VERSION"
+          echo "目标版本: v$VERSION"
 
       - name: 下载源码 tarball 并计算 sha256
         id: sha

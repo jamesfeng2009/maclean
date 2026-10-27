@@ -1,12 +1,26 @@
 name: Release CLI (signed & notarized)
 
-# maclean CLI 发布流水线（2026-10-13 商业化边界调整）：
-# 构建 universal binary（arm64 + x86_64）→ 签名（Developer ID + hardened
-# runtime）→ zip 公证（notarize + staple）→ tar.gz + SHA256 产物。
-# 无签名/公证凭据时直接失败 —— 禁止静默 ad-hoc 降级（Gatekeeper 会拦截）。
+# maclean CLI 发布流水线（2026-10-13 商业化边界调整；2026-10-27 全链路自动化）
 #
-# 说明：GUI App（DMG）的打包/公证在私有 maclean-pro 仓库的独立流水线，
-# 不在这里。
+# 一个 tag 从构建到各分发渠道，全自动，不再需要手工下载 artifact 再发 Release：
+#
+#   build-sign-notarize ──┬─> publish-crates    crates.io（4 个 crate 按依赖顺序）
+#   （universal 签名+公证）├─> publish-r2        Cloudflare R2（downloads.getmaclean.com）
+#                        └─> update-homebrew   jamesfeng2009/homebrew-maclean
+#
+# 无签名/公证凭据时直接失败 —— 禁止静默 ad-hoc 降级（Gatekeeper 会拦截）。
+# 同理，R2 / crates.io / homebrew 凭据缺失也在第一步就失败：宁可一次都不发，
+# 也不要出现"GitHub Release 有了、crates.io 没有"这种半发布状态。
+#
+# 说明：GUI App（DMG）的打包/公证/R2 上传在私有 maclean-pro 仓库的
+# release-app.yml，不由本文件负责。
+#
+# 必需 secrets：
+#   MACLEAN_CERT_P12_B64 / MACLEAN_CERT_PASSWORD / MACLEAN_SIGN_IDENTITY
+#   MACLEAN_NOTARY_KEY_ID / MACLEAN_NOTARY_KEY_P8 / MACLEAN_NOTARY_ISSUER_ID
+#   R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
+#   CARGO_REGISTRY_TOKEN          （crates.io，需 publish-new + publish-update 权限）
+#   MACLEAN_HOMEBREW_TOKEN        （GitHub PAT，能推送 homebrew-maclean）
 
 on:
   workflow_dispatch:
@@ -23,6 +37,10 @@ jobs:
   build-sign-notarize:
     name: Build · sign · notarize · package
     runs-on: macos-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
 
@@ -41,17 +59,20 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-
 
-      # 凭据校验：任一缺失即失败（不再 ad-hoc 降级）
-      - name: 校验签名/公证凭据
+      # 凭据校验：任一缺失即失败（不再 ad-hoc 降级，也不做"跳过某渠道"的静默降级）
+      - name: 校验发布凭据
         run: |
-          required=(MACLEAN_CERT_P12_B64 MACLEAN_CERT_PASSWORD MACLEAN_SIGN_IDENTITY MACLEAN_NOTARY_KEY_ID MACLEAN_NOTARY_KEY_P8 MACLEAN_NOTARY_ISSUER_ID)
+          required=(MACLEAN_CERT_P12_B64 MACLEAN_CERT_PASSWORD MACLEAN_SIGN_IDENTITY \
+                    MACLEAN_NOTARY_KEY_ID MACLEAN_NOTARY_KEY_P8 MACLEAN_NOTARY_ISSUER_ID \
+                    R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY \
+                    CARGO_REGISTRY_TOKEN MACLEAN_HOMEBREW_TOKEN)
           missing=0
           for v in "${required[@]}"; do
             val="${!v:-}"
             if [ -z "$val" ]; then echo "缺少 $v"; missing=1; fi
           done
           if [ "$missing" -eq 1 ]; then
-            echo "::error::发布构建必须配置签名/公证 secrets（Developer ID + notary API key）。禁止无凭据 ad-hoc 降级。" >&2
+            echo "::error::发布必须配置签名/公证/R2/crates.io/homebrew 全部 secrets。禁止无凭据降级发布。" >&2
             exit 1
           fi
         env:
@@ -61,11 +82,35 @@ jobs:
           MACLEAN_NOTARY_KEY_ID: ${{ secrets.MACLEAN_NOTARY_KEY_ID }}
           MACLEAN_NOTARY_KEY_P8: ${{ secrets.MACLEAN_NOTARY_KEY_P8 }}
           MACLEAN_NOTARY_ISSUER_ID: ${{ secrets.MACLEAN_NOTARY_ISSUER_ID }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          MACLEAN_HOMEBREW_TOKEN: ${{ secrets.MACLEAN_HOMEBREW_TOKEN }}
 
       - name: 读取版本号（单一来源 Cargo.toml）
+        id: version
         run: |
-          VERSION=$(grep -m1 '^version' apps/maclean-cli/Cargo.toml | cut -d'"' -f2)
+          # 版本号单一来源：根 Cargo.toml [workspace.package] version
+          VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml \
+            | grep -m1 '^version = "' | cut -d'"' -f2)
+          if [ -z "$VERSION" ]; then
+            echo "错误：无法从 Cargo.toml 读取 workspace 版本号" >&2
+            exit 1
+          fi
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        # 防止 "改了代码忘了 bump" + "打了旧 tag" 组合出 v0.4.1 内容是 0.4.2
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$TAG_VERSION" != "$VERSION" ]; then
+            echo "::error::tag v${TAG_VERSION} 与 Cargo.toml 版本 ${VERSION} 不一致" >&2
+            exit 1
+          fi
 
       - name: Build universal binary
         run: |
@@ -148,3 +193,164 @@ jobs:
             dist/maclean-*-universal.tar.gz
             dist/maclean-*-universal.zip
             dist/SHA256SUMS.txt
+
+      # 自动化第 3 步：不再需要人工从 Actions artifacts 拉文件再 gh release create。
+      - name: 创建/更新 GitHub Release 并附加 macOS 产物
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在（Windows 流水线可能先建），追加 macOS 产物"
+          else
+            # windows-ci.yml 的 windows-release job 也在同一 tag 上建 Release，
+            # 两边并发创建会撞 422 already_exists。这里允许失败：撞上就说明
+            # 对方已经建好了，紧接着的 upload 仍然能成功。
+            gh release create "$TAG" --title "$TAG" --generate-notes || true
+            gh release view "$TAG" >/dev/null
+          fi
+          gh release upload "$TAG" \
+            "dist/maclean-${VERSION}-universal.tar.gz" \
+            "dist/maclean-${VERSION}-universal.zip" \
+            dist/SHA256SUMS.txt --clobber
+
+  # ---------------------------------------------------------------- crates.io
+  # 按依赖顺序发布。cargo 会自动等待上游版本进入 index 后再打包下游，
+  # 所以不需要手工 sleep。
+  publish-crates:
+    name: Publish to crates.io
+    needs: build-sign-notarize
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (pinned 1.90.0)
+        uses: dtolnay/rust-toolchain@1.90.0
+
+      - name: 发布（幂等：已存在的版本跳过）
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.build-sign-notarize.outputs.version }}
+        run: |
+          # 顺序即依赖顺序，不能调整：
+          #   maclean-types → maclean-core → maclean-cli-contract → maclean-cli
+          # maclean-storage / maclean-platform 标了 publish = false，不在此列。
+          CRATES=(maclean-types maclean-core maclean-cli-contract maclean-cli)
+          UA="maclean-release-ci (https://github.com/${GITHUB_REPOSITORY})"
+
+          for c in "${CRATES[@]}"; do
+            # 重跑保护：crates.io 的版本一旦发布就不能覆盖，重复 publish 会 400。
+            # 先查存在性，已发布就跳过 —— 让整个 job 可重入。
+            if curl -fsS -o /dev/null -H "User-Agent: ${UA}" \
+                 "https://crates.io/api/v1/crates/${c}/${VERSION}"; then
+              echo "跳过 ${c} ${VERSION}（已发布）"
+              continue
+            fi
+            echo "发布 ${c} ${VERSION}"
+            cargo publish -p "$c"
+          done
+
+  # ---------------------------------------------------------------------- R2
+  publish-r2:
+    name: Upload to Cloudflare R2
+    needs: build-sign-notarize
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: maclean-cli-release-${{ needs.build-sign-notarize.outputs.version }}
+          path: dist
+
+      - name: 生成 latest.json（与 maclean-pro 同 schema，便于站点统一读取）
+        env:
+          VERSION: ${{ needs.build-sign-notarize.outputs.version }}
+        run: |
+          cd dist
+          TAR="maclean-${VERSION}-universal.tar.gz"
+          SHA=$(grep " ${TAR}$" SHA256SUMS.txt | awk '{print $1}')
+          if [ -z "$SHA" ]; then
+            echo "::error::SHA256SUMS.txt 里找不到 ${TAR}" >&2
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$TAR")
+          python3 - "$VERSION" "$SHA" "$SIZE" <<'PY'
+          import json, os, sys
+          version, sha, size = sys.argv[1:4]
+          latest = {
+              "version": version,
+              "platforms": {
+                  "macos": {
+                      "url": f"https://downloads.getmaclean.com/maclean-cli/v{version}/maclean-{version}-universal.tar.gz",
+                      "sha256": sha,
+                      "size": int(size),
+                      "published_at": os.popen("date -u +%Y-%m-%dT%H:%M:%SZ").read().strip(),
+                      "notes": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/v{version}",
+                  }
+              },
+          }
+          with open("latest.json", "w", encoding="utf-8") as f:
+              json.dump(latest, f, ensure_ascii=False, indent=2)
+          PY
+          cat latest.json
+
+      - name: 上传 R2（downloads.getmaclean.com/maclean-cli/）
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          VERSION: ${{ needs.build-sign-notarize.outputs.version }}
+        run: |
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+          export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+          export AWS_EC2_METADATA_DISABLED=true
+
+          # 版本化路径：不可变，长缓存（客户端按完整版本号引用）
+          for f in "maclean-${VERSION}-universal.tar.gz" "maclean-${VERSION}-universal.zip" "SHA256SUMS.txt"; do
+            case "$f" in
+              *.tar.gz) CT="application/gzip" ;;
+              *.zip)    CT="application/zip" ;;
+              *.txt)    CT="text/plain; charset=utf-8" ;;
+              *)        CT="application/octet-stream" ;;
+            esac
+            aws s3 cp "dist/$f" "s3://${R2_BUCKET}/maclean-cli/v${VERSION}/$f" \
+              --endpoint-url "$ENDPOINT" --region auto \
+              --content-type "$CT" \
+              --cache-control "public,max-age=31536000,immutable"
+          done
+
+          # 指针文件：路径固定，必须 no-cache，否则站点/CDN 会读到旧版本号
+          aws s3 cp dist/latest.json "s3://${R2_BUCKET}/maclean-cli/latest.json" \
+            --endpoint-url "$ENDPOINT" --region auto \
+            --content-type "application/json" \
+            --cache-control "no-cache"
+
+          echo "已上传 v${VERSION} 到 R2"
+
+          # 回读校验：自定义域没绑到该 bucket 时这里会暴露。只告警不失败 ——
+          # 上传本身已成功，公网可见性属于 Cloudflare 侧配置问题，不该把
+          # 一次成功的发布标记为失败。
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://downloads.getmaclean.com/maclean-cli/latest.json" || echo 000)
+          if [ "$CODE" = "200" ]; then
+            echo "✅ downloads.getmaclean.com/maclean-cli/latest.json 可访问"
+          else
+            echo "::warning::latest.json 回读 HTTP ${CODE}（上传成功，检查 R2 自定义域/公共访问配置）"
+          fi
+
+  # ---------------------------------------------------------------- homebrew
+  # 用可复用工作流直接调用，不依赖 `release: published` 事件 ——
+  # GITHUB_TOKEN 创建 Release 产生的 published 事件不会触发新 workflow 运行
+  # （GitHub 防递归规则），这正是 0.3.3~0.4.1 期间 formula 一直靠手工回填的根因。
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: build-sign-notarize
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/update-homebrew-tap.yml
+    with:
+      version: ${{ needs.build-sign-notarize.outputs.version }}
+    secrets: inherit
