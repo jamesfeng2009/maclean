@@ -270,7 +270,9 @@ jobs:
         run: |
           cd dist
           TAR="maclean-${VERSION}-universal.tar.gz"
-          SHA=$(grep " ${TAR}$" SHA256SUMS.txt | awk '{print $1}')
+          # SHA256SUMS.txt 由 `shasum dist/xxx` 生成，第二列带 `dist/` 前缀，
+          # 用 " ${TAR}$" 直接 grep 永远匹配不到（0.4.2 首次自动发布即因此失败）。
+          SHA=$(awk -v f="$TAR" 'index($2,f)==length($2)-length(f)+1 {print $1}' SHA256SUMS.txt)
           if [ -z "$SHA" ]; then
             echo "::error::SHA256SUMS.txt 里找不到 ${TAR}" >&2
             exit 1
