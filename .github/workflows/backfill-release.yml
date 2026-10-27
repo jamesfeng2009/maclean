@@ -44,7 +44,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           mkdir -p dist
-          gh release download "v${VERSION}" \
+          # 本 job 没有 actions/checkout，gh 无法从 .git 推断仓库，必须显式 -R
+          gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
             --pattern "maclean-${VERSION}-universal.tar.gz" \
             --pattern "maclean-${VERSION}-universal.zip" \
             --pattern "SHA256SUMS.txt" \
