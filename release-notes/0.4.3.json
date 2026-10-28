@@ -1,0 +1,14 @@
+{
+  "en": [
+    "Trial expiry is now a hard gate: scanning, analysis, cleanup, optimization, uninstall and login-item changes are all locked until a license is activated",
+    "Any locked action opens an activation guide that jumps straight to the license page instead of failing silently",
+    "Overview keeps showing disk usage, but every actionable feature now requires an activated license",
+    "CLI ships as 0.4.3 for version alignment; no command-line behaviour changes"
+  ],
+  "zh": [
+    "试用到期改为硬门禁：扫描、分析、清理、优化、卸载、登录项改动全部锁定，必须激活 License Key",
+    "点到被锁定的功能会弹出激活引导，一键跳到授权页，不再静默失败",
+    "概览页仍显示磁盘占用，但所有可执行功能都需要激活后才能使用",
+    "CLI 同步至 0.4.3，仅为版本对齐，命令行行为无变更"
+  ]
+}

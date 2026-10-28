@@ -54,7 +54,7 @@ default-members = ["apps/maclean-cli"]
 # 0.4.1 = 上一个已发行版本（git tag v0.4.1）。
 # 0.4.2 = 本次修复版本：--tab 收紧为枚举、workspace 版本号对齐、
 #         Windows 目标编译修复。patch 级，无功能新增。
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/jamesfeng2009/maclean"
@@ -80,9 +80,9 @@ libc = "0.2"
 #
 # 现在收敛到这里：bump 只需改 [workspace.package] 和本节（scripts/bump-version.sh
 # 一次改完，CI 里 version-consistency 会校验两处必须相等）。
-maclean-types = { path = "crates/maclean-types", version = "0.4.2" }
-maclean-core = { path = "crates/maclean-core", version = "0.4.2" }
-maclean-cli-contract = { path = "crates/maclean-cli", version = "0.4.2" }
+maclean-types = { path = "crates/maclean-types", version = "0.4.3" }
+maclean-core = { path = "crates/maclean-core", version = "0.4.3" }
+maclean-cli-contract = { path = "crates/maclean-cli", version = "0.4.3" }
 
 # 发布优化（workspace 模式下 [profile.release] 必须在根声明，子包声明会被忽略）
 [profile.release]
