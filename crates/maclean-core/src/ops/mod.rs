@@ -613,7 +613,9 @@ pub fn resolve_simulator_uuids(path: &str) -> Result<Vec<String>, String> {
 /// 1. 进程检测：Xcode/Simulator/CoreSimulatorService 运行时拒绝删除
 /// 2. 挂载点检测：正在挂载使用的运行时跳过，只删 UNUSED 的
 /// 3. 使用 `xcrun simctl runtime delete <uuid>` 安全删除
-/// 4. 如果 xcrun 失败，返回 Err 让调用方 fallback 到 sudo rm -rf（仅 UNUSED 项）
+/// 4. 若 xcrun 不可用 / 解析失败，调用方（sudo 预处理阶段）按 A-13 的 fail-closed
+///    策略 **skip_rm 并上报**，绝不 fallback 到 sudo rm -rf 整卷（整卷删除会绕过
+///    下方的进程/挂载检测，且不可恢复）。
 #[cfg(target_os = "macos")]
 pub fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<String, String> {
     // 1. 进程检测：模拟器运行中时拒绝删除
@@ -852,6 +854,26 @@ fn claim_entry_trash_name(trash_dir: &str, path: &str, use_trash: bool) -> Strin
 /// （单路径分支 [1373+] 用 `else if use_trash / else` 结构天然等价，无需调用本函数。）
 pub(crate) fn classify_bulk_failure(use_trash: bool) -> bool {
     !use_trash
+}
+
+/// A-13 安全不变式（可测纯函数）：模拟器卷项是否应**跳过** `sudo rm -rf` 整目录兜底。
+///
+/// 返回 `true`（跳过）当且仅当：
+/// - 解析失败（`Err`：xcrun 不可用 / JSON 损坏 / 空路径）——完全不知道目录内容，
+///   fail-closed 锁定，绝不 sudo rm -rf；或
+/// - 解析成功但过滤后无 deletable runtime（孤儿残留 / 结构异常）——X+ 严格版同样
+///   不 sudo rm -rf 整卷（宁可少删，不让不可恢复的误删发生）。
+///
+/// 返回 `false`（继续）：成功且拿到非空 deletable uuid 列表，走 `xcrun simctl runtime
+/// delete` 按 uuid 精确删（不 rm 整卷）。
+///
+/// 抽成函数是为了让回归测试钉死「模拟器卷永不走 sudo rm -rf 整目录」这条不变式，
+/// 防止回退成 A-13 数据丢失 bug（Err/Ok空 → remaining_items → sudo rm -rf 整卷）。
+pub(crate) fn sim_volume_requires_skip_rm(
+    resolved: &Result<Vec<String>, String>,
+    filtered: &[String],
+) -> bool {
+    resolved.is_err() || filtered.is_empty()
 }
 
 /// D-04：把残留清理计数转成给用户看的摘要（ResidualCleaned 的生产消费端）。
@@ -1803,17 +1825,35 @@ pub fn start_sudo_delete(
         let mut remaining_items: Vec<(String, String)> = Vec::new();
         for (path, category) in &failed_items {
             if category == "模拟器镜像" || category == "模拟器Cryptex" {
-                // 用 sudo xcrun simctl runtime delete 删除本项归属的运行时
-                // P1：只删归属于本项、且系统标记 deletable 的 runtime。
-                // 旧脚本在 root 下遍历"所有" runtime 逐个删除，勾选一项会连锅端。
-                let sim_uuids: Vec<String> = resolve_simulator_uuids(path)
+                // A-13（X+）：先解析归属 runtime 列表。任何解析失败/无目标都 fail-closed
+                // 锁定，绝不 sudo rm -rf 整卷（绕过 deletable/挂载/进程三道闸门 = 不可恢复误删）。
+                let resolved = resolve_simulator_uuids(path);
+                let sim_uuids: Vec<String> = resolved
+                    .clone()
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|u| u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
                     .collect();
-                if sim_uuids.is_empty() {
-                    // 没有可删目标：保留该项，交给后续 sudo rm 清理残留目录
-                    remaining_items.push((path.clone(), category.clone()));
+                if sim_volume_requires_skip_rm(&resolved, &sim_uuids) {
+                    // A-13：解析失败或无 deletable runtime —— 仅上报，绝不 sudo rm -rf 整卷。
+                    let reason = match &resolved {
+                        Err(e) => format!("模拟器镜像解析失败（{e}），已跳过 sudo rm 以防误删"),
+                        Ok(_) => "该模拟器卷下未解析到可删运行时，已跳过 sudo rm".to_string(),
+                    };
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!(
+                            "⚠️ {} — {}",
+                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                            reason
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
+                    crate::logger::warn(&format!(
+                        "[删除] 模拟器镜像跳过 sudo rm: {} — {}",
+                        path, reason
+                    ));
                     continue;
                 }
                 let uuid_list = sim_uuids
@@ -1845,8 +1885,19 @@ exit 0
                 // 改用不可预测文件名 + O_EXCL + 0600；脚本交给 /bin/bash 执行，不需要 +x。
                 let Some(xcrun_script) = write_private_temp_file("maclean_xcrun", "sh", &script)
                 else {
-                    crate::logger::error("无法安全创建临时脚本，跳过 xcrun 删除");
-                    remaining_items.push((path.clone(), category.clone()));
+                    // A-13（X+）：无法安全准备 xcrun 脚本，同样 fail-closed 跳过，
+                    // 不 sudo rm -rf 整卷。
+                    crate::logger::warn("无法安全创建临时脚本，跳过 xcrun 删除（不 sudo rm 整卷）");
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!(
+                            "⚠️ {} — {}",
+                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                            "无法安全创建临时脚本，已跳过 sudo rm"
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
                     continue;
                 };
 
@@ -1920,8 +1971,22 @@ exit 0
                 let _ = std::fs::remove_file(&xcrun_script);
 
                 if !xcrun_success {
-                    // xcrun 删除后仍有残留，用 sudo rm -rf 清理
-                    remaining_items.push((path.clone(), category.clone()));
+                    // A-13（X+）：xcrun 精确删失败（运行时在跑/挂载中/权限），
+                    // fail-closed 锁定，不 sudo rm -rf 整卷，仅上报交由用户手动处理。
+                    crate::logger::warn(&format!(
+                        "[删除] 模拟器镜像 xcrun 删除未成功，跳过 sudo rm: {}",
+                        path
+                    ));
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!(
+                            "⚠️ {} — {}",
+                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                            "模拟器镜像 xcrun 删除未成功，已跳过 sudo rm"
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
                 }
             } else {
                 remaining_items.push((path.clone(), category.clone()));
@@ -2285,17 +2350,35 @@ pub fn start_sudo_delete_touchid(
                     crate::i18n::tf_lang(lang_en, "log_touchid_prepare_xcrun", &[category])
                 )));
 
-                // P1（对齐密码分支 1993+）：只删归属于本勾选项、且系统标记
-                // deletable 的 runtime。旧脚本在 root 下遍历"全部" runtime 逐个
-                // 删除 —— 勾一个 Cryptex 会连锅端掉全机模拟器运行时。
-                let sim_uuids: Vec<String> = resolve_simulator_uuids(path)
+                // A-13（X+）：先解析归属 runtime 列表。任何解析失败/无目标都 fail-closed
+                // 锁定，绝不 sudo rm -rf 整卷（绕过 deletable/挂载/进程三道闸门 = 不可恢复误删）。
+                let resolved = resolve_simulator_uuids(path);
+                let sim_uuids: Vec<String> = resolved
+                    .clone()
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|u| u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
                     .collect();
-                if sim_uuids.is_empty() {
-                    // 没有可删目标：保留该项，交给后续 sudo rm 清理残留目录
-                    remaining_items.push((path.clone(), category.clone()));
+                if sim_volume_requires_skip_rm(&resolved, &sim_uuids) {
+                    // A-13：解析失败或无 deletable runtime —— 仅上报，绝不 sudo rm -rf 整卷。
+                    let reason = match &resolved {
+                        Err(e) => format!("模拟器镜像解析失败（{e}），已跳过 sudo rm 以防误删"),
+                        Ok(_) => "该模拟器卷下未解析到可删运行时，已跳过 sudo rm".to_string(),
+                    };
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!(
+                            "⚠️ {} — {}",
+                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                            reason
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
+                    crate::logger::warn(&format!(
+                        "[删除] 模拟器镜像跳过 sudo rm: {} — {}",
+                        path, reason
+                    ));
                     continue;
                 }
                 let uuid_list = sim_uuids
@@ -2327,8 +2410,19 @@ exit 0
                 // 改用不可预测文件名 + O_EXCL + 0600；脚本交给 /bin/bash 执行，不需要 +x。
                 let Some(xcrun_script) = write_private_temp_file("maclean_xcrun", "sh", &script)
                 else {
-                    crate::logger::error("无法安全创建临时脚本，跳过 xcrun 删除");
-                    remaining_items.push((path.clone(), category.clone()));
+                    // A-13（X+）：无法安全准备 xcrun 脚本，同样 fail-closed 跳过，
+                    // 不 sudo rm -rf 整卷。
+                    crate::logger::warn("无法安全创建临时脚本，跳过 xcrun 删除（不 sudo rm 整卷）");
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!(
+                            "⚠️ {} — {}",
+                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                            "无法安全创建临时脚本，已跳过 sudo rm"
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
                     continue;
                 };
 
@@ -2344,13 +2438,28 @@ exit 0
 
                 // P0-2：随机名 + O_EXCL + 0600，避免日志被符号链接劫持
                 let (xcrun_log, xcrun_log_file) =
-                    match create_private_temp_file("maclean_xcrun_tid", "log") {
-                        Some(v) => v,
-                        None => {
-                            remaining_items.push((path.clone(), category.clone()));
-                            continue;
-                        }
-                    };
+                        match create_private_temp_file("maclean_xcrun_tid", "log") {
+                            Some(v) => v,
+                            None => {
+                                // A-13（X+）：无法安全创建 xcrun 日志文件，fail-closed 跳过，
+                                // 不 sudo rm -rf 整卷。
+                                crate::logger::warn(&format!(
+                                    "[删除] 模拟器镜像无法创建日志文件，跳过 sudo rm: {}",
+                                    path
+                                ));
+                                let _ = tx.send(DeleteMessage::Log(
+                                    format!(
+                                        "⚠️ {} — {}",
+                                        crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                                        "无法创建 xcrun 日志文件，已跳过 sudo rm"
+                                    ),
+                                    path.clone(),
+                                    category.clone(),
+                                    false,
+                                ));
+                                continue;
+                            }
+                        };
                 let xcrun_log_file = Some(xcrun_log_file);
 
                 // 不用 -S，sudo 会自动弹出 Touch ID；stdout 重定向到文件避免 pipe 死锁
@@ -2455,7 +2564,21 @@ exit 0
                 let _ = std::fs::remove_file(&xcrun_log);
 
                 if !xcrun_success {
-                    remaining_items.push((path.clone(), category.clone()));
+                    // A-13（X+）：xcrun 精确删失败，fail-closed 锁定，不 sudo rm -rf 整卷。
+                    crate::logger::warn(&format!(
+                        "[删除] 模拟器镜像 xcrun 删除未成功，跳过 sudo rm: {}",
+                        path
+                    ));
+                    let _ = tx.send(DeleteMessage::Log(
+                        format!(
+                            "⚠️ {} — {}",
+                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                            "模拟器镜像 xcrun 删除未成功，已跳过 sudo rm"
+                        ),
+                        path.clone(),
+                        category.clone(),
+                        false,
+                    ));
                 }
             } else {
                 remaining_items.push((path.clone(), category.clone()));
@@ -3881,6 +4004,40 @@ mod tests {
         assert!(
             classify_bulk_failure(false),
             "use_trash=false 的失败项应进 sudo 列表"
+        );
+    }
+
+    // ---------- A-13: 模拟器卷永不 sudo rm 整目录（fail-closed 回归） ----------
+
+    #[test]
+    fn sim_volume_skip_when_resolve_fails() {
+        // A-13 核心：解析失败（xcrun 不可用 / JSON 损坏 / 空路径）绝不能
+        // sudo rm -rf 整卷。回退成 `false` 会让本测试变红。
+        let resolved: Result<Vec<String>, String> = Err("xcrun 不可用".to_string());
+        assert!(
+            sim_volume_requires_skip_rm(&resolved, &[]),
+            "解析失败必须 skip_rm（A-13 数据丢失回归）"
+        );
+    }
+
+    #[test]
+    fn sim_volume_skip_when_no_deletable_runtime() {
+        // X+ 严格版：解析成功但无 deletable runtime（孤儿残留/结构异常），
+        // 也不 sudo rm -rf 整卷。回退成 `false` 会让本测试变红。
+        let resolved: Result<Vec<String>, String> = Ok(vec![]);
+        assert!(
+            sim_volume_requires_skip_rm(&resolved, &[]),
+            "无 deletable runtime 必须 skip_rm"
+        );
+    }
+
+    #[test]
+    fn sim_volume_proceed_when_uuid_present() {
+        // 对照：拿到非空 deletable uuid 列表 → 走 xcrun 按 uuid 精确删，不 skip。
+        let resolved: Result<Vec<String>, String> = Ok(vec!["A-B-C".to_string()]);
+        assert!(
+            !sim_volume_requires_skip_rm(&resolved, &["A-B-C".to_string()]),
+            "有 deletable uuid 应走 xcrun 精确删（不 skip）"
         );
     }
 
