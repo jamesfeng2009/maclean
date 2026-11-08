@@ -839,6 +839,21 @@ fn claim_entry_trash_name(trash_dir: &str, path: &str, use_trash: bool) -> Strin
     crate::backup::claim_trash_name(trash_dir, path)
 }
 
+/// A-02 安全不变式（可测纯函数）：批量删除模式中，某一项删除失败后，
+/// 是否应进入 `sudo rm -rf` 兜底列表（`NeedPassword`）。
+///
+/// - `use_trash = true`：失败意味着废纸篓删除失败，文件应**保留**，
+///   绝不能降级为 `sudo` 永久删除——`sudo rm -rf` 会让本可恢复的废纸篓项
+///   彻底不可恢复（真实数据丢失）。→ 返回 `false`。
+/// - `use_trash = false`：失败意味着真实永久删除失败，需要密码兜底重试 → 返回 `true`。
+///
+/// 抽成函数是为了让回归测试能直接钉死这个决策，防止有人把
+/// 「use_trash 失败也进 sudo 列表」这个 P0 数据丢失 bug 改回来。
+/// （单路径分支 [1373+] 用 `else if use_trash / else` 结构天然等价，无需调用本函数。）
+pub(crate) fn classify_bulk_failure(use_trash: bool) -> bool {
+    !use_trash
+}
+
 /// D-04：把残留清理计数转成给用户看的摘要（ResidualCleaned 的生产消费端）。
 pub fn residual_cleaned_summary(reg: usize, env: usize, files: usize) -> String {
     format!(
@@ -1145,8 +1160,9 @@ pub fn start_delete(
                                     // A-02（修复）：use_trash=true 的批量项废纸篓失败时，
                                     // 保留文件、不进 sudo rm -rf 列表 —— sudo 阶段 rm -rf
                                     // 会让本可恢复的废纸篓项彻底不可恢复。与单路径分支
-                                    // （1496-1500）口径一致。
-                                    if !use_trash {
+                                    // （1405-1440）口径一致。决策抽成 classify_bulk_failure
+                                    // 以便回归测试钉死，防止回退成数据丢失 bug。
+                                    if classify_bulk_failure(use_trash) {
                                         failed_items.lock().unwrap_or_else(|e| e.into_inner())
                                             .push((bp.clone(), category.clone()));
                                     }
@@ -3843,6 +3859,29 @@ mod tests {
             }
         }
         assert!(got_partial, "其它 Tab 应发送增量消息");
+    }
+
+    // ---------- A-02: 批量项失败分类（防数据丢失回归） ----------
+
+    #[test]
+    fn classify_bulk_failure_trash_mode_must_not_enter_sudo_list() {
+        // A-02 核心反向验证：use_trash=true 时，批量项废纸篓删除失败
+        // 必须保留文件、绝不进 sudo rm -rf 兜底列表——否则本可恢复的
+        // 废纸篓项会被永久删除（真实数据丢失）。把本函数改回 `true`
+        // 会让这条测试变红，从而钉死 P0 修复不被回退。
+        assert!(
+            !classify_bulk_failure(true),
+            "use_trash=true 的失败项绝不能进 sudo rm -rf 列表（A-02 数据丢失回归）"
+        );
+    }
+
+    #[test]
+    fn classify_bulk_failure_non_trash_mode_enters_sudo_list() {
+        // 对照：非 trash 模式真实删除失败，确实需要密码兜底重试。
+        assert!(
+            classify_bulk_failure(false),
+            "use_trash=false 的失败项应进 sudo 列表"
+        );
     }
 
     // ---------- P1: 删除失败归因 ----------
