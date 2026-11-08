@@ -9,11 +9,53 @@
 
 use std::path::{Path, PathBuf};
 
+use maclean_types::domain::{CleanupAction, CleanupCandidate, StorageEntity};
+use maclean_types::safety::SafetyGate;
+
 /// 安全检查结果 —— Open Core 拆分后迁移至公开契约层
 /// `maclean-types::safety`（2026-10-07，tasks.md P3-1/P4-3）。
 ///
 /// 这里只做 re-export：既有 `crate::safety::SafetyCheck` 引用路径不变。
 pub use maclean_types::safety::SafetyCheck;
+
+/// 契约层 `SafetyGate` 的生产实现（D-10）。
+///
+/// 之前 `types/safety.rs` 里只有定义与单测，删除链全走自由函数，trait 形同
+/// 虚设。现在把它接到唯一闸门上：所有破坏性出口调 [`gate_allows`]，而
+/// `gate_allows` 必须经由本实现，契约层的「validate 非 Safe 不得删除」才真正成立。
+pub struct DefaultSafetyGate;
+
+impl SafetyGate for DefaultSafetyGate {
+    fn validate(&self, candidate: &CleanupCandidate) -> SafetyCheck {
+        check_path_safety_with_category(&candidate.entity.path, &candidate.entity.category)
+    }
+}
+
+/// 删除出口的**唯一**放行判定（A-07a）。
+///
+/// 不要在各出口自己 `match SafetyCheck`：历史上有出口只判 `Danger` 就把
+/// `Warning` 放行了，同一路径在不同删除链得到相反结论。统一走这里，
+/// `is_safe()` 只认 `Safe`，`Warning` 与 `Danger` 一律拒绝。
+///
+/// `Warning` 的「需要额外确认」语义此前零生产消费者，本实现按最保守口径
+/// 收敛为「不放行」；若将来要接确认流，必须同时改这里与所有出口。
+pub fn gate_decision(path: &str, category: &str) -> SafetyCheck {
+    let candidate = CleanupCandidate {
+        entity: StorageEntity {
+            path: path.to_string(),
+            category: category.to_string(),
+            ..Default::default()
+        },
+        safety: SafetyCheck::Safe,
+        reclaimable_bytes: 0,
+        action: CleanupAction::Delete,
+    };
+    DefaultSafetyGate.validate(&candidate)
+}
+
+pub fn gate_allows(path: &str, category: &str) -> bool {
+    gate_decision(path, category).is_safe()
+}
 
 // 2026-09-18 删除了 `check_path_safety`（无 category 的兼容版本）：全仓零调用点，
 // 留着只会让人以为"不传 category 也行"。所有入口必须显式传分类。
@@ -132,6 +174,30 @@ fn check_home_paths(
     homes: &[PathBuf],
 ) -> Option<SafetyCheck> {
     check_home_paths_for_platform(canonical, canonical_str, homes, cfg!(target_os = "windows"))
+}
+
+/// 路径比较的宽松键（A-09）。
+///
+/// macOS APFS 默认大小写不敏感，且非 ASCII 常以 NFD（分解）存储，而
+/// `$HOME` / 用户输入的路径可能是 NFC（合成）。直接用 `Path` 的字节比较时
+/// `~/library/mail` 与 `~/Library/Mail` 会指向同一目录却不命中黑名单。
+///
+/// 这里做两件事：先 NFC 归一化（把 `e\u{301}` 合成 `é`），再转小写。
+/// 早期版本是「丢弃组合标记」，那只会让 NFD 变成 `e`、NFC 仍是 `é`，
+/// 两者依然不相等 —— 保护并没有真正生效。
+fn loose_component_key(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfc().flat_map(char::to_lowercase).collect()
+}
+
+fn loose_components(p: &Path) -> Vec<String> {
+    p.components()
+        .map(|c| loose_component_key(&c.as_os_str().to_string_lossy()))
+        .collect()
+}
+
+fn loose_starts_with(path: &[String], prefix: &[String]) -> bool {
+    path.len() >= prefix.len() && path[..prefix.len()] == prefix[..]
 }
 
 /// macOS 侧 home 黑名单：精确匹配（只禁目录自身，子项可删）
@@ -269,17 +335,24 @@ fn check_home_paths_for_platform(
     homes: &[PathBuf],
     windows: bool,
 ) -> Option<SafetyCheck> {
+    // 组件级、大小写与 Unicode 规范化无关的比较（A-09）。
+    // 注意不能直接用 `Path::starts_with`：它按原始字节比，APFS 上
+    // `~/library/mail` 与 `~/Library/Mail` 是同一目录却匹配不上。
+    let candidate = loose_components(canonical);
+
     // 用户主目录本身禁止删除
-    if homes.iter().any(|h| canonical == *h) {
+    if homes.iter().any(|h| candidate == loose_components(h)) {
         return Some(SafetyCheck::Danger("拒绝删除用户主目录".to_string()));
     }
 
     // 凭据点目录内的精确可再生缓存子目录（如 ~/.kube/cache）放行：
     // 只对白名单目录本身生效，其兄弟项（.kube/config 等）与其更深层路径仍走下面的保护。
     for home in homes {
-        if let Ok(rel) = canonical.strip_prefix(home) {
-            let rel = rel.to_string_lossy();
-            if RECLAIMABLE_INSIDE_PROTECTED_HOME.contains(&rel.as_ref()) {
+        let home_comps = loose_components(home);
+        if loose_starts_with(&candidate, &home_comps) {
+            let rel_comps = &candidate[home_comps.len()..];
+            let rel = rel_comps.join("/");
+            if RECLAIMABLE_INSIDE_PROTECTED_HOME.contains(&rel.as_str()) {
                 return None;
             }
         }
@@ -290,8 +363,7 @@ fn check_home_paths_for_platform(
     // 4a. 精确匹配：只保护目录本身，允许删除其子项
     for home in homes {
         for forbidden_suffix in forbidden_exact {
-            let forbidden_path = home.join(forbidden_suffix);
-            if canonical == forbidden_path {
+            if candidate == loose_components(&home.join(forbidden_suffix)) {
                 return Some(SafetyCheck::Danger(format!(
                     "拒绝删除用户关键目录: {}",
                     canonical_str
@@ -300,15 +372,11 @@ fn check_home_paths_for_platform(
         }
     }
 
-    // 4b. 前缀匹配：保护目录本身及其所有子内容
-    //
-    // 改用 `Path::starts_with`（按路径组件比较）。原实现拼字符串
-    // `starts_with(format!("{}/", forbidden_path))` 硬编码了 `/`，
-    // Windows 的 `\` 路径永远匹配不上 —— 这一层在那边一直是虚设。
+    // 4b. 前缀匹配：保护目录本身及其所有子内容（组件级，跨平台）
     for home in homes {
         for forbidden_suffix in forbidden_prefix {
-            let forbidden_path = home.join(forbidden_suffix);
-            if canonical == forbidden_path || canonical.starts_with(&forbidden_path) {
+            let forbidden = loose_components(&home.join(forbidden_suffix));
+            if loose_starts_with(&candidate, &forbidden) {
                 return Some(SafetyCheck::Danger(format!(
                     "拒绝删除用户关键目录: {}",
                     canonical_str
@@ -422,23 +490,32 @@ pub(crate) fn duplicate_candidate_allowed(path: &Path) -> bool {
 /// 本函数把"重复文件"的扫描与删除都钉死在缓存目录家族 —— 缓存目录外
 /// 一律拒绝，宁可少省空间也不误删（用户明确接受的保守原则）。
 pub(crate) fn is_repeat_cache_dir(path: &Path) -> bool {
-    let p = path.to_string_lossy();
+    // A-03：一律用组件级 `Path::starts_with`。旧实现是裸字符串前缀，
+    // `~/Library/CachesEvil`、`/Library/CachesX` 都会被当成缓存目录。
     for h in protected_homes() {
-        let h = h.to_string_lossy();
-        if p.starts_with(&format!("{}/Library/Caches", h))
-            || p.starts_with(&format!("{}/.cache", h))
-        {
+        if path.starts_with(h.join("Library/Caches")) || path.starts_with(h.join(".cache")) {
             return true;
         }
     }
-    if p.starts_with("/Library/Caches") {
+    if path.starts_with(Path::new("/Library/Caches")) {
         return true;
     }
+
     // 沙盒容器缓存：~/Library/Containers/<bundle-id>/Data/Library/Caches
-    if p.contains("/Library/Containers/") && p.contains("/Data/Library/Caches") {
-        return true;
-    }
-    false
+    // 旧实现用两段独立 `contains`，任何路径只要凑齐这两段（顺序不限）就放行。
+    // 这里按组件顺序窗口匹配，且要求中间确实隔着一个 bundle 组件。
+    let comps: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    comps.windows(6).any(|w| {
+        w[0] == "Library"
+            && w[1] == "Containers"
+            && !w[2].is_empty()
+            && w[3] == "Data"
+            && w[4] == "Library"
+            && w[5] == "Caches"
+    })
 }
 
 /// 缓存目录内也拒绝删除的"用户数据/不可再生"扩展名（仅重复文件类目）。
@@ -637,6 +714,33 @@ fn is_app_support_data_root(path: &Path) -> bool {
     app_support_data_root_with_homes(path, &protected_homes())
 }
 
+/// 伪路径标记的格式白名单（A-10）。
+///
+/// 只接受「已知前缀 + 由安全字符组成的标识」，绝不允许 `/`、`\`、`..`，
+/// 也不允许把绝对路径藏在 ` | ` 之后。APFS 快照卷名允许空格。
+fn is_well_formed_pseudo_path(path: &str) -> bool {
+    fn safe_label(s: &str) -> bool {
+        !s.is_empty()
+            && !s.contains("..")
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_' | ':'))
+    }
+
+    if let Some(rest) = path.strip_prefix("com.apple.TimeMachine.") {
+        let Some((snapshot, volume)) = rest.split_once(" | ") else {
+            return false;
+        };
+        return safe_label(snapshot) && safe_label(volume);
+    }
+    if let Some(rest) = path
+        .strip_prefix("docker:")
+        .or_else(|| path.strip_prefix("orbstack:"))
+    {
+        return safe_label(rest);
+    }
+    false
+}
+
 pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyCheck {
     // 当前策略对所有分类一视同仁（category 预留给后续按场景细化，如"大文件"放宽白名单）。
     // 先显式消费掉，避免误删参数后调用方悄悄失配。
@@ -670,20 +774,18 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         return SafetyCheck::Danger("路径包含目录遍历 (..)".to_string());
     }
 
-    // 非文件路径（APFS 快照等），跳过文件路径检查
+    // 非文件路径（APFS 快照 / docker prune 标记）由外部命令处理，不删文件。
     //
-    // 这里必须用 `&&` 同时约束前缀与分隔符。原实现是
-    // `starts_with("com.apple.TimeMachine.") || contains(" | ")`，
-    // `||` 让第二个条件独立生效 —— 任何含「空格|空格」的路径
-    // （如 `/System/Library | x`、`/Users/u/Library/Mail | x`）
-    // 会在下面全部 7 层黑名单之前被无条件放行（历史 bug）。
-    if path.starts_with("com.apple.TimeMachine.") && path.contains(" | ") {
-        return SafetyCheck::Safe;
-    }
-
-    // Docker prune 特殊路径标记，通过外部命令清理而非文件删除
-    if path.starts_with("docker:") || path.starts_with("orbstack:") {
-        return SafetyCheck::Safe;
+    // A-10：旧实现在这里无条件 `return Safe`，位于符号链接解析、系统黑名单、
+    // home 黑名单之前 —— 拼一个 `com.apple.TimeMachine.x | /System/...`
+    // 就能绕过全部 7 层。现在只记录标记并收窄格式，让它继续走完所有检查，
+    // 到函数末尾（第 8 层之前）才放行；注入的绝对路径会在第 3 层被拦下。
+    let has_pseudo_prefix = path.starts_with("com.apple.TimeMachine.")
+        || path.starts_with("docker:")
+        || path.starts_with("orbstack:");
+    let pseudo_path = is_well_formed_pseudo_path(path);
+    if has_pseudo_prefix && !pseudo_path {
+        return SafetyCheck::Danger("伪路径标记格式非法（含路径分隔符或目录遍历）".to_string());
     }
 
     let p = Path::new(path);
@@ -897,16 +999,16 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // ================================================================
     //  第 5 层: 黑名单策略（已替代白名单）
     // ================================================================
-    // 不再使用白名单（只允许特定路径），改为纯黑名单（只禁止危险路径）。
-    // 这样更通用，适配任意机器，无需为每台电脑配置白名单。
+    // 安全模型（2026-11-08 起，A-07）：**排除 + 准入** 双层，fail-closed。
     //
-    // 安全保障：
-    //   - 第 3 层：系统关键目录黑名单（/System, /usr, /bin 等 60+ 路径）
-    //   - 第 4 层：用户数据黑名单（Keychains, Mail, Messages 等）
-    //   - 扫描器只扫描已知缓存/构建目录，不会扫到随机危险路径
-    //   - 第 6 层：敏感文件名检测（.env, id_rsa 等）
+    // 第 1~7 层是「排除」：系统关键目录、home 黑名单、容器数据、仓库元数据、
+    // 敏感文件名、运行中应用等。但它们只回答「明确不能删」，没命中不代表能删。
+    // 第 8 层是「准入」：路径必须落在扫描器显式声明的根（provenance）或静态
+    // 可再生缓存准入表内，否则一律 Danger。
     //
-    // 原 check_whitelist 函数保留但不再调用，以备未来需要时恢复
+    // 早期版本在这里直接 `return Safe`，防御力等价于黑名单完备性：漏一条规则
+    // 就是一次误删。改成准入制后，漏一个根只是「少删一点」，不会误删。
+    // 详见 `docs/safety/SAFETY_MODEL.md` 与 `provenance.rs`。
 
     // ================================================================
     //  第 6 层: 敏感文件名检测
@@ -954,7 +1056,30 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         }
     }
 
-    SafetyCheck::Safe
+    // 伪路径不是文件系统路径：上面 7 层排除检查已全部跑过，在此放行，
+    // 不参与第 8 层的来源准入（它们由外部命令处理，不经过文件删除链）。
+    if pseudo_path {
+        return SafetyCheck::Safe;
+    }
+
+    // ================================================================
+    //  第 8 层: 来源准入（fail-closed）
+    // ================================================================
+    // 前面 7 层只排除了「明确不能删」的路径；未命中黑名单不等于可以删。
+    // 这里要求路径来自扫描器显式声明的根，或落在静态可再生缓存准入表内。
+    // 漏注册只会导致少删，不会导致误删 —— 这是准入制相对纯黑名单的关键。
+    if homes
+        .iter()
+        .any(|home| check_whitelist(&canonical, home, category))
+        || crate::provenance::is_vetted(&canonical)
+    {
+        SafetyCheck::Safe
+    } else {
+        SafetyCheck::Danger(format!(
+            "路径未通过来源准入：不在任何已声明扫描根下，拒绝删除: {}",
+            canonical_str
+        ))
+    }
 }
 
 /// 第 6 层：敏感文件名检测（纯函数）
@@ -1359,11 +1484,13 @@ pub(crate) fn is_critical_system_path(path: &str) -> bool {
     false
 }
 
-/// 检查路径是否在安全白名单内（已弃用，保留备查）
+/// 静态「可再生缓存根」准入表（A-07d，2026-11-08 重新接线）。
 ///
-/// 以前采用白名单策略，现已改为纯黑名单策略，更通用。
-/// 此函数保留供未来需要时参考，但不再被调用。
-#[allow(dead_code)]
+/// 与 `provenance` 的动态注册根取并集：本表覆盖已知工具缓存 / 应用数据根，
+/// 动态注册覆盖各扫描器运行时枚举的根。任一命中才允许第 8 层放行。
+///
+/// 所有前缀判定必须走组件级 `is_same_or_under` / `is_direct_child`；
+/// 裸 `starts_with` 会让 `~/Library/CachesEvil` 被当成缓存目录（见 A-03）。
 fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
     let canonical_str = canonical.to_string_lossy();
     let home_str = home.to_string_lossy();
@@ -2032,6 +2159,9 @@ mod tests {
 
     #[test]
     fn manifest_managed_dirs_are_never_deletable() {
+        // A-07b：本测试用的是假 home 路径，声明它为扫描根后才能检验
+        // 「4.6/4.8 不误伤其它类目」；否则第 8 层准入会先把它拦下。
+        crate::provenance::register_root(Path::new("/Users/u"));
         // 根因修复：delete.log 曾累计 350+ 条误删落在 site-packages、波及
         // 20+ 个 venv。清单管理目录在任何删除入口都必须被硬阻断。
         for p in [
@@ -2087,6 +2217,7 @@ mod tests {
         // 目录白名单是"非缓存目录全拒"，不依赖 .git 祖先是否存在。
         let tmp = std::env::temp_dir().join(format!("maclean_safety_48a_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        crate::provenance::register_root(&tmp); // A-07b：声明本用例的扫描根
         let user_doc = tmp.join("docs/report.pdf");
         std::fs::create_dir_all(user_doc.parent().unwrap()).unwrap();
         std::fs::write(&user_doc, b"%PDF-1.4 fake").unwrap();
@@ -2246,6 +2377,7 @@ mod tests {
         // 即使扫描结果来自旧缓存/旧版本，删除期也拦得住。
         let tmp = std::env::temp_dir().join(format!("maclean_safety_git_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        crate::provenance::register_root(&tmp); // A-07b：声明本用例的扫描根
         let proj = tmp.join("proj");
         std::fs::create_dir_all(proj.join("src")).unwrap();
         std::fs::write(proj.join(".git"), b"").unwrap();
@@ -3202,6 +3334,7 @@ mod tests {
         // 对标 MangoDisk PROTECTED_REPOSITORY_COMPONENTS：任意深度的 .git 均拒绝
         let tmp = std::env::temp_dir().join(format!("maclean_repo_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        crate::provenance::register_root(&tmp); // A-07b：声明本用例的扫描根
         for (label, p) in [
             ("git_root", tmp.join("proj/.git")),
             ("git_deep", tmp.join("a/b/c/.git")),
@@ -3228,5 +3361,99 @@ mod tests {
             s
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---------- A-07：fail-closed 准入层的端到端反向验证 ----------
+
+    #[test]
+    fn fail_closed_gate_denies_unvetted_path_and_allows_registered_root() {
+        // 用一个不可能被其它用例或静态准入表登记的根，避免全局注册表互相干扰。
+        // 这条测试同时是「把第 8 层改回无条件 Safe 就必须变红」的反向验证：
+        // 只要有人让准入层恒真，下面第一个断言立刻失败。
+        let sentinel = Path::new("/__maclean_unvetted_sentinel_2026__");
+        let candidate = sentinel.join("Library/Caches/sub/file.bin");
+        let s = candidate.to_string_lossy().to_string();
+
+        let before = gate_decision(&s, "系统缓存");
+        assert!(
+            matches!(before, SafetyCheck::Danger(_)),
+            "未声明来源根的路径必须默认拒绝，实际 {:?}",
+            before
+        );
+        assert!(
+            before.reason().unwrap_or("").contains("来源准入"),
+            "拒绝原因必须可诊断，实际 {:?}",
+            before
+        );
+
+        crate::provenance::register_root(sentinel);
+        let after = gate_decision(&s, "系统缓存");
+        assert!(
+            matches!(after, SafetyCheck::Safe),
+            "声明扫描根后应放行，实际 {:?}",
+            after
+        );
+
+        // 组件级边界：同名前缀的兄弟目录不得被顺带放行
+        let sibling = "/__maclean_unvetted_sentinel_2026__Evil/Library/Caches/file.bin";
+        assert!(
+            matches!(gate_decision(sibling, "系统缓存"), SafetyCheck::Danger(_)),
+            "准入根必须按组件比较，不能退化为字符串前缀"
+        );
+    }
+
+    #[test]
+    fn warning_is_never_treated_as_allowed_by_the_gate() {
+        // 闸门只认 Safe。若有人给 `Warning` 开后门，这条会变红。
+        let warning = SafetyCheck::Warning("需要确认".into());
+        assert!(!warning.is_safe(), "Warning 在统一闸门下不得放行");
+        assert!(!gate_allows("", "任意类目"), "空路径必须被拒");
+    }
+
+    #[test]
+    fn pseudo_path_injection_cannot_skip_blacklists() {
+        // A-10：把绝对路径藏在 ` | ` 之后不得绕过第 3 层系统黑名单。
+        let injected = "com.apple.TimeMachine.2024-01-01-120000 | /System/Library";
+        assert!(matches!(
+            check_path_safety_with_category(injected, ""),
+            SafetyCheck::Danger(_)
+        ));
+        // 正常快照名仍可用
+        assert!(matches!(
+            check_path_safety_with_category(
+                "com.apple.TimeMachine.2024-01-01-120000 | Macintosh HD",
+                ""
+            ),
+            SafetyCheck::Safe
+        ));
+    }
+
+    #[test]
+    fn home_blacklist_is_case_and_unicode_insensitive() {
+        // A-09：APFS 大小写不敏感 / NFD 存储，黑名单比较必须归一化。
+        let canonical = Path::new("/Users/u/library/mail/message.emlx");
+        let forbidden = Path::new("/Users/u/Library/Mail");
+        assert!(loose_starts_with(
+            &loose_components(canonical),
+            &loose_components(forbidden)
+        ));
+        assert_eq!(
+            loose_component_key("Cafe\u{301}"),
+            loose_component_key("cafÉ")
+        );
+    }
+
+    #[test]
+    fn repeat_cache_dir_rejects_sibling_prefix_and_reordered_containers() {
+        // A-03：裸字符串前缀与两段独立 contains 的历史漏洞。
+        assert!(!is_repeat_cache_dir(Path::new(
+            "/Library/CachesEvil/duplicate.bin"
+        )));
+        assert!(!is_repeat_cache_dir(Path::new(
+            "/tmp/Data/Library/Caches/Library/Containers/x/duplicate.bin"
+        )));
+        assert!(is_repeat_cache_dir(Path::new(
+            "/Users/u/Library/Containers/com.example.app/Data/Library/Caches/a.bin"
+        )));
     }
 }

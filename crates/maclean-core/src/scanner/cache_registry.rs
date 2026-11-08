@@ -421,17 +421,30 @@ impl Scanner for RegistryScanner {
             if path.is_dir() {
                 let size = dir_size(path);
                 if size > 0 {
+                    // C-16：完整应用数据目录（如 Postman 根，含请求历史/配置）
+                    // 只能只读展示，绝不产出可删项；其余条目都精确到可重建
+                    // Cache 子目录，正常可删（见 is_whole_app_data_dir 审计）。
+                    let read_only = is_whole_app_data_dir(def.macos_path)
+                        || is_whole_app_data_dir(def.windows_path);
                     items.push(ScanItem {
                         batch_mtimes: vec![],
                         path: expanded,
                         size_bytes: size,
                         category: def.name.to_string(),
                         selected: false,
-                        deletable: true,
-                        undeletable_reason: String::new(),
+                        deletable: !read_only,
+                        undeletable_reason: if read_only {
+                            "完整应用数据目录（含请求历史/配置），仅展示、不可清理".to_string()
+                        } else {
+                            String::new()
+                        },
                         batch_paths: Vec::new(),
                         recommend: def.recommend,
-                        description: def.desc_zh.to_string(),
+                        description: if read_only {
+                            format!("{}（仅展示，不可清理）", def.desc_zh)
+                        } else {
+                            def.desc_zh.to_string()
+                        },
                     });
                 }
             }
@@ -444,6 +457,31 @@ impl Scanner for RegistryScanner {
             scan_time_ms: start.elapsed().as_millis() as u64,
         }
     }
+}
+
+/// C-16：注册表路径是否指向「整个应用数据目录」而非可重建缓存子目录。
+///
+/// 判定：`Application Support`（macOS）/ `%APPDATA%`（Windows）下、末段又不是
+/// `Cache`/`CachedData` 等可重建目录名 → 就是完整应用数据根。这类目录含请求
+/// 历史、账号配置等用户数据，删掉不可恢复，只能只读展示。
+///
+/// 审计：全表 38 条里只有 Postman 命中；VSCode / Cursor / Windsurf / Trae 都
+/// 精确到 `/Cache`，`~/Library/Caches/*` 系更不在 Application Support 下。
+fn is_whole_app_data_dir(raw_path: &str) -> bool {
+    let lower = raw_path.to_ascii_lowercase();
+    let under_app_data = lower.contains("application support") || lower.contains("%appdata%");
+    if !under_app_data {
+        return false;
+    }
+    let last = raw_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    !matches!(
+        last.as_str(),
+        "cache" | "caches" | "cacheddata" | "cache_data" | "code cache" | "gpucache"
+    )
 }
 
 /// 展开路径中的 ~ 和环境变量
@@ -526,6 +564,50 @@ mod tests {
     fn test_registry_scanner_returns_results() {
         let result = RegistryScanner::new().scan();
         // 至少能扫描出一些结果（测试环境可能没有所有缓存）
-        assert!(result.scan_time_ms < 10000, "扫描应快速完成");
+        //
+        // 时序护栏：scan() 对真实存在的缓存目录递归 dir_size() 做真实 I/O。
+        // 冷扫描（文件系统缓存未热）在本机实测可达 ~9s，全量测试并发 I/O
+        // 争用下还会更高；10s 硬上限会偶发误判。放宽到 30s 仍能拦住真正
+        // 的性能回归（如扫描卡死 / 分钟级耗时），但不因冷启动波动而红。
+        assert!(result.scan_time_ms < 30_000, "扫描应快速完成");
+    }
+
+    #[test]
+    fn postman_is_the_only_whole_app_data_entry() {
+        // C-16：Postman 指向完整应用数据目录，只能只读展示；其余条目精确到
+        // 可重建缓存子目录（VSCode/Cursor 的 /Cache 等），不应被误判。
+        // 反向验证：把 is_whole_app_data_dir 改成恒 false，本用例变红。
+        let postman = CACHE_REGISTRY
+            .iter()
+            .find(|d| d.name == "Postman")
+            .expect("注册表应含 Postman");
+        assert!(
+            is_whole_app_data_dir(postman.macos_path),
+            "Postman macOS 路径是完整应用数据目录，应只读"
+        );
+        assert!(
+            is_whole_app_data_dir(postman.windows_path),
+            "Postman Windows 路径是完整应用数据目录，应只读"
+        );
+        // 审计其余条目：不得再出现「两平台都是应用数据根」的同类问题。
+        for d in CACHE_REGISTRY.iter().filter(|d| d.name != "Postman") {
+            assert!(
+                !(is_whole_app_data_dir(d.macos_path) && is_whole_app_data_dir(d.windows_path)),
+                "{} 不应是只读条目（其缓存路径可重建）",
+                d.name
+            );
+        }
+    }
+
+    #[test]
+    fn registry_scan_wires_read_only_to_deletable() {
+        // C-16：钉住 scan() 真的把只读判定接到 deletable 上（不是只定义不用）。
+        // 按 `\nmod tests` 切出生产段再断言（H-02 的正确切法）。
+        let src = include_str!("cache_registry.rs");
+        let production = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            production.contains("deletable: !read_only"),
+            "scan() 必须用只读判定决定 deletable，否则 Postman 仍可被删"
+        );
     }
 }

@@ -43,91 +43,96 @@ static TOOLCHAIN_RULES: &[ToolchainRule] = &[
         category: "Go构建缓存",
         recommend: Recommend::CacheOnly,
         description: "Go 编译产物缓存，删除后下次构建会重新编译；源码与已下载的模块缓存不受影响。",
-        apps_to_close: &[],
+        apps_to_close: &["go"],
         paths: &["~/Library/Caches/go-build"],
     },
     ToolchainRule {
         category: "uv缓存",
         recommend: Recommend::CacheOnly,
         description: "uv（Python 包管理器）的下载与构建缓存，删除后下次安装依赖时重新下载。",
-        apps_to_close: &[],
+        apps_to_close: &["uv"],
         paths: &["~/Library/Caches/uv"],
     },
     ToolchainRule {
         category: "Yarn缓存",
         recommend: Recommend::CacheOnly,
         description: "Yarn 下载的依赖包缓存，删除后下次安装时重新下载。",
-        apps_to_close: &[],
+        apps_to_close: &["yarn", "node"],
         paths: &["~/Library/Caches/Yarn", "~/Library/Caches/Yarn v6"],
     },
     ToolchainRule {
         category: "Bun缓存",
         recommend: Recommend::CacheOnly,
         description: "Bun 包管理器下载的依赖缓存，删除后下次安装时重新下载。",
-        apps_to_close: &[],
+        apps_to_close: &["bun"],
         paths: &["~/.bun/install/cache"],
     },
     ToolchainRule {
         category: "Deno缓存",
         recommend: Recommend::CacheOnly,
         description: "Deno 的模块与编译缓存，删除后下次运行脚本时重新下载/编译。",
-        apps_to_close: &[],
+        apps_to_close: &["deno"],
         paths: &["~/Library/Caches/deno"],
     },
     ToolchainRule {
         category: "Playwright浏览器",
         recommend: Recommend::Caution,
         description: "Playwright / Puppeteer 下载的浏览器运行时（Chromium/Firefox/WebKit 等），删除后需要重新下载（GB 级）。",
-        apps_to_close: &[],
+        apps_to_close: &["Chromium", "Firefox", "node"],
         paths: &["~/Library/Caches/ms-playwright"],
     },
     ToolchainRule {
         category: "CocoaPods缓存",
         recommend: Recommend::CacheOnly,
         description: "CocoaPods 的 Specs 与下载缓存，删除后 pod install 时重新下载。",
-        apps_to_close: &[],
+        apps_to_close: &["Xcode", "pod"],
         paths: &["~/Library/Caches/CocoaPods"],
     },
     ToolchainRule {
         category: "Swift SPM缓存",
         recommend: Recommend::CacheOnly,
         description: "Swift Package Manager 的依赖下载与编译缓存，删除后下次构建重新解析。",
-        apps_to_close: &[],
+        apps_to_close: &["Xcode", "swift"],
         paths: &["~/Library/Caches/org.swift.swiftpm"],
     },
     ToolchainRule {
         category: "Composer缓存",
         recommend: Recommend::CacheOnly,
         description: "PHP Composer 的包下载缓存，删除后 composer install 时重新下载。",
-        apps_to_close: &[],
+        apps_to_close: &["php", "composer"],
         paths: &["~/Library/Caches/composer", "~/.composer/cache"],
     },
     ToolchainRule {
         category: "Ruby gem",
         recommend: Recommend::Caution,
         description: "Ruby 全局 gem 安装目录，删除后已安装的 gem 需重新安装；不影响 Gemfile 锁定的项目依赖（bundle 会重建）。",
-        apps_to_close: &[],
+        apps_to_close: &["ruby", "gem"],
         paths: &["~/.gem"],
     },
     ToolchainRule {
         category: "Bundler缓存",
         recommend: Recommend::CacheOnly,
         description: "Ruby Bundler 的 gem 下载缓存，删除后 bundle install 时重新下载。",
-        apps_to_close: &[],
+        apps_to_close: &["bundle", "ruby"],
         paths: &["~/Library/Caches/Bundler"],
     },
 ];
+
+/// D-12 · 生成「清理前请关闭」提示（纯函数，开发机可测）。
+fn close_hint_for(apps_to_close: &[&str]) -> String {
+    if apps_to_close.is_empty() {
+        String::new()
+    } else {
+        format!(" 清理前请关闭：{}。", apps_to_close.join("、"))
+    }
+}
 
 /// 扫描工具链注册表：每个规则命中（路径存在且体积达标）即产出语义化清理项。
 pub fn scan_toolchain_rules() -> Vec<ScanItem> {
     let home = home_dir();
     let mut items = Vec::new();
     for rule in TOOLCHAIN_RULES {
-        let mut close_hint = String::new();
-        if !rule.apps_to_close.is_empty() {
-            close_hint = format!(" 清理前请关闭：{}。", rule.apps_to_close.join("、"));
-        }
-        let description = format!("{}{}", rule.description, close_hint);
+        let description = format!("{}{}", rule.description, close_hint_for(rule.apps_to_close));
         for p in rule.paths {
             let full = if let Some(rest) = p.strip_prefix("~/") {
                 home.join(rest)
@@ -284,6 +289,30 @@ fn push_app_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolchain_rules_declare_apps_to_close() {
+        // D-12 · close_hint 分支原本永不触发（11 条全填 &[]），
+        // 现在每条都必须声明需要关闭的进程/应用。
+        for rule in TOOLCHAIN_RULES {
+            assert!(
+                !rule.apps_to_close.is_empty(),
+                "{} 未声明 apps_to_close",
+                rule.category
+            );
+        }
+        // 反向验证：把某条改回 &[]，本用例必红。
+    }
+
+    #[test]
+    fn close_hint_is_generated_for_non_empty_rules() {
+        assert!(close_hint_for(&[]).is_empty());
+        assert_eq!(
+            close_hint_for(&["go", "Xcode"]),
+            " 清理前请关闭：go、Xcode。"
+        );
+        // 反向验证：把 close_hint_for 改成恒返回空串，第二条必红。
+    }
 
     #[test]
     fn toolchain_rules_have_valid_layout() {

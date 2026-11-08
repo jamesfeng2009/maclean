@@ -15,7 +15,9 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use super::{dir_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{
+    dir_size, finalize_scan_result, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner,
+};
 
 /// 100MB 阈值（只有大于此值的目录才展示）
 const APP_DATA_MIN: u64 = 100 * 1024 * 1024;
@@ -37,27 +39,14 @@ impl Scanner for AppDataScanner {
 
         // home 获取不到时不要硬扫（否则会退化为扫描系统目录）
         if !has_home() {
-            return ScanResult {
-                items: Vec::new(),
-                total_size: 0,
-                scan_time_ms: 0,
-            };
+            return finalize_scan_result(Vec::new(), start.elapsed().as_millis() as u64);
         }
 
         items.extend(scan_application_support());
         items.extend(scan_containers());
 
-        // 按大小降序排列
-        items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
-
-        let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
-        let scan_time_ms = start.elapsed().as_millis() as u64;
-
-        ScanResult {
-            items,
-            total_size,
-            scan_time_ms,
-        }
+        // C-17 · 排序 / 去重 / 体积汇总统一走共享 helper
+        finalize_scan_result(items, start.elapsed().as_millis() as u64)
     }
 }
 
@@ -100,7 +89,27 @@ fn scan_application_support() -> Vec<ScanItem> {
 
     let entries = match std::fs::read_dir(&app_support) {
         Ok(e) => e,
-        Err(_) => return items,
+        Err(e) => {
+            // C-17 · 与 scan_containers 同口径：读取失败要如实标注「不可读」，
+            // 不能静默返回空让用户以为「确实没有数据」。
+            items.push(ScanItem {
+                batch_mtimes: vec![],
+                path: app_support.to_string_lossy().to_string(),
+                size_bytes: 0,
+                category: "应用数据".to_string(),
+                selected: false,
+                deletable: false,
+                undeletable_reason: if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    "需要「完全磁盘访问权限」读取 Application Support".to_string()
+                } else {
+                    format!("无法读取目录: {}", e)
+                },
+                batch_paths: Vec::new(),
+                recommend: Recommend::Caution,
+                description: "应用数据目录（未能读取）".to_string(),
+            });
+            return items;
+        }
     };
 
     let paths: Vec<_> = entries

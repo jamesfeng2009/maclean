@@ -34,7 +34,15 @@ jobs:
         # --all-targets 必须带上：否则 #[cfg(test)] 里的 Windows 分支不会被编译，
         # 测试代码烂掉也发现不了。2026-09 之前正是漏了这个参数，
         # 让 13 个 Windows 编译错误在工作区里躺了很久也没人察觉。
-        run: cargo check --target x86_64-pc-windows-msvc --all-targets
+        # H-05：补 --workspace —— 与 ci.yml 的 clippy/test 口径一致，确保 3 个
+        # 库 crate 的 #[cfg(windows)] 分支也在 Windows 目标上被编译。
+        run: cargo check --target x86_64-pc-windows-msvc --workspace --all-targets
+
+      - name: 单元测试（workspace）
+        # H-03：此前 Windows runner 是 check → build → --help，全程零 cargo test，
+        # Windows 专属逻辑只编译不执行（假覆盖）。这里让全部单测在 Windows 上
+        # 真正跑一遍，失败即阻塞（无 continue-on-error）。
+        run: cargo test --workspace --target x86_64-pc-windows-msvc
 
   windows-build:
     name: Windows release build

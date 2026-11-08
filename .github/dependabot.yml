@@ -1,0 +1,24 @@
+# H-06 / G-2：依赖自动更新。
+# 关闭项（不放假文件）：npm ecosystem —— 本仓库根目录无 package.json
+# （官网在独立仓库 maclean-site），没有可监控的 npm 清单，故不配置。
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "rust"]
+    # Cargo.lock 一并更新；CI 的 cargo audit / cargo deny / dependency-review 会复核
+    allow:
+      - dependency-type: "direct"
+      - dependency-type: "indirect"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci"]

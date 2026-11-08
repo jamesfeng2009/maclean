@@ -31,8 +31,37 @@ impl DevCacheScanner {
     }
 }
 
+/// A-07b：声明本扫描器会枚举、但 `register_standard_scan_roots()` 未覆盖的
+/// 准入根。这些子扫描产出的是可删缓存项，漏注册会让它们在删除阶段被第 8 层
+/// fail-closed 拦下（按模型设计，漏注册只「少删」不会误删）。只登记下列窄的
+/// 工具级目录，**绝不登记整个 `$HOME`** —— 那会把准入制退化回纯黑名单；
+/// 标准根表已覆盖的（Library/Caches、.cache、.cargo、go、Downloads、
+/// /Library/Developer 等）不重复登记。
+fn register_dev_cache_roots() {
+    let home = home_dir();
+    for rel in [
+        ".conda",                  // conda 包缓存（~/ .conda/pkgs）
+        ".kube",                   // kubectl / helm 缓存
+        ".docker",                 // buildx 缓存
+        ".orbstack",               // OrbStack 数据
+        ".ollama",                 // 本地模型缓存
+        "Library/pnpm",            // macOS pnpm store
+        "Library/LaunchAgents",    // 用户级孤儿 LaunchAgent（可删）
+        ".local/share/pnpm/store", // Linux pnpm store（精确路径，不登记整个 .local）
+    ] {
+        crate::provenance::register_root(&home.join(rel));
+    }
+    // Homebrew Caskroom 旧版本缓存是绝对路径，不在 HOME_ROOTS 表内。
+    for p in ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"] {
+        crate::provenance::register_root(Path::new(p));
+    }
+}
+
 impl Scanner for DevCacheScanner {
     fn scan(&self) -> ScanResult {
+        // A-07b：枚举之前先声明标准根表外的准入根，否则产出项在删除阶段
+        // 会被第 8 层拦下（见 register_dev_cache_roots 说明）。
+        register_dev_cache_roots();
         let start = Instant::now();
         let mut items = Vec::new();
 
@@ -94,6 +123,9 @@ impl Scanner for DevCacheScanner {
             items.extend(scan_docker_windows());
         }
 
+        // C-02 / C-03：按路径去重 + 剔除父子嵌套项，必须在 total_size
+        // 求和之前完成，否则 pip / Homebrew 的可释放空间翻倍。
+        items = dedup_items_by_path(items);
         let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
         let scan_time_ms = start.elapsed().as_millis() as u64;
 
@@ -103,6 +135,36 @@ impl Scanner for DevCacheScanner {
             scan_time_ms,
         }
     }
+}
+
+/// C-02 / C-03：按路径去重并剔除「被其它项包含的嵌套项」（保留父项）。
+/// - C-02：pip 缓存被 `scan_pip_caches` 与 `scan_python_caches` 各 push 一次，
+///   同路径只留一项，total_size 不翻倍；
+/// - C-03：Homebrew 整目录与其 `downloads` 子目录同时入列，父项 `dir_size`
+///   已含子项，按组件级前缀剔除子项，杜绝父子嵌套重复计体积。
+///
+/// 与 `app_cache.rs::dedup_by_path` 同口径；包含判定只对绝对路径生效，
+/// 避免把 "Monorepo: ..." / "orbstack:system-clean" 这类描述文字误判。
+fn dedup_items_by_path(items: Vec<ScanItem>) -> Vec<ScanItem> {
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<ScanItem> = items
+        .into_iter()
+        .filter(|item| seen.insert(item.path.clone()))
+        .collect();
+
+    // 用 owned 字符串快照，避免 `paths` 借用 `unique` 后又 move 它（E0505）。
+    let paths: Vec<String> = unique.iter().map(|i| i.path.clone()).collect();
+    unique
+        .into_iter()
+        .filter(|item| {
+            let p = Path::new(item.path.as_str());
+            !paths.iter().any(|other| {
+                other.as_str() != item.path.as_str()
+                    && Path::new(other.as_str()).is_absolute()
+                    && p.starts_with(Path::new(other.as_str()))
+            })
+        })
+        .collect()
 }
 
 // =========================================================================
@@ -159,6 +221,44 @@ fn scan_rust_caches() -> Vec<ScanItem> {
 // =========================================================================
 
 /// 扫描 Xcode 相关缓存（参考 DevCleaner 细粒度拆分）
+/// C-15：枚举 iOS DeviceSupport 下的**真实版本目录**（排除普通文件、
+/// 符号链接、隐藏项），返回 `(版本名, 路径, 体积, mtime秒)` 并按版本号
+/// + mtime 排序（版本号相等时 mtime 更新的排后面，作为最新版保留）。
+///
+/// 旧实现无 `is_dir` 守卫，一个同名文件/软链会被版本排序当成「最新版」，
+/// 真实版本目录反被标成 `Recommend::Safe`（可删）。
+fn collect_device_support_versions(device_support: &Path) -> Vec<(String, PathBuf, u64, i64)> {
+    let mut versions: Vec<(String, PathBuf, u64, i64)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(device_support) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // 注意：这里要判断的是**文件名**是否以 . 开头。
+            if name.is_empty() || name.starts_with('.') {
+                continue;
+            }
+            // C-15：只有真实目录（非普通文件、非软链）才是版本目录。
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_dir() || meta.file_type().is_symlink() {
+                continue;
+            }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let size = dir_size(&path);
+            versions.push((name.to_string(), path, size, mtime));
+        }
+    }
+    // 按版本号排序；版本号相等时用 mtime 兜底（更新的排后面 = 最新版）。
+    versions.sort_by(|a, b| version_compare(&a.0, &b.0).then_with(|| a.3.cmp(&b.3)));
+    versions
+}
+
 fn scan_xcode_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
     let home = home_dir();
@@ -205,25 +305,11 @@ fn scan_xcode_caches() -> Vec<ScanItem> {
     // 2. iOS DeviceSupport - 按版本拆分，保留最新版
     let device_support = xcode_dir.join("iOS DeviceSupport");
     if device_support.is_dir() {
-        let mut versions: Vec<(String, PathBuf, u64)> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&device_support) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                // 注意：这里要判断的是**文件名**是否以 . 开头。
-                // 原写法 `path.starts_with(".")` 是对完整路径做 Path 组件匹配，
-                // 恒为 false，导致隐藏目录完全没被过滤。
-                if name.is_empty() || name.starts_with('.') {
-                    continue;
-                }
-                let size = dir_size(&path);
-                versions.push((name.to_string(), path, size));
-            }
-        }
-        // 按 iOS 版本号排序，找出最新版
-        versions.sort_by(|a, b| version_compare(&a.0, &b.0));
+        // C-15：只纳入真实版本目录（排除普通文件 / 软链），并按版本号
+        // + mtime 排序（同版本时 mtime 兜底），见 collect_device_support_versions。
+        let versions = collect_device_support_versions(&device_support);
 
-        for (i, (version, path, size)) in versions.iter().enumerate() {
+        for (i, (version, path, size, _mtime)) in versions.iter().enumerate() {
             let is_latest = i == versions.len().saturating_sub(1);
             items.push(ScanItem {
                 batch_mtimes: vec![],
@@ -1019,7 +1105,26 @@ fn get_project_search_paths() -> Vec<PathBuf> {
 /// - `base`: 搜索起始目录
 /// - `name`: 要搜索的目录名（如 "target"、"node_modules"）
 /// - `max_depth`: 最大搜索深度
+///
+/// 遍历模式：命中清单管理目录时，是否允许「目标目录本身」进入结果。
+#[derive(Clone, Copy)]
+enum SearchDirsMode {
+    /// 清单管理子树整棵剪掉（`scan_node_caches` 等清理项扫描的 DESIGN-INTENT）。
+    PruneManaged,
+    /// D-05：允许命中目标名本身被收集，只剪其子树（monorepo 聚合展示用）。
+    AllowTargetItself,
+}
+
 fn search_dirs(base: &Path, name: &str, max_depth: usize) -> Vec<PathBuf> {
+    search_dirs_with_mode(base, name, max_depth, SearchDirsMode::PruneManaged)
+}
+
+fn search_dirs_with_mode(
+    base: &Path,
+    name: &str,
+    max_depth: usize,
+    mode: SearchDirsMode,
+) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if !base.is_dir() {
         return found;
@@ -1040,6 +1145,12 @@ fn search_dirs(base: &Path, name: &str, max_depth: usize) -> Vec<PathBuf> {
                 let dir_name = e.file_name().to_string_lossy();
                 if dir_name == ".git" || dir_name == ".svn" || dir_name == ".hg" {
                     return false;
+                }
+                // D-05：目标目录本身要允许被收集（monorepo 聚合项依赖它），
+                // 即使它命中 manifest 剪枝也放行；其子树仍会在下一层被
+                // is_manifest_managed_path 剪掉，不会嵌套重复。
+                if matches!(mode, SearchDirsMode::AllowTargetItself) && dir_name == name {
+                    return true;
                 }
                 // 清单管理子树（venv/site-packages/node_modules 等）整棵剪掉，
                 // 与 safety 第 4.6 层共用同一判定：扫不进 = 删不掉。
@@ -1804,9 +1915,47 @@ fn is_orbstack_available() -> bool {
         .unwrap_or(false)
 }
 
+/// C-07：解析 `orbctl list` 单行，返回该行「可回收字节数」。
+/// 尺寸字段是「数值 + 单位」两列（如 `800 MB`），必须拼接后再交给
+/// [`parse_orb_size`]；旧实现只把 `cols[5]`（"800"）单独传入，
+/// `parse_orb_size("800")` 因不含单位恒返回 0 → `orbstack:system-clean`
+/// 永不出现。只统计 stopped 的 VM（running 删除会中断服务）。
+fn orb_reclaimable_line_bytes(line: &str) -> u64 {
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    // name status distro version arch SIZE UNIT ip
+    if cols.len() < 7 || cols[1] != "stopped" {
+        return 0;
+    }
+    parse_orb_size(&format!("{} {}", cols[5], cols[6]))
+}
+
+/// C-07：按可回收量构造 `orbstack:system-clean` 清理项（0 不产出）。
+/// 抽成纯函数供 `scan_docker_caches` 与单测共用，便于用真实输出样例
+/// 断言「cleanup 项生成」而无需 spawn orbctl。
+fn orb_cleanup_item(reclaimable: u64) -> Option<ScanItem> {
+    if reclaimable == 0 {
+        return None;
+    }
+    Some(ScanItem {
+        batch_mtimes: vec![],
+        path: "orbstack:system-clean".to_string(),
+        size_bytes: reclaimable,
+        category: "OrbStack清理".to_string(),
+        selected: false,
+        deletable: true,
+        undeletable_reason: String::new(),
+        batch_paths: Vec::new(),
+        recommend: Recommend::Advanced,
+        description: format!(
+            "执行 orbctl 清理未使用的 OrbStack 虚拟机/镜像，可回收约 {}；清理后需重新创建/拉取镜像",
+            crate::scanner::format_size(reclaimable)
+        ),
+    })
+}
+
 /// 估算 OrbStack 可回收空间（字节）：只统计 **已停止** 的虚拟机。
 ///
-/// `orbctl list` 输出示例（空格分隔，第 6 字段为磁盘占用）:
+/// `orbctl list` 输出示例（空格分隔；尺寸是「数值 + 单位」两列）:
 /// ```text
 /// ubuntu  running  ubuntu  noble  arm64  2.4 GB  192.168.139.195
 /// debian  stopped  debian  bookworm  arm64  800 MB  -
@@ -1820,15 +1969,8 @@ fn get_orbstack_reclaimable_size() -> u64 {
         return 0;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut total: u64 = 0;
-    for line in stdout.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        // name status distro version arch size ip
-        if cols.len() >= 6 && cols[1] == "stopped" {
-            total += parse_orb_size(cols[5]);
-        }
-    }
-    total
+    // C-07：逐行交给纯解析器（生产与单测共用），拼接数值 + 单位。
+    stdout.lines().map(orb_reclaimable_line_bytes).sum()
 }
 
 /// 解析 OrbStack size 字段（"2.4 GB" / "800 MB"）为字节（1000 进制）
@@ -2126,21 +2268,9 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     // 6. OrbStack 镜像可回收量（orbctl 只读查询，命令删除通道可清）
     if is_orbstack_available() {
         let reclaimable = get_orbstack_reclaimable_size();
-        if reclaimable > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
-                path: "orbstack:system-clean".to_string(),
-                size_bytes: reclaimable,
-                category: "OrbStack清理".to_string(),
-                selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
-                batch_paths: Vec::new(),
-                recommend: Recommend::Advanced,
-                description: format!(
-                    "执行 orbctl 清理未使用的 OrbStack 虚拟机/镜像，可回收约 {}；清理后需重新创建/拉取镜像",
-                    crate::scanner::format_size(reclaimable)
-                ),
-            });
+        // C-07：构造走纯函数，便于单测断言「真实输出 → cleanup 项生成」。
+        if let Some(item) = orb_cleanup_item(reclaimable) {
+            items.push(item);
         }
     }
 
@@ -2503,6 +2633,57 @@ fn count_monorepo_packages(root: &Path) -> usize {
 /// 扫描 Monorepo 的所有子包 node_modules
 ///
 /// 在项目搜索路径下查找 monorepo root，聚合展示所有子包的 node_modules
+/// D-05：把 monorepo 命中到的各子包 `node_modules` 聚合成单个展示项。
+/// `min_size` 参数化便于单测用小阈值；生产传 50MB。抽成纯函数供
+/// `scan_monorepo_caches` 与单测共用，测试调用被测逻辑本身。
+fn build_monorepo_item(
+    monorepo_root: &Path,
+    nm_dirs: &[PathBuf],
+    min_size: u64,
+) -> Option<ScanItem> {
+    let mut total_size: u64 = 0;
+    let mut all_paths: Vec<String> = Vec::new();
+    for nm in nm_dirs {
+        let size = dir_size(nm);
+        if size > 0 {
+            total_size += size;
+            all_paths.push(nm.to_string_lossy().to_string());
+        }
+    }
+    // 只展示 >= min_size 的 monorepo（生产 50MB）
+    if total_size < min_size {
+        return None;
+    }
+    let mono_type = detect_monorepo_type(monorepo_root);
+    let pkg_count = count_monorepo_packages(monorepo_root);
+    let root_name = monorepo_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| monorepo_root.to_string_lossy().to_string());
+    Some(ScanItem {
+        batch_mtimes: vec![],
+        path: format!("Monorepo: {} ({} 个子包)", root_name, pkg_count),
+        size_bytes: total_size,
+        category: "Monorepo依赖".to_string(),
+        selected: false,
+        deletable: true,
+        undeletable_reason: String::new(),
+        batch_paths: all_paths,
+        recommend: Recommend::Safe,
+        description: format!(
+            "{} monorepo，包含 {} 个子包的 node_modules\n\
+             删除后需在 root 目录执行 {} install 恢复",
+            mono_type,
+            pkg_count,
+            match mono_type {
+                "pnpm" => "pnpm",
+                "lerna" | "nx" | "turbo" | "rush" => "npm",
+                _ => "npm/pnpm",
+            }
+        ),
+    })
+}
+
 fn scan_monorepo_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
 
@@ -2543,56 +2724,25 @@ fn scan_monorepo_caches() -> Vec<ScanItem> {
 
         // 对每个 monorepo root，扫描所有子包的 node_modules
         for monorepo_root in monorepo_roots {
-            let nm_dirs = search_dirs(&monorepo_root, "node_modules", 5);
+            // D-05：旧实现走 search_dirs（PruneManaged），node_modules 命中
+            // is_manifest_managed_path 被整棵剪掉 → found 恒空 → 整段死代码。
+            // 改用 AllowTargetItself：收集目标本身、只剪其子树。
+            let nm_dirs = search_dirs_with_mode(
+                &monorepo_root,
+                "node_modules",
+                5,
+                SearchDirsMode::AllowTargetItself,
+            );
             if nm_dirs.is_empty() {
                 continue;
             }
-
-            let mut total_size: u64 = 0;
-            let mut all_paths: Vec<String> = Vec::new();
-
-            for nm in &nm_dirs {
-                let size = dir_size(nm);
-                if size > 0 {
-                    total_size += size;
-                    all_paths.push(nm.to_string_lossy().to_string());
-                }
+            // D-05：声明该 monorepo 根为扫描准入根，否则聚合项的
+            // batch_paths 在删除阶段会被第 8 层 fail-closed 拦下。
+            crate::provenance::register_root(&monorepo_root);
+            // D-05：聚合逻辑抽成纯函数（生产与单测共用）。
+            if let Some(item) = build_monorepo_item(&monorepo_root, &nm_dirs, 50 * 1024 * 1024) {
+                items.push(item);
             }
-
-            // 只展示 > 50MB 的 monorepo
-            if total_size < 50 * 1024 * 1024 {
-                continue;
-            }
-
-            let mono_type = detect_monorepo_type(&monorepo_root);
-            let pkg_count = count_monorepo_packages(&monorepo_root);
-            let root_name = monorepo_root
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| monorepo_root.to_string_lossy().to_string());
-
-            items.push(ScanItem {
-                batch_mtimes: vec![],
-                path: format!("Monorepo: {} ({} 个子包)", root_name, pkg_count),
-                size_bytes: total_size,
-                category: "Monorepo依赖".to_string(),
-                selected: false,
-                deletable: true,
-                undeletable_reason: String::new(),
-                batch_paths: all_paths,
-                recommend: Recommend::Safe,
-                description: format!(
-                    "{} monorepo，包含 {} 个子包的 node_modules\n\
-                     删除后需在 root 目录执行 {} install 恢复",
-                    mono_type,
-                    pkg_count,
-                    match mono_type {
-                        "pnpm" => "pnpm",
-                        "lerna" | "nx" | "turbo" | "rush" => "npm",
-                        _ => "npm/pnpm",
-                    }
-                ),
-            });
         }
     }
 
@@ -2868,10 +3018,7 @@ fn scan_ds_store_files() -> Vec<ScanItem> {
                 // 位于清单管理目录（go/pkg/mod、node_modules 等）内的 .DS_Store
                 // 会被判 Danger，必须在这里就排除——否则它进入聚合项后，用户点
                 // “安全清理”时仍会在删除阶段被拦（违背“安全项=必可删”的约定）。
-                if !matches!(
-                    crate::safety::check_path_safety_with_category(&full, "DS_Store"),
-                    crate::safety::SafetyCheck::Safe
-                ) {
+                if !crate::safety::gate_allows(&full, "DS_Store") {
                     continue;
                 }
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -3122,6 +3269,144 @@ fn scan_docker_windows() -> Vec<ScanItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mk_dev_item(path: &str, size: u64) -> ScanItem {
+        ScanItem {
+            batch_mtimes: vec![],
+            path: path.to_string(),
+            size_bytes: size,
+            category: "test".to_string(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            batch_paths: Vec::new(),
+            recommend: Recommend::Safe,
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn dev_cache_dedup_removes_repeated_pip_path_and_keeps_total() {
+        // C-02：同一次 scan 里 pip 缓存路径被 scan_pip_caches 与
+        // scan_python_caches 各 push 一次，收尾去重后只留一项、
+        // total_size 不翻倍。反向验证：把 dedup_items_by_path 改成恒真
+        // （不去重），下面断言会变红。
+        let pip = "/Users/u/Library/Caches/pip";
+        let items = vec![
+            mk_dev_item(pip, 100),
+            mk_dev_item("/Users/u/.cache/conda", 200),
+            mk_dev_item(pip, 100),
+        ];
+        let out = dedup_items_by_path(items);
+        assert_eq!(out.len(), 2, "重复路径必须只留一项");
+        let total: u64 = out.iter().map(|i| i.size_bytes).sum();
+        assert_eq!(total, 300, "total_size 不得因重复项翻倍");
+        assert_eq!(out.iter().filter(|i| i.path == pip).count(), 1);
+    }
+
+    #[test]
+    fn dev_cache_dedup_drops_nested_homebrew_child() {
+        // C-03：Homebrew 整目录与其 downloads 子目录同时入列，父项
+        // dir_size 已含子项，必须只保留父项，杜绝父子嵌套重复计体积。
+        // 反向验证：把 dedup_items_by_path 的包含剔除去掉，子项会留下 → 红。
+        let parent = "/Users/u/Library/Caches/Homebrew";
+        let child = "/Users/u/Library/Caches/Homebrew/downloads";
+        let items = vec![mk_dev_item(parent, 1000), mk_dev_item(child, 400)];
+        let out = dedup_items_by_path(items);
+        assert_eq!(out.len(), 1, "被父项包含的子项必须剔除");
+        assert_eq!(out[0].path, parent);
+        assert_eq!(out[0].size_bytes, 1000, "父项体积已含子项，不得再叠加");
+    }
+
+    #[test]
+    fn orbstack_real_output_produces_cleanup_item() {
+        // C-07：用 orbctl list 真实输出样例，断言 stopped 行尺寸被
+        // 正确解析（数值+单位拼接）并生成 orbstack:system-clean 项。
+        // 反向验证：把生产改回「只传 cols[5]」或解析函数恒 0，
+        // reclaimable==0 → 不生成项 → 断言变红。
+        let running = "ubuntu  running  ubuntu  noble  arm64  2.4 GB  192.168.139.195";
+        let stopped = "debian  stopped  debian  bookworm  arm64  800 MB  -";
+        let stopped2 = "alpine  stopped  alpine  edge  arm64  1.5 GB  -";
+        assert_eq!(orb_reclaimable_line_bytes(running), 0, "running 不计入");
+        let reclaimable =
+            orb_reclaimable_line_bytes(stopped) + orb_reclaimable_line_bytes(stopped2);
+        assert_eq!(
+            reclaimable,
+            800 * 1_000_000 + 1_500_000_000,
+            "stopped 行尺寸应解析为字节"
+        );
+        let item = orb_cleanup_item(reclaimable).expect("有可回收量应生成清理项");
+        assert_eq!(item.path, "orbstack:system-clean");
+        assert_eq!(item.size_bytes, reclaimable);
+        assert!(orb_cleanup_item(0).is_none(), "0 可回收量不生成项");
+    }
+
+    #[test]
+    fn device_support_versions_ignore_plain_files_and_symlinks() {
+        // C-15：普通文件 / 软链不得挤进版本排序成为「最新版」。
+        // 反向验证：去掉 collect_device_support_versions 的 is_dir /
+        // !is_symlink 守卫，文件或软链会进 versions → 断言变红。
+        let tmp = std::env::temp_dir().join(format!("maclean_devsupport_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join("16.0")).unwrap();
+        std::fs::create_dir_all(tmp.join("17.0")).unwrap();
+        // 名字像更高版本的普通文件与软链（旧实现会把它们排成 latest）
+        std::fs::write(tmp.join("99.0"), b"not a dir").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.join("16.0"), tmp.join("18.0")).unwrap();
+
+        let versions = collect_device_support_versions(&tmp);
+        assert_eq!(versions.len(), 2, "只应有 2 个真实版本目录");
+        assert!(versions
+            .iter()
+            .all(|(n, _, _, _)| n == "16.0" || n == "17.0"));
+        assert_eq!(versions.last().unwrap().0, "17.0", "最新版必须是真实目录");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn monorepo_with_multiple_packages_produces_aggregate_item() {
+        // D-05：monorepo 下多个子包各有 node_modules。旧实现 search_dirs
+        // 对 is_manifest_managed_path 命中的 node_modules 整棵剪枝 → found
+        // 恒空 → scan_monorepo_caches 恒返回空（死代码）。
+        // 反向验证：把 monorepo 段改回 search_dirs（PruneManaged），
+        // nm_dirs 为空 → 断言变红。
+        let tmp = std::env::temp_dir().join(format!("maclean_monorepo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        // monorepo 标记
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            b"packages:\n  - packages/*",
+        )
+        .unwrap();
+        // 两个子包，各含 node_modules + 一个文件 + package.json
+        for pkg in ["packages/a", "packages/b"] {
+            let nm = root.join(pkg).join("node_modules");
+            std::fs::create_dir_all(&nm).unwrap();
+            std::fs::write(nm.join("mod.bin"), vec![1u8; 4096]).unwrap();
+            std::fs::write(root.join(pkg).join("package.json"), b"{}").unwrap();
+        }
+
+        let nm_dirs =
+            search_dirs_with_mode(&root, "node_modules", 5, SearchDirsMode::AllowTargetItself);
+        assert_eq!(nm_dirs.len(), 2, "应找到两个子包的 node_modules");
+        assert!(
+            search_dirs(&root, "node_modules", 5).is_empty(),
+            "旧模式（清理项扫描）仍按 DESIGN-INTENT 整棵剪枝"
+        );
+
+        let item = build_monorepo_item(&root, &nm_dirs, 1).expect("应产出 monorepo 聚合项");
+        assert_eq!(item.batch_paths.len(), 2);
+        assert!(item.size_bytes > 0);
+        assert!(
+            item.description.contains("pnpm"),
+            "detect_monorepo_type 结果应进入文案"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     // ---------- 版本号自然序（防止误删最新版 IDE 配置） ----------
 
@@ -3498,5 +3783,38 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with('.'));
+    }
+
+    #[test]
+    fn dev_cache_scan_wires_provenance_root_registration() {
+        // A-07b 接线断言：scan() 入口必须调用 register_dev_cache_roots()，
+        // 否则下列窄根下的产出项在删除阶段会被第 8 层 fail-closed 拦下。
+        // 按 `\nmod tests` 切出生产段，避免把本测试里的同名字符串算进去。
+        // 反向验证：删掉 scan() 里那一行调用，本用例必须变红。
+        let src = include_str!("dev_cache.rs");
+        let production = src.split("\nmod tests").next().unwrap();
+        assert!(
+            production.contains("register_dev_cache_roots();"),
+            "scan() 必须声明标准根表外的准入根"
+        );
+    }
+
+    #[test]
+    fn dev_cache_roots_are_vetted_but_unknown_root_stays_fail_closed() {
+        // A-07b：注册后，本扫描器枚举的窄根路径应通过来源准入；未声明的根
+        // 仍一律拒绝（fail-closed 不变量，漏注册只少删不误删）。
+        register_dev_cache_roots();
+        let home = home_dir();
+        assert!(crate::provenance::is_vetted(&home.join(".conda/pkgs/pkg")));
+        assert!(crate::provenance::is_vetted(
+            &home.join(".ollama/models/blob")
+        ));
+        assert!(crate::provenance::is_vetted(Path::new(
+            "/opt/homebrew/Caskroom/Google Chrome/1.0"
+        )));
+        assert!(
+            !crate::provenance::is_vetted(Path::new("/__maclean_devcache_unregistered_root__/x")),
+            "未声明的根必须仍被拒绝"
+        );
     }
 }

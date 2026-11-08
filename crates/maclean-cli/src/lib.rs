@@ -10,9 +10,12 @@
 //!
 //! ```text
 //! maclean scan / clean / schedule / check-disk / list / apps / uninstall
-//! maclean log / backups / restore / startup / optimize / dup-ignore
+//! maclean system-data / apfs / log / backups / restore / startup / optimize
+//! maclean dup-ignore
 //! maclean scan --format json / jsonl   （envelope 结构化输出，稳定契约）
 //! ```
+//! E-14：system-data 与 apfs（list / delete）是已实现的公开命令，
+//! 命令集以 `docs/cli-contract.md` §2 为准（README 由另一组同步）。
 //!
 //! Pro 命令（history / growth / forecast / policy / automation）只保留
 //! 契约占位（可解析、返回错误信封），实现留在私有 Pro 仓库。

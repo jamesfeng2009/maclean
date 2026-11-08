@@ -1,0 +1,24 @@
+# H-06 / G-3：安全报告（仅引导，不在公开 issue 收集漏洞细节）
+name: 安全问题（引导）
+description: 删除链 / 提权 / 路径处理相关——请走私有渠道，不要在这里写漏洞细节
+labels: ["security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **请勿在本公开 issue 中描述漏洞细节。**
+        maclean 会真实删除用户文件，删除链 / 提权 / 路径穿越 / 符号链接相关
+        问题请按仓库 `SECURITY.md` 的私有报告渠道提交，或在 GitHub 上开
+        私有 Security Advisory。
+        这里只用于「已通过私有渠道报告后」的公开跟踪编号。
+  - type: input
+    id: advisory
+    attributes:
+      label: 私有报告编号 / Advisory 链接（可选）
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已通过 SECURITY.md 的私有渠道报告，本 issue 不含漏洞细节
+          required: true

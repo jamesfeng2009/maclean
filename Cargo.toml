@@ -10,10 +10,14 @@
 #
 #   crates/maclean-types    公开契约层（零私有依赖，最底层）
 #   crates/maclean-core     核心引擎（scanner / safety / ops / scheduler）
-#   crates/maclean-storage  本地持久化（JSON-first 存储 + 迁移框架）
-#   crates/maclean-platform 平台适配器契约（Trash / 路径 / 注册表）
 #   crates/maclean-cli      CLI 契约（命令解析 / envelope / 渲染）
 #   apps/maclean-cli        公开产品（纯 CLI 二进制，产物名 maclean）
+#
+# 2026-11-08：maclean-storage / maclean-platform 两个「契约骨架」crate 因
+# 零生产消费者、私有 Pro 也零依赖，已移出 workspace 归档到
+# archive/contract-crates-2026-11-08/。能力在 maclean-core 内均有实现
+# （config.rs / backup.rs / platform/ / ops::is_path_mounted）。
+# 归档代码不参与构建与测试，重新接入前须先修 README 列出的已知缺陷。
 #
 # 规则（MAC-CLI-001/004）：
 # - 公开 workspace 必须独立编译（不依赖任何私有仓库/密钥/GUI）；
@@ -30,30 +34,24 @@ resolver = "3"
 members = [
     "crates/maclean-types",
     "crates/maclean-core",
-    "crates/maclean-storage",
-    "crates/maclean-platform",
     "crates/maclean-cli",
     "apps/maclean-cli",
 ]
-# 私有包目录不属于公开 workspace（独立 workspace 见各目录内 Cargo.toml）
+# 私有包目录与归档代码都不属于公开 workspace
 exclude = [
     "maclean-license-server-v1.0",
     "maclean-production-v1.0",
+    "archive",
 ]
 default-members = ["apps/maclean-cli"]
 
 [workspace.package]
-# 单一版本事实来源（2026-10-27 统一）：
+# 单一版本事实来源（2026-10-27 统一；I-06 改为不带版本号的说明）：
 # 所有 workspace 成员写 `version.workspace = true`，此处 bump 一次即全量生效。
-#
-# 历史问题：本字段长期停在 0.2.0，而 apps/maclean-cli 随每次 release 单独
-# bump（0.3.x → 0.4.x），crates/ 下的库 crate 又分别停在 0.2.0/0.2.2/0.2.3。
-# 结果是 `maclean --version` 报的版本、homebrew formula 拉的 tag、issue 里
-# 用户贴的版本号三者对不上。
-#
-# 0.4.1 = 上一个已发行版本（git tag v0.4.1）。
-# 0.4.2 = 本次修复版本：--tab 收紧为枚举、workspace 版本号对齐、
-#         Windows 目标编译修复。patch 级，无功能新增。
+# 旧注释写死「0.4.1 = 上一版 / 0.4.2 = 本次修复版本」，每次 bump 必滞后，
+# 故删掉具体版本号：发行历史以 git tag 为准（`git tag -l`）。
+# scripts/bump-version.sh 同步本节与 [workspace.dependencies]，CI 的
+# version-consistency 校验二者及 Makefile 求值 / homebrew formula tag 一致。
 version = "0.4.3"
 edition = "2021"
 license = "Apache-2.0"

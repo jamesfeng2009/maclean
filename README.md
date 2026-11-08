@@ -60,7 +60,7 @@ maclean check-disk --breakdown --json
 
 
 ```
-cargo build --workspace       # 全量（5 个公开 crate + CLI）
+cargo build --workspace       # 全量（3 个库 crate + CLI；D-08 后两契约 crate 已归档）
 cargo test --workspace        # 测试
 cargo build --release         # 发布版 CLI
 make package                  # CLI 发行产物（tar.gz + SHA256）
@@ -75,11 +75,10 @@ maclean/
 ├── crates/
 │   ├── maclean-types        公开契约层（领域模型 / envelope / 错误码 / Feature）
 │   ├── maclean-core         核心引擎（scanner / safety / ops / scheduler）
-│   ├── maclean-storage      本地持久化（JSON-first）
-│   ├── maclean-platform     平台适配契约（Trash / 路径 / 注册表 / 磁盘）
 │   └── maclean-cli          CLI 契约（命令解析 / envelope 渲染 / 退出码）
 ├── apps/
 │   └── maclean-cli          公开产品（纯 CLI 二进制，产物名 maclean）
+├── archive/                 已移出 workspace 的契约骨架（见目录内 README）
 ├── schemas/  examples/  tests/  docs/  scripts/
 ├── Cargo.toml  LICENSE  NOTICE  README.md
 ```
@@ -99,9 +98,17 @@ maclean/
 | `startup list \| disable <label> \| enable <label>`                   | macOS 启动项管理（可逆禁用）                  |
 | `optimize list-tasks \| run --task <id> [--yes]`                      | 系统优化 / 维护任务                        |
 | `schedule [--install --days N] [--remove]`                            | 定时清理任务管理                           |
+| `system-data`                                                         | System Data 聚合视图（缓存 / 日志 / 本地快照 / iOS 备份 / App 支持）   |
+| `apfs list \| delete <target> [--yes]`                                | APFS 本地快照 / 模拟器运行时管理（CLI 里唯一真正删除快照的入口）    |
 | `backups [--restorable-only]`                                         | 历史删除清单（废纸篓还原用）                     |
 | `restore <id>`                                                        | 按清单还原可恢复项                          |
 | `log [--tail N] [--open]`                                             | 查看日志                               |
+| `dup-ignore <子命令>`                                                 | 重复文件忽略规则                           |
+
+<!-- E-14：以上补入 args.rs 中已实现的 system-data / apfs（含 list|delete 子命令），
+     并补齐契约已列、README 漏列的 dup-ignore；完整命令集以 docs/cli-contract.md 为准。 -->
+以上 15 个公开命令与 `args.rs` 的顶层变体一一对应；Pro 命令
+（`history / growth / forecast / policy / automation`）为契约占位，见上文产品分层。
 
 ## 平台现状
 
@@ -168,18 +175,26 @@ Apache-2.0。CLI **永久免费**；GUI App 提供 14 天试用，试用后付�
 
 ## 质量门禁
 
-CI 有三个 workflow：
+<!-- I-02：.github/workflows/ 实际有 5 个 workflow，旧文案只写了 3 个 -->
+CI 共五个 workflow：
 
+* `ci.yml`（macOS；push / PR / 手动）：`cargo fmt --check` →
+  `cargo clippy --workspace --all-targets -D warnings`（H-04）→
+  `cargo test --workspace` → release 构建 → 版本号一致性 →
+  security（`cargo audit` / `cargo deny` / dependency review / 防泄漏，H-06）
+* `windows-ci.yml`（Windows；push / PR / `v*` tag / 手动）：
+  `cargo check --target x86_64-pc-windows-msvc --workspace --all-targets` →
+  `cargo test --workspace`（H-03）→ release 构建出 exe + 冒烟 → NSIS 打包 →
+  tag 时发 GitHub Release
+* `release-macos.yml`（`v*` tag / 手动）：universal binary → Developer ID 签名 →
+  公证 → tar.gz + SHA256 → GitHub Release / crates.io / R2 / 官网 / Homebrew tap
+* `backfill-release.yml`（仅手动 `workflow_dispatch`）：按渠道（R2 / 官网）补发
+  已发布 Release 的产物，不重建、不重签名、不移动 tag
+* `update-homebrew-tap.yml`（`workflow_call` 被 release 调用 / `release: published` /
+  手动）：把 `homebrew-maclean` 的 Formula 版本与源码 tarball sha256 回填
 
-
-* `ci.yml`（macOS）：`cargo fmt --check` → `cargo clippy --all-targets -D warnings`
-
-  → `cargo test --workspace` → release 构建 → 版本号一致性
-
-* `windows-ci.yml`（Windows）：`cargo check --all-targets` → release 构建出 exe + 冒烟
-
-* `release-macos.yml`（发布）：universal binary → Developer ID 签名 → 公证 →
-
-  tar.gz + SHA256
-
-版本号唯一来源是 `Cargo.toml`（`apps/maclean-cli/Cargo.toml`）。
+<!-- H-07 / I-01：版本号唯一来源是根 Cargo.toml 的 [workspace.package] -->
+版本号唯一来源是根 `Cargo.toml` 的 `[workspace.package] version`；所有成员写
+`version.workspace = true`，`scripts/bump-version.sh` 一处 bump 全量生效。
+CI 的 `version-consistency` 校验根版本、各 crate 继承、Makefile 求值与
+homebrew formula tag 一致，打 tag 时再由 `release-macos.yml` 校验 tag == 根版本。

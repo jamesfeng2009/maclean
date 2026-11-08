@@ -130,53 +130,75 @@ const DATA_PROTECTED_PREFIXES: &[&str] = &[
     "com.daisydiskapp.",
 ];
 
+/// A-08：把表项规整为「域标签前缀」，统一小写后按「相等 / `前缀.` 边界」匹配。
+///
+/// 表项可能自带尾点（`com.apple.dt.`）也可能不带（`com.apple.FinalCut`），
+/// 统一去掉尾点后比较，既让大小写混用的表项（`com.apple.Safari`）能命中
+/// `com.apple.safari`，又不会让 `com.apple.finderfake` 被 `com.apple.finder` 越界命中。
+fn label_matches(bundle_id: &str, prefix: &str) -> bool {
+    let id = bundle_id.to_ascii_lowercase();
+    let raw = prefix.to_ascii_lowercase();
+    let p = raw.trim_end_matches('.');
+    id == p || id.starts_with(&format!("{p}."))
+}
+
+/// A-08：bundle_id 是否命中前缀表任一项（统一走 label_matches）。
+fn matches_any_prefix(bundle_id: &str, prefixes: &[&str]) -> bool {
+    prefixes
+        .iter()
+        .copied()
+        .any(|prefix| label_matches(bundle_id, prefix))
+}
+
+/// A-08：按优先级把四组命中标志收敛为保护级别（纯函数，生产与测试共用）。
+///
+/// 优先级：系统关键 > 安全/MDM > 可卸载白名单 > 数据保护 > 无。
+/// 系统关键与安全/MDM **必须前置**：命中即保护，绝不能被「可卸载白名单」
+/// 短路成 None（旧实现白名单在最前，`com.apple.dt.*` 直接 return None）。
+/// 白名单仍保留覆盖数据保护的原相对行为，返回 None（与默认一致）。
+fn classify_bundle(
+    critical: bool,
+    security: bool,
+    uninstallable: bool,
+    data_protected: bool,
+) -> ProtectionLevel {
+    if critical {
+        return ProtectionLevel::Critical;
+    }
+    if security {
+        return ProtectionLevel::RequiresOfficialUninstaller;
+    }
+    if uninstallable {
+        return ProtectionLevel::None;
+    }
+    if data_protected {
+        return ProtectionLevel::DataProtected;
+    }
+    ProtectionLevel::None
+}
+
 /// 检查 bundle ID 的保护级别
 ///
 /// 返回对应的保护级别，供卸载扫描器决定是否允许删除。
+/// A-08：Critical/Security 前置，匹配统一小写 + 边界（见 label_matches）。
 pub fn check_bundle_protection(bundle_id: &str) -> ProtectionLevel {
-    // 1. 检查是否为可卸载的 Apple 应用（Xcode 等）
-    //    这类应用虽然是 com.apple.* 但允许卸载，需在 Critical 检查之前判断
-    for prefix in APPLE_UNINSTALLABLE_PREFIXES {
-        if bundle_id.starts_with(prefix) {
-            return ProtectionLevel::None;
-        }
-    }
-
-    // 2. 检查是否为系统关键应用
-    for prefix in CRITICAL_BUNDLE_PREFIXES {
-        if bundle_id.starts_with(prefix) {
-            return ProtectionLevel::Critical;
-        }
-    }
-
-    // 3. 检查是否为安全/MDM 应用
-    for (_, prefixes) in SECURITY_APP_RULES {
-        for prefix in *prefixes {
-            if bundle_id.starts_with(prefix) {
-                return ProtectionLevel::RequiresOfficialUninstaller;
-            }
-        }
-    }
-
-    // 4. 检查是否为数据保护应用
-    for prefix in DATA_PROTECTED_PREFIXES {
-        if bundle_id.starts_with(prefix) {
-            return ProtectionLevel::DataProtected;
-        }
-    }
-
-    ProtectionLevel::None
+    let critical = matches_any_prefix(bundle_id, CRITICAL_BUNDLE_PREFIXES);
+    let security = SECURITY_APP_RULES
+        .iter()
+        .any(|rule| matches_any_prefix(bundle_id, rule.1));
+    let uninstallable = matches_any_prefix(bundle_id, APPLE_UNINSTALLABLE_PREFIXES);
+    let data_protected = matches_any_prefix(bundle_id, DATA_PROTECTED_PREFIXES);
+    classify_bundle(critical, security, uninstallable, data_protected)
 }
 
 /// 获取安全/MDM 应用的厂商名称
 ///
 /// 返回厂商名称用于显示"请使用 XXX 官方卸载工具"提示。
+/// A-08：与保护判定共用 label_matches（统一小写 + 边界）。
 pub fn get_security_vendor(bundle_id: &str) -> Option<&'static str> {
-    for (vendor, prefixes) in SECURITY_APP_RULES {
-        for prefix in *prefixes {
-            if bundle_id.starts_with(prefix) {
-                return Some(vendor);
-            }
+    for rule in SECURITY_APP_RULES.iter() {
+        if matches_any_prefix(bundle_id, rule.1) {
+            return Some(rule.0);
         }
     }
     None
@@ -311,5 +333,90 @@ mod tests {
             check_bundle_protection("com.apple.iWork.Pages"),
             ProtectionLevel::None
         );
+    }
+
+    #[test]
+    fn label_matches_is_case_insensitive_and_boundary_aware() {
+        // A-08：统一小写 + 相等/`prefix.` 边界。反向验证：去掉 to_ascii_lowercase
+        // 或改回裸 starts_with，下面断言必红。
+        assert!(label_matches("com.apple.safari", "com.apple.Safari"));
+        assert!(label_matches("COM.APPLE.SAFARI", "com.apple.Safari"));
+        assert!(label_matches("com.apple.Safari.helper", "com.apple.Safari"));
+        assert!(label_matches("com.apple.dt.Xcode", "com.apple.dt.")); // 表项自带尾点
+        assert!(label_matches(
+            "com.cisco.anyconnect",
+            "com.cisco.anyconnect"
+        )); // 精确相等
+            // 边界：兄弟名不得被前缀误命中
+        assert!(!label_matches("com.apple.finderfake", "com.apple.finder"));
+        assert!(!label_matches(
+            "com.apple.FinalCutPro",
+            "com.apple.FinalCut"
+        ));
+        assert!(!label_matches(
+            "com.cisco.anyconnectX",
+            "com.cisco.anyconnect"
+        ));
+    }
+
+    #[test]
+    fn check_bundle_protection_case_and_boundary_reverse_cases() {
+        // A-08 反向用例（直接调生产 check_bundle_protection，改坏 label_matches 必红）：
+        // - `com.apple.safari` 全小写过去因大小写敏感绕过 Critical，现必须 Critical；
+        // - `com.apple.finderfake` 过去被裸前缀 `com.apple.finder` 误判 Critical，现必须 None。
+        assert_eq!(
+            check_bundle_protection("com.apple.safari"),
+            ProtectionLevel::Critical
+        );
+        assert_eq!(
+            check_bundle_protection("COM.APPLE.SAFARI"),
+            ProtectionLevel::Critical
+        );
+        assert_eq!(
+            check_bundle_protection("com.apple.Safari.evil"),
+            ProtectionLevel::Critical
+        );
+        assert_eq!(
+            check_bundle_protection("com.apple.finderfake"),
+            ProtectionLevel::None
+        );
+    }
+
+    #[test]
+    fn classify_bundle_priority_puts_critical_and_security_first() {
+        // A-08：Critical/Security 必须前置。反向验证：把 classify_bundle 里
+        // `uninstallable` 分支挪到 `critical` 之前（退回旧优先级），两条断言必红。
+        let cases = [
+            (false, false, false, false, ProtectionLevel::None),
+            (false, false, false, true, ProtectionLevel::DataProtected),
+            (false, false, true, true, ProtectionLevel::None), // 白名单仍覆盖数据保护
+            (true, false, true, false, ProtectionLevel::Critical), // 关键 > 白名单
+            (
+                false,
+                true,
+                true,
+                false,
+                ProtectionLevel::RequiresOfficialUninstaller,
+            ), // 安全 > 白名单
+            (true, true, true, true, ProtectionLevel::Critical), // 关键最高
+        ];
+        for (c, s, u, d, expected) in cases {
+            assert_eq!(
+                classify_bundle(c, s, u, d),
+                expected,
+                "critical={c} security={s} uninstallable={u} data_protected={d}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_security_vendor_is_case_insensitive() {
+        // A-08：get_security_vendor 与保护判定共用 label_matches。
+        assert_eq!(
+            get_security_vendor("COM.CROWDSTRIKE.FALCON"),
+            Some("CrowdStrike")
+        );
+        assert_eq!(get_security_vendor("Com.Jamf.Software"), Some("Jamf"));
+        assert_eq!(get_security_vendor("com.crowdstrikeX"), None); // 边界：不得越界命中
     }
 }

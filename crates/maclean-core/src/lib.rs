@@ -11,6 +11,7 @@
 //! 阶段 0（2026-10）从原单 crate 抽取，行为与抽取前逐行一致。
 
 pub mod app_protection;
+pub mod atomic_write;
 pub mod backup;
 pub mod config;
 pub mod design_tokens;
@@ -19,6 +20,7 @@ pub mod im_data;
 pub mod logger;
 pub mod ops;
 pub mod platform;
+pub mod provenance;
 pub mod rules;
 pub mod safety;
 pub mod scanner;

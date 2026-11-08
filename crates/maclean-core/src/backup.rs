@@ -39,6 +39,13 @@ pub struct BackupEntry {
     /// 只有走废纸篓/回收站、或删前备份过的数据才是 true。
     /// 永久删除的缓存一律 false —— 不撒谎是本模块的底线。
     pub restorable: bool,
+    /// 删除时记录在废纸篓里的**实际落点文件名**（B-04）。
+    ///
+    /// 空串 = 无法确认归属（Finder 重名改名、回收站无稳定路径等），
+    /// 还原时必须判 failed，绝不退回"按 basename 猜一个名字搬过去"。
+    /// `serde(default)` 兼容旧清单（缺少该字段的历史条目按不可确认处理）。
+    #[serde(default)]
+    pub trash_name: String,
 }
 
 /// 一次删除操作的完整清单
@@ -95,23 +102,53 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// 生成清单 id
+/// 用 `create_new(true)` 原子占位一个清单文件（B-05）
 ///
-/// 用时间戳 + 序号：同一秒内连续删两次不会互相覆盖（覆盖 = 丢清单）。
-fn make_id(now: u64) -> String {
-    let base = format!("{}", now);
-    let dir = backup_dir();
-    if !dir.join(format!("{}.json", base)).exists() {
-        return base;
-    }
-    for i in 1..1000 {
-        let candidate = format!("{}-{}", now, i);
-        if !dir.join(format!("{}.json", candidate)).exists() {
-            return candidate;
+/// 旧实现靠 `exists()` 判断再 `std::fs::write`（非 create_new）：两个并发删除
+/// 任务（定时 + 手动）同一秒会拿到同一个 id、互相覆盖丢清单。这里直接以目标
+/// 文件本身占位，冲突就换 id 重试；返回的 File 句柄交给调用方写入，全程只有
+/// 一个写者。同一 id 的 `.json` 与 `.pending.json` 视为互相冲突，避免两种清单撞名。
+fn claim_manifest_file(
+    dir: &std::path::Path,
+    now: u64,
+    pending: bool,
+) -> Option<(String, std::fs::File)> {
+    let ext = if pending { "pending.json" } else { "json" };
+    for i in 0..1000u32 {
+        let id = if i == 0 {
+            format!("{}", now)
+        } else {
+            format!("{}-{}", now, i)
+        };
+        let sibling = if pending {
+            dir.join(format!("{}.json", id))
+        } else {
+            dir.join(format!("{}.pending.json", id))
+        };
+        if sibling.exists() {
+            continue;
+        }
+        let path = dir.join(format!("{}.{}", id, ext));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => return Some((id, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
         }
     }
-    // 极端情况兜底：用 1000 次都撞上几乎不可能，落到这里也不该丢清单
-    format!("{}-{}", now, now_secs())
+    None
+}
+
+/// 把清单序列化并写入已占位的句柄（B-05）
+fn write_claimed_manifest(file: &mut std::fs::File, manifest: &BackupManifest) -> Option<()> {
+    use std::io::Write;
+    let s = serde_json::to_string_pretty(manifest).ok()?;
+    file.write_all(s.as_bytes()).ok()?;
+    file.flush().ok()?;
+    Some(())
 }
 
 /// 记录一次删除
@@ -128,26 +165,24 @@ pub fn record(entries: Vec<BackupEntry>) -> Option<String> {
         return None;
     }
     let now = now_secs();
-    let id = make_id(now);
+    // B-05：原子占位，冲突换 id 重试。
+    let Some((id, mut file)) = claim_manifest_file(&dir, now, false) else {
+        crate::logger::warn("备份清单 id 分配失败，本次删除不记录清单");
+        return None;
+    };
+    let path = dir.join(format!("{}.json", id));
     let manifest = BackupManifest {
         id: id.clone(),
         created_at: now,
         platform: std::env::consts::OS.to_string(),
         entries,
     };
-    let path = dir.join(format!("{}.json", id));
-    match serde_json::to_string_pretty(&manifest) {
-        Ok(s) => match std::fs::write(&path, s) {
-            Ok(_) => Some(id),
-            Err(e) => {
-                crate::logger::warn(&format!("备份清单写入失败，本次删除不记录: {}", e));
-                None
-            }
-        },
-        Err(e) => {
-            crate::logger::warn(&format!("备份清单序列化失败: {}", e));
-            None
-        }
+    if write_claimed_manifest(&mut file, &manifest).is_some() {
+        Some(id)
+    } else {
+        crate::logger::warn("备份清单写入失败，本次删除不记录");
+        let _ = std::fs::remove_file(&path);
+        None
     }
 }
 
@@ -168,26 +203,24 @@ pub fn record_pending(entries: Vec<BackupEntry>) -> Option<String> {
         return None;
     }
     let now = now_secs();
-    let id = make_id(now);
+    // B-05：pending 也走 create_new 原子占位，并同时检查 `.json` 兄弟文件。
+    let Some((id, mut file)) = claim_manifest_file(&dir, now, true) else {
+        crate::logger::warn("待删快照 id 分配失败，不记录快照");
+        return None;
+    };
+    let path = dir.join(format!("{}.pending.json", id));
     let manifest = BackupManifest {
         id: id.clone(),
         created_at: now,
         platform: std::env::consts::OS.to_string(),
         entries,
     };
-    let path = dir.join(format!("{}.pending.json", id));
-    match serde_json::to_string_pretty(&manifest) {
-        Ok(s) => match std::fs::write(&path, s) {
-            Ok(_) => Some(id),
-            Err(e) => {
-                crate::logger::warn(&format!("待删快照写入失败: {}", e));
-                None
-            }
-        },
-        Err(e) => {
-            crate::logger::warn(&format!("待删快照序列化失败: {}", e));
-            None
-        }
+    if write_claimed_manifest(&mut file, &manifest).is_some() {
+        Some(id)
+    } else {
+        crate::logger::warn("待删快照写入失败");
+        let _ = std::fs::remove_file(&path);
+        None
     }
 }
 
@@ -340,18 +373,14 @@ pub fn restore_plan(manifest: &BackupManifest, trash_dir: &str) -> RestoreReport
             report.not_restorable.push(e.path.clone());
             continue;
         }
-        // 废纸篓里的名字通常是原文件名；重名时 Finder 会加后缀，这里只认
-        // 最朴素的那一种，认不出就报 failed —— 宁可报"没找到"也不能猜。
-        let name = Path::new(&e.path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if name.is_empty() {
+        // B-04：只认「删除时写进清单的废纸篓实际落点」。没有记录就无法确认
+        // 归属（重名时 Finder 会加后缀），一律进 failed —— 绝不退回按 basename
+        // 猜名字，那会让两个不同目录的同名文件争抢同一个废纸篓条目。
+        if e.trash_name.trim().is_empty() {
             report.failed.push(e.path.clone());
             continue;
         }
         report.restored.push(e.path.clone());
-        let _ = (trash_dir, &name);
     }
     report
 }
@@ -362,10 +391,38 @@ fn sort_restore_order(mut paths: Vec<String>) -> Vec<String> {
     paths
 }
 
+/// B-04：按清单记录的 `trash_name` 从废纸篓搬回目标（不猜 basename）。
+///
+/// 目标父目录不存在、目标已存在、或落点名字含路径分隔符（防被篡改的清单
+/// 穿越）都判失败 —— 覆盖一个当前正在用的文件比不还原更糟。
+fn restore_from_trash(trash_dir: &str, trash_name: &str, target: &str) -> bool {
+    if trash_dir.is_empty() || trash_name.is_empty() {
+        return false;
+    }
+    if trash_name.contains('/')
+        || trash_name.contains('\\')
+        || trash_name == "."
+        || trash_name == ".."
+    {
+        return false;
+    }
+    let src = Path::new(trash_dir).join(trash_name);
+    let dst = Path::new(target);
+    if dst.exists() {
+        return false;
+    }
+    if let Some(parent) = dst.parent() {
+        if !parent.exists() {
+            return false;
+        }
+    }
+    std::fs::rename(src, dst).is_ok()
+}
+
 /// 执行还原（尽力而为）
 ///
-/// 只处理废纸篓里的项：目标父目录不存在就跳过（用户可能已经重装系统或
-/// 移动了目录），目标已存在也跳过 —— 覆盖一个当前正在用的文件比不还原更糟。
+/// 只处理废纸篓里的项，且按清单记录的落点取回（B-04）：目标父目录不存在
+/// 就跳过，目标已存在也跳过 —— 覆盖一个当前正在用的文件比不还原更糟。
 pub fn restore(id: &str, trash_dir: &str) -> RestoreReport {
     let Some(manifest) = load(id) else {
         return RestoreReport::default();
@@ -381,28 +438,47 @@ pub fn restore(id: &str, trash_dir: &str) -> RestoreReport {
     let pending = sort_restore_order(plan.restored);
 
     for target in pending {
-        let name = Path::new(&target)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let src = Path::new(trash_dir).join(&name);
-        let dst = Path::new(&target);
-        if dst.exists() {
+        // B-04：按记录取回，而不是用 target 的 basename 重新猜。
+        let trash_name = manifest
+            .entries
+            .iter()
+            .find(|e| e.path == target)
+            .map(|e| e.trash_name.as_str())
+            .unwrap_or("");
+        if restore_from_trash(trash_dir, trash_name, &target) {
+            report.restored.push(target);
+        } else {
             report.failed.push(target);
-            continue;
-        }
-        if let Some(parent) = dst.parent() {
-            if !parent.exists() {
-                report.failed.push(target);
-                continue;
-            }
-        }
-        match std::fs::rename(&src, dst) {
-            Ok(_) => report.restored.push(target),
-            Err(_) => report.failed.push(target),
         }
     }
     report
+}
+
+/// B-04：删除前声明废纸篓落点名字。名字已被占用（Finder 会重名改名）或路径
+/// 无文件名时无法确认归属 → 返回空串，还原时判 failed。
+pub fn claim_trash_name(trash_dir: &str, original: &str) -> String {
+    if trash_dir.is_empty() {
+        return String::new();
+    }
+    let Some(name) = Path::new(original).file_name() else {
+        return String::new();
+    };
+    let name = name.to_string_lossy().to_string();
+    if name.is_empty() || Path::new(trash_dir).join(&name).exists() {
+        return String::new();
+    }
+    name
+}
+
+/// B-04：删除后复核声明的落点确实出现在废纸篓里；复核不过则无法确认归属。
+pub fn confirm_trash_name(trash_dir: &str, claimed: &str) -> String {
+    if trash_dir.is_empty() || claimed.is_empty() {
+        return String::new();
+    }
+    if !Path::new(trash_dir).join(claimed).exists() {
+        return String::new();
+    }
+    claimed.to_string()
 }
 
 #[cfg(test)]
@@ -410,11 +486,17 @@ mod tests {
     use super::*;
 
     fn entry(path: &str, restorable: bool) -> BackupEntry {
+        // 默认按 basename 记录落点，模拟删除时成功确认归属的情形。
+        let trash_name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         BackupEntry {
             path: path.to_string(),
             size_bytes: 100,
             category: "test".to_string(),
             restorable,
+            trash_name,
         }
     }
 
@@ -521,6 +603,29 @@ mod tests {
         // 路径穿越防护：含分隔符的 id 直接忽略
         finalize_pending("../../etc/passwd");
 
+        // B-05：并发删除（定时 + 手动）不得互相覆盖清单。
+        // 反向验证：把 claim_manifest_file 改回 exists() + std::fs::write，
+        // 下面断言会因同一秒拿到重复 id 而变红。
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    record(vec![entry(&format!("/Users/u/Caches/c{i}.bin"), true)])
+                })
+            })
+            .collect();
+        let ids: Vec<String> = handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 8, "并发 record 有失败");
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 8, "并发删除拿到重复 id，清单互相覆盖");
+        for id in &ids {
+            assert!(load(id).is_some(), "清单 {id} 丢失");
+        }
+
         set_test_backup_dir(std::path::PathBuf::new());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -601,5 +706,94 @@ mod tests {
             src.contains("    sort_newest_first(&mut out);"),
             "list() 不再经过 sort_newest_first"
         );
+    }
+
+    // ---------- B-04：按记录的废纸篓落点还原 ----------
+
+    #[test]
+    fn b04_two_same_named_files_restore_to_their_own_directories() {
+        // 反向验证：把 restore_from_trash 改回用 target 的 basename，或把
+        // restore_plan 的 trash_name 校验去掉，下面断言必红。
+        let tmp = std::env::temp_dir().join(format!("maclean_b04_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let trash = tmp.join("Trash");
+        let d1 = tmp.join("dir1");
+        let d2 = tmp.join("dir2");
+        for d in [&trash, &d1, &d2] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(trash.join("f.txt"), b"from dir1").unwrap();
+        std::fs::write(trash.join("f (1).txt"), b"from dir2").unwrap();
+
+        let mk = |dir: &std::path::Path, name: &str| BackupEntry {
+            path: dir.join("f.txt").to_string_lossy().to_string(),
+            size_bytes: 9,
+            category: "t".to_string(),
+            restorable: true,
+            trash_name: name.to_string(),
+        };
+        let m = BackupManifest {
+            id: "x".to_string(),
+            created_at: 0,
+            platform: "macos".to_string(),
+            entries: vec![mk(&d1, "f.txt"), mk(&d2, "f (1).txt")],
+        };
+        let trash_s = trash.to_string_lossy().to_string();
+        let plan = restore_plan(&m, &trash_s);
+        assert!(plan.failed.is_empty(), "有记录的两项不该进 failed");
+        assert_eq!(plan.restored.len(), 2);
+        for e in &m.entries {
+            assert!(
+                restore_from_trash(&trash_s, &e.trash_name, &e.path),
+                "{} 按记录搬回失败",
+                e.path
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(d1.join("f.txt")).unwrap(),
+            "from dir1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d2.join("f.txt")).unwrap(),
+            "from dir2"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn b04_missing_trash_name_is_failed_not_guessed() {
+        let m = BackupManifest {
+            id: "x".to_string(),
+            created_at: 0,
+            platform: "macos".to_string(),
+            entries: vec![BackupEntry {
+                path: "/a/b/f.txt".to_string(),
+                size_bytes: 1,
+                category: "t".to_string(),
+                restorable: true,
+                trash_name: String::new(),
+            }],
+        };
+        let plan = restore_plan(&m, "/tmp/Trash");
+        assert!(plan.restored.is_empty(), "无归属记录不得猜名字还原");
+        assert_eq!(plan.failed, vec!["/a/b/f.txt".to_string()]);
+        assert!(!restore_from_trash("/tmp/Trash", "", "/a/b/f.txt"));
+    }
+
+    #[test]
+    fn b04_claim_and_confirm_trash_name() {
+        let tmp = std::env::temp_dir().join(format!("maclean_b04c_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let trash = tmp.join("Trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let s = trash.to_string_lossy().to_string();
+        assert_eq!(claim_trash_name(&s, "/a/b/f.txt"), "f.txt");
+        assert_eq!(confirm_trash_name(&s, "f.txt"), ""); // 删除前不存在 → 未落盘
+        std::fs::write(trash.join("f.txt"), b"x").unwrap();
+        // 名字已被占用 → 无法确认归属（Finder 会改名）
+        assert_eq!(claim_trash_name(&s, "/a/b/f.txt"), "");
+        assert_eq!(confirm_trash_name(&s, "f.txt"), "f.txt");
+        assert_eq!(confirm_trash_name(&s, "missing.txt"), "");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

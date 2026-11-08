@@ -21,24 +21,9 @@ const RESTORE_POINT_INTERVAL_SECS: u64 = 20 * 60 * 60;
 //  备份清单
 // =========================================================================
 
-/// 备份清单条目（一次注册表备份的记录）
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BackupEntry {
-    /// 时间戳字符串（yyyy-MM-dd HH:mm:ss，用于显示）
-    pub timestamp: String,
-    /// 备份来源（如 win_disable_telemetry）
-    pub source: String,
-    /// .reg 备份文件完整路径
-    pub reg_file: String,
-    /// 原始注册表键路径（如 HKLM\SOFTWARE\...）
-    pub reg_key: String,
-}
-
-/// 备份清单
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct BackupManifest {
-    pub entries: Vec<BackupEntry>,
-}
+// F-09 / B-06：清单结构定义移到无 cfg 的 reg_safety 模块，便于本机行为测试；
+// 这里保留原公开名字，外部引用不变。
+pub use super::reg_safety::{RegBackupEntry as BackupEntry, RegBackupManifest as BackupManifest};
 
 /// 备份根目录：%APPDATA%\maclean\backup\
 pub fn backup_dir() -> PathBuf {
@@ -55,28 +40,57 @@ fn manifest_path() -> PathBuf {
     backup_dir().join("manifest.json")
 }
 
-/// 读取备份清单
-pub fn load_manifest() -> BackupManifest {
+/// 读取备份清单（F-09）
+///
+/// 损坏文件返回 Err，绝不 `unwrap_or_default` 静默清空 —— manifest.json 位于
+/// 用户可写的 %APPDATA%，解析失败被当空清单会让所有备份条目凭空消失。
+pub fn load_manifest() -> Result<BackupManifest, String> {
     let path = manifest_path();
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        serde_json::from_str(&content).unwrap_or_default()
-    } else {
-        BackupManifest::default()
+    match std::fs::read_to_string(&path) {
+        Ok(content) => super::reg_safety::parse_reg_manifest(&content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BackupManifest::default()),
+        Err(e) => Err(format!("读取备份清单失败: {}", e)),
     }
 }
 
-/// 保存备份清单
+/// 保存备份清单（F-09）：复用共用原子写，避免半截 JSON 与并发交叉写。
 fn save_manifest(manifest: &BackupManifest) {
     let path = manifest_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    match serde_json::to_string_pretty(manifest) {
+        Ok(json) => {
+            if let Err(e) = crate::atomic_write::atomic_write(&path, json.as_bytes()) {
+                crate::logger::error(&format!("保存备份清单失败: {}", e));
+            }
+        }
+        Err(e) => crate::logger::error(&format!("序列化备份清单失败: {}", e)),
     }
-    if let Ok(json) = serde_json::to_string_pretty(manifest) {
-        let _ = std::fs::write(&path, json);
+}
+
+/// F-09：跨进程串行化清单读改写（create_new 占位锁，争用超时则尽力而为）。
+fn with_manifest_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _ = std::fs::create_dir_all(backup_dir());
+    let lock = backup_dir().join("manifest.lock");
+    for _ in 0..50 {
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .is_ok()
+        {
+            let out = f();
+            let _ = std::fs::remove_file(&lock);
+            return out;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    crate::logger::warn("备份清单进程锁争用超时，仍按原子写尽力而为");
+    f()
 }
 
 /// 当前时间戳字符串（yyyy-MM-dd HH:mm:ss）
+///
+/// F-09：powershell 失败或输出为空时，用 SystemTime 回退且**永不返回空串**，
+/// 否则文件名会退化成 `_<source>_<key>.reg` 被 `reg export /y` 覆盖旧备份。
 fn now_timestamp() -> String {
     // 用 PowerShell 获取本地时间格式化（避免引入 chrono 依赖）
     let output = Command::new("powershell")
@@ -88,8 +102,15 @@ fn now_timestamp() -> String {
         ])
         .output();
     match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => String::new(),
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() {
+                super::reg_safety::fallback_file_stamp()
+            } else {
+                s
+            }
+        }
+        _ => super::reg_safety::fallback_file_stamp(),
     }
 }
 
@@ -198,7 +219,15 @@ pub fn backup_registry_key(key_path: &str, source: &str) -> Option<String> {
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '_')
         .collect();
-    let file_name = format!("{}_{}_{}.reg", file_timestamp(), source, key_short);
+    let base = format!("{}_{}_{}", file_timestamp(), source, key_short);
+    // F-09：文件名唯一化，绝不覆盖已存在的 .reg 备份（即使时间戳退化）。
+    let mut file_name = format!("{}.reg", base);
+    for i in 1..1000u32 {
+        if !dir.join(&file_name).exists() {
+            break;
+        }
+        file_name = format!("{}_{}.reg", base, i);
+    }
     let file_path = dir.join(&file_name);
 
     let output = Command::new("reg")
@@ -208,15 +237,28 @@ pub fn backup_registry_key(key_path: &str, source: &str) -> Option<String> {
     match output {
         Ok(o) if o.status.success() => {
             let path_str = file_path.to_string_lossy().to_string();
-            // 追加到清单
-            let mut manifest = load_manifest();
-            manifest.entries.push(BackupEntry {
-                timestamp: now_timestamp(),
-                source: source.to_string(),
-                reg_file: path_str.clone(),
-                reg_key: key_path.to_string(),
+            let stamp = now_timestamp();
+            // F-09：读改写串行化；损坏清单绝不能被当成空清单继续追加。
+            let ok = with_manifest_lock(|| {
+                let mut manifest = match load_manifest() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        crate::logger::error(&format!("{}，拒绝追加备份条目", e));
+                        return false;
+                    }
+                };
+                manifest.entries.push(BackupEntry {
+                    timestamp: stamp.clone(),
+                    source: source.to_string(),
+                    reg_file: path_str.clone(),
+                    reg_key: key_path.to_string(),
+                });
+                save_manifest(&manifest);
+                true
             });
-            save_manifest(&manifest);
+            if !ok {
+                return None;
+            }
             crate::logger::info(&format!("注册表已备份: {} -> {}", key_path, file_name));
             Some(path_str)
         }
@@ -236,19 +278,21 @@ pub fn backup_registry_key(key_path: &str, source: &str) -> Option<String> {
 ///
 /// 返回 (备份时间, 来源, 备份键数)，无备份返回 None
 pub fn last_backup_summary() -> Option<(String, String, usize)> {
-    let manifest = load_manifest();
+    // F-09：清单损坏时返回 None，不按空清单静默处理。
+    let manifest = load_manifest().ok()?;
     if manifest.entries.is_empty() {
         return None;
     }
-    // 按时间戳取最后一批（同一 source + 相邻时间视为一批，简化为取最后一个 source 的所有条目）
-    let last_source = manifest.entries.last()?.source.clone();
-    let last_time = manifest.entries.last()?.timestamp.clone();
-    let count = manifest
+    // B-06：按 (timestamp, source) 分组，只统计最后一批的数量。
+    let keys: Vec<(String, String)> = manifest
         .entries
         .iter()
-        .filter(|e| e.source == last_source)
-        .count();
-    Some((last_time, last_source, count))
+        .map(|e| (e.timestamp.clone(), e.source.clone()))
+        .collect();
+    let batch = super::reg_safety::last_backup_batch(&keys);
+    let last = *batch.last()?;
+    let e = &manifest.entries[last];
+    Some((e.timestamp.clone(), e.source.clone(), batch.len()))
 }
 
 /// 还原上次修改
@@ -264,17 +308,28 @@ pub fn last_backup_summary() -> Option<(String, String, usize)> {
 ///
 /// 返回 (success, message)
 pub fn restore_last_backup() -> (bool, String) {
-    let manifest = load_manifest();
+    let manifest = match load_manifest() {
+        Ok(m) => m,
+        // F-09：清单损坏时如实报错，绝不按空清单静默"无备份/还原成功"。
+        Err(e) => return (false, e),
+    };
     if manifest.entries.is_empty() {
         return (false, "none".to_string());
     }
 
-    let last_source = manifest.entries.last().map(|e| e.source.clone()).unwrap();
-    let batch: Vec<&BackupEntry> = manifest
+    // B-06：只取最后一批（同 timestamp + source），不再把历史上所有同
+    // source 的 .reg 全 import —— 那会把更早的旧值一起写回。
+    let keys: Vec<(String, String)> = manifest
         .entries
         .iter()
-        .filter(|e| e.source == last_source)
+        .map(|e| (e.timestamp.clone(), e.source.clone()))
         .collect();
+    let batch_idx = super::reg_safety::last_backup_batch(&keys);
+    let Some(&last) = batch_idx.last() else {
+        return (false, "none".to_string());
+    };
+    let last_source = manifest.entries[last].source.clone();
+    let batch: Vec<&BackupEntry> = batch_idx.iter().map(|&i| &manifest.entries[i]).collect();
 
     let registry_dir = registry_backup_dir();
     // canonicalize 一次作为比较基准；取不到就直接放弃本次还原，
@@ -321,8 +376,12 @@ pub fn restore_last_backup() -> (bool, String) {
             continue;
         }
 
+        // B-08：canonicalize / 目录内判定 / 内容校验全部基于 canonical_file，
+        // 执行 reg import 也必须用同一个路径，不能用 manifest 里的原始字符串
+        // （那会绕过所有校验，指向任意文件）。
+        let canonical_str = canonical_file.to_string_lossy().to_string();
         let output = Command::new("reg")
-            .args(["import", &entry.reg_file])
+            .args(["import", &canonical_str])
             .output();
         match output {
             Ok(o) if o.status.success() => success_count += 1,

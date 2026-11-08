@@ -23,6 +23,10 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# A-09：home 黑名单需要做 Unicode NFC 归一化后再比较。macOS APFS 上
+# 文件系统常用 NFD（分解），而 $HOME 环境变量可能是 NFC（合成），
+# 直接按字节比较会让 `~/Library/Mail` 的保护整体失效。
+unicode-normalization = "0.1"
 
 # macOS 进程内「移入废纸篓」（NSFileManager / NSWorkspace），替代旧的
 # osascript 让 Finder 跨进程代删——后者受 TCC 自动化限制、授权回调不稳，

@@ -14,15 +14,68 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+// C-12/F-03 · 统一的带超时 + 退出码检查的命令执行器（见 io_pool.rs）。
+use super::io_pool::{command_output_checked, CommandOutcome};
+// D-01/F-01 · 残留数据结构刻意放在无 cfg 的 residual_match，这里 pub use 出去，
+// 保持 scanner::windows_apps::UninstallResidual 等既有公开路径不变（ops 侧在用）。
 use super::residual_match::{
-    display_name_variants, is_deletable_fs_path, is_deletable_reg_key_basic, is_residual_dir,
-    is_residual_reg_key,
+    bloatware_fuzzy_matches, clean_selected_residuals_with, cleaned_path_value,
+    decode_console_output, dedup_indices_by_app_id, derive_app_name_from_path,
+    display_name_variants, install_dir_version_token, is_deletable_fs_path,
+    is_deletable_reg_key_basic, is_residual_dir, is_residual_reg_key, parse_reg_line,
+    version_scoped_subkey, ResidualAction, MIN_MATCH_LEN,
+};
+pub use super::residual_match::{
+    EnvVarResidual, FilesystemResidual, RegistryResidual, UninstallResidual,
 };
 // 保护分级已搬到 win_protection（无 cfg，开发机可测），这里只 re-export 使用。
 // 详见 win_protection.rs 顶部注释：判定逻辑放进 cfg(windows) 模块会导致本机 0 覆盖。
 use super::win_protection::{check_protection, WinProtectionLevel, WindowsAppInfo};
-use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use super::{
+    dir_size, finalize_scan_result, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner,
+};
+
+/// C-12/F-03 · 查询类命令超时（reg / powershell）。
+const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+/// C-12 · 卸载/写入类命令超时：卸载器可能较慢，但不能无限期阻塞。
+const ACTION_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// C-12/F-03 · 带超时、退出码检查与非 UTF-8 输出保留的命令执行。
+/// 失败（非零退出）、未启动、超时分别记日志，均返回 None，调用方据此跳过，
+/// 不再把「命令失败」和「确实没有结果」混为一谈。
+fn checked_stdout(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    match command_output_checked(program, args, timeout) {
+        CommandOutcome::Success(out) => Some(decode_console_output(&out.stdout)),
+        CommandOutcome::Failed(out) => {
+            let detail = decode_console_output(&out.stderr);
+            crate::logger::warn(&format!("{} 命令执行失败: {}", program, detail.trim()));
+            None
+        }
+        CommandOutcome::SpawnError(e) => {
+            crate::logger::warn(&format!("{} 命令无法启动: {}", program, e));
+            None
+        }
+        CommandOutcome::Timeout => {
+            crate::logger::warn(&format!("{} 命令超时，跳过本次查询", program));
+            None
+        }
+    }
+}
+
+/// C-12 · 写入/删除类命令：返回 (是否成功, 失败详情)。
+fn checked_run(program: &str, args: &[&str], timeout: Duration) -> (bool, String) {
+    match command_output_checked(program, args, timeout) {
+        CommandOutcome::Success(_) => (true, String::new()),
+        CommandOutcome::Failed(out) => {
+            let detail = decode_console_output(&out.stderr);
+            (false, format!("{} 失败: {}", program, detail.trim()))
+        }
+        CommandOutcome::SpawnError(e) => (false, format!("{} 无法启动: {}", program, e)),
+        CommandOutcome::Timeout => (false, format!("{} 超时", program)),
+    }
+}
 
 // =========================================================================
 //  UWP 预装应用数据库（bloatware 列表）
@@ -128,7 +181,9 @@ mod recommend_serde {
             "cacheonly" | "cache_only" | "cache" => Recommend::CacheOnly,
             "caution" => Recommend::Caution,
             "advanced" => Recommend::Advanced,
-            _ => Recommend::Safe,
+            // F-04 · 未知等级不再 fail-open 成 Safe（默认勾选档），
+            // 收敛为最保守的 Advanced，避免写错等级就变成默认勾选。
+            _ => Recommend::Advanced,
         })
     }
 }
@@ -158,6 +213,22 @@ fn builtin_entries_owned() -> Vec<BloatwareEntryOwned> {
         .collect()
 }
 
+/// F-04 · 按 app_id 去重（忽略大小写，保留首次出现）并校验唯一性。
+/// 内置 DB 里 Microsoft.BingWeather / WindowsSoundRecorder 各出现两次，
+/// 不去重会让同一应用匹配到两条推荐等级不同的条目。
+fn dedup_bloatware(entries: Vec<BloatwareEntryOwned>, source: &str) -> Vec<BloatwareEntryOwned> {
+    let ids: Vec<String> = entries.iter().map(|e| e.app_id.clone()).collect();
+    let keep = dedup_indices_by_app_id(&ids);
+    if keep.len() != entries.len() {
+        crate::logger::warn(&format!(
+            "{} 存在 {} 个重复 app_id，已按首次出现去重",
+            source,
+            entries.len() - keep.len()
+        ));
+    }
+    keep.into_iter().map(|i| entries[i].clone()).collect()
+}
+
 /// 加载 bloatware 条目（用户 apps.json 优先，内置 DB 兜底）
 fn load_bloatware_entries() -> Vec<BloatwareEntryOwned> {
     let user_path = crate::config::apps_json_path();
@@ -169,7 +240,7 @@ fn load_bloatware_entries() -> Vec<BloatwareEntryOwned> {
                     user_path.display(),
                     cfg.apps.len()
                 ));
-                return cfg.apps;
+                return dedup_bloatware(cfg.apps, "用户 apps.json");
             }
             Ok(_) => {
                 crate::logger::error("用户 apps.json 为空，回退内置数据库");
@@ -179,7 +250,7 @@ fn load_bloatware_entries() -> Vec<BloatwareEntryOwned> {
             }
         }
     }
-    builtin_entries_owned()
+    dedup_bloatware(builtin_entries_owned(), "内置 bloatware DB")
 }
 
 /// 全局 bloatware 数据库（启动时加载一次）
@@ -906,14 +977,16 @@ pub const BLOATWARE_DB: &[BloatwareEntry] = &[
 //  磁盘扫描配置
 //
 //  默认只扫描 C 盘（大部分应用安装在 C 盘）。
-//  用户可通过 set_scan_all_disks(true) 开启扫描全部磁盘。
+//  D-12 · 用户可通过 set_scan_all_disks(true) 或环境变量
+//  MACLEAN_SCAN_ALL_DISKS=1 开启扫描全部磁盘；后者让 CLI/UI 无需改代码即可
+//  接线，避免 SCAN_ALL_DISKS 恒 false、D–J 盘分支永不生效的死配置。
 //  注册表扫描始终覆盖所有盘符的应用（UninstallString 含完整路径），
 //  此配置仅影响 Program Files 直接目录扫描。
 // =========================================================================
 
 static SCAN_ALL_DISKS: AtomicBool = AtomicBool::new(false);
 
-/// 设置是否扫描全部磁盘
+/// 设置是否扫描全部磁盘（程序内开关）
 pub fn set_scan_all_disks(enabled: bool) {
     SCAN_ALL_DISKS.store(enabled, Ordering::Relaxed);
     crate::logger::info(&format!(
@@ -922,9 +995,17 @@ pub fn set_scan_all_disks(enabled: bool) {
     ));
 }
 
-/// 获取当前磁盘扫描配置
+/// 获取当前磁盘扫描配置（外部开关经环境变量生效）
 pub fn should_scan_all_disks() -> bool {
-    SCAN_ALL_DISKS.load(Ordering::Relaxed)
+    if SCAN_ALL_DISKS.load(Ordering::Relaxed) {
+        return true;
+    }
+    std::env::var("MACLEAN_SCAN_ALL_DISKS")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 /// 列出系统可用的磁盘盘符
@@ -1057,19 +1138,18 @@ fn is_windows_system_name(name: &str) -> bool {
 /// 1. 精确匹配 app_id（UWP 的 Name 字段即包名，如 Microsoft.BingWeather）
 /// 2. 精确匹配 app_id 与 PackageFullName 的 Name 段（第一个 '_' 之前）
 /// 3. 精确匹配 friendly_name（应用显示名，主要命中 Win32 DisplayName）
-/// 4. 模糊匹配：应用名/包全名包含 app_id 或 friendly_name
+/// 4. 模糊匹配：**仅对 UWP 包全名**，且 app_id / friendly_name 须达 MIN_MATCH_LEN
 ///
-/// 数据源为动态 bloatware_db()（用户 apps.json 可覆盖内置 DB）。
-/// 返回匹配的 BloatwareEntryOwned 引用，未匹配返回 None。
-fn find_bloatware_match(app: &WindowsAppInfo) -> Option<&'static BloatwareEntryOwned> {
-    let name_lower = app.name.to_lowercase();
-    let key_lower = app.key_name.to_lowercase();
+/// A-11 · 返回 (条目, 是否精确匹配)。1-3 级才算精确，模糊档不参与
+/// selected_by_default —— 否则 "Twitter" / "Weather" 这类短 app_id
+/// 会把普通应用误配成预装应用并默认勾选。
+fn find_bloatware_match(app: &WindowsAppInfo) -> Option<(&'static BloatwareEntryOwned, bool)> {
     let db = bloatware_db();
 
     // 1. 精确匹配 app_id（UWP 扫描时 name 字段存的就是包名）
     for entry in db {
         if entry.app_id.eq_ignore_ascii_case(&app.name) {
-            return Some(entry);
+            return Some((entry, true));
         }
     }
 
@@ -1079,7 +1159,7 @@ fn find_bloatware_match(app: &WindowsAppInfo) -> Option<&'static BloatwareEntryO
         if !pkg_name.is_empty() {
             for entry in db {
                 if entry.app_id.eq_ignore_ascii_case(pkg_name) {
-                    return Some(entry);
+                    return Some((entry, true));
                 }
             }
         }
@@ -1088,22 +1168,22 @@ fn find_bloatware_match(app: &WindowsAppInfo) -> Option<&'static BloatwareEntryO
     // 3. 精确匹配 friendly_name（应用显示名）
     for entry in db {
         if entry.friendly_name.eq_ignore_ascii_case(&app.name) {
-            return Some(entry);
+            return Some((entry, true));
         }
     }
 
-    // 4. 模糊匹配：应用名/包全名包含 app_id 或 friendly_name（处理版本后缀等变体）
-    for entry in db {
-        let app_id_lower = entry.app_id.to_lowercase();
-        let friendly_lower = entry.friendly_name.to_lowercase();
-
-        // 应用名包含 app_id（如 "Microsoft.BingWeather_8wekyb3d8bbwe"）
-        if key_lower.contains(&app_id_lower) {
-            return Some(entry);
-        }
-        // 应用名包含 friendly_name（如 "Microsoft Copilot" 匹配 "Microsoft Copilot"）
-        if name_lower.contains(&friendly_lower) {
-            return Some(entry);
+    // 4. 模糊档：只认 UWP 包全名（is_uwp=true），且名字须达 MIN_MATCH_LEN。
+    // Win32 注册表键名一概不走模糊档，避免短 app_id 误配普通应用。
+    if app.is_uwp {
+        let full_name_lower = app.key_name.to_lowercase();
+        for entry in db {
+            if bloatware_fuzzy_matches(&entry.app_id, &app.key_name, true) {
+                return Some((entry, false));
+            }
+            let friendly_lower = entry.friendly_name.to_lowercase();
+            if friendly_lower.len() >= MIN_MATCH_LEN && full_name_lower.contains(&friendly_lower) {
+                return Some((entry, false));
+            }
         }
     }
 
@@ -1127,24 +1207,24 @@ fn scan_registry_uninstall() -> Vec<WindowsAppInfo> {
     ];
 
     for reg_path in &reg_paths {
-        // 列出所有子键
-        let output = Command::new("reg").args(["query", reg_path]).output();
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines() {
-                let line = line.trim();
-                if !line.starts_with("HKEY") {
-                    continue;
-                }
-                // 提取键名（最后一段）
-                let key_name = line.rsplit('\\').next().unwrap_or("").to_string();
-                if key_name.is_empty() {
-                    continue;
-                }
-                // 查询该键的值
-                if let Some(app) = query_app_info(reg_path, &key_name) {
-                    apps.push(app);
-                }
+        // C-12/F-03 · 统一命令执行器：超时 + 退出码检查 + 非 UTF-8 输出保留。
+        // 旧实现只判 Ok(out)，命令失败（非零退出）会被当成「没有应用」。
+        let Some(stdout) = checked_stdout("reg", &["query", *reg_path], QUERY_TIMEOUT) else {
+            continue;
+        };
+        for line in stdout.lines() {
+            let line = line.trim();
+            if !line.starts_with("HKEY") {
+                continue;
+            }
+            // 提取键名（最后一段）
+            let key_name = line.rsplit('\\').next().unwrap_or("").to_string();
+            if key_name.is_empty() {
+                continue;
+            }
+            // 查询该键的值
+            if let Some(app) = query_app_info(reg_path, &key_name) {
+                apps.push(app);
             }
         }
     }
@@ -1155,9 +1235,9 @@ fn scan_registry_uninstall() -> Vec<WindowsAppInfo> {
 /// 查询单个注册表键的应用信息
 fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
     let full_path = format!("{}\\{}", parent_path, key_name);
-    let output = Command::new("reg").args(["query", &full_path]).output();
-    let out = output.ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // C-12/F-03 · 超时 + 退出码检查 + 非 UTF-8 输出保留；失败/超时返回 None，
+    // 调用方据此跳过该键，不再把「命令失败」误当成「应用不存在」。
+    let stdout = checked_stdout("reg", &["query", full_path.as_str()], QUERY_TIMEOUT)?;
 
     let mut name = None;
     let mut install_location = None;
@@ -1209,94 +1289,59 @@ fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
     })
 }
 
-/// 解析 reg query 输出行
-///
-/// 格式: "    DisplayName    REG_SZ    My Application"
-/// 或:   "    EstimatedSize    REG_DWORD    0x1234"
-fn parse_reg_line(line: &str, field: &str) -> Option<String> {
-    if !line.to_lowercase().contains(&field.to_lowercase()) {
-        return None;
-    }
-    // 分割: 字段名 | 类型 | 值
-    let parts: Vec<&str> = line.splitn(3, "    ").collect();
-    if parts.len() < 3 {
-        // 尝试用多个空格分割
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
-            return None;
-        }
-        // 找到 REG_ 类型后的内容
-        let type_idx = parts.iter().position(|p| p.starts_with("REG_"))?;
-        let value = parts[type_idx + 1..].join(" ");
-        // REG_DWORD 的值是 0x 开头的十六进制
-        if parts[type_idx].contains("DWORD") {
-            return Some(value);
-        }
-        return Some(value);
-    }
-    let value = parts[2].trim().to_string();
-    if value.is_empty() {
-        return None;
-    }
-    // REG_DWORD: 0x1234 -> 转十进制
-    if parts[1].contains("DWORD") && value.starts_with("0x") {
-        if let Ok(n) = u64::from_str_radix(&value[2..], 16) {
-            return Some(n.to_string());
-        }
-    }
-    Some(value)
-}
+/// F-02/C-12 · 解析 reg query 输出行的纯函数来自 `residual_match`（无 cfg，
+/// 开发机可测）：精确比较第一个 token 字段名、DWORD 的 0x 值转十进制，
+/// 不再用 contains 把 QuietUninstallString 吞进 UninstallString 分支。
 
 /// 扫描 UWP/Store 应用（通过 PowerShell）
 fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
     let ps_cmd =
         "Get-AppxPackage | Select-Object Name, PackageFullName, InstallLocation | ConvertTo-Json";
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
-        .output();
     let mut apps = Vec::new();
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        // 解析 JSON（简化处理，PowerShell 可能返回数组或单对象）
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            let arr = if json.is_array() {
-                json.as_array().unwrap().clone()
-            } else {
-                vec![json]
-            };
-            for item in arr {
-                let name = item
-                    .get("Name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let full_name = item
-                    .get("PackageFullName")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let install = item
-                    .get("InstallLocation")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if name.is_empty() {
-                    continue;
-                }
-                apps.push(WindowsAppInfo {
-                    name,
-                    install_location: install,
-                    uninstall_string: Some(format!("Remove-AppxPackage -Package {}", full_name)),
-                    quiet_uninstall_string: Some(format!(
-                        "Remove-AppxPackage -Package {}",
-                        full_name
-                    )),
-                    estimated_size: None,
-                    publisher: None,
-                    key_name: full_name,
-                    is_uwp: true,
-                    system_component: false,
-                });
+    // C-12/F-03 · 超时 + 退出码检查 + 非 UTF-8 输出保留；中文包名不再被压成 U+FFFD。
+    let Some(stdout) = checked_stdout(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+        QUERY_TIMEOUT,
+    ) else {
+        return apps;
+    };
+    // 解析 JSON（简化处理，PowerShell 可能返回数组或单对象）
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        let arr = if json.is_array() {
+            json.as_array().unwrap().clone()
+        } else {
+            vec![json]
+        };
+        for item in arr {
+            let name = item
+                .get("Name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let full_name = item
+                .get("PackageFullName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let install = item
+                .get("InstallLocation")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if name.is_empty() {
+                continue;
             }
+            apps.push(WindowsAppInfo {
+                name,
+                install_location: install,
+                uninstall_string: Some(format!("Remove-AppxPackage -Package {}", full_name)),
+                quiet_uninstall_string: Some(format!("Remove-AppxPackage -Package {}", full_name)),
+                estimated_size: None,
+                publisher: None,
+                key_name: full_name,
+                is_uwp: true,
+                system_component: false,
+            });
         }
     }
     apps
@@ -1327,10 +1372,13 @@ fn scan_program_files_dirs() -> Vec<WindowsAppInfo> {
         PathBuf::from(r"C:\Program Files (x86)"),
     ];
 
-    // 开启全盘扫描后，检测其他盘符（D:、E: 等）的 Program Files 目录
+    // 开启全盘扫描后，按实际存在的盘符枚举（D-12 · list_available_disks 接线）
     if should_scan_all_disks() {
         crate::logger::info("扫描全部磁盘的 Program Files 目录");
-        for drive in ['D', 'E', 'F', 'G', 'H', 'I', 'J'] {
+        for drive in list_available_disks() {
+            if drive == 'C' {
+                continue; // C 盘已在默认搜索目录中
+            }
             let pf = PathBuf::from(format!("{}:\\Program Files", drive));
             let pf_x86 = PathBuf::from(format!("{}:\\Program Files (x86)", drive));
             if pf.is_dir() {
@@ -1803,7 +1851,11 @@ fn collect_program_files_dirs() -> Vec<PathBuf> {
         PathBuf::from(r"C:\Program Files (x86)"),
     ];
     if should_scan_all_disks() {
-        for drive in ['D', 'E', 'F', 'G', 'H', 'I', 'J'] {
+        // D-12 · 与 scan_program_files_dirs 同口径，按实际存在盘符枚举
+        for drive in list_available_disks() {
+            if drive == 'C' {
+                continue;
+            }
             let pf = PathBuf::from(format!("{}:\\Program Files", drive));
             let pf_x86 = PathBuf::from(format!("{}:\\Program Files (x86)", drive));
             if pf.is_dir() {
@@ -1820,6 +1872,11 @@ fn collect_program_files_dirs() -> Vec<PathBuf> {
 impl Scanner for WindowsAppCacheScanner {
     fn scan(&self) -> ScanResult {
         let start = std::time::Instant::now();
+        // C-17 · home 解析失败时不能退化成相对路径误扫，统一守卫。
+        if !has_home() {
+            crate::logger::warn("home 目录解析失败，App缓存扫描返回空结果");
+            return finalize_scan_result(Vec::new(), start.elapsed().as_millis() as u64);
+        }
         let home = home_dir();
 
         let local_appdata = std::env::var("LOCALAPPDATA")
@@ -1876,11 +1933,8 @@ impl Scanner for WindowsAppCacheScanner {
             start.elapsed().as_millis()
         ));
 
-        ScanResult {
-            items,
-            total_size,
-            scan_time_ms: start.elapsed().as_millis() as u64,
-        }
+        // C-17 · 排序 / 去重 / 体积汇总统一走共享 helper
+        finalize_scan_result(items, start.elapsed().as_millis() as u64)
     }
 }
 
@@ -1968,6 +2022,11 @@ fn scan_user_appdata_data(base: &Path) -> Vec<ScanItem> {
 impl Scanner for WindowsAppDataScanner {
     fn scan(&self) -> ScanResult {
         let start = std::time::Instant::now();
+        // C-17 · 统一 has_home() 守卫
+        if !has_home() {
+            crate::logger::warn("home 目录解析失败，App数据扫描返回空结果");
+            return finalize_scan_result(Vec::new(), start.elapsed().as_millis() as u64);
+        }
         let home = home_dir();
 
         let local_appdata = std::env::var("LOCALAPPDATA")
@@ -1999,11 +2058,8 @@ impl Scanner for WindowsAppDataScanner {
             super::format_size(total_size),
             start.elapsed().as_millis()
         ));
-        ScanResult {
-            items,
-            total_size,
-            scan_time_ms: start.elapsed().as_millis() as u64,
-        }
+        // C-17 · 排序 / 去重 / 体积汇总统一走共享 helper
+        finalize_scan_result(items, start.elapsed().as_millis() as u64)
     }
 }
 
@@ -2025,6 +2081,11 @@ impl WindowsUninstallScanner {
 impl Scanner for WindowsUninstallScanner {
     fn scan(&self) -> ScanResult {
         let start = std::time::Instant::now();
+        // C-17 · 统一 has_home() 守卫（AppData 残留枚举依赖 home）
+        if !has_home() {
+            crate::logger::warn("home 目录解析失败，App卸载扫描返回空结果");
+            return finalize_scan_result(Vec::new(), start.elapsed().as_millis() as u64);
+        }
         crate::logger::info("Windows 卸载扫描开始");
         let apps = get_installed_apps();
         crate::logger::info(&format!(
@@ -2035,7 +2096,11 @@ impl Scanner for WindowsUninstallScanner {
 
         for app in apps {
             let protection = check_protection(&app);
-            let bloatware_match = find_bloatware_match(&app);
+            // A-11 · 拆出「是否精确匹配」：只有 1-3 级精确命中才允许默认勾选。
+            let (bloatware_match, bloatware_exact) = match find_bloatware_match(&app) {
+                Some((bw, exact)) => (Some(bw), exact),
+                None => (None, false),
+            };
 
             // 记录保护检测日志
             match protection {
@@ -2071,17 +2136,18 @@ impl Scanner for WindowsUninstallScanner {
                 ));
             }
 
-            let (deletable, reason, desc_suffix) = match protection {
-                WinProtectionLevel::Critical => {
-                    (false, "系统关键应用，禁止卸载".to_string(), " [系统保护]")
-                }
-                WinProtectionLevel::RequiresOfficialUninstaller => (
-                    false,
-                    "安全软件，请使用官方卸载工具".to_string(),
-                    " [需官方卸载工具]",
-                ),
-                WinProtectionLevel::DataProtected => (true, String::new(), " [⚠️ 数据保护]"),
-                WinProtectionLevel::None => (true, String::new(), ""),
+            // H-01 · 删除出口必须调生产判定 allows_uninstall()/block_reason()，
+            // 不再在这里独立 match 重写一份（改坏生产判定测试仍绿的假绿）。
+            let deletable = protection.allows_uninstall();
+            let reason = protection
+                .block_reason()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let desc_suffix = match protection {
+                WinProtectionLevel::Critical => " [系统保护]",
+                WinProtectionLevel::RequiresOfficialUninstaller => " [需官方卸载工具]",
+                WinProtectionLevel::DataProtected => " [⚠️ 数据保护]",
+                WinProtectionLevel::None => "",
             };
 
             // 计算大小
@@ -2150,10 +2216,12 @@ impl Scanner for WindowsUninstallScanner {
                 path: uninstall_path,
                 size_bytes: size,
                 category: format!("{} (卸载)", app.name),
-                selected: bloatware_match
-                    .as_ref()
-                    .map(|bw| bw.selected_by_default)
-                    .unwrap_or(false),
+                // A-11 · 模糊命中绝不默认勾选
+                selected: bloatware_exact
+                    && bloatware_match
+                        .as_ref()
+                        .map(|bw| bw.selected_by_default)
+                        .unwrap_or(false),
                 deletable,
                 undeletable_reason: reason,
                 batch_paths: Vec::new(),
@@ -2227,12 +2295,8 @@ impl Scanner for WindowsUninstallScanner {
             items.len()
         ));
 
-        let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
-        ScanResult {
-            items,
-            total_size,
-            scan_time_ms: start.elapsed().as_millis() as u64,
-        }
+        // C-17 · 排序 / 去重 / 体积汇总统一走共享 helper
+        finalize_scan_result(items, start.elapsed().as_millis() as u64)
     }
 }
 
@@ -2255,8 +2319,6 @@ fn scan_windows_app_data_and_cache(app_name: &str) -> (Vec<String>, u64, Vec<Str
     let mut cache_paths = Vec::new();
     let mut cache_size = 0u64;
 
-    let name_variants = windows_app_name_variants(app_name);
-
     for base in [&local_appdata, &appdata] {
         if !base.is_dir() {
             continue;
@@ -2271,13 +2333,12 @@ fn scan_windows_app_data_and_cache(app_name: &str) -> (Vec<String>, u64, Vec<Str
                 continue;
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
-            let dir_lower = dir_name.to_lowercase();
 
-            // 检查目录名是否匹配应用名变体
-            if !name_variants
-                .iter()
-                .any(|v| dir_lower.contains(&v.to_lowercase()))
-            {
+            // A-04 · 删除方向必须走严格匹配：折叠后精确相等 + MIN_MATCH_LEN +
+            // 共享容器保护。旧实现用「目录名小写后子串包含应用名变体」，卸载
+            // Go/Git/Team 会把 Google/GitHub/TeamViewer 的 AppData 列进 batch_paths
+            // 删除集，本函数不再复用保护方向的模糊匹配。
+            if !is_residual_dir(&dir_name, app_name) {
                 continue;
             }
 
@@ -2319,39 +2380,9 @@ fn scan_windows_app_data_and_cache(app_name: &str) -> (Vec<String>, u64, Vec<Str
     (data_paths, data_size, cache_paths, cache_size)
 }
 
-/// 生成 Windows 应用名变体（用于匹配 AppData 目录）
-fn windows_app_name_variants(app_name: &str) -> Vec<String> {
-    let mut variants = vec![app_name.to_string()];
-
-    let lower = app_name.to_lowercase();
-    if lower != app_name {
-        variants.push(lower.clone());
-    }
-
-    // 去除空格、连字符、下划线后的紧凑名
-    let compact = app_name.replace([' ', '-', '_'], "").to_lowercase();
-    if compact != lower && !compact.is_empty() {
-        variants.push(compact);
-    }
-
-    // 去除常见后缀
-    for suffix in [
-        " for windows",
-        " desktop",
-        " (64-bit)",
-        " (32-bit)",
-        " beta",
-    ] {
-        if lower.ends_with(suffix) {
-            let stripped = lower.strip_suffix(suffix).unwrap_or(&lower).to_string();
-            if !variants.contains(&stripped) {
-                variants.push(stripped);
-            }
-        }
-    }
-
-    variants
-}
+/// A-04 · 生成 AppData 目录匹配变体的宽松函数已删除：删除方向的匹配统一
+/// 由 `residual_match::is_residual_dir`（折叠相等 + MIN_MATCH_LEN + 共享容器
+/// 保护）负责，保护方向的 `resembles_app_dir` 刻意保持宽松，两者不得复用。
 
 // =========================================================================
 //  应用卸载执行
@@ -2365,15 +2396,42 @@ fn windows_app_name_variants(app_name: &str) -> Vec<String> {
 ///
 /// 返回 (success, output_message)
 pub fn uninstall_app(path: &str) -> (bool, String) {
-    if path.starts_with("uwp:") {
-        let package_full_name = &path[4..];
-        uninstall_uwp(package_full_name)
-    } else if path.starts_with("uninstall:") {
-        let key_name = &path[10..];
-        uninstall_win32(key_name)
-    } else {
-        (false, "未知的卸载路径格式".to_string())
+    if let Some(package_full_name) = path.strip_prefix("uwp:") {
+        return uninstall_uwp(package_full_name);
     }
+
+    // D-11 · 把扫描时已解析的 WindowsAppInfo 传进卸载函数，优先用
+    // quiet_uninstall_string / uninstall_string；dir: 应用的 key_name 不在注册表里，
+    // 必须直接执行它自己的卸载 exe，否则 reg query 必然查不到、永远无法卸载。
+    let key = if let Some(k) = path.strip_prefix("uninstall:") {
+        k.to_string()
+    } else if let Some(k) = path.strip_prefix("dir:") {
+        format!("dir:{}", k)
+    } else {
+        return (false, "未知的卸载路径格式".to_string());
+    };
+
+    if let Some(app) = find_app_by_key(&key) {
+        return uninstall_win32_with_info(&app);
+    }
+    // 兜底：uninstall: 键仍可回注册表再查一次；dir: 键必然查不到，直接报错。
+    if key.starts_with("dir:") {
+        (false, format!("未找到应用 {} 的卸载程序", key))
+    } else {
+        uninstall_win32(&key)
+    }
+}
+
+/// D-11 · 用已解析的卸载串执行，Quiet 优先（该字段原先全仓只有赋值、零读取）。
+fn uninstall_win32_with_info(app: &WindowsAppInfo) -> (bool, String) {
+    if let Some(cmd) = app
+        .quiet_uninstall_string
+        .as_deref()
+        .or(app.uninstall_string.as_deref())
+    {
+        return execute_uninstall_command(cmd);
+    }
+    (false, format!("应用 {} 没有卸载命令", app.name))
 }
 
 /// 卸载 UWP/Store 应用
@@ -2432,54 +2490,47 @@ fn uninstall_uwp_appx(package_full_name: &str) -> (bool, String) {
         "Remove-AppxPackage -Package '{}' -ErrorAction Stop",
         package_full_name
     );
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-        .output();
-
-    let success = match output {
-        Ok(out) => {
-            if out.status.success() {
-                true
-            } else {
-                // 当前用户卸载失败，尝试所有用户（需管理员权限）
-                let package_name = package_full_name
-                    .split('_')
-                    .next()
-                    .unwrap_or(package_full_name);
-                let all_users_cmd = format!(
-                    "Get-AppxPackage -AllUsers -Name '{}' | Remove-AppxPackage -AllUsers -ErrorAction Stop",
-                    package_name
-                );
-                match Command::new("powershell")
-                    .args(["-NoProfile", "-NonInteractive", "-Command", &all_users_cmd])
-                    .output()
-                {
-                    Ok(retry) if retry.status.success() => true,
-                    Ok(retry) => {
-                        let stderr = String::from_utf8_lossy(&retry.stderr);
-                        return (
-                            false,
-                            format!("UWP 卸载失败（含 AllUsers 重试）: {}", stderr.trim()),
-                        );
-                    }
-                    Err(e) => return (false, format!("执行 PowerShell 失败: {}", e)),
-                }
-            }
-        }
-        Err(e) => return (false, format!("执行 PowerShell 失败: {}", e)),
-    };
-
-    if success {
-        // 清理 provisioned package（阻止新用户登录时重装，需管理员，失败不影响结果）
+    // C-12 · 带超时 + 退出码检查的统一执行器（失败与「没有结果」可区分）
+    let (ok, _) = checked_run(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", ps_cmd.as_str()],
+        ACTION_TIMEOUT,
+    );
+    if !ok {
+        // 当前用户卸载失败，尝试所有用户（需管理员权限）
         let package_name = package_full_name
             .split('_')
             .next()
             .unwrap_or(package_full_name);
-        cleanup_provisioned_package(package_name);
-        (true, format!("UWP 应用 {} 已卸载", package_full_name))
-    } else {
-        (false, format!("UWP 应用 {} 卸载失败", package_full_name))
+        let all_users_cmd = format!(
+            "Get-AppxPackage -AllUsers -Name '{}' | Remove-AppxPackage -AllUsers -ErrorAction Stop",
+            package_name
+        );
+        let (retry_ok, retry_msg) = checked_run(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                all_users_cmd.as_str(),
+            ],
+            ACTION_TIMEOUT,
+        );
+        if !retry_ok {
+            return (
+                false,
+                format!("UWP 卸载失败（含 AllUsers 重试）: {}", retry_msg),
+            );
+        }
     }
+
+    // 清理 provisioned package（阻止新用户登录时重装，需管理员，失败不影响结果）
+    let package_name = package_full_name
+        .split('_')
+        .next()
+        .unwrap_or(package_full_name);
+    cleanup_provisioned_package(package_name);
+    (true, format!("UWP 应用 {} 已卸载", package_full_name))
 }
 
 /// 清理 provisioned package（防止应用在新用户登录时自动重装）
@@ -2490,19 +2541,19 @@ fn cleanup_provisioned_package(package_name: &str) {
         "Get-AppxProvisionedPackage -Online | Where-Object {{$_.DisplayName -eq '{}'}} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Out-Null",
         package_name
     );
-    match Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            crate::logger::info(&format!("已清理 provisioned package: {}", package_name));
-        }
-        _ => {
-            crate::logger::info(&format!(
-                "provisioned package 清理跳过（需管理员或不存在）: {}",
-                package_name
-            ));
-        }
+    // C-12 · 统一执行器；失败静默忽略（仅记日志），不影响卸载主流程
+    let (ok, _) = checked_run(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", ps_cmd.as_str()],
+        ACTION_TIMEOUT,
+    );
+    if ok {
+        crate::logger::info(&format!("已清理 provisioned package: {}", package_name));
+    } else {
+        crate::logger::info(&format!(
+            "provisioned package 清理跳过（需管理员或不存在）: {}",
+            package_name
+        ));
     }
 }
 
@@ -2511,57 +2562,43 @@ fn cleanup_provisioned_package(package_name: &str) {
 /// 1. 优先 `winget uninstall --id <AppId>`（精确）
 /// 2. 失败则 `winget uninstall --name "<FriendlyName>"`（按名称匹配）
 fn uninstall_uwp_winget(entry: &BloatwareEntryOwned) -> (bool, String) {
-    // 尝试 --id 精确卸载
-    let id_result = Command::new("winget")
-        .args([
+    // C-12 · 带超时 + 退出码检查；失败继续尝试 --name
+    let (id_ok, _) = checked_run(
+        "winget",
+        &[
             "uninstall",
             "--id",
             entry.app_id.as_str(),
             "--silent",
             "--accept-source-agreements",
             "--disable-interactivity",
-        ])
-        .output();
-
-    match id_result {
-        Ok(out) if out.status.success() => {
-            return (true, format!("{} 已通过 winget 卸载", entry.friendly_name));
-        }
-        Ok(_) => {} // 继续尝试 --name
-        Err(e) => {
-            // winget 命令不存在
-            return (false, format!("winget 不可用: {}", e));
-        }
+        ],
+        ACTION_TIMEOUT,
+    );
+    if id_ok {
+        return (true, format!("{} 已通过 winget 卸载", entry.friendly_name));
     }
 
     // 回退：按名称卸载
-    let name_result = Command::new("winget")
-        .args([
+    let (name_ok, name_msg) = checked_run(
+        "winget",
+        &[
             "uninstall",
             "--name",
             entry.friendly_name.as_str(),
             "--silent",
             "--accept-source-agreements",
             "--disable-interactivity",
-        ])
-        .output();
-
-    match name_result {
-        Ok(out) if out.status.success() => {
-            (true, format!("{} 已通过 winget 卸载", entry.friendly_name))
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            (
-                false,
-                format!(
-                    "winget 卸载 {} 失败: {}",
-                    entry.friendly_name,
-                    stderr.trim()
-                ),
-            )
-        }
-        Err(e) => (false, format!("winget 不可用: {}", e)),
+        ],
+        ACTION_TIMEOUT,
+    );
+    if name_ok {
+        (true, format!("{} 已通过 winget 卸载", entry.friendly_name))
+    } else {
+        (
+            false,
+            format!("winget 卸载 {} 失败: {}", entry.friendly_name, name_msg),
+        )
     }
 }
 
@@ -2576,26 +2613,28 @@ fn uninstall_win32(key_name: &str) -> (bool, String) {
 
     for reg_path in &reg_paths {
         let full_path = format!("{}\\{}", reg_path, key_name);
-        let output = Command::new("reg").args(["query", &full_path]).output();
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
+        // C-12/F-03 · 超时 + 退出码检查 + 非 UTF-8 输出保留
+        let Some(stdout) = checked_stdout("reg", &["query", full_path.as_str()], QUERY_TIMEOUT)
+        else {
+            continue;
+        };
 
-            // 优先使用 QuietUninstallString（静默卸载）
-            let mut quiet_cmd = None;
-            let mut uninstall_cmd = None;
+        // F-02 · 优先使用 QuietUninstallString（静默卸载）。parse_reg_line
+        // 精确比较第一个 token，Quiet 行不会再被 UninstallString 分支吞掉。
+        let mut quiet_cmd = None;
+        let mut uninstall_cmd = None;
 
-            for line in stdout.lines() {
-                if let Some(val) = parse_reg_line(line, "QuietUninstallString") {
-                    quiet_cmd = Some(val);
-                } else if let Some(val) = parse_reg_line(line, "UninstallString") {
-                    uninstall_cmd = Some(val);
-                }
+        for line in stdout.lines() {
+            if let Some(val) = parse_reg_line(line, "QuietUninstallString") {
+                quiet_cmd = Some(val);
+            } else if let Some(val) = parse_reg_line(line, "UninstallString") {
+                uninstall_cmd = Some(val);
             }
+        }
 
-            // 执行卸载命令
-            if let Some(cmd) = quiet_cmd.or(uninstall_cmd) {
-                return execute_uninstall_command(&cmd);
-            }
+        // 执行卸载命令
+        if let Some(cmd) = quiet_cmd.or(uninstall_cmd) {
+            return execute_uninstall_command(&cmd);
         }
     }
 
@@ -2675,11 +2714,12 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
             match output {
                 Ok(o) if o.status.success() => (true, format!("应用 {} 已卸载", exe_path)),
                 Ok(o) => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    let detail = if stderr.is_empty() {
+                    // F-03 · 非 UTF-8 控制台输出不再压成 U+FFFD
+                    let stderr = decode_console_output(&o.stderr);
+                    let detail = if stderr.trim().is_empty() {
                         format!("退出码: {}", o.status.code().unwrap_or(-1))
                     } else {
-                        stderr.to_string()
+                        stderr
                     };
                     (false, format!("卸载失败: {}", detail))
                 }
@@ -2724,7 +2764,8 @@ fn execute_msi_uninstall(cmd_str: &str) -> (bool, String) {
                             }
                             Ok(o) => (
                                 false,
-                                format!("MSI 卸载失败: {}", String::from_utf8_lossy(&o.stderr)),
+                                // F-03 · 非 UTF-8 控制台输出不再压成 U+FFFD
+                                format!("MSI 卸载失败: {}", decode_console_output(&o.stderr)),
                             ),
                             Err(e) => (false, format!("执行 msiexec 失败: {}", e)),
                         }
@@ -2783,34 +2824,30 @@ fn try_powershell_elevated(exe_path: &str, args: &[String]) -> (bool, String) {
         args_str.replace('\'', "''")
     );
 
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-        .output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let exit_code: i32 = stdout.parse().unwrap_or(-1);
-            if out.status.success() && exit_code == 0 {
-                crate::logger::info(&format!("PowerShell 提权卸载成功: {}", exe_path));
-                (
-                    true,
-                    format!("应用 {} 已通过 PowerShell 提权卸载", exe_path),
-                )
-            } else {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                crate::logger::warn(&format!(
-                    "PowerShell 提权卸载失败 (exit={}): {}",
-                    exit_code,
-                    stderr.trim()
-                ));
-                (
-                    false,
-                    format!("PowerShell 提权卸载失败 (exit={}): {}", exit_code, stderr),
-                )
-            }
-        }
-        Err(e) => (false, format!("执行 PowerShell 失败: {}", e)),
+    // C-12/F-03 · 统一执行器：超时 + 退出码检查 + 非 UTF-8 输出保留
+    let Some(stdout) = checked_stdout(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", ps_cmd.as_str()],
+        ACTION_TIMEOUT,
+    ) else {
+        return (
+            false,
+            "PowerShell 提权卸载失败（命令未成功执行）".to_string(),
+        );
+    };
+    let exit_code: i32 = stdout.trim().parse().unwrap_or(-1);
+    if exit_code == 0 {
+        crate::logger::info(&format!("PowerShell 提权卸载成功: {}", exe_path));
+        (
+            true,
+            format!("应用 {} 已通过 PowerShell 提权卸载", exe_path),
+        )
+    } else {
+        crate::logger::warn(&format!("PowerShell 提权卸载失败 (exit={})", exit_code));
+        (
+            false,
+            format!("PowerShell 提权卸载失败 (exit={})", exit_code),
+        )
     }
 }
 
@@ -2860,77 +2897,9 @@ fn parse_command(cmd: &str) -> (String, Vec<String>) {
 //  3. 文件系统残留（%APPDATA%\<AppName> 等）
 // =========================================================================
 
-/// 注册表残留项
-#[derive(Debug, Clone)]
-pub struct RegistryResidual {
-    /// 注册表键路径，如 "HKCU\\SOFTWARE\\JavaSoft"
-    pub key_path: String,
-    /// 是否为系统级（HKLM 需要管理员权限）
-    pub is_system: bool,
-    /// 是否可删除（HKLM 且无管理员权限时为 false）
-    pub deletable: bool,
-    /// 不可删除的原因
-    pub reason: String,
-}
-
-/// 环境变量残留项
-#[derive(Debug, Clone)]
-pub struct EnvVarResidual {
-    /// 变量名，如 "JAVA_HOME" 或 "Path"
-    pub var_name: String,
-    /// 当前值
-    pub current_value: String,
-    /// 对于 Path 类型：要移除的条目列表
-    /// 对于独立变量（JAVA_HOME 等）：整个值都要删除
-    pub entries_to_remove: Vec<String>,
-    /// 是否为系统级环境变量
-    pub is_system: bool,
-    /// 是否可删除
-    pub deletable: bool,
-    /// 不可删除的原因
-    pub reason: String,
-}
-
-/// 文件系统残留项
-#[derive(Debug, Clone)]
-pub struct FilesystemResidual {
-    /// 残留目录路径
-    pub path: String,
-    /// 目录大小（字节）
-    pub size: u64,
-    /// 是否可删除
-    pub deletable: bool,
-    /// 不可删除的原因
-    pub reason: String,
-}
-
-/// 干净卸载残留扫描结果
-#[derive(Debug, Clone)]
-pub struct UninstallResidual {
-    /// 注册表残留
-    pub registry: Vec<RegistryResidual>,
-    /// 环境变量残留
-    pub env_vars: Vec<EnvVarResidual>,
-    /// 文件系统残留
-    pub filesystem: Vec<FilesystemResidual>,
-}
-
-impl UninstallResidual {
-    pub fn is_empty(&self) -> bool {
-        self.registry.is_empty() && self.env_vars.is_empty() && self.filesystem.is_empty()
-    }
-
-    pub fn total_count(&self) -> usize {
-        self.registry.len() + self.env_vars.len() + self.filesystem.len()
-    }
-
-    /// 可删除的残留项数量
-    pub fn deletable_count(&self) -> usize {
-        self.registry.iter().filter(|r| r.deletable).count()
-            + self.env_vars.iter().filter(|e| e.deletable).count()
-            + self.filesystem.iter().filter(|f| f.deletable).count()
-    }
-}
+/// D-01/F-01 · 四个残留数据结构与其计数/辅助方法统一放在无 cfg 的
+/// `residual_match`，本文件顶部 `pub use` 保持了 `windows_apps::*` 公开路径。
+/// 这样 ops 侧的类型引用不变，而纯逻辑与行为测试能在开发机真跑。
 
 /// 扫描文件系统残留（只扫描，不删除）
 ///
@@ -3011,9 +2980,13 @@ pub fn delete_filesystem_residual(path: &str) -> (bool, String) {
     // 不在这里过 check_path_safety_with_category，第 4.6 层清单管理目录
     // 与 home 黑名单就整体失防（site-packages 事故同型：%APPDATA%\Python
     // 下挂着 pip 用户级 site-packages，卸载 "Python 3.11" 会连根删掉）。
-    if let crate::safety::SafetyCheck::Danger(reason) =
-        crate::safety::check_path_safety_with_category(path, "卸载残留")
-    {
+    // A-07a：旁路删除出口同样走统一闸门，旧实现只判 `Danger`。
+    let decision = crate::safety::gate_decision(path, "卸载残留");
+    if !decision.is_safe() {
+        let reason = decision
+            .reason()
+            .unwrap_or("路径未通过安全闸门")
+            .to_string();
         crate::safety::log_deletion(path, "卸载残留", false, Some(&reason));
         return (false, reason);
     }
@@ -3036,8 +3009,9 @@ pub fn delete_filesystem_residual(path: &str) -> (bool, String) {
 /// - HKLM\SOFTWARE\* — 系统级应用设置（需要管理员权限）
 /// - HKLM\SOFTWARE\WOW6432Node\* — 32 位应用设置
 ///
-/// 匹配规则：键名包含应用名（大小写不敏感）
-pub fn scan_registry_residual(app_name: &str) -> Vec<RegistryResidual> {
+/// 匹配规则：键名折叠后与应用名变体精确相等（见 `is_residual_reg_key`）。
+/// B 类共享容器不整棵删，改由版本化下钻（D-02）只删推得出版本号的单版本节点。
+pub fn scan_registry_residual(app_name: &str, install_path: Option<&str>) -> Vec<RegistryResidual> {
     let mut items = Vec::new();
     let name_lower = app_name.to_lowercase();
 
@@ -3048,32 +3022,66 @@ pub fn scan_registry_residual(app_name: &str) -> Vec<RegistryResidual> {
     ];
 
     for (root, is_system) in &search_roots {
-        let output = Command::new("reg").args(["query", root]).output();
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines() {
-                let line = line.trim();
-                if !line.starts_with("HKEY") {
-                    continue;
-                }
-                let key_name = line.rsplit('\\').next().unwrap_or("");
+        // C-12/F-03 · 超时 + 退出码检查 + 非 UTF-8 输出保留；旧实现只判 Ok(out)。
+        let Some(stdout) = checked_stdout("reg", &["query", *root], QUERY_TIMEOUT) else {
+            continue;
+        };
+        for line in stdout.lines() {
+            let line = line.trim();
+            if !line.starts_with("HKEY") {
+                continue;
+            }
+            let key_name = line.rsplit('\\').next().unwrap_or("");
 
-                // 这里命中就直接 `reg delete <key> /f`，且 **/f 跳过确认并递归删除
-                // 整个子树**，所以必须走严格匹配，绝不用双向子串 / 首词。
-                if is_residual_reg_key(key_name, &name_lower) {
-                    let (deletable, reason) = if *is_system {
-                        (false, "系统级注册表，需要管理员权限删除".to_string())
-                    } else {
-                        (true, String::new())
-                    };
+            // 这里命中就直接 `reg delete <key> /f`，且 **/f 跳过确认并递归删除
+            // 整个子树**，所以必须走严格匹配，绝不用双向子串 / 首词。
+            if is_residual_reg_key(key_name, &name_lower) {
+                let (deletable, reason) = if *is_system {
+                    (false, "系统级注册表，需要管理员权限删除".to_string())
+                } else {
+                    (true, String::new())
+                };
 
-                    items.push(RegistryResidual {
-                        key_path: line.to_string(),
-                        is_system: *is_system,
-                        deletable,
-                        reason,
-                    });
-                }
+                items.push(RegistryResidual {
+                    key_path: line.to_string(),
+                    is_system: *is_system,
+                    deletable,
+                    reason,
+                });
+            }
+        }
+    }
+
+    // D-02 · 版本化下钻：B 类（JavaSoft / Microsoft 等共享容器）不能整棵删，
+    // 但能推得出版本号的那一个叶子节点可以。版本证据来自安装方自填的
+    // InstallLocation，归属明确；reg delete /f 的递归范围只剩单版本子树。
+    // 用 reg query /s 枚举子树，version_scoped_subkey 只接受恰好一个无歧义命中。
+    if let Some(version) = install_path.and_then(install_dir_version_token) {
+        for (root, is_system) in &search_roots {
+            let Some(stdout) = checked_stdout("reg", &["query", *root, "/s"], QUERY_TIMEOUT) else {
+                continue;
+            };
+            let subkeys: Vec<String> = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("HKEY"))
+                .map(|l| l.to_string())
+                .collect();
+            if let Some(target) = version_scoped_subkey(&subkeys, &version) {
+                // version_scoped_subkey 内部已过 is_deletable_reg_path；这里把
+                // 归一化分隔符还原成 reg.exe 需要的反斜杠。
+                let key_path = target.replace('/', "\\");
+                let (deletable, reason) = if *is_system {
+                    (false, "系统级注册表，需要管理员权限删除".to_string())
+                } else {
+                    (true, String::new())
+                };
+                items.push(RegistryResidual {
+                    key_path,
+                    is_system: *is_system,
+                    deletable,
+                    reason,
+                });
             }
         }
     }
@@ -3092,15 +3100,22 @@ pub fn scan_registry_residual(app_name: &str) -> Vec<RegistryResidual> {
 pub fn scan_env_var_residual(app_name: &str, install_path: Option<&str>) -> Vec<EnvVarResidual> {
     let mut items = Vec::new();
 
-    let install_path = match install_path {
-        Some(p) if !p.is_empty() => p.to_lowercase(),
-        _ => return items, // 没有安装路径无法匹配环境变量
-    };
-
     // 搜索名称用于匹配变量值中的路径关键词。
     // 不能用带首词提取的 generate_search_names：卸载 "Go" 时 "go" 会命中
     // `C:\Program Files\Google\Chrome\...`，把 Chrome 的 PATH 条目删掉。
+    // display_name_variants 已带 MIN_MATCH_LEN，短名返回空表。
     let search_names = display_name_variants(app_name);
+    if search_names.is_empty() {
+        return items; // 应用名太短，无法安全匹配任何 PATH 条目
+    }
+
+    // D-15 · install_path 缺失（无 InstallLocation 的应用）不再直接 return：
+    // 改用应用名变体回退匹配，否则这类应用的环境变量残留完全扫不到。
+    let install_key = install_path
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| p.to_lowercase());
+    let matches_install_path =
+        |v: &str| install_key.as_ref().is_some_and(|p| v.contains(p.as_str()));
 
     let env_roots = [
         (r"HKCU\Environment", false),
@@ -3111,72 +3126,72 @@ pub fn scan_env_var_residual(app_name: &str, install_path: Option<&str>) -> Vec<
     ];
 
     for (reg_key, is_system) in &env_roots {
-        let output = Command::new("reg").args(["query", reg_key]).output();
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
+        // C-12/F-03 · 超时 + 退出码检查 + 非 UTF-8 输出保留
+        let Some(stdout) = checked_stdout("reg", &["query", *reg_key], QUERY_TIMEOUT) else {
+            continue;
+        };
 
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.is_empty() || !line.contains("REG_") {
-                    continue;
-                }
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() || !line.contains("REG_") {
+                continue;
+            }
 
-                // 解析环境变量名和值
-                if let Some((var_name, var_value)) = parse_env_var_line(line) {
-                    let value_lower = var_value.to_lowercase();
+            // 解析环境变量名和值
+            if let Some((var_name, var_value)) = parse_env_var_line(line) {
+                let value_lower = var_value.to_lowercase();
 
-                    // Path 变量特殊处理：分割为条目
-                    if var_name.eq_ignore_ascii_case("Path") {
-                        let entries: Vec<&str> = var_value.split(';').collect();
-                        let to_remove: Vec<String> = entries
-                            .iter()
-                            .filter(|e| {
-                                let e_lower = e.to_lowercase();
-                                // 条目引用了应用安装路径
-                                e_lower.contains(&install_path)
-                                // 或条目路径包含应用名关键词
-                                || search_names.iter().any(|sn| e_lower.contains(sn) && e_lower.contains("program"))
-                            })
-                            .map(|e| e.to_string())
-                            .collect();
+                // Path 变量特殊处理：分割为条目
+                if var_name.eq_ignore_ascii_case("Path") {
+                    let entries: Vec<&str> = var_value.split(';').collect();
+                    let to_remove: Vec<String> = entries
+                        .iter()
+                        .filter(|e| {
+                            let e_lower = e.to_lowercase();
+                            // 条目引用了应用安装路径（install_path 缺失时该条件不生效）
+                            matches_install_path(&e_lower)
+                            // 或条目路径包含应用名关键词（变体已过 MIN_MATCH_LEN）
+                            || search_names.iter().any(|sn| e_lower.contains(sn) && e_lower.contains("program"))
+                        })
+                        .map(|e| e.to_string())
+                        .collect();
 
-                        if !to_remove.is_empty() {
-                            let (deletable, reason) = if *is_system {
-                                (false, "系统级 PATH，需要管理员权限修改".to_string())
-                            } else {
-                                (true, String::new())
-                            };
-                            items.push(EnvVarResidual {
-                                var_name: var_name.clone(),
-                                current_value: var_value.clone(),
-                                entries_to_remove: to_remove,
-                                is_system: *is_system,
-                                deletable,
-                                reason,
-                            });
-                        }
-                    } else {
-                        // 非 Path 变量：检查值是否引用应用路径
-                        let references_app = value_lower.contains(&install_path)
-                            || search_names.iter().any(|sn| {
-                                value_lower.contains(sn) && value_lower.contains("\\program files")
-                            });
+                    if !to_remove.is_empty() {
+                        let (deletable, reason) = if *is_system {
+                            (false, "系统级 PATH，需要管理员权限修改".to_string())
+                        } else {
+                            (true, String::new())
+                        };
+                        items.push(EnvVarResidual {
+                            var_name: var_name.clone(),
+                            current_value: var_value.clone(),
+                            entries_to_remove: to_remove,
+                            is_system: *is_system,
+                            deletable,
+                            reason,
+                        });
+                    }
+                } else {
+                    // 非 Path 变量：检查值是否引用应用路径
+                    let references_app = matches_install_path(&value_lower)
+                        || search_names.iter().any(|sn| {
+                            value_lower.contains(sn) && value_lower.contains("\\program files")
+                        });
 
-                        if references_app {
-                            let (deletable, reason) = if *is_system {
-                                (false, "系统级环境变量，需要管理员权限修改".to_string())
-                            } else {
-                                (true, String::new())
-                            };
-                            items.push(EnvVarResidual {
-                                var_name: var_name.clone(),
-                                current_value: var_value.clone(),
-                                entries_to_remove: vec![var_value.clone()],
-                                is_system: *is_system,
-                                deletable,
-                                reason,
-                            });
-                        }
+                    if references_app {
+                        let (deletable, reason) = if *is_system {
+                            (false, "系统级环境变量，需要管理员权限修改".to_string())
+                        } else {
+                            (true, String::new())
+                        };
+                        items.push(EnvVarResidual {
+                            var_name: var_name.clone(),
+                            current_value: var_value.clone(),
+                            entries_to_remove: vec![var_value.clone()],
+                            is_system: *is_system,
+                            deletable,
+                            reason,
+                        });
                     }
                 }
             }
@@ -3233,22 +3248,12 @@ pub fn delete_registry_residual(key_path: &str) -> (bool, String) {
         );
     }
 
-    let output = Command::new("reg")
-        .args(["delete", key_path, "/f"])
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => (true, format!("已删除注册表键: {}", key_path)),
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let detail = if stderr.is_empty() {
-                "权限不足或键不存在".to_string()
-            } else {
-                stderr.trim().to_string()
-            };
-            (false, format!("删除注册表键失败 {}: {}", key_path, detail))
-        }
-        Err(e) => (false, format!("执行 reg delete 失败: {}", e)),
+    // C-12 · 删除是写操作，同样走带超时 + 退出码检查的统一执行器。
+    let (ok, msg) = checked_run("reg", &["delete", key_path, "/f"], ACTION_TIMEOUT);
+    if ok {
+        (true, format!("已删除注册表键: {}", key_path))
+    } else {
+        (false, format!("删除注册表键失败 {}: {}", key_path, msg))
     }
 }
 
@@ -3271,23 +3276,35 @@ pub fn clean_env_var_residual(residual: &EnvVarResidual) -> (bool, String) {
 
     // Path 变量：移除特定条目
     if residual.var_name.eq_ignore_ascii_case("Path") {
-        let entries: Vec<&str> = residual.current_value.split(';').collect();
-        let to_remove_lower: Vec<String> = residual
-            .entries_to_remove
-            .iter()
-            .map(|e| e.to_lowercase())
-            .collect();
+        // D-15 · 清理时重新 reg query 取当前值，绝不用扫描时刻的
+        // residual.current_value 整条覆盖 —— 用户确认期间其它程序新增的条目必须保留。
+        let Some(stdout) = checked_stdout("reg", &["query", reg_key], QUERY_TIMEOUT) else {
+            return (
+                false,
+                "重新读取当前 Path 失败，已放弃清理以免覆盖".to_string(),
+            );
+        };
+        let current_value = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("REG_"))
+            .find_map(|l| {
+                parse_env_var_line(l)
+                    .and_then(|(name, value)| name.eq_ignore_ascii_case("Path").then_some(value))
+            });
+        let Some(current_value) = current_value else {
+            return (
+                false,
+                "当前 Path 变量不存在或无法解析，已放弃清理".to_string(),
+            );
+        };
+        // cleaned_path_value 只从「当前值」里剔除待删条目，不碰其余条目。
+        let new_path = cleaned_path_value(&current_value, &residual.entries_to_remove);
 
-        let cleaned: Vec<&str> = entries
-            .iter()
-            .copied()
-            .filter(|e| !to_remove_lower.contains(&e.to_lowercase()))
-            .collect();
-
-        let new_path = cleaned.join(";");
-
-        let output = Command::new("reg")
-            .args([
+        // C-12 · 写操作统一执行器（超时 + 退出码检查）
+        let (ok, msg) = checked_run(
+            "reg",
+            &[
                 "add",
                 reg_key,
                 "/v",
@@ -3295,42 +3312,33 @@ pub fn clean_env_var_residual(residual: &EnvVarResidual) -> (bool, String) {
                 "/t",
                 "REG_EXPAND_SZ",
                 "/d",
-                &new_path,
+                new_path.as_str(),
                 "/f",
-            ])
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                broadcast_env_change();
-                let removed_count = residual.entries_to_remove.len();
-                (true, format!("已从 Path 移除 {} 个条目", removed_count))
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                (false, format!("修改 Path 失败: {}", stderr.trim()))
-            }
-            Err(e) => (false, format!("执行 reg add 失败: {}", e)),
+            ],
+            ACTION_TIMEOUT,
+        );
+        if ok {
+            broadcast_env_change();
+            let removed_count = residual.entries_to_remove.len();
+            (true, format!("已从 Path 移除 {} 个条目", removed_count))
+        } else {
+            (false, format!("修改 Path 失败: {}", msg))
         }
     } else {
-        // 独立变量：删除整个变量
-        let output = Command::new("reg")
-            .args(["delete", reg_key, "/v", &residual.var_name, "/f"])
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                broadcast_env_change();
-                (true, format!("已删除环境变量: {}", residual.var_name))
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                (
-                    false,
-                    format!("删除环境变量 {} 失败: {}", residual.var_name, stderr.trim()),
-                )
-            }
-            Err(e) => (false, format!("执行 reg delete 失败: {}", e)),
+        // 独立变量：删除整个变量（C-12 · 统一执行器）
+        let (ok, msg) = checked_run(
+            "reg",
+            &["delete", reg_key, "/v", residual.var_name.as_str(), "/f"],
+            ACTION_TIMEOUT,
+        );
+        if ok {
+            broadcast_env_change();
+            (true, format!("已删除环境变量: {}", residual.var_name))
+        } else {
+            (
+                false,
+                format!("删除环境变量 {} 失败: {}", residual.var_name, msg),
+            )
         }
     }
 }
@@ -3351,9 +3359,12 @@ fn broadcast_env_change() {
         [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
 "#;
 
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
-        .output();
+    // C-12 · 广播只是通知，同样走带超时 + 退出码检查的统一执行器
+    let _ = checked_run(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+        QUERY_TIMEOUT,
+    );
 }
 
 /// 执行干净卸载（只卸载 + 扫描残留，不自动清理）
@@ -3380,6 +3391,27 @@ pub fn clean_uninstall(
         filesystem: Vec::new(),
     };
 
+    // D-14 · ops 侧对 UWP 传进来的 app_name 恒为空（路径是 uwp: 前缀，
+    // key_name 取 ""），必须从包全名推回可用名；否则三个 scan_*_residual
+    // 会在 name_lower.is_empty() 处静默返回空，残留扫描等于没做。
+    let derived_name = if app_name.trim().is_empty() {
+        derive_app_name_from_path(uninstall_path)
+    } else {
+        None
+    };
+    let app_name = match &derived_name {
+        Some(name) => name.as_str(),
+        None => app_name,
+    };
+    if app_name.is_empty() {
+        let msg = format!(
+            "无法从卸载路径 {} 推导应用名，残留扫描已跳过（不是「没有残留」）",
+            uninstall_path
+        );
+        crate::logger::warn(&msg);
+        return (false, msg, residual);
+    }
+
     crate::logger::info(&format!(
         "开始干净卸载: {} (路径: {}, 安装位置: {})",
         app_name,
@@ -3401,7 +3433,7 @@ pub fn clean_uninstall(
 
     // 2. 扫描注册表残留（只扫描，不删除）
     crate::logger::info("步骤 2/4: 扫描注册表残留");
-    residual.registry = scan_registry_residual(app_name);
+    residual.registry = scan_registry_residual(app_name, install_path);
     let reg_count = residual.registry.len();
     if reg_count > 0 {
         crate::logger::info(&format!(
@@ -3534,6 +3566,21 @@ pub fn clean_all_residuals(residual: &UninstallResidual) -> (usize, usize, usize
     ));
 
     (reg_cleaned, env_cleaned, fs_cleaned)
+}
+
+/// D-01 · 「清理选中残留」的公开入口（ops 侧在 `clean_uninstall` 之后调用）。
+/// 返回 (成功, 失败, 跳过) 三个计数。
+///
+/// 派发与计数逻辑刻意放在无 cfg 的 `residual_match::clean_selected_residuals_with`，
+/// 开发机上的行为测试能真跑整条链（见 residual_match.rs 的 `d01_*` 用例：
+/// 把派发核心改成不调用 exec 或不派发可删项，用例必红）。这里只是把三个
+/// 带闸门的真实删除函数注入进去，不再把约 600 行删除链留成死代码。
+pub fn clean_selected_residuals(residuals: &[UninstallResidual]) -> (usize, usize, usize) {
+    clean_selected_residuals_with(residuals, |action| match action {
+        ResidualAction::Registry(key_path) => delete_registry_residual(&key_path).0,
+        ResidualAction::EnvVar(env) => clean_env_var_residual(&env).0,
+        ResidualAction::Filesystem(path) => delete_filesystem_residual(&path).0,
+    })
 }
 
 #[cfg(test)]

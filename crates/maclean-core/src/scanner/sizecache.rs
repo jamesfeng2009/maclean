@@ -305,14 +305,24 @@ pub fn invalidate_all() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// D-06：把 dirty 的 Store 落盘（`flush` 的核心，抽成函数供单测直接调用，
+/// 验证「扫描写入 → 收尾 flush → 重启命中」链路）。
+fn flush_store(g: &mut Store) {
+    if g.is_dirty() {
+        if let Err(e) = g.save() {
+            crate::logger::warn(&format!("[sizecache] 落盘失败（不影响本次结果）: {e}"));
+        }
+    }
+}
+
 /// 把累积的缓存落盘（扫描收尾时调用；无改动则是空操作）。
+///
+/// D-06：生产由 `LargeFileScanner::scan` / 磁盘分析命令收尾调用，把
+/// `dir_size_accurate_cached` 累积的 `put` 真正写盘；此前只在卸载流程被调用，
+/// 正常磁盘分析从不落盘、进程退出即丢。
 pub fn flush() {
     if let Ok(mut g) = global().lock() {
-        if g.is_dirty() {
-            if let Err(e) = g.save() {
-                crate::logger::warn(&format!("[sizecache] 落盘失败（不影响本次结果）: {e}"));
-            }
-        }
+        flush_store(&mut g);
     }
 }
 
@@ -442,6 +452,27 @@ mod tests {
         assert_eq!(
             s2.get("/y", &meta(8, 51, 9, 2048), 1, CACHE_TTL_SECS),
             Some(8192)
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn scan_flush_persists_and_next_startup_hits() {
+        // D-06：模拟一次磁盘分析扫描（miss → put，Store 变 dirty），收尾 flush
+        // 落盘；进程重启（重新 Store::open 读盘）后必须命中上次写入的缓存。
+        // 反向验证：把 flush_store 改坏（不调 save）→ 重启读不到 → 变红。
+        let p = tmp_path("scan_flush");
+        let m = meta(42, 100, 0, 4096);
+        let mut s = Store::open(p.clone());
+        s.put("/b".to_string(), m, 8888, false, 100);
+        assert!(s.is_dirty(), "扫描后缓存应为 dirty（对应 put）");
+        flush_store(&mut s);
+        assert!(!s.is_dirty(), "flush 后应已提交");
+        let s2 = Store::open(p.clone());
+        assert_eq!(
+            s2.get("/b", &m, 100, CACHE_TTL_SECS),
+            Some(8888),
+            "重启后应命中上次扫描写入的缓存"
         );
         let _ = std::fs::remove_file(&p);
     }

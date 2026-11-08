@@ -141,10 +141,37 @@ fn file_category(name: &str) -> &'static str {
     cat
 }
 
-/// 递归收集 `root` 下单个文件 ≥ `threshold` 字节的常规文件（按大小降序，截断上限）。
+/// C-06：文件物理占用 `st_blocks×512`。稀疏文件 / APFS 克隆按物理块计，
+/// 不按 `md.len()` 逻辑长度虚高（OrbStack 镜像按 len 算 995G、du 实际 22G）。
+/// 非 unix 无 `st_blocks`，退回逻辑长度。
+fn physical_size(md: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        md.blocks() * 512
+    }
+    #[cfg(not(unix))]
+    {
+        md.len()
+    }
+}
+
+/// 递归收集 `root` 下单个文件物理占用 ≥ `threshold` 字节的常规文件（降序、截断）。
 ///
 /// 阈值参数化以便单测用小值快速构造；生产用 [`LARGE_FILE_THRESHOLD`]。
+/// C-06：默认走 [`physical_size`]（st_blocks×512）口径，阈值判定与
+/// `size_bytes` 用同一个物理值，杜绝「按 len 判、按 blocks 记」的错位。
 fn collect_large_files_under(root: &Path, threshold: u64) -> Vec<(PathBuf, u64)> {
+    collect_large_files_under_with(root, threshold, physical_size)
+}
+
+/// 遍历核心；`size_fn` 注入大小口径，单测可注入逻辑长度保持确定性
+/// （生产入口固定用物理占用，C-06）。
+fn collect_large_files_under_with(
+    root: &Path,
+    threshold: u64,
+    size_fn: fn(&std::fs::Metadata) -> u64,
+) -> Vec<(PathBuf, u64)> {
     let mut out: Vec<(PathBuf, u64)> = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -171,7 +198,10 @@ fn collect_large_files_under(root: &Path, threshold: u64) -> Vec<(PathBuf, u64)>
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| match e.metadata() {
-            Ok(md) if md.len() >= threshold => Some((e.path().to_path_buf(), md.len())),
+            Ok(md) => {
+                let size = size_fn(&md);
+                (size >= threshold).then(|| (e.path().to_path_buf(), size))
+            }
             _ => None,
         })
         .collect();
@@ -324,6 +354,9 @@ impl Scanner for LargeFileScanner {
         // 注意：大文件已包含在某些大目录内，两组 total 不可相加展示；前端各视图
         // 分别按自身列表求和。这里 total_size 仅给可能的调试/日志使用。
         result.total_size = file_total;
+        // D-06：磁盘分析收尾把 dir_size_accurate_cached 累积的 put 落盘，
+        // 否则「持久化增量体积缓存」进程退出即丢，标题承诺的增量缓存从不写盘。
+        crate::scanner::sizecache::flush();
         result.scan_time_ms = start.elapsed().as_millis() as u64;
         result
     }
@@ -475,6 +508,11 @@ mod tests {
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
+    /// 单测注入的逻辑长度口径（生产入口用 `physical_size`，C-06）。
+    fn logical_size(md: &std::fs::Metadata) -> u64 {
+        md.len()
+    }
+
     /// 临时目录 guard：drop 时递归清理，避免污染
     struct TmpDir(PathBuf);
     impl TmpDir {
@@ -588,7 +626,8 @@ mod tests {
         tmp.put("go/pkg/mod/cache/x.zip", 10);
         tmp.put("Library/Caches/big.mkv", 10);
 
-        let got = collect_large_files_under(root, 5);
+        // 注入逻辑长度口径保持小文件用例确定性；生产入口用物理占用（C-06）。
+        let got = collect_large_files_under_with(root, 5, logical_size);
         let names: Vec<String> = got
             .iter()
             .map(|(p, _)| p.strip_prefix(root).unwrap().to_string_lossy().to_string())
@@ -631,5 +670,49 @@ mod tests {
         sorted.sort_by(|a, b| b.cmp(a));
         assert_eq!(sizes, sorted, "应按大小降序: {sizes:?}");
         assert_eq!(got.len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sparse_file_is_judged_by_physical_blocks_not_logical_length() {
+        // C-06：稀疏文件逻辑长度 1GB、物理只占 1 个块。生产入口必须按
+        // st_blocks×512 判定，不能按 md.len() 把它虚高成"大文件"。
+        // 反向验证：把 collect_large_files_under 的 size_fn 从 physical_size
+        // 改回 |md| md.len()，稀疏文件会被计入 → 本用例变红。
+        use std::io::{Seek, SeekFrom, Write};
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let sparse = root.join("sparse.img");
+        let mut f = fs::File::create(&sparse).unwrap();
+        f.seek(SeekFrom::Start((1 << 30) - 1)).unwrap();
+        f.write_all(&[1u8]).unwrap();
+        drop(f);
+
+        let md = fs::metadata(&sparse).unwrap();
+        assert_eq!(md.len(), 1 << 30, "构造的应是逻辑 1GB 的稀疏文件");
+        assert!(
+            physical_size(&md) < 16 * 1024 * 1024,
+            "稀疏文件物理占用应远小于逻辑长度，实际 {}",
+            physical_size(&md)
+        );
+
+        let got = collect_large_files_under(root, 16 * 1024 * 1024);
+        assert!(
+            !got.iter().any(|(p, _)| p == &sparse),
+            "稀疏文件不得按逻辑长度计入大文件: {got:?}"
+        );
+    }
+
+    #[test]
+    fn disk_scan_finalizer_wires_sizecache_flush() {
+        // D-06：钉住 LargeFileScanner::scan 收尾确实调用 sizecache::flush()。
+        // 按 `\nmod tests` 切出生产段再断言调用表达式，避免整文件字符串被
+        // 测试模块里的同名字符串蒙混（H-02 的正确切法）。
+        let src = include_str!("large_files.rs");
+        let production = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            production.contains("crate::scanner::sizecache::flush()"),
+            "磁盘分析 scan 收尾必须调用 flush()，否则持久化增量缓存从不落盘"
+        );
     }
 }

@@ -390,13 +390,20 @@ pub(crate) fn push_named_cache_item(
     // 清单管理结构）标记为不可删并给出原因，前端显示为「受保护」锁定态，
     // 用户不会勾选，删除时也不再出现「已自动跳过」的拒绝提示。
     // 预检有界（闸门后代遍历深度 ≤8 / 条目 ≤2 万），只作用于达标的语义项。
-    let (deletable, undeletable_reason) =
-        match crate::safety::check_path_safety_with_category(&path_str, category) {
-            crate::safety::SafetyCheck::Danger(reason) => {
-                (false, format!("受安全闸门保护：{reason}"))
-            }
-            _ => (true, String::new()),
-        };
+    // A-07a：统一闸门。旧实现只判 `Danger`，`Warning` 在这里会被当可删，
+    // 而 ops 删除链会跳过 Warning —— 同一路径两个出口结论相反。
+    let decision = crate::safety::gate_decision(&path_str, category);
+    let (deletable, undeletable_reason) = if decision.is_safe() {
+        (true, String::new())
+    } else {
+        (
+            false,
+            format!(
+                "受安全闸门保护：{}",
+                decision.reason().unwrap_or("路径未通过安全闸门")
+            ),
+        )
+    };
     items.push(ScanItem {
         batch_mtimes: vec![],
         path: path_str,
@@ -632,11 +639,23 @@ const CACHE_DIR_NAMES: &[&str] = &[
     "Photos.cache", // Address Book
 ];
 
+/// C-04：收集后剔除「被其它缓存目录包含」的嵌套子项。
+/// `scan_app_support_caches` 的 `filter_entry` 只判隐藏目录 / fs_guard，
+/// 命中 `CACHE_DIR_NAMES` 后仍会继续下钻：如 `Code/Cache` 与其子目录
+/// `Code/Cache/Cache_Data` 都命中，各生成一项、父项又含子项 → 体积重复计。
+/// 只保留最外层父项（它已包含子项体积）。
+fn drop_nested_cache_dirs(dirs: Vec<(PathBuf, u64)>) -> Vec<(PathBuf, u64)> {
+    let all: Vec<PathBuf> = dirs.iter().map(|(p, _)| p.clone()).collect();
+    dirs.into_iter()
+        .filter(|(p, _)| !all.iter().any(|other| other != p && p.starts_with(other)))
+        .collect()
+}
+
 /// 递归扫描 Application Support 下的缓存子目录
 ///
-/// 策略：用 walkdir 迭代遍历（不会栈溢出），最大深度 4 层，
-/// 遇到目录名匹配已知缓存名时，计算大小并加入清理列表，
-/// 不再继续递归该目录（剪枝，避免重复扫描缓存内部文件）。
+/// 策略：walkdir 迭代遍历（不会栈溢出），最大深度 4 层；命中已知缓存名时
+/// 计算大小加入候选，收集后由 [`drop_nested_cache_dirs`] 剔除嵌套重复项
+/// （C-04：`filter_entry` 不剪缓存目录，父子嵌套会各生成一项）。
 pub fn scan_app_support_caches() -> Vec<ScanItem> {
     let home = home_dir();
     let app_support = home.join("Library/Application Support");
@@ -705,6 +724,9 @@ pub fn scan_app_support_caches() -> Vec<ScanItem> {
     // 按大小降序排序
     cache_dirs.sort_by_key(|a| std::cmp::Reverse(a.1));
     cache_dirs.dedup_by(|a, b| a.0 == b.0);
+    // C-04：父缓存目录已包含子缓存目录的体积，收集后剔除被包含的子项，
+    // 杜绝嵌套缓存目录重复计体积（见 drop_nested_cache_dirs）。
+    cache_dirs = drop_nested_cache_dirs(cache_dirs);
 
     for (path, size) in cache_dirs {
         // 从路径中提取 App 名称（Application Support/<AppName>/.../<CacheDir>）
@@ -1300,5 +1322,26 @@ mod tests {
             Recommend::CacheOnly,
         );
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn nested_cache_dirs_drop_child_but_keep_parent() {
+        // C-04：Application Support/Code/Cache 与其子 Cache/Cache_Data 都命中
+        // 缓存名，父项已含子项体积，必须只保留父项。
+        // 反向验证：把 drop_nested_cache_dirs 改成恒真（不剔除嵌套子项），
+        // 断言「只剩父项 + 无关项」会变红。
+        let parent = PathBuf::from("/Users/u/Library/Application Support/Code/Cache");
+        let child = parent.join("Cache_Data");
+        let sibling = PathBuf::from("/Users/u/Library/Application Support/Steam/htmlcache");
+        let out = drop_nested_cache_dirs(vec![
+            (child.clone(), 20),
+            (parent.clone(), 100),
+            (sibling.clone(), 30),
+        ]);
+        assert_eq!(out.len(), 2, "嵌套子项必须剔除，父项与无关项保留");
+        let paths: Vec<&PathBuf> = out.iter().map(|(p, _)| p).collect();
+        assert!(paths.contains(&&parent));
+        assert!(paths.contains(&&sibling));
+        assert!(!paths.contains(&&child));
     }
 }

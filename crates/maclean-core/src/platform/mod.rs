@@ -15,7 +15,9 @@ pub mod windows_backup;
 mod macos_trash;
 // 注册表备份的可信性校验。刻意不作平台限定 —— 这是 `reg import` 前最后一道关，
 // 必须在开发机上就能编译和测试，详见模块顶部注释。
-mod reg_safety;
+// H-02：公开模块，让校验函数与清单解析成为真实公开 API（去掉 allow(dead_code) 后
+// 也不会因"本机编译不到 windows_backup"而报 dead_code）。
+pub mod reg_safety;
 
 /// 获取当前用户 home 目录
 ///
@@ -79,6 +81,17 @@ pub fn app_data_dir() -> PathBuf {
 // `scanner::cache_registry::expand_path`（两参数、真正被 scan() 调用的那个）
 // 重复。两份实现并存时，"改哪份才算生效"是个陷阱。
 
+/// F-07：root 属主且当前进程非 root 时，返回「需提权」原因。
+///
+/// 抽成无 cfg 的纯函数，让这条判定在本机也能被行为测试覆盖。
+fn root_owned_needs_privilege(uid: u32, euid: u32) -> Option<&'static str> {
+    if uid == 0 && euid != 0 {
+        Some("root 属主：需要管理员权限（提权删除）")
+    } else {
+        None
+    }
+}
+
 /// 检测路径是否可删除（跨平台）
 ///
 /// 返回 (deletable, reason)
@@ -105,12 +118,14 @@ pub fn check_deletable(path: &str) -> (bool, String) {
             );
         }
 
-        // 检查属主（unix 专属）
+        // F-07：旧实现对 uid==0 直接 return (true, "")，与函数末尾恒等，
+        // 属主检查是死代码。真正接线：root 属主且当前用户非 root 时明确标注
+        // 需提权，让上层走提权链路，而不是假装和普通文件一样可删。
         if let Ok(meta) = p.symlink_metadata() {
             use std::os::unix::fs::MetadataExt;
-            let uid = meta.uid();
-            if uid == 0 {
-                return (true, String::new());
+            let euid = unsafe { libc::geteuid() };
+            if let Some(reason) = root_owned_needs_privilege(meta.uid(), euid) {
+                return (true, reason.to_string());
             }
         }
     }
@@ -180,28 +195,37 @@ pub fn move_to_trash(path: &str) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        // Windows: 用 PowerShell 调用 VisualBasic.FileSystem 模块的 FileIO.FileSystem.DeleteDirectory
-        // 带 UIOption::OnlyErrorDialogs + RecycleOption::SendToRecycleBin
+        // F-10：路径不再拼进 `-Command` 字符串（撇号转义挡不住所有注入形态），
+        // 改为独立参数传入、脚本里用 `$args[0]` 取；stderr 保留记日志，
+        // 不再被 Stdio::null() 吞掉后假装成功。
         let ps_cmd = if p.is_dir() {
-            format!(
-                "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('{}','OnlyErrorDialogs','SendToRecycleBin')",
-                path.replace('\'', "''")
-            )
+            "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($args[0],'OnlyErrorDialogs','SendToRecycleBin')"
         } else {
-            format!(
-                "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{}','OnlyErrorDialogs','SendToRecycleBin')",
-                path.replace('\'', "''")
-            )
+            "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($args[0],'OnlyErrorDialogs','SendToRecycleBin')"
         };
-        let status = std::process::Command::new("powershell")
+        let out = std::process::Command::new("powershell")
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
-            .arg(&ps_cmd)
+            .arg(ps_cmd)
+            .arg(path)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        status.map(|s| s.success()).unwrap_or(false)
+            .stderr(std::process::Stdio::piped())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => true,
+            Ok(o) => {
+                crate::logger::warn(&format!(
+                    "移入回收站失败: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+                false
+            }
+            Err(e) => {
+                crate::logger::warn(&format!("移入回收站命令启动失败: {}", e));
+                false
+            }
+        }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -260,10 +284,10 @@ pub fn system_prefers_dark() -> bool {
     }
 }
 
-/// 获取磁盘信息 (macOS 实现) → (total, used)
+/// 获取磁盘信息 (macOS 实现) → (total, free)
 ///
-/// 用 `df -k /` 读根卷容量 / 可用量（阶段 0 从 bin 的 main.rs 原样下沉，
-/// 供 egui 壳与 Tauri 壳共用同一份实现）。
+/// 用 `df -k /` 读根卷容量 / 可用量：`parts[1]` 是总容量、`parts[3]` 是
+/// Available（即可用/空闲），不是 used。F-08：统一注释与返回口径。
 #[cfg(target_os = "macos")]
 fn get_disk_info_macos() -> (u64, u64) {
     let output = std::process::Command::new("df").arg("-k").arg("/").output();
@@ -285,43 +309,37 @@ fn get_disk_info_macos() -> (u64, u64) {
     (0, 0)
 }
 
-/// 获取磁盘信息 (Windows 实现) → (total, free)
+/// F-08：解析 `Get-PSDrive C | Select-Object Used,Free | ConvertTo-Json`
 ///
-/// 用 PowerShell `Get-PSDrive C` 读系统盘（阶段 0 从 main.rs 原样下沉）。
+/// ConvertTo-Json 压缩成单行时，旧逐行 `starts_with("\"Used\"")` 全部不命中、
+/// 静默返回 (0,0)。改用 serde_json 按字段取值；纯函数不加 cfg，便于本机测试。
+/// 仅在 Windows 磁盘信息路径被调用，非 Windows 构建下按平台 gate 抑制 dead_code。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_psdrive_json(text: &str) -> (u64, u64) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (0, 0);
+    };
+    let used = v.get("Used").and_then(|x| x.as_u64()).unwrap_or(0);
+    let free = v.get("Free").and_then(|x| x.as_u64()).unwrap_or(0);
+    (used.saturating_add(free), free)
+}
+
+/// 获取磁盘信息 (Windows 实现) → (total, free)
 #[cfg(target_os = "windows")]
 fn get_disk_info_windows() -> (u64, u64) {
-    // Windows: 用 fsutil 或 wmic 获取磁盘信息
-    // 这里用 PowerShell 调用 Get-PSDrive
     let output = std::process::Command::new("powershell")
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
         .arg("Get-PSDrive C | Select-Object Used,Free | ConvertTo-Json")
         .output();
-
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // 解析 JSON: {"Used":123,"Free":456}
-        let mut used: u64 = 0;
-        let mut free: u64 = 0;
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.starts_with("\"Used\"") {
-                if let Some(val) = line.split(':').nth(1) {
-                    let val = val.trim().trim_end_matches(',').trim();
-                    used = val.parse::<u64>().unwrap_or(0);
-                }
-            } else if line.starts_with("\"Free\"") {
-                if let Some(val) = line.split(':').nth(1) {
-                    let val = val.trim().trim_end_matches(',').trim();
-                    free = val.parse::<u64>().unwrap_or(0);
-                }
-            }
-        }
-        return (used + free, free);
+    let Ok(output) = output else {
+        return (0, 0);
+    };
+    if !output.status.success() {
+        return (0, 0);
     }
-
-    (0, 0)
+    parse_psdrive_json(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// 获取磁盘信息 (total, free)
@@ -346,7 +364,7 @@ pub fn disk_info() -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::check_deletable;
+    use super::*;
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -381,5 +399,33 @@ mod tests {
             let (deletable, _) = check_deletable(&p);
             assert!(deletable, "用户路径应可删: {p}");
         }
+    }
+
+    // ---------- F-07 ----------
+
+    #[test]
+    fn root_owned_needs_privilege_is_not_dead_code() {
+        // 反向验证：把生产函数改回恒返回 None，第一条断言必红。
+        assert!(root_owned_needs_privilege(0, 501).is_some());
+        assert!(root_owned_needs_privilege(0, 0).is_none()); // 已是 root
+        assert!(root_owned_needs_privilege(501, 501).is_none()); // 普通属主
+    }
+
+    // ---------- F-08 ----------
+
+    #[test]
+    fn psdrive_json_parses_compact_and_pretty_and_rejects_garbage() {
+        // 压缩单行（旧逐行解析的盲区）
+        assert_eq!(
+            parse_psdrive_json("{\"Used\":123,\"Free\":456}"),
+            (579, 456)
+        );
+        // 多行展开
+        assert_eq!(
+            parse_psdrive_json("{\n  \"Used\": 100,\n  \"Free\": 200\n}"),
+            (300, 200)
+        );
+        // 无效 JSON 明确 (0,0)，不再静默误报容量
+        assert_eq!(parse_psdrive_json("not json"), (0, 0));
     }
 }

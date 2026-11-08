@@ -1,0 +1,6 @@
+# H-06 / G-3：Issue 入口。安全漏洞不走公开 issue。
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞报告（私有渠道）
+    url: https://github.com/jamesfeng2009/maclean/blob/main/SECURITY.md
+    about: 删除链 / 提权 / 路径处理漏洞请按 SECURITY.md 的私有渠道报告，勿开公开 issue。

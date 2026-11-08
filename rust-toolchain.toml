@@ -1,5 +1,11 @@
 # 固定工具链（P1，2026-10-12）：发布构建与本地一致，避免 stable 漂移。
 # 选择 1.90.0（当前本地工具链）；MSRV 为 1.77（edition 2024 要求 ≥1.85）。
+#
+# H-05：显式声明 Windows 目标，由 rustup 管理其 std（CI 与本地一致）。
+# 本机陷阱：若 PATH 把 /opt/homebrew/bin 排在 ~/.cargo/bin 之前，rustc 会是
+# Homebrew 版（1.99.x），本文件的 1.90.0 pin 被架空，rustc --print sysroot
+# 里自然看不到 windows std → 误判 E0463。校验见 CONTRIBUTING.md / make check-windows。
 [toolchain]
 channel = "1.90.0"
 components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]

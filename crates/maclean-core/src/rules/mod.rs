@@ -19,7 +19,9 @@ use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::safety;
-use crate::scanner::{dir_size, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner};
+use crate::scanner::{
+    dir_size, finalize_scan_result, has_home, home_dir, Recommend, ScanItem, ScanResult, Scanner,
+};
 
 const BUILTIN_RULES_JSON: &str = include_str!("builtin_rules.json");
 
@@ -65,11 +67,16 @@ fn default_risk() -> String {
 }
 
 impl CleanRule {
-    /// 该规则是否适用于当前平台
-    fn matches_platform(&self) -> bool {
-        let os = std::env::consts::OS;
+    /// 该规则是否适用于给定 OS（H-01：纯逻辑，os 由入参传入，
+    /// macos / windows / 其它 三个分支都能在开发机上真跑、真测）。
+    fn matches_platform_for(&self, os: &str) -> bool {
         matches!(self.platform.as_str(), "all" | "macos" if os == "macos")
             || matches!(self.platform.as_str(), "all" | "windows" if os == "windows")
+    }
+
+    /// 该规则是否适用于当前平台（生产入口，委托给纯逻辑）。
+    fn matches_platform(&self) -> bool {
+        self.matches_platform_for(std::env::consts::OS)
     }
 
     /// 解析并校验规则根，返回已解析的绝对路径（P0 校验失败 → None，规则整体跳过）
@@ -184,30 +191,23 @@ impl Scanner for RuleScanner {
         let start = std::time::Instant::now();
         let mut items = Vec::new();
 
-        // 占用进程（删前要求停进程）：全扫描只取一次系统进程快照
+        // 占用进程（删前要求停进程）：全扫描只取一次系统进程快照。
+        // A-06：None = 快照未知（命令失败/非零退出/平台不支持），由
+        // required_processes_decision 对声明了 required_stopped_processes 的项 fail-closed 锁定。
         let running = running_process_names();
         for rule in &self.rules {
             for root in rule.resolved_roots() {
-                items.extend(scan_rule_root(&root, rule, &running));
+                items.extend(scan_rule_root(&root, rule, running.as_deref()));
             }
         }
 
-        // 按路径去重（多个规则可能命中同一目录）
-        let mut seen = std::collections::HashSet::new();
-        items.retain(|i| seen.insert(i.path.clone()));
-
-        items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
-        let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
-        ScanResult {
-            total_size,
-            scan_time_ms: start.elapsed().as_millis() as u64,
-            items,
-        }
+        // C-17：去重 / 排序 / 汇总收敛到共享 helper（各 Scanner 同一口径）。
+        finalize_scan_result(items, start.elapsed().as_millis() as u64)
     }
 }
 
 /// 扫描单个规则根：walkdir 收集匹配子目录，过滤体积阈值与安全校验
-fn scan_rule_root(root: &Path, rule: &CleanRule, running: &[String]) -> Vec<ScanItem> {
+fn scan_rule_root(root: &Path, rule: &CleanRule, snapshot: Option<&[String]>) -> Vec<ScanItem> {
     if !root.is_dir() {
         return Vec::new();
     }
@@ -238,35 +238,17 @@ fn scan_rule_root(root: &Path, rule: &CleanRule, running: &[String]) -> Vec<Scan
         .filter_map(|p| {
             let p_str = p.to_string_lossy().to_string();
             // 安全层兜底：候选目录本身必须通过既有安全检查
-            if !matches!(
-                safety::check_path_safety_with_category(&p_str, &rule.category),
-                safety::SafetyCheck::Safe
-            ) {
+            if !safety::gate_allows(&p_str, &rule.category) {
                 return None;
             }
             let size = dir_size(p);
             if size < rule.min_size {
                 return None;
             }
-            // 删前要求停进程（fail-closed）：任一要求进程仍在运行 → 该项锁定
-            let mut deletable = true;
-            let mut undeletable_reason = String::new();
-            if !rule.required_stopped_processes.is_empty() {
-                let still_running: Vec<String> = rule
-                    .required_stopped_processes
-                    .iter()
-                    .filter(|proc_name| {
-                        let wanted = proc_name.to_lowercase();
-                        running.iter().any(|n| n == &wanted)
-                    })
-                    .cloned()
-                    .collect();
-                if !still_running.is_empty() {
-                    deletable = false;
-                    undeletable_reason =
-                        format!("required_stopped_processes:{}", still_running.join(", "));
-                }
-            }
+            // A-06：删前要求停进程走纯函数；快照未知（None）一律 fail-closed 锁定，
+            // 绝不再把「空列表」当成「没有进程在跑」。
+            let (deletable, undeletable_reason) =
+                required_processes_decision(&rule.required_stopped_processes, snapshot);
             Some(ScanItem {
                 batch_mtimes: vec![],
                 path: p_str,
@@ -287,55 +269,108 @@ fn scan_rule_root(root: &Path, rule: &CleanRule, running: &[String]) -> Vec<Scan
         .collect()
 }
 
-/// 当前运行进程名快照（小写，无扩展名差异）。
+/// 当前运行进程名快照（小写）。
 ///
-/// - macOS：`ps -axo comm=`（进程名/路径，取 basename）；
-/// - Windows：`tasklist /FO CSV /NH`（"name.exe"）。
-///
-/// 失败时返回空列表：调用方按"未知运行状态"处理 —— 规则要求进程时，
-/// 若快照失败则 fail-closed 锁定该项（宁可不可删，不可误删）。
-fn running_process_names() -> Vec<String> {
-    let mut names = Vec::new();
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(out) = std::process::Command::new("/bin/ps")
-            .args(["-axo", "comm="])
-            .output()
-        {
-            if out.status.success() {
-                for line in String::from_utf8_lossy(&out.stdout).lines() {
-                    let name = line
-                        .trim()
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(line.trim())
-                        .to_lowercase();
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
-                }
-            }
-        }
+/// - macOS：`ps -axo comm=`；Windows：`tasklist /FO CSV /NH`。
+/// - 命令成功且退出码 0 → `Some(names)`（哪怕为空也表示「确实没在跑」）；
+/// - 命令启动失败 / 非零退出 / 平台不支持 → `None`（A-06「未知」态，
+///   调用方对声明了 `required_stopped_processes` 的项 fail-closed 锁定，
+///   绝不当成「没有进程在跑」）。
+fn running_process_names() -> Option<Vec<String>> {
+    let (text, mac_format) = capture_process_snapshot()?;
+    Some(parse_process_snapshot(&text, mac_format))
+}
+
+/// A-06：平台相关的进程快照采集。成功返回 (原始输出, 是否 mac 的 ps 格式)；
+/// 命令启动失败 / 非零退出 / 非 mac/win 平台一律 `None`（未知）。
+/// 真正的命令执行是平台分支，解析逻辑抽到无 cfg 的纯函数，见 parse_process_snapshot。
+#[cfg(target_os = "macos")]
+fn capture_process_snapshot() -> Option<(String, bool)> {
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-axo", "comm="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(out) = std::process::Command::new("tasklist")
-            .args(["/FO", "CSV", "/NH"])
-            .output()
-        {
-            if out.status.success() {
-                for line in String::from_utf8_lossy(&out.stdout).lines() {
-                    // CSV: "name.exe","pid","session"... 取第一列并去引号
-                    let first = line.split(',').next().unwrap_or("").trim_matches('"');
-                    let name = first.to_lowercase();
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
-                }
-            }
+    Some((String::from_utf8_lossy(&out.stdout).into_owned(), true))
+}
+
+#[cfg(target_os = "windows")]
+fn capture_process_snapshot() -> Option<(String, bool)> {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some((String::from_utf8_lossy(&out.stdout).into_owned(), false))
+}
+
+/// 非 mac/win 平台没有可用的进程快照命令 → 未知（fail-closed 由调用方兜底）。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn capture_process_snapshot() -> Option<(String, bool)> {
+    None
+}
+
+/// A-06：解析进程快照文本为小写进程名列表（无 cfg 纯逻辑）。
+/// 平台格式由 `mac_format` 入参区分：两个分支都能在开发机上真跑、真测。
+/// - `true`：`ps -axo comm=`（路径取 basename）；
+/// - `false`：`tasklist /FO CSV /NH`（取逗号首列、去引号）。
+fn parse_process_snapshot(text: &str, mac_format: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let name = if mac_format {
+            line.trim()
+                .rsplit('/')
+                .next()
+                .unwrap_or(line.trim())
+                .to_lowercase()
+        } else {
+            line.split(',')
+                .next()
+                .unwrap_or("")
+                .trim_matches('"')
+                .to_lowercase()
+        };
+        if !name.is_empty() {
+            names.push(name);
         }
     }
     names
+}
+
+/// A-06：删前停进程判定（纯函数，生产 scan_rule_root 与测试共用，禁止另写一套）。
+/// - required 为空 → 无此约束，正常可删；
+/// - snapshot=None（快照未知）→ 无法确认要求的进程已退出 → fail-closed 强制锁定并给原因；
+/// - snapshot=Some 且有要求进程仍在运行 → 锁定；快照成功且要求的进程已退出 → 可删。
+fn required_processes_decision(required: &[String], snapshot: Option<&[String]>) -> (bool, String) {
+    if required.is_empty() {
+        return (true, String::new());
+    }
+    let Some(running) = snapshot else {
+        return (
+            false,
+            "required_stopped_processes:进程快照未知（fail-closed 锁定）".to_string(),
+        );
+    };
+    let still_running: Vec<String> = required
+        .iter()
+        .filter(|proc_name| {
+            let wanted = proc_name.to_lowercase();
+            running.iter().any(|n| n == &wanted)
+        })
+        .cloned()
+        .collect();
+    if still_running.is_empty() {
+        (true, String::new())
+    } else {
+        (
+            false,
+            format!("required_stopped_processes:{}", still_running.join(", ")),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -480,21 +515,41 @@ mod tests {
     }
 
     #[test]
-    fn platform_filter_respects_current_os() {
-        let rule = CleanRule {
+    fn platform_filter_is_table_driven() {
+        // H-01：平台过滤改表驱动具体输入，不再写
+        // `matches_platform() == (OS == "windows")` 这种「改坏实现仍绿」的恒等式。
+        // 反向验证：把 matches_platform_for 的 os 守卫去掉 / 改错，下面用例必红。
+        let mk = |platform: &str| CleanRule {
             id: "t".into(),
             name_key: "x".into(),
             desc_key: "x".into(),
             category: "x".into(),
-            platform: "windows".into(),
-            roots: vec!["$HOME/Library/Caches/Foo".to_string()],
+            platform: platform.into(),
+            roots: vec![],
             patterns: vec!["Cache".into()],
             min_size: 0,
             risk: "Safe".into(),
             required_stopped_processes: vec![],
         };
-        // 在 macOS 上 windows-only 规则不匹配平台
-        assert_eq!(rule.matches_platform(), std::env::consts::OS == "windows");
+        // (platform, os, expected)
+        let cases = [
+            ("all", "macos", true),
+            ("all", "windows", true),
+            ("all", "linux", false),
+            ("macos", "macos", true),
+            ("macos", "windows", false),
+            ("macos", "linux", false),
+            ("windows", "macos", false),
+            ("windows", "windows", true),
+            ("windows", "linux", false),
+        ];
+        for (platform, os, expected) in cases {
+            assert_eq!(
+                mk(platform).matches_platform_for(os),
+                expected,
+                "platform={platform}, os={os}"
+            );
+        }
     }
 
     #[test]
@@ -502,6 +557,7 @@ mod tests {
         // 临时目录造一个 1KB 缓存子目录 + 一个 2MB 缓存子目录
         let tmp = std::env::temp_dir().join(format!("maclean_rules_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        crate::provenance::register_root(&tmp); // A-07b：规则根需显式声明准入
         let small = tmp.join("tiny");
         let big = tmp.join("BigCache");
         std::fs::create_dir_all(&small).unwrap();
@@ -521,7 +577,8 @@ mod tests {
             risk: "Safe".into(),
             required_stopped_processes: vec![],
         };
-        let items = scan_rule_root(&tmp, &rule, &[]);
+        let no_running: Vec<String> = Vec::new();
+        let items = scan_rule_root(&tmp, &rule, Some(no_running.as_slice()));
         // 只应命中 BigCache（>=1MB），tiny 被体积阈值过滤
         assert_eq!(items.len(), 1, "应只有大目录命中: {:?}", items);
         assert_eq!(items[0].path, big.to_string_lossy());
@@ -533,9 +590,14 @@ mod tests {
 
     #[test]
     fn required_stopped_processes_locks_items_fail_closed() {
-        // 规则声明需停止的进程：进程在运行 → 锁定不可删；进程已退出 → 可删
+        // 规则声明需停止的进程：
+        // - 快照含该进程 → 锁定不可删；
+        // - 快照成功且为空（已确认进程退出）→ 可删；
+        // - 快照未知（None）→ fail-closed 强制锁定（A-06：旧实现把空列表当
+        //   「没进程在跑」是 fail-open，本用例不再把它写成期望）。
         let tmp = std::env::temp_dir().join(format!("maclean_proc_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        crate::provenance::register_root(&tmp); // A-07b：规则根需显式声明准入
         let cache = tmp.join("ChromeCache");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("a"), vec![0u8; 2 * 1024 * 1024]).unwrap();
@@ -552,9 +614,11 @@ mod tests {
             risk: "Safe".into(),
             required_stopped_processes: vec!["Google Chrome".into()],
         };
+        let running_chrome = vec!["google chrome".to_string()];
+        let no_running: Vec<String> = Vec::new();
 
         // 进程仍在运行 → deletable=false + 原因
-        let locked = scan_rule_root(&tmp, &rule, &["google chrome".to_string()]);
+        let locked = scan_rule_root(&tmp, &rule, Some(running_chrome.as_slice()));
         assert_eq!(locked.len(), 1);
         assert!(!locked[0].deletable, "进程运行时必须锁定不可删");
         assert!(
@@ -565,12 +629,72 @@ mod tests {
             locked[0].undeletable_reason
         );
 
-        // 进程已退出 → 正常可删
-        let free = scan_rule_root(&tmp, &rule, &[]);
+        // 进程已退出（快照成功、空列表）→ 正常可删
+        let free = scan_rule_root(&tmp, &rule, Some(no_running.as_slice()));
         assert_eq!(free.len(), 1);
         assert!(free[0].deletable, "进程退出后应可删");
         assert!(free[0].undeletable_reason.is_empty());
 
+        // A-06：快照未知 → fail-closed 锁定（不可把「未知」当成「没有进程在跑」）
+        let unknown = scan_rule_root(&tmp, &rule, None);
+        assert_eq!(unknown.len(), 1);
+        assert!(!unknown[0].deletable, "进程快照未知必须 fail-closed 锁定");
+        assert!(unknown[0]
+            .undeletable_reason
+            .starts_with("required_stopped_processes:"));
+
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn required_processes_decision_pure_function_is_fail_closed() {
+        // A-06：删前停进程的纯逻辑（生产 scan_rule_root 与本用例共用，禁止另写一套）。
+        // 反向验证：把 None 分支改成返回 (true, "")（退回 fail-open），下面断言必红。
+        let req = vec!["Google Chrome".to_string()];
+        let running = vec!["google chrome".to_string()];
+        let none: Vec<String> = Vec::new();
+        let no_req: Vec<String> = Vec::new();
+
+        // 无 required 约束：快照已知/未知都不锁定
+        assert_eq!(
+            required_processes_decision(&no_req, None),
+            (true, String::new())
+        );
+        assert_eq!(
+            required_processes_decision(&no_req, Some(none.as_slice())),
+            (true, String::new())
+        );
+
+        // 快照未知 → fail-closed 锁定并给原因
+        let (d, r) = required_processes_decision(&req, None);
+        assert!(!d, "进程快照未知必须锁定");
+        assert!(r.starts_with("required_stopped_processes:"));
+
+        // 快照成功但要求的进程仍在 → 锁定
+        let (d, r) = required_processes_decision(&req, Some(running.as_slice()));
+        assert!(!d);
+        assert!(r.contains("Google Chrome"));
+
+        // 快照成功且要求的进程已退出 → 可删
+        assert_eq!(
+            required_processes_decision(&req, Some(none.as_slice())),
+            (true, String::new())
+        );
+    }
+
+    #[test]
+    fn parse_process_snapshot_runs_both_platform_formats() {
+        // A-06 / H-01：解析逻辑无 cfg，两个平台格式由入参区分，
+        // macOS 开发机上也能真跑 Windows 的 tasklist 分支。
+        let mac = "/usr/bin/Google Chrome\n/sbin/Finder\n\n";
+        assert_eq!(
+            parse_process_snapshot(mac, true),
+            vec!["google chrome".to_string(), "finder".to_string()]
+        );
+        let win = "\"chrome.exe\",\"1234\",\"Console\"\r\n\"Finder.EXE\",\"9\",\"Console\"\r\n";
+        assert_eq!(
+            parse_process_snapshot(win, false),
+            vec!["chrome.exe".to_string(), "finder.exe".to_string()]
+        );
     }
 }

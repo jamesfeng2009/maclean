@@ -12,7 +12,28 @@ use std::path::PathBuf;
 
 /// 配置目录
 pub fn config_dir() -> PathBuf {
+    // A-12：测试钩子，单测把配置目录指向临时位置，绝不碰真实 config.json。
+    #[cfg(test)]
+    {
+        if let Ok(guard) = TEST_CONFIG_DIR.lock() {
+            if let Some(d) = guard.as_ref() {
+                if !d.as_os_str().is_empty() {
+                    return d.clone();
+                }
+            }
+        }
+    }
     crate::platform::app_data_dir().join("config")
+}
+
+#[cfg(test)]
+static TEST_CONFIG_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_test_config_dir(d: PathBuf) {
+    if let Ok(mut guard) = TEST_CONFIG_DIR.lock() {
+        *guard = Some(d);
+    }
 }
 
 /// apps.json 路径（用户自定义 bloatware 列表）
@@ -127,33 +148,77 @@ pub fn config_exists() -> bool {
     config_json_path().exists()
 }
 
-/// 从 config.json 加载用户设置
-pub fn load_config() -> AppConfig {
+/// 带错误通道地加载 config.json（A-12）
+///
+/// 解析失败返回 Err，由调用方显式处理；绝不把损坏文件"降级"成默认配置后
+/// 又悄悄写回 —— 那正是用户设置不可恢复地丢失的链路。
+pub fn load_config_checked() -> Result<AppConfig, String> {
     let path = config_json_path();
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-            crate::logger::error(&format!("config.json 解析失败（使用默认设置）: {}", e));
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        // 文件不存在 = 首次启动，用内存默认值但不落盘。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AppConfig::default()),
+        Err(e) => return Err(format!("读取 config.json 失败: {}", e)),
+    };
+    serde_json::from_str(&content).map_err(|e| format!("config.json 解析失败: {}", e))
+}
+
+/// 从 config.json 加载用户设置（A-12）
+///
+/// 解析失败时必须**显式报错并保留原文件**：这里不写回任何东西，也不假装
+/// "使用默认设置"就万事大吉；`save_config` 会在写盘前复核，损坏文件一律
+/// 拒绝覆盖，用户数据不会被默认值冲掉。是否重置由用户决定（见 `reset_config`）。
+pub fn load_config() -> AppConfig {
+    match load_config_checked() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            crate::logger::error(&format!(
+                "config.json 解析失败：保留原文件、拒绝写回默认（请手动修复或重置）: {}",
+                e
+            ));
             AppConfig::default()
-        }),
-        Err(_) => AppConfig::default(),
+        }
     }
 }
 
-/// 保存用户设置到 config.json
+/// 保存用户设置到 config.json（A-12）
+///
+/// 写盘前复核现有文件：损坏的 config.json 必须原样保留，绝不因一次"内存里
+/// 是默认值"的保存就把用户设置永久覆盖。合法内容走共用原子写。
 pub fn save_config(cfg: &AppConfig) {
     let path = config_json_path();
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if let Err(e) = serde_json::from_str::<AppConfig>(&existing) {
+            crate::logger::error(&format!(
+                "config.json 已损坏，拒绝覆盖以保护原文件（如需重置请调用 reset_config）: {}",
+                e
+            ));
             return;
         }
     }
-    match serde_json::to_string_pretty(cfg) {
+    let json = match serde_json::to_string_pretty(cfg) {
+        Ok(j) => j,
+        Err(e) => {
+            crate::logger::error(&format!("序列化设置失败: {}", e));
+            return;
+        }
+    };
+    match crate::atomic_write::atomic_write(&path, json.as_bytes()) {
+        Ok(()) => crate::logger::info("用户设置已保存"),
+        Err(e) => crate::logger::error(&format!("原子写用户设置失败: {}", e)),
+    }
+}
+
+/// 用户显式决定重置配置时调用（A-12）：唯一允许覆盖损坏文件的入口。
+pub fn reset_config() {
+    let path = config_json_path();
+    match serde_json::to_string_pretty(&AppConfig::default()) {
         Ok(json) => {
-            if std::fs::write(&path, json).is_ok() {
-                crate::logger::info("用户设置已保存");
+            if let Err(e) = crate::atomic_write::atomic_write(&path, json.as_bytes()) {
+                crate::logger::error(&format!("重置配置失败: {}", e));
             }
         }
-        Err(e) => crate::logger::error(&format!("序列化设置失败: {}", e)),
+        Err(e) => crate::logger::error(&format!("序列化默认设置失败: {}", e)),
     }
 }
 
@@ -262,5 +327,55 @@ pub fn import_config(src_dir: &std::path::Path) -> (bool, String) {
         (false, "no_config_found".to_string())
     } else {
         (false, errors.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a12_broken_config_is_preserved_and_never_overwritten_by_a_default_save() {
+        // A-12 验收用例：半截 JSON → 不覆盖 → 重启仍保留。
+        // 合并为单测，避免全局测试目录钩子在并行用例间互相覆盖。
+        // 反向验证：把 save_config 改回 std::fs::write（或去掉写前复核），
+        // 下面第二条断言会立刻变红——原文件被默认值冲掉。
+        let tmp = std::env::temp_dir().join(format!("maclean_cfg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        set_test_config_dir(tmp.clone());
+        let path = config_json_path();
+        let broken = "{\"lang_en\": true,";
+        std::fs::write(&path, broken).unwrap();
+
+        // ① 解析失败必须显式报错，不能被当成正常默认。
+        assert!(load_config_checked().is_err(), "半截 JSON 必须报错");
+        // ② 任意一次保存都不得覆盖原文件（否则用户设置永久丢失）。
+        save_config(&AppConfig::default());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "损坏的 config.json 被默认值覆盖了"
+        );
+        // ③ 「重启」（再次加载）仍是同一份损坏文件，行为一致。
+        assert!(load_config_checked().is_err());
+        // ④ 只有显式重置才允许覆盖，且落盘内容可正常解析。
+        reset_config();
+        let cfg = load_config_checked().expect("重置后应可解析");
+        assert!(!cfg.lang_en);
+
+        // ⑤ 正常配置往返：保存 → 重新加载拿到真实值。
+        let custom = AppConfig {
+            lang_en: true,
+            schedule_interval_days: 30,
+            ..Default::default()
+        };
+        save_config(&custom);
+        let reloaded = load_config_checked().unwrap();
+        assert!(reloaded.lang_en);
+        assert_eq!(reloaded.schedule_interval_days, 30);
+
+        set_test_config_dir(PathBuf::new());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

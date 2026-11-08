@@ -18,10 +18,10 @@
 //! 判定依赖的三个外部函数（`dir_size` / `home_dir` / `resembles_app_dir`）
 //! 都是跨平台实现，不是 Windows 专属，可以直接用。
 
-// 代价：不加 cfg 意味着在 macOS 目标上这些符号没有生产调用点，clippy 会把它们
-// 全报成 dead_code。这里是刻意的 —— 宁可挂一条 allow 换"本机跑得到测试"，
-// 也不要回到"只有 Windows 目标才编译、因此永远没测过"的状态。
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+// A-05：不再挂全模块 allow(dead_code)。has_large_user_data 现在真正调用
+// user_data_dir_exceeds_threshold / trimmed_app_name（生产链完整），
+// 这些 private 函数不再是「只被测试调用的孤儿」；clippy 的 dead_code
+// 由接线消除，而不是靠 #[allow] 掩盖。
 
 use std::path::PathBuf;
 
@@ -320,30 +320,28 @@ fn has_large_user_data(app_name: &str) -> bool {
         .map(PathBuf::from)
         .unwrap_or_else(|_| home.join("AppData/Roaming"));
 
-    let trimmed_name = app_name
-        .trim_end_matches(" for windows")
-        .trim_end_matches(" desktop")
-        .trim_end_matches(" beta")
-        .trim_end_matches(" (64-bit)");
-
+    // A-05：把真实目录枚举成 (目录名, 大小) 列表，再统一交给生产判定函数
+    // user_data_dir_exceeds_threshold —— 它调用不区分大小写的 trimmed_app_name。
+    // 旧实现把「区分大小写、只剥一次」的 trim 链内联在这里，修好的两个纯函数
+    // 只被测试调用，生产路径仍是坏的（WeChat for Windows 后缀永远剥不掉）。
+    let mut dirs: Vec<(String, u64)> = Vec::new();
     for base in [&local_appdata, &appdata] {
         if !base.is_dir() {
             continue;
         }
         if let Ok(entries) = std::fs::read_dir(base) {
             for entry in entries.flatten() {
-                let dir_name = entry.file_name().to_string_lossy().to_string();
-                if resembles_app_dir(&dir_name, trimmed_name) {
-                    let path = entry.path();
-                    if path.is_dir() && dir_size(&path) >= DATA_PROTECTED_SIZE_THRESHOLD {
-                        return true;
-                    }
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
                 }
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                dirs.push((dir_name, dir_size(&path)));
             }
         }
     }
 
-    false
+    user_data_dir_exceeds_threshold(app_name, &dirs)
 }
 
 /// 去掉应用名尾部的平台/渠道后缀
@@ -622,5 +620,46 @@ mod tests {
                 name
             );
         }
+    }
+
+    // --- A-05 / H-01：生产链接线 + 反向验证 ---
+
+    #[test]
+    fn a05_production_data_check_uses_case_insensitive_suffix_trim() {
+        // user_data_dir_exceeds_threshold 是 has_large_user_data 的生产判定节点
+        // （不再是只被测试调用的孤儿）。"WeChat for Windows" 的大写 W 后缀
+        // 必须被剥掉后匹配到 "WeChat" 目录。
+        assert!(user_data_dir_exceeds_threshold(
+            "WeChat for Windows",
+            &[("WeChat".to_string(), DATA_PROTECTED_SIZE_THRESHOLD + 1)]
+        ));
+        assert!(user_data_dir_exceeds_threshold(
+            "Slack DESKTOP",
+            &[("Slack".to_string(), DATA_PROTECTED_SIZE_THRESHOLD + 1)]
+        ));
+        // 反向验证：把 trimmed_app_name 改回区分大小写的 trim 链，
+        // 上面两条断言会变红（旧实现下后缀剥不掉、目录名对不上）。
+        assert_eq!(trimmed_app_name("WeChat for Windows"), "WeChat");
+    }
+
+    #[test]
+    fn h01_check_protection_feeds_the_uninstall_gate() {
+        // 生产出口（windows_apps.rs::WindowsUninstallScanner）改调
+        // allows_uninstall()/block_reason()，不再自己 match 重写一份。
+        let critical = check_protection(&app(
+            "Windows Defender",
+            Some("Microsoft Corporation"),
+            None,
+        ));
+        assert!(!critical.allows_uninstall());
+        assert!(critical.block_reason().is_some());
+        let security = check_protection(&app("CrowdStrike Falcon", Some("CrowdStrike"), None));
+        assert!(!security.allows_uninstall());
+        assert!(security.block_reason().is_some());
+        let plain = check_protection(&app("Spotify", Some("Spotify AB"), None));
+        assert!(plain.allows_uninstall());
+        assert!(plain.block_reason().is_none());
+        // 反向验证：把 WinProtectionLevel::allows_uninstall 改成恒 true，
+        // 前两条断言必红。
     }
 }

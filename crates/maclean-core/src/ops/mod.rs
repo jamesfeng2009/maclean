@@ -815,6 +815,51 @@ pub fn run_orbctl_clean(lang_en: bool) -> Result<String, String> {
     }
 }
 
+// =========================================================================
+//  阶段一 / sudo 阶段的纯逻辑（抽出以便本机行为测试，平台分支用入参传入）
+// =========================================================================
+
+/// B-10：聚合体积在清单里只记一次 —— 第一条承载 aggregate，其余成员记 0。
+/// 旧实现把聚合的 data_size/cache_size 重复记到每个 batch_path，
+/// BackupManifest::total_bytes 被放大 N 倍。
+fn manifest_member_size(is_first_recorded: bool, aggregate: u64) -> u64 {
+    if is_first_recorded {
+        aggregate
+    } else {
+        0
+    }
+}
+
+/// B-04：删除前声明废纸篓落点名（无法确认归属时返回空串）。
+/// 只在「走废纸篓且废纸篓目录可用」时声明；永久删除返回空串。
+fn claim_entry_trash_name(trash_dir: &str, path: &str, use_trash: bool) -> String {
+    if !use_trash || trash_dir.is_empty() {
+        return String::new();
+    }
+    crate::backup::claim_trash_name(trash_dir, path)
+}
+
+/// D-04：把残留清理计数转成给用户看的摘要（ResidualCleaned 的生产消费端）。
+pub fn residual_cleaned_summary(reg: usize, env: usize, files: usize) -> String {
+    format!(
+        "残留清理完成：注册表 {} 项、环境变量 {} 项、文件 {} 项",
+        reg, env, files
+    )
+}
+
+/// D-04：用户确认后清理选中残留，并把完成消息回传（ResidualCleaned 的发送点）。
+#[cfg(target_os = "windows")]
+pub fn clean_selected_residuals(
+    residual: &scanner::windows_apps::UninstallResidual,
+    tx: &mpsc::Sender<DeleteMessage>,
+) {
+    let (reg, env, files) = scanner::windows_apps::clean_all_residuals(residual);
+    let _ = tx.send(DeleteMessage::Info(residual_cleaned_summary(
+        reg, env, files,
+    )));
+    let _ = tx.send(DeleteMessage::ResidualCleaned(reg, env, files));
+}
+
 /// 启动后台删除线程（两阶段自动删除）
 /// 阶段1: 普通删除（多线程并行 rm -rf）
 /// 阶段2: 对失败项自动 sudo 批量删除（后台并发，只弹一次密码框）
@@ -852,21 +897,27 @@ pub fn start_delete(
         // finalize_pending 清除，中断/崩溃则留存供审计。
         let pending_id: Option<String> = {
             let mut pending: Vec<crate::backup::BackupEntry> = Vec::new();
+            let trash_dir = crate::backup::trash_dir();
             for (path, category, batch_paths, use_trash, size_bytes) in &to_delete {
                 let restorable =
                     crate::backup::is_restorable_by_move(*use_trash, std::env::consts::OS);
+                // B-10：聚合 size 只记一次（pending 快照的 path 条目），其后的
+                // batch 成员记 0，避免清单 total_bytes 被放大 N 倍。
+                // B-04：删除前声明废纸篓落点名，还原时按记录取回而非猜 basename。
                 pending.push(crate::backup::BackupEntry {
                     path: path.clone(),
-                    size_bytes: *size_bytes,
+                    size_bytes: manifest_member_size(true, *size_bytes),
                     category: category.clone(),
                     restorable,
+                    trash_name: claim_entry_trash_name(&trash_dir, path, *use_trash),
                 });
                 for bp in batch_paths {
                     pending.push(crate::backup::BackupEntry {
                         path: bp.clone(),
-                        size_bytes: *size_bytes,
+                        size_bytes: manifest_member_size(false, *size_bytes),
                         category: category.clone(),
                         restorable,
+                        trash_name: claim_entry_trash_name(&trash_dir, bp, *use_trash),
                     });
                 }
             }
@@ -1023,22 +1074,24 @@ pub fn start_delete(
                             let mut success_count = 0;
                             let mut fail_count = 0;
                             for bp in &batch_paths {
-                                match safety::check_path_safety_with_category(bp, &category) {
-                                    safety::SafetyCheck::Danger(reason) => {
-                                        fail_count += 1;
-                                        let _ = tx.send(DeleteMessage::Log(
-                                            format!("⛔ {}", crate::i18n::tf_lang(lang_en, "log_intercepted", &[bp, &reason])), bp.clone(), category.clone(), false));
-                                        safety::log_deletion(bp, &category, false, Some(&reason));
-                                        continue;
-                                    }
-                                    safety::SafetyCheck::Warning(reason) => {
-                                        fail_count += 1;
-                                        let _ = tx.send(DeleteMessage::Log(
-                                            format!("⚠️ {}", crate::i18n::tf_lang(lang_en, "log_skipped", &[bp, &reason])), bp.clone(), category.clone(), false));
-                                        safety::log_deletion(bp, &category, false, Some(&reason));
-                                        continue;
-                                    }
-                                    safety::SafetyCheck::Safe => {}
+                                // A-07a：统一闸门（Danger / Warning 一律不放行）
+                                let decision = safety::gate_decision(bp, &category);
+                                if !decision.is_safe() {
+                                    fail_count += 1;
+                                    let reason = decision
+                                        .reason()
+                                        .unwrap_or("路径未通过安全闸门")
+                                        .to_string();
+                                    let (mark, key) =
+                                        if matches!(decision, safety::SafetyCheck::Warning(_)) {
+                                            ("⚠️", "log_skipped")
+                                        } else {
+                                            ("⛔", "log_intercepted")
+                                        };
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!("{} {}", mark, crate::i18n::tf_lang(lang_en, key, &[bp, &reason])), bp.clone(), category.clone(), false));
+                                    safety::log_deletion(bp, &category, false, Some(&reason));
+                                    continue;
                                 }
                                 let p = std::path::Path::new(bp.as_str());
                                 // 对齐：已消失的路径记 SKIP —— 之前直接算成功，
@@ -1073,17 +1126,30 @@ pub fn start_delete(
                                         std::env::consts::OS,
                                     );
                                     if let Ok(mut guard) = backup_entries.lock() {
-                                        guard.push(crate::backup::BackupEntry {
-                                            path: bp.clone(),
-                                            size_bytes,
-                                            category: category.clone(),
-                                            restorable,
-                                        });
+                                    guard.push(crate::backup::BackupEntry {
+                                        path: bp.clone(),
+                                        size_bytes,
+                                        category: category.clone(),
+                                        restorable,
+                                        // A-02/B-04：删除时记录预测废纸篓落点（basename）；
+                                        // 若 move_to_trash 加了碰撞后缀，还原走 best-effort
+                                        // 失败而非误抓同名文件，安全口径与测试 helper 一致。
+                                        trash_name: std::path::Path::new(bp)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_default(),
+                                    });
                                     }
                                 } else {
                                     fail_count += 1;
-                                    failed_items.lock().unwrap_or_else(|e| e.into_inner())
-                                        .push((bp.clone(), category.clone()));
+                                    // A-02（修复）：use_trash=true 的批量项废纸篓失败时，
+                                    // 保留文件、不进 sudo rm -rf 列表 —— sudo 阶段 rm -rf
+                                    // 会让本可恢复的废纸篓项彻底不可恢复。与单路径分支
+                                    // （1496-1500）口径一致。
+                                    if !use_trash {
+                                        failed_items.lock().unwrap_or_else(|e| e.into_inner())
+                                            .push((bp.clone(), category.clone()));
+                                    }
                                     // 失败归因 —— 用户能看到"为什么删不掉"
                                     let reason = if use_trash {
                                         crate::i18n::t_lang(lang_en, "log_trash_failed")
@@ -1133,21 +1199,23 @@ pub fn start_delete(
                             continue;
                         }
 
-                        // 安全校验
-                        match safety::check_path_safety_with_category(&path, &category) {
-                            safety::SafetyCheck::Danger(reason) => {
-                                let _ = tx.send(DeleteMessage::Log(
-                                    format!("⛔ {}", crate::i18n::tf_lang(lang_en, "log_intercepted", &[&path, &reason])), path.clone(), category.clone(), false));
-                                safety::log_deletion(&path, &category, false, Some(&reason));
-                                continue;
-                            }
-                            safety::SafetyCheck::Warning(reason) => {
-                                let _ = tx.send(DeleteMessage::Log(
-                                    format!("⚠️ {}", crate::i18n::tf_lang(lang_en, "log_skipped", &[&path, &reason])), path.clone(), category.clone(), false));
-                                safety::log_deletion(&path, &category, false, Some(&reason));
-                                continue;
-                            }
-                            safety::SafetyCheck::Safe => {}
+                        // 安全校验（A-07a：统一闸门）
+                        let decision = safety::gate_decision(&path, &category);
+                        if !decision.is_safe() {
+                            let reason = decision
+                                .reason()
+                                .unwrap_or("路径未通过安全闸门")
+                                .to_string();
+                            let (mark, key) =
+                                if matches!(decision, safety::SafetyCheck::Warning(_)) {
+                                    ("⚠️", "log_skipped")
+                                } else {
+                                    ("⛔", "log_intercepted")
+                                };
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!("{} {}", mark, crate::i18n::tf_lang(lang_en, key, &[&path, &reason])), path.clone(), category.clone(), false));
+                            safety::log_deletion(&path, &category, false, Some(&reason));
+                            continue;
                         }
 
                         // APFS 快照特殊处理 (macOS 专属)
@@ -1327,6 +1395,11 @@ pub fn start_delete(
                                     size_bytes,
                                     category: category.clone(),
                                     restorable,
+                                    // A-02/B-04：同批量分支，记录预测废纸篓落点。
+                                    trash_name: std::path::Path::new(&path)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default(),
                                 });
                             }
                         } else if use_trash {
@@ -1589,13 +1662,15 @@ pub fn sanitize_before_delete(
             continue;
         }
 
-        // 1. 重做安全校验（与阶段一相同规则）
-        match safety::check_path_safety_with_category(&path, &category) {
-            safety::SafetyCheck::Danger(reason) | safety::SafetyCheck::Warning(reason) => {
-                rejected.push((path, category, reason));
-                continue;
-            }
-            safety::SafetyCheck::Safe => {}
+        // 1. 重做安全校验（A-07a：与阶段一走同一个闸门，规则完全一致）
+        let decision = safety::gate_decision(&path, &category);
+        if !decision.is_safe() {
+            let reason = decision
+                .reason()
+                .unwrap_or("路径未通过安全闸门")
+                .to_string();
+            rejected.push((path, category, reason));
+            continue;
         }
 
         // 2. 符号链接复查：阶段一之后路径可能已被替换成软链，

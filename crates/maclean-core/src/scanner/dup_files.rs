@@ -181,20 +181,22 @@ impl Scanner for DuplicateFileScanner {
         }
 
         // 2. 大小组内预筛（前 64KB 哈希）→ 3. 全量哈希确认
-        let candidates: Vec<_> = by_size
+        // A-01：flat_map 把每个尺寸桶产出的多个全哈希组摊平成「一组一项」，
+        // 绝不跨全哈希组合并（见 find_duplicate_groups）。
+        let groups: Vec<Vec<PathBuf>> = by_size
             .into_par_iter()
             .filter(|(_, paths)| paths.len() > 1)
-            .map(|(_, paths)| find_duplicate_groups(paths))
+            .flat_map(|(_, paths)| find_duplicate_groups(paths))
             .collect();
 
-        // 4. 组装 ScanItem（每组一个聚合项）
+        // 4. 组装 ScanItem（每个全哈希组单独选 keep，各出一个聚合项）
         let mut items: Vec<ScanItem> = Vec::new();
-        for group in candidates.into_iter().take(self.max_groups) {
-            // 安全判定在 select_duplicate_keep 内：包根分桶 / git 项目边界 /
-            // 保留者选择（返回 None = 整组不呈现）。
-            let Some((keep, batch_paths)) = select_duplicate_keep(group, &home) else {
-                continue;
-            };
+        // A-01：安全判定在 select_duplicate_keep 内（包根分桶 / git 项目边界 /
+        // 保留者选择，返回 None = 整组不呈现）；每个全哈希组独立走一次。
+        for (keep, batch_paths) in select_keep_per_group(groups, &home)
+            .into_iter()
+            .take(self.max_groups)
+        {
             let total_dup: u64 = batch_paths
                 .iter()
                 .map(|p| p.metadata().map(|m| m.len()).unwrap_or(0))
@@ -315,8 +317,13 @@ fn rel_str_first_equals(rel: &Path, d: &str) -> bool {
     name == d
 }
 
-/// 组内找重复：先预筛（前 64KB），再全量哈希
-fn find_duplicate_groups(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+/// 组内找重复：先预筛（前 64KB），再全量哈希。
+///
+/// A-01：返回 `Vec<Vec<PathBuf>>` —— **每个全哈希组各自成一个 Vec**，绝不跨组
+/// 扁平合并。旧实现 `result.extend(dup)` 把同一尺寸桶里所有全哈希组摊成一个 Vec，
+/// scan() 再整个交给 `select_duplicate_keep` 只挑 1 个 keep：同尺寸但内容不同的
+/// 组（A/B=X、C/D=Y）里 C/D 与 keep 内容不同仍进删除集 → 内容不同的文件被误删。
+fn find_duplicate_groups(paths: Vec<PathBuf>) -> Vec<Vec<PathBuf>> {
     // 预筛：前 64KB 哈希 → 只有预筛相同才全量哈希
     let prefix_hashed: Vec<(PathBuf, String)> = paths
         .into_par_iter()
@@ -328,7 +335,7 @@ fn find_duplicate_groups(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         prefix_groups.entry(h).or_default().push(p);
     }
 
-    let mut result = Vec::new();
+    let mut result: Vec<Vec<PathBuf>> = Vec::new();
     for (_, group) in prefix_groups {
         if group.len() < 2 {
             continue;
@@ -342,11 +349,23 @@ fn find_duplicate_groups(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         }
         for (_, dup) in full {
             if dup.len() >= 2 {
-                result.extend(dup);
+                // A-01：每个全哈希组单独成组，供上层各自选 keep。
+                result.push(dup);
             }
         }
     }
     result
+}
+
+/// A-01：对每个全哈希组**单独**选 keep，产出 `(保留者, 可删副本)` 列表。
+///
+/// 抽成纯函数供 `scan()` 与单测共用：测试调用被测逻辑本身，不重写分组算法。
+/// 把这里改回「所有组合并后只选一次 keep」，下面的跨内容组用例必须变红。
+fn select_keep_per_group(groups: Vec<Vec<PathBuf>>, home: &Path) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    groups
+        .into_iter()
+        .filter_map(|g| select_duplicate_keep(g, home))
+        .collect()
 }
 
 /// 清单管理目录判定统一走 safety::is_manifest_managed_path（第 4.6 层）。
@@ -636,11 +655,86 @@ mod tests {
         std::fs::write(&a, vec![1u8; 2 * 1024 * 1024]).unwrap();
         std::fs::write(&b, vec![1u8; 2 * 1024 * 1024]).unwrap();
         std::fs::write(&c, vec![2u8; 2 * 1024 * 1024]).unwrap();
-        let result = find_duplicate_groups(vec![a.clone(), b.clone(), c.clone()]);
-        // a/b 重复进入结果；c 不重复
-        assert!(result.contains(&a));
-        assert!(result.contains(&b));
-        assert!(!result.contains(&c));
+        // A-01：返回按全哈希组分组的 Vec<Vec<PathBuf>>；只有 a/b 成组，c 内容唯一不成组。
+        let groups = find_duplicate_groups(vec![a.clone(), b.clone(), c.clone()]);
+        let flat: Vec<PathBuf> = groups.into_iter().flatten().collect();
+        assert!(flat.contains(&a));
+        assert!(flat.contains(&b));
+        assert!(!flat.contains(&c));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_duplicate_groups_keeps_hash_groups_separate() {
+        // A-01 反向验证：同尺寸 A/B=内容 X、C/D=内容 Y（X≠Y），两个不同内容
+        // 的全哈希组必须各自成组。把生产改回 `result.extend(dup)` 扁平化，
+        // groups.len() 会变成 1 → 本用例必须变红。
+        let tmp =
+            std::env::temp_dir().join(format!("maclean_dup_crosshash_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let a = tmp.join("a.bin");
+        let b = tmp.join("b.bin");
+        let c = tmp.join("c.bin");
+        let d = tmp.join("d.bin");
+        std::fs::write(&a, vec![1u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&b, vec![1u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&c, vec![2u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&d, vec![2u8; 2 * 1024 * 1024]).unwrap();
+
+        let groups = find_duplicate_groups(vec![a.clone(), b.clone(), c.clone(), d.clone()]);
+        assert_eq!(groups.len(), 2, "两个不同内容的全哈希组必须各自成组");
+        for g in &groups {
+            let has_x = g.contains(&a) || g.contains(&b);
+            let has_y = g.contains(&c) || g.contains(&d);
+            assert!(!(has_x && has_y), "不得把内容不同的组扁平合并: {g:?}");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn two_different_content_groups_never_cross_contaminate_deletion_set() {
+        // A-01 验收：同尺寸两个不同内容组。旧实现把 4 个文件合并成一个 group
+        // 只选 1 个 keep，C/D 与 keep 内容不同仍进删除集 → 误删。修复后按组
+        // 独立选 keep：C/D 一个都不进 A/B（内容 X）那组的删除集。
+        // 反向验证：把 find_duplicate_groups 改回扁平 extend，或把
+        // select_keep_per_group 改回「合并后只选一次」，本用例必须变红。
+        let tmp = std::env::temp_dir().join(format!("maclean_dup_crossdel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let a = tmp.join("a.bin");
+        let b = tmp.join("b.bin");
+        let c = tmp.join("c.bin");
+        let d = tmp.join("d.bin");
+        std::fs::write(&a, vec![1u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&b, vec![1u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&c, vec![2u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&d, vec![2u8; 2 * 1024 * 1024]).unwrap();
+
+        let groups = find_duplicate_groups(vec![a.clone(), b.clone(), c.clone(), d.clone()]);
+        let decisions = select_keep_per_group(groups, &tmp);
+        assert_eq!(decisions.len(), 2, "两个内容组各自独立选 keep");
+
+        // 不变式：任一删除集成员的内容必须与本组 keep 相同（绝不跨哈希组）。
+        for (keep, batch) in &decisions {
+            let keep_hash = full_hash(keep).unwrap();
+            for p in batch {
+                assert_eq!(
+                    full_hash(p).unwrap(),
+                    keep_hash,
+                    "删除集成员 {p:?} 与保留者 {keep:?} 内容不同 → 跨哈希组误合并"
+                );
+            }
+        }
+
+        // 验收字面：内容 X（A/B）那组的删除集里，C/D 一个都不能进。
+        let x_hash = full_hash(&a).unwrap();
+        let (_, batch_x) = decisions
+            .iter()
+            .find(|(keep, _)| full_hash(keep).as_deref() == Some(x_hash.as_str()))
+            .expect("应存在内容 X 的重复组");
+        assert!(!batch_x.contains(&c), "C 不得进 A/B 组删除集");
+        assert!(!batch_x.contains(&d), "D 不得进 A/B 组删除集");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -23,7 +23,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// QoS class `UTILITY`（macOS `<sys/qos.h>`）：低于用户主动发起的工作，系统会在
 /// 资源紧张时压制其 CPU 调度与 IO 发放，但又不像 BACKGROUND 那样可能被强烈挂起。
@@ -101,6 +101,8 @@ struct Load {
     /// 自上次调节窗口以来的成功 / 超时计数。
     win_ok: AtomicU64,
     win_timeout: AtomicU64,
+    /// C-13 · 最近一次超时的 UNIX 毫秒时间戳，独立于被 swap 清零的 win_timeout。
+    last_timeout_ms: AtomicU64,
     last_adjust: Mutex<Instant>,
 }
 
@@ -116,6 +118,7 @@ fn load() -> &'static Load {
         ewma_us: AtomicU64::new(0),
         win_ok: AtomicU64::new(0),
         win_timeout: AtomicU64::new(0),
+        last_timeout_ms: AtomicU64::new(0),
         last_adjust: Mutex::new(Instant::now()),
     })
 }
@@ -128,6 +131,16 @@ const LATENCY_IDLE_US: u64 = 80_000;
 const IDLE_MIN_SAMPLES: u64 = 8;
 /// 常规（成功驱动的）升降调节之间的最小间隔，避免抖动。
 const ADJUST_INTERVAL: Duration = Duration::from_millis(1200);
+/// C-13 · 一次超时后多长时间内仍视为「近期拥塞」信号（供 is_busy 放宽看门狗）。
+/// win_timeout 每个调节窗口都会被 swap(0) 清空，不能拿它当近期信号。
+const RECENT_TIMEOUT_WINDOW_MS: u64 = 10_000;
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 impl Load {
     fn current_limit(&self) -> usize {
@@ -170,6 +183,9 @@ impl Load {
     /// 立即触发一次乘性降并发（不等节流间隔）。
     fn record_timeout(&self) {
         self.win_timeout.fetch_add(1, Ordering::Relaxed);
+        // C-13：win_timeout 会被下面的 maybe_adjust swap(0) 清空，
+        // 因此另存一个不被清空的近期超时时间戳，供 is_busy 使用。
+        self.last_timeout_ms.store(now_unix_ms(), Ordering::Relaxed);
         self.maybe_adjust(true);
     }
 
@@ -191,8 +207,9 @@ impl Load {
 
         let mut g = self.gate.lock().expect("load gate poisoned");
         let old = g.limit;
-        // 乘性减：窗口内有明显超时比例（≥12%）或执行延迟持续偏高 → 立刻减半（封底）。
-        let congested = timeout_rate >= 0.12 || ewma >= LATENCY_BUSY_US;
+        // C-13 · 乘性减：force（单次超时，最强拥塞信号）无条件触发，
+        // 不再被 0.12 的超时率阈值挡住；其余按超时比例或持续高延迟判定。
+        let congested = force || timeout_rate >= 0.12 || ewma >= LATENCY_BUSY_US;
         // 加性增：窗口零超时、延迟足够低且样本充分 → 每次 +2（封顶）。
         let idle = to == 0 && ewma <= LATENCY_IDLE_US && ok >= IDLE_MIN_SAMPLES;
         if congested {
@@ -212,10 +229,22 @@ impl Load {
 /// 当前是否判定为磁盘 / 系统繁忙：有效并发已降到繁忙线及以下、EWMA 延迟偏高，
 /// 或本调节窗口刚出现过超时。看门狗据此放宽预算、对本地卷给一次重试。
 pub fn is_busy() -> bool {
-    let l = load();
-    l.current_limit() <= BUSY_CONCURRENCY
-        || l.ewma_us.load(Ordering::Relaxed) >= LATENCY_BUSY_US
-        || l.win_timeout.load(Ordering::Relaxed) > 0
+    load_is_busy(load())
+}
+
+/// C-13 · 抽成可注入 Load 的纯判定，便于本机行为测试。
+/// 近期超时信号取 last_timeout_ms（不会被调节窗口 swap 清零），
+/// 而非几乎恒为 0 的 win_timeout。
+fn load_is_busy(l: &Load) -> bool {
+    if l.current_limit() <= BUSY_CONCURRENCY || l.ewma_us.load(Ordering::Relaxed) >= LATENCY_BUSY_US
+    {
+        return true;
+    }
+    let last = l.last_timeout_ms.load(Ordering::Relaxed);
+    if last == 0 {
+        return false;
+    }
+    now_unix_ms().saturating_sub(last) < RECENT_TIMEOUT_WINDOW_MS
 }
 
 /// 当前自适应有效并发（主要用于日志 / 诊断）。
@@ -249,4 +278,57 @@ where
 /// 由调用方在「等待任务结果超时」时上报一次超时（拥塞信号）。
 pub(crate) fn note_wait_timeout() {
     load().record_timeout();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造独立的 Load 实例（不用全局 LOAD，避免测试互相污染）
+    fn test_load() -> Load {
+        Load {
+            gate: Mutex::new(Gate {
+                active: 0,
+                limit: start_concurrency(),
+            }),
+            cv: Condvar::new(),
+            ewma_us: AtomicU64::new(0),
+            win_ok: AtomicU64::new(0),
+            win_timeout: AtomicU64::new(0),
+            last_timeout_ms: AtomicU64::new(0),
+            last_adjust: Mutex::new(Instant::now()),
+        }
+    }
+
+    #[test]
+    fn c13_single_timeout_forces_multiplicative_decrease() {
+        let l = test_load();
+        let before = l.current_limit();
+        // 100 个快速成功样本：延迟 1ms，不会触发常规降并发
+        for _ in 0..100 {
+            l.record_ok(1_000);
+        }
+        // 单次超时：timeout_rate = 1/101 < 0.12，旧实现不会降并发；
+        // force 分支必须无条件触发乘性减。
+        l.record_timeout();
+        let after = l.current_limit();
+        assert!(after < before, "单次超时应立即降并发: {before} -> {after}");
+        assert_eq!(after, MIN_CONCURRENCY.max(before / 2));
+        assert!(l.last_timeout_ms.load(Ordering::Relaxed) > 0);
+        // 反向验证：把 maybe_adjust 的 force 从 congested 里去掉，本用例必红。
+    }
+
+    #[test]
+    fn c13_recent_timeout_survives_the_adjust_window_swap() {
+        let l = test_load();
+        assert!(!load_is_busy(&l), "无超时且并发正常时不应判繁忙");
+        // 模拟「调节窗口已 swap(0) 清空 win_timeout，但近期确有超时」
+        l.win_timeout.store(0, Ordering::Relaxed);
+        l.last_timeout_ms.store(now_unix_ms(), Ordering::Relaxed);
+        assert!(
+            load_is_busy(&l),
+            "win_timeout 归零后近期超时信号仍须让 is_busy 生效"
+        );
+        // 反向验证：把 load_is_busy 改成只看 win_timeout，本用例必红。
+    }
 }

@@ -32,6 +32,31 @@ pub(crate) struct DirListing {
     pub subdirs: Vec<PathBuf>,
 }
 
+// =========================================================================
+//  C-05：硬链接 / APFS 克隆去重（同一 (dev,ino) 只计一次物理块）
+//
+//  Time Machine、pnpm store、模型库里大量文件是硬链接，逐文件无条件累加
+//  `st_blocks×512` 会把同一物理块重复计 N 次。这里在一次目录枚举内维护
+//  `(dev,ino)` 集合，只计首次出现的 inode。
+//  注：跨目录出现的硬链接需在 scanner/mod.rs 的遍历层用全局集合去重 ——
+//  该文件不在本轮修改边界内，本模块负责单目录枚举内的去重。
+// =========================================================================
+
+#[cfg(unix)]
+#[derive(Default)]
+struct InodeDedup {
+    seen: std::collections::HashSet<(u64, u64)>,
+}
+
+#[cfg(unix)]
+impl InodeDedup {
+    /// 该 inode 是否首次出现（首次才应计入体积）。
+    fn first(&mut self, meta: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        self.seen.insert((meta.dev(), meta.ino()))
+    }
+}
+
 /// 枚举一个目录。返回「打不开」级别的 IO 错误；单条目异常被忽略。
 pub(crate) fn list_dir(dir: &Path) -> std::io::Result<DirListing> {
     #[cfg(target_os = "macos")]
@@ -59,6 +84,9 @@ pub(crate) fn list_dir(dir: &Path) -> std::io::Result<DirListing> {
 
 fn list_dir_std(dir: &Path) -> std::io::Result<DirListing> {
     let mut out = DirListing::default();
+    // C-05：单目录枚举内按 (dev,ino) 去重，硬链接只计一次物理块。
+    #[cfg(unix)]
+    let mut dedup = InodeDedup::default();
     for entry in std::fs::read_dir(dir)?.flatten() {
         let ft = match entry.file_type() {
             Ok(ft) => ft,
@@ -70,6 +98,10 @@ fn list_dir_std(dir: &Path) -> std::io::Result<DirListing> {
             if let Ok(meta) = entry.metadata() {
                 #[cfg(unix)]
                 {
+                    // C-05：同一 inode 重复出现（硬链接）时跳过，避免双计。
+                    if !dedup.first(&meta) {
+                        continue;
+                    }
                     use std::os::unix::fs::MetadataExt;
                     out.files_bytes += meta.blocks() * 512;
                 }
@@ -121,6 +153,9 @@ mod imp_bulk {
         let entries = collect(dir, common)?;
 
         let mut out = DirListing::default();
+        // C-05：与 std 回退同口径，单目录枚举内按 (dev,ino) 去重。
+        #[cfg(unix)]
+        let mut dedup = super::InodeDedup::default();
         for e in entries {
             match e.objtype {
                 VDIR => {
@@ -134,9 +169,12 @@ mod imp_bulk {
                         if meta.is_file() {
                             #[cfg(unix)]
                             {
-                                use std::os::unix::fs::MetadataExt;
-                                out.files_bytes =
-                                    out.files_bytes.saturating_add(meta.blocks() * 512);
+                                // C-05：同一 inode 的硬链接只计一次。
+                                if dedup.first(&meta) {
+                                    use std::os::unix::fs::MetadataExt;
+                                    out.files_bytes =
+                                        out.files_bytes.saturating_add(meta.blocks() * 512);
+                                }
                             }
                             #[cfg(not(unix))]
                             {
@@ -300,15 +338,23 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    /// H-01：独立参照实现 —— 自己 read_dir 并按 (dev,ino) 去重累加物理块，
+    /// **不调用** `list_dir` / `list_dir_std` / `list_dir_bulk` 任何被测逻辑。
+    /// 旧参照与被测实现同样「逐文件累加 blocks 不去重」，硬链接双计两边
+    /// 一起错（假绿）。生产丢掉去重时这里仍只计一次 → 差值让测试变红。
     fn reference(dir: &Path) -> (u64, usize) {
         let mut bytes = 0u64;
         let mut dirs = 0usize;
+        let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
         for e in fs::read_dir(dir).unwrap().flatten() {
             let ft = e.file_type().unwrap();
             if ft.is_dir() {
                 dirs += 1;
             } else if ft.is_file() {
-                bytes += e.metadata().unwrap().blocks() * 512;
+                let md = e.metadata().unwrap();
+                if seen.insert((md.dev(), md.ino())) {
+                    bytes += md.blocks() * 512;
+                }
             }
         }
         (bytes, dirs)
@@ -380,16 +426,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bulk_unreadable_dir_does_not_panic() {
+    fn bulk_unreadable_dir_returns_err_not_zero_byte_complete_listing() {
+        // C-08：「打不开」级别的 IO 错误必须由 list_dir 以 Err 返回，供
+        // visit_dir 透传后置 incomplete=true；绝不能退化成「0 字节且完整」
+        // 的 Ok 结果。scanner/mod.rs 的 visit_dir 目前用
+        // list_dir(...).unwrap_or_default() 吞掉 Err —— 那侧的 Result 透传
+        // 属于该文件（本轮文件边界禁止修改），本模块只保证 Err 契约。
         let tmp = std::env::temp_dir().join(format!("maclean_bulk_noacc_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let orig = fs::metadata(&tmp).unwrap().permissions().mode();
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o000)).unwrap();
         if unsafe { libc::geteuid() } != 0 {
-            assert!(list_dir(&tmp).is_err());
+            match list_dir(&tmp) {
+                Err(_) => {} // C-08：正确，错误可透传
+                Ok(listing) => panic!(
+                    "不可读目录不得返回 Ok(0 字节且完整): {} bytes, {} subdirs",
+                    listing.files_bytes,
+                    listing.subdirs.len()
+                ),
+            }
         }
         fs::set_permissions(&tmp, fs::Permissions::from_mode(orig)).ok();
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn hardlinks_are_counted_once_by_inode() {
+        // C-05 / H-01：同一 (dev,ino) 的两个硬链接只计一次物理块。
+        // reference() 是独立参照（自己去重、不调被测逻辑）；生产若丢掉
+        // 去重，files_bytes 会是参照的 2 倍 → 断言变红（反向验证）。
+        let tmp =
+            std::env::temp_dir().join(format!("maclean_bulk_hardlink_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let a = tmp.join("a.bin");
+        let b = tmp.join("b.bin");
+        fs::write(&a, vec![3u8; 4096]).unwrap();
+        fs::hard_link(&a, &b).unwrap(); // b 是 a 的硬链接，同 (dev,ino)
+
+        let one = fs::metadata(&a).unwrap().blocks() * 512;
+        let got = list_dir(&tmp).expect("list_dir ok");
+        let (ref_bytes, _) = reference(&tmp);
+        assert_eq!(got.files_bytes, one, "硬链接只能计一次物理块");
+        assert_eq!(ref_bytes, one, "独立参照也应只计一次");
+        assert_eq!(got.files_bytes, ref_bytes, "生产与独立参照必须一致");
         fs::remove_dir_all(&tmp).ok();
     }
 }

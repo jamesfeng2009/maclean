@@ -1,0 +1,49 @@
+# H-06 / G-3：缺陷报告
+name: 缺陷报告（Bug）
+description: 报告 maclean CLI 的错误行为（尤其是清理 / 删除 / 还原相关）
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认：版本来自 `maclean --version`，且已用 `--dry-run` 复现。
+        若涉及删除安全，请改走 `SECURITY.md` 的私有报告渠道，不要在公开 issue 里贴细节。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: "`maclean --version` 的输出"
+      placeholder: 0.4.3
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows x64
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 实际行为
+      description: 附上完整命令与输出；机器格式请贴 `--format json` 与退出码
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: "`maclean log --tail 50` 的相关片段（请先删掉个人路径）"
+      render: shell

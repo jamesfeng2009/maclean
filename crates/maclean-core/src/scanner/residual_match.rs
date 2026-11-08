@@ -7,9 +7,12 @@
 //! true/false 最终都落到 `remove_dir_all` 或 `reg delete /f`
 //! （`/f` 跳过确认且递归删除整棵子树）。写完没人验证，等同于没保护。
 //!
-//! 代价是本模块的非测试代码在本机会触发 dead_code，故整体 `allow(dead_code)`。
+//! 代价：macOS 上只有 win_protection 用到的少数几个函数有生产调用点，
+//! 其余纯逻辑只在 `#[cfg(test)]` 里被消费，故仅对非 Windows 目标放宽
+//! dead_code。**Windows 目标上刻意不放宽**：那里每个纯函数都必须被
+//! windows_apps.rs 接上，clippy 的 dead_code 就是接线检查器，不许用 allow 掩盖。
 
-#![allow(dead_code)]
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 // =========================================================================
 //  安全关键：下面每个 true/false 都导向不可逆操作
@@ -57,6 +60,9 @@
 //
 //  A 类已封死；B 类的召回改用版本化下钻（`version_scoped_subkey`）补回来 ——
 //  不下模糊匹配的牌，只删推得出版本号的那一个节点。
+//  D-02 · 该下钻已由 `windows_apps.rs::scan_registry_residual` 接线：
+//  reg query /s 枚举 + InstallLocation 版本推导 + version_scoped_subkey，
+//  不再是「只有定义和单测」的死代码。
 
 /// 参与子串匹配所需的最短应用名长度
 ///
@@ -483,9 +489,263 @@ pub fn resembles_app_dir(dir_name: &str, app_name: &str) -> bool {
     dir_key.contains(&app_key) || app_key.contains(&dir_key)
 }
 
+// =========================================================================
+//  D-01 / F-01 / F-02 / F-03 / A-04 / A-11 / D-14 / D-15 / F-04
+//  windows_apps.rs 的纯逻辑（刻意无 cfg，开发机可编译可测）
+//
+//  windows_apps 整体 `#[cfg(windows)]`，写在里面的东西本机 0 编译 0 测试。
+//  这里把「能脱离 Windows API 独立判定」的部分全部抽出来：数据结构、命令
+//  输出解析、名称推导、派发与计数。windows_apps.rs 只负责采集与真实删除，
+//  判定与编排一律调这里，开发机上的行为测试因此能真跑生产函数。
+// =========================================================================
+
+/// D-01 · 注册表残留项
+#[derive(Debug, Clone)]
+pub struct RegistryResidual {
+    pub key_path: String,
+    pub is_system: bool,
+    pub deletable: bool,
+    pub reason: String,
+}
+
+/// D-01 · 环境变量残留项
+#[derive(Debug, Clone)]
+pub struct EnvVarResidual {
+    pub var_name: String,
+    pub current_value: String,
+    pub entries_to_remove: Vec<String>,
+    pub is_system: bool,
+    pub deletable: bool,
+    pub reason: String,
+}
+
+/// D-01 · 文件系统残留项
+#[derive(Debug, Clone)]
+pub struct FilesystemResidual {
+    pub path: String,
+    pub size: u64,
+    pub deletable: bool,
+    pub reason: String,
+}
+
+/// D-01 · 干净卸载残留扫描结果
+#[derive(Debug, Clone)]
+pub struct UninstallResidual {
+    pub registry: Vec<RegistryResidual>,
+    pub env_vars: Vec<EnvVarResidual>,
+    pub filesystem: Vec<FilesystemResidual>,
+}
+
+impl UninstallResidual {
+    pub fn is_empty(&self) -> bool {
+        self.registry.is_empty() && self.env_vars.is_empty() && self.filesystem.is_empty()
+    }
+    pub fn total_count(&self) -> usize {
+        self.registry.len() + self.env_vars.len() + self.filesystem.len()
+    }
+    pub fn deletable_count(&self) -> usize {
+        self.registry.iter().filter(|r| r.deletable).count()
+            + self.env_vars.iter().filter(|e| e.deletable).count()
+            + self.filesystem.iter().filter(|f| f.deletable).count()
+    }
+}
+
+/// D-01 · 一次清理动作（注入执行器时按此派发）
+#[derive(Debug, Clone)]
+pub enum ResidualAction {
+    Registry(String),
+    EnvVar(EnvVarResidual),
+    Filesystem(String),
+}
+
+/// D-01 · 「清理选中残留」的派发与计数核心（可注入执行器）。
+///
+/// `exec` 返回 true=成功 / false=失败；不可删项直接计入跳过、绝不派发。
+/// 生产侧 `windows_apps::clean_selected_residuals` 把三个真实删除函数注入
+/// 这里；测试侧注入记录动作的假执行器，从而在开发机上真跑整条派发链 ——
+/// 不是 include_str! 源码文本断言。把本函数改成「不调用 exec」，
+/// 下面 `d01_*` 行为用例必须变红。
+pub fn clean_selected_residuals_with<F>(
+    residuals: &[UninstallResidual],
+    mut exec: F,
+) -> (usize, usize, usize)
+where
+    F: FnMut(ResidualAction) -> bool,
+{
+    let (mut success, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+    for r in residuals {
+        for reg in &r.registry {
+            if !reg.deletable {
+                skipped += 1;
+                continue;
+            }
+            if exec(ResidualAction::Registry(reg.key_path.clone())) {
+                success += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        for env in &r.env_vars {
+            if !env.deletable {
+                skipped += 1;
+                continue;
+            }
+            if exec(ResidualAction::EnvVar(env.clone())) {
+                success += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        for fs in &r.filesystem {
+            if !fs.deletable {
+                skipped += 1;
+                continue;
+            }
+            if exec(ResidualAction::Filesystem(fs.path.clone())) {
+                success += 1;
+            } else {
+                failed += 1;
+            }
+        }
+    }
+    (success, failed, skipped)
+}
+
+/// F-02 · 解析 reg query 输出行：**精确比较第一个 token** 的字段名。
+///
+/// 旧实现 `line.to_lowercase().contains(field.to_lowercase())` 会让
+/// `"quietuninstallstring".contains("uninstallstring")` 恒真，
+/// QuietUninstallString 行被 UninstallString 分支吞掉。DWORD 的 `0x…`
+/// 统一转十进制，否则 `parse::<u64>()` 失败。
+pub fn parse_reg_line(line: &str, field: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let sep = "    ";
+    let (name, type_token, value): (String, String, String) = if trimmed.contains(sep) {
+        let parts: Vec<&str> = trimmed.splitn(3, sep).collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        (
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+            parts[2].trim().to_string(),
+        )
+    } else {
+        let toks: Vec<&str> = trimmed.split_whitespace().collect();
+        let type_idx = toks.iter().position(|p| p.starts_with("REG_"))?;
+        if type_idx == 0 || type_idx + 1 > toks.len() {
+            return None;
+        }
+        (
+            toks[..type_idx].join(" "),
+            toks[type_idx].to_string(),
+            toks[type_idx + 1..].join(" "),
+        )
+    };
+    if !name.eq_ignore_ascii_case(field) || value.is_empty() {
+        return None;
+    }
+    if type_token.to_ascii_uppercase().contains("DWORD")
+        && value.to_ascii_lowercase().starts_with("0x")
+    {
+        if let Ok(n) = u64::from_str_radix(&value[2..], 16) {
+            return Some(n.to_string());
+        }
+    }
+    Some(value)
+}
+
+/// F-03 · 解码外部命令输出：UTF-8 优先；非 UTF-8 时按 Latin-1 逐字节保留，
+/// 不再用 `from_utf8_lossy` 把中文 OEM 字节全压成 U+FFFD。
+pub fn decode_console_output(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+    }
+}
+
+/// A-11 · bloatware 第 4 级模糊匹配：仅用于 UWP 包全名，且 app_id 须达到
+/// MIN_MATCH_LEN。Win32 键名（`is_uwp=false`）一律不走模糊档。
+pub fn bloatware_fuzzy_matches(app_id: &str, package_full_name: &str, is_uwp: bool) -> bool {
+    if !is_uwp {
+        return false;
+    }
+    let id = app_id.trim().to_lowercase();
+    if id.len() < MIN_MATCH_LEN {
+        return false;
+    }
+    package_full_name.to_lowercase().contains(&id)
+}
+
+/// F-04 · 按 app_id 去重，返回应保留的索引（忽略大小写，保留首次出现）。
+pub fn dedup_indices_by_app_id(ids: &[String]) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    ids.iter()
+        .enumerate()
+        .filter(|(_, id)| seen.insert(id.to_ascii_lowercase()))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// D-14 · 从卸载路径推导应用/包名。ops 侧对 UWP 传进来的 app_name 恒为空，
+/// clean_uninstall 必须能自己从 `uwp:<PackageFullName>` 推出可用的名字。
+pub fn derive_app_name_from_path(path: &str) -> Option<String> {
+    let (is_uwp, rest) = if let Some(r) = path.strip_prefix("uwp:") {
+        (true, r)
+    } else if let Some(r) = path.strip_prefix("uninstall:") {
+        (false, r)
+    } else {
+        let r = path.strip_prefix("dir:")?;
+        (false, r)
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if is_uwp {
+        let name = rest.split('_').next().unwrap_or(rest);
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+/// D-15 · 从**当前** PATH 值里移除指定条目（大小写不敏感）。
+/// 清理时必须重新 `reg query` 取当前值再调这里，不能用扫描时刻的
+/// current_value 整条覆盖 —— 否则会抹掉用户确认期间其它程序新增的条目。
+pub fn cleaned_path_value(current: &str, to_remove: &[String]) -> String {
+    let rm: Vec<String> = to_remove.iter().map(|e| e.trim().to_lowercase()).collect();
+    current
+        .split(';')
+        .filter(|e| !rm.contains(&e.trim().to_lowercase()))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-01 · include_str! 源码断言必须先按 `\nmod tests` 切出生产段：
+    /// 否则函数体会一直截到文件末尾（含测试模块），测试里出现同名
+    /// 字符串即假绿/假红。
+    fn production_src() -> &'static str {
+        include_str!("windows_apps.rs")
+            .split("\nmod tests")
+            .next()
+            .unwrap_or(include_str!("windows_apps.rs"))
+    }
+
+    fn win_protection_production_src() -> &'static str {
+        include_str!("win_protection.rs")
+            .split("\nmod tests")
+            .next()
+            .unwrap_or(include_str!("win_protection.rs"))
+    }
 
     // =====================================================================
     //  残留名称匹配回归（X-1 注册表 / X-2 文件系统）
@@ -826,16 +1086,10 @@ mod tests {
     fn protective_entrypoint_does_not_reuse_the_strict_matcher() {
         // is_residual_dir 导向删除， resembles_app_dir 导向保护。两者若被合并，
         // 只要有人为了召回放宽规则，风险方向就会一侧爆掉。用源码钉住分工。
-        // has_large_user_data 已随保护判定整体搬到 win_protection.rs（无 cfg，
-        // 本机可编译可测）。源码断言跟着走，否则这条用例只会因为"找不到函数"
-        // 而红 —— 那是搬迁信号，不是规则被破坏。
-        let src = include_str!("win_protection.rs");
-        let guard = src[src
-            .find("fn has_large_user_data")
-            .expect("has_large_user_data 不见了")..]
-            .split("\nfn ")
-            .next()
-            .unwrap();
+        // A-05：has_large_user_data 现在把真实目录枚举后交给生产节点
+        // user_data_dir_exceeds_threshold，后者才调 resembles_app_dir。
+        let src = win_protection_production_src();
+        let guard = fn_body(src, "fn user_data_dir_exceeds_threshold");
         assert!(
             guard.contains("resembles_app_dir("),
             "保护性启发式改回了删除侧规则，会 fail-open"
@@ -905,7 +1159,7 @@ mod tests {
     #[test]
     fn both_deletion_exits_have_their_own_gate() {
         // 纯函数的闸门不等于生效的闸门 —— 必须钉住出口真的调了它
-        let src = include_str!("windows_apps.rs");
+        let src = production_src();
 
         let fs = src[src
             .find("pub fn delete_filesystem_residual")
@@ -955,7 +1209,7 @@ mod tests {
     fn clean_all_residuals_routes_through_the_gated_exits() {
         // 批量清理是 UI 上"一键清干净"的入口。它一旦绕过 delete_* 出口
         // 自己 remove_dir_all / reg delete，前面所有闸门就全废了。
-        let src = include_str!("windows_apps.rs");
+        let src = production_src();
         let body = fn_body(src, "pub fn clean_all_residuals");
         assert!(
             body.contains("delete_registry_residual(")
@@ -972,7 +1226,7 @@ mod tests {
     fn env_var_cleanup_respects_the_deletable_flag() {
         // 环境变量里 PATH 是重灾区：写错了整个系统的命令查找都会坏。
         // 扫描侧判定为不可删（如系统级变量需管理员权限）时必须直接退出。
-        let src = include_str!("windows_apps.rs");
+        let src = production_src();
         let body = fn_body(src, "pub fn clean_env_var_residual");
         assert!(
             body.contains("!residual.deletable"),
@@ -985,7 +1239,7 @@ mod tests {
         // UninstallString 由安装方自写，属于不可信输入。若用 `cmd /C <整串>`
         // 拼接执行，字符串里夹 `&` `|` 就能挂载任意命令。
         // 正确做法是解析出 exe + 参数，用 Command::new(exe).args(...)。
-        let src = include_str!("windows_apps.rs");
+        let src = production_src();
         let body = fn_body(src, "fn execute_uninstall_command");
         assert!(
             body.contains("Command::new(&exe_path)"),
@@ -1001,14 +1255,14 @@ mod tests {
     fn registry_residual_scan_marks_system_keys_as_not_deletable() {
         // 扫描侧对 HKLM 键必须标 deletable=false（要管理员权限），
         // 否则 UI 会把它当成可勾选项交给 reg delete。
-        let src = include_str!("windows_apps.rs");
+        let src = production_src();
         let body = fn_body(src, "pub fn scan_registry_residual");
         assert!(body.contains("is_system"), "扫描注册表残留没有区分系统级键");
     }
 
     #[test]
     fn deletion_entrypoints_actually_use_the_strict_matcher() {
-        let src = include_str!("windows_apps.rs");
+        let src = production_src();
 
         let fs_fn = src[src
             .find("pub fn scan_filesystem_residual")
@@ -1034,10 +1288,30 @@ mod tests {
     }
 
     #[test]
+    fn h01_uninstall_exit_uses_the_production_protection_gate() {
+        // H-01 · 生产出口必须调 allows_uninstall()/block_reason()，不许自己
+        // match 重写一份。把调用改回硬编码的中文文案 match，下面断言必红。
+        let src = production_src();
+        let body = fn_body(src, "impl Scanner for WindowsUninstallScanner");
+        assert!(
+            body.contains("allows_uninstall()"),
+            "卸载扫描出口没有调生产判定 allows_uninstall()"
+        );
+        assert!(
+            body.contains("block_reason()"),
+            "卸载扫描出口没有调生产判定 block_reason()"
+        );
+        assert!(
+            !body.contains("\"系统关键应用，禁止卸载\""),
+            "卸载扫描出口又在自己重写保护判定文案（假绿）"
+        );
+    }
+
+    #[test]
     fn no_bidirectional_substring_match_remains() {
         // 反向包含曾让短键名被长应用名吞掉。一旦有人图方便加回来，
         // 前面所有用例都会被绕过，所以在这显式钉住。
-        let src = include_str!("windows_apps.rs");
+        let src = production_src();
         assert!(
             !src.contains("sn.contains(&key_lower)"),
             "注册表反向子串匹配回来了"
@@ -1049,6 +1323,225 @@ mod tests {
         assert!(
             !src.contains("fn generate_search_names"),
             "带首词提取的 generate_search_names 回来了"
+        );
+    }
+
+    // =================================================================
+    //  D-01 · 行为测试：钉住「清理选中残留」入口真的调用了清理逻辑
+    //
+    //  不用 include_str! 源码文本断言。生产入口 windows_apps.rs::
+    //  clean_selected_residuals 只是把三个真实删除函数注入
+    //  clean_selected_residuals_with；派发与计数全在这个无 cfg 函数里，
+    //  因此开发机能真跑。把 core 改成「不调用 exec」或「恒跳过」，
+    //  下面两条用例必红。
+    // =================================================================
+
+    fn sample_residual() -> UninstallResidual {
+        UninstallResidual {
+            registry: vec![
+                RegistryResidual {
+                    key_path: r"HKCU\SOFTWARE\Zoom".to_string(),
+                    is_system: false,
+                    deletable: true,
+                    reason: String::new(),
+                },
+                RegistryResidual {
+                    key_path: r"HKLM\SOFTWARE\Microsoft".to_string(),
+                    is_system: true,
+                    deletable: false,
+                    reason: "需要管理员权限".to_string(),
+                },
+            ],
+            env_vars: vec![EnvVarResidual {
+                var_name: "Path".to_string(),
+                current_value: r"C:\Windows;C:\Zoom".to_string(),
+                entries_to_remove: vec![r"C:\Zoom".to_string()],
+                is_system: false,
+                deletable: true,
+                reason: String::new(),
+            }],
+            filesystem: vec![
+                FilesystemResidual {
+                    path: r"C:\Users\me\AppData\Roaming\Zoom".to_string(),
+                    size: 1024,
+                    deletable: true,
+                    reason: String::new(),
+                },
+                FilesystemResidual {
+                    path: r"C:\Users\me\AppData\Local\Microsoft".to_string(),
+                    size: 4096,
+                    deletable: false,
+                    reason: "共享容器".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn d01_clean_selected_residuals_dispatches_every_deletable_action() {
+        let r = sample_residual();
+        let mut seen: Vec<ResidualAction> = Vec::new();
+        let counts = clean_selected_residuals_with(std::slice::from_ref(&r), |a| {
+            seen.push(a);
+            true
+        });
+        // 3 个可删项全部成功，2 个不可删项被跳过
+        assert_eq!(counts, (3, 0, 2));
+        assert_eq!(seen.len(), 3, "每个可删残留都必须真正派发一次清理动作");
+        assert!(seen
+            .iter()
+            .any(|a| matches!(a, ResidualAction::Registry(_))));
+        assert!(seen.iter().any(|a| matches!(a, ResidualAction::EnvVar(_))));
+        assert!(seen
+            .iter()
+            .any(|a| matches!(a, ResidualAction::Filesystem(_))));
+    }
+
+    #[test]
+    fn d01_clean_selected_residuals_counts_failures_and_skips() {
+        let r = sample_residual();
+        let mut calls = 0;
+        // 执行器恒失败：可删项全部计入失败，不可删项仍只计跳过、绝不派发
+        let counts = clean_selected_residuals_with(std::slice::from_ref(&r), |_| {
+            calls += 1;
+            false
+        });
+        assert_eq!(counts, (0, 3, 2));
+        assert_eq!(calls, 3, "不可删项不能被派发给删除函数");
+        // 空清单：三个计数全 0
+        assert_eq!(clean_selected_residuals_with(&[], |_| true), (0, 0, 0));
+    }
+
+    // --- F-02 · parse_reg_line ---
+
+    #[test]
+    fn f02_parse_reg_line_compares_the_first_token_exactly() {
+        let quiet = "    QuietUninstallString    REG_SZ    msiexec /x {ABC} /quiet";
+        assert_eq!(
+            parse_reg_line(quiet, "QuietUninstallString").as_deref(),
+            Some("msiexec /x {ABC} /quiet")
+        );
+        // 旧实现用 contains，这行会被当成 UninstallString 吞掉 —— 改回去必红
+        assert_eq!(parse_reg_line(quiet, "UninstallString"), None);
+        assert_eq!(
+            parse_reg_line("    DisplayName    REG_SZ    WeChat", "DisplayName").as_deref(),
+            Some("WeChat")
+        );
+        assert_eq!(
+            parse_reg_line("    DisplayName    REG_SZ    ", "DisplayName"),
+            None
+        );
+    }
+
+    #[test]
+    fn f02_parse_reg_line_converts_dword_hex_to_decimal() {
+        assert_eq!(
+            parse_reg_line("    EstimatedSize    REG_DWORD    0x1234", "EstimatedSize").as_deref(),
+            Some("4660")
+        );
+        // 回退分支（split_whitespace）也要转
+        assert_eq!(
+            parse_reg_line("SystemComponent REG_DWORD 0x1", "SystemComponent").as_deref(),
+            Some("1")
+        );
+    }
+
+    // --- F-03 · decode_console_output ---
+
+    #[test]
+    fn f03_decode_console_output_preserves_utf8_and_does_not_collapse_oem_bytes() {
+        assert_eq!(decode_console_output("元宝 😀".as_bytes()), "元宝 😀");
+        let gbk_yuanbao = decode_console_output(&[0xD4, 0xAA, 0xB1, 0xA6]);
+        let gbk_other = decode_console_output(&[0xD5, 0xC5, 0xC8, 0xFD]);
+        assert!(!gbk_yuanbao.contains('\u{FFFD}'));
+        assert_ne!(
+            gbk_yuanbao, gbk_other,
+            "不同 OEM 字节不得被压成同一个串（from_utf8_lossy 会全部变成 U+FFFD）"
+        );
+    }
+
+    // --- A-11 · bloatware 模糊档 ---
+
+    #[test]
+    fn a11_fuzzy_bloatware_match_only_applies_to_uwp_full_name() {
+        assert!(bloatware_fuzzy_matches(
+            "Clipchamp.Clipchamp",
+            "Clipchamp.Clipchamp_2.0_x64__8wekyb3d8bbwe",
+            true
+        ));
+        // Win32 注册表键名永不走模糊档，否则短 app_id 会把普通应用误配成预装应用
+        assert!(!bloatware_fuzzy_matches(
+            "Clipchamp.Clipchamp",
+            "SomeWin32Key",
+            false
+        ));
+        // 短于 MIN_MATCH_LEN 的 app_id 直接拒绝
+        assert!(!bloatware_fuzzy_matches("AB", "XXAB_1.0", true));
+        assert!(!bloatware_fuzzy_matches("", "Anything_1.0", true));
+    }
+
+    // --- F-04 · app_id 去重 ---
+
+    #[test]
+    fn f04_dedup_indices_by_app_id_keeps_first_occurrence_case_insensitively() {
+        let ids: Vec<String> = ["A", "B", "a", "C", "B"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(dedup_indices_by_app_id(&ids), vec![0, 1, 3]);
+        assert_eq!(dedup_indices_by_app_id(&[]), Vec::<usize>::new());
+    }
+
+    // --- D-14 · 路径推导 app_name ---
+
+    #[test]
+    fn d14_derive_app_name_from_uninstall_path() {
+        assert_eq!(
+            derive_app_name_from_path("uwp:Microsoft.BingWeather_1.0.0_x64__8weky"),
+            Some("Microsoft.BingWeather".to_string())
+        );
+        assert_eq!(
+            derive_app_name_from_path("uninstall:7-Zip"),
+            Some("7-Zip".to_string())
+        );
+        assert_eq!(
+            derive_app_name_from_path("dir:MyApp"),
+            Some("MyApp".to_string())
+        );
+        assert_eq!(derive_app_name_from_path("uwp:"), None);
+        assert_eq!(derive_app_name_from_path(""), None);
+        assert_eq!(derive_app_name_from_path("bogus"), None);
+    }
+
+    // --- D-15 · 用当前 PATH 值清理 ---
+
+    #[test]
+    fn d15_cleaned_path_value_keeps_entries_added_after_scan() {
+        let current = r"C:\Windows;C:\Python39;C:\NewByOtherProgram";
+        assert_eq!(
+            cleaned_path_value(current, &[r"C:\Python39".to_string()]),
+            r"C:\Windows;C:\NewByOtherProgram"
+        );
+        // 大小写不敏感
+        assert_eq!(
+            cleaned_path_value(r"C:\Windows;c:\python39", &[r"C:\Python39".to_string()]),
+            r"C:\Windows"
+        );
+    }
+
+    // --- A-04 · 生产接线（按 \nmod tests 切分生产段） ---
+
+    #[test]
+    fn a04_appdata_scan_uses_the_strict_residual_matcher() {
+        let src = production_src();
+        let body = fn_body(src, "fn scan_windows_app_data_and_cache");
+        assert!(
+            body.contains("is_residual_dir("),
+            "卸载残留/关联数据的删除方向必须走严格匹配"
+        );
+        assert!(
+            !body.contains("dir_lower.contains("),
+            "删除方向仍在复用模糊子串匹配"
         );
     }
 }

@@ -109,15 +109,17 @@ pub enum Commands {
     /// 查看 / 注册 / 注销定时清理任务（C-3）
     Schedule {
         /// 注册系统定时任务
-        #[arg(long)]
+        // E-13：--install 与 --remove 互斥，旧实现 else-if 会静默只跑 install
+        #[arg(long, conflicts_with = "remove")]
         install: bool,
 
         /// 注销系统定时任务
         #[arg(long)]
         remove: bool,
 
-        /// 设置间隔（天）：1 / 7 / 30，其它值会被夹到最近的档位
-        #[arg(long)]
+        /// 设置间隔（天）：1 / 7 / 30，其它值会被夹到最近的档位；
+        /// 单独使用只更新配置，需配合 --install 才真正注册（handler 会提示）
+        #[arg(long, conflicts_with = "remove")]
         days: Option<u32>,
     },
 
@@ -434,6 +436,86 @@ mod tests {
                 assert!(safe_only);
             }
             other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn schedule_install_and_remove_conflict() {
+        // E-13：--install --remove 旧实现只跑 install；clap 层直接拒绝组合
+        assert!(
+            Cli::try_parse_from(["maclean", "schedule", "--install", "--remove"]).is_err(),
+            "--install 与 --remove 必须互斥"
+        );
+        assert!(
+            Cli::try_parse_from(["maclean", "schedule", "--install", "--days", "7"]).is_ok(),
+            "--install --days 合法组合应可解析"
+        );
+    }
+
+    #[test]
+    fn documented_command_set_matches_args_variants() {
+        // E-14：四处文档曾漏列 system-data / apfs。钉住"文档命令数 == 公开
+        // args 变体数"，并逐条比对，漏列即红。
+        use clap::CommandFactory;
+        use std::collections::BTreeSet;
+
+        let doc = include_str!("../../../docs/cli-contract.md");
+        let block = doc
+            .split("```text")
+            .nth(1)
+            .expect("契约 §2 命令集代码块")
+            .split("```")
+            .next()
+            .unwrap();
+        let documented: BTreeSet<&str> = block
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("maclean "))
+            .map(|l| l.split_whitespace().next().unwrap())
+            .collect();
+
+        let public: BTreeSet<&str> = [
+            "scan",
+            "clean",
+            "schedule",
+            "system-data",
+            "apfs",
+            "check-disk",
+            "list",
+            "apps",
+            "uninstall",
+            "log",
+            "backups",
+            "restore",
+            "startup",
+            "optimize",
+            "dup-ignore",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            documented, public,
+            "契约命令集与公开 args 变体不一致（漏列 system-data/apfs？）"
+        );
+
+        // args 侧：公开变体数必须等于文档命令数（排除 5 个 Pro 占位与
+        // clap 自动生成的 help）。
+        let from_args: BTreeSet<String> = Cli::command()
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .filter(|n| {
+                !matches!(
+                    n.as_str(),
+                    "history" | "growth" | "forecast" | "policy" | "automation" | "help"
+                )
+            })
+            .collect();
+        assert_eq!(
+            from_args.len(),
+            documented.len(),
+            "args 公开变体数 != 文档命令数"
+        );
+        for d in &documented {
+            assert!(from_args.contains(*d), "args 缺少文档命令 {d}");
         }
     }
 }

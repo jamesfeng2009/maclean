@@ -144,12 +144,32 @@ pub fn rotate_log_if_needed() -> bool {
     std::fs::rename(&log, &rotated).is_ok()
 }
 
-/// 生成 launchd plist（纯函数）
+/// G-07：XML 文本节点转义（`& < > " '`）。
+///
+/// exe 路径或日志目录里含 `&`/`<`/`>` 时，未转义的 plist 会被 launchd
+/// 判为非法 XML，定时任务静默注册不上；`&` 必须最先替换，否则会把后面
+/// 生成的实体里的 `&` 又转义一次。
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// 生成 launchd plist（G-07 纯函数：exe 与日志路径由入参传入）
 ///
 /// `StartInterval` 按秒计。`RunAtLoad` 开 + `--only-if-due`：登录时补跑
 /// 一次错过的清理（机器关机/休眠错过定时点时，launchd 不会补），
 /// 但命令自己会先判断是否真的到期，未到期直接退出，不会每次登录都清。
-pub fn launchd_plist(interval_days: u32, exe: &str) -> String {
+pub fn launchd_plist_for(interval_days: u32, exe: &str, log: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -176,11 +196,16 @@ pub fn launchd_plist(interval_days: u32, exe: &str) -> String {
 </dict>
 </plist>
 "#,
-        label = LAUNCHD_LABEL,
-        exe = exe,
+        label = xml_escape(LAUNCHD_LABEL),
+        exe = xml_escape(exe),
         secs = interval_days as u64 * 86_400,
-        log = schedule_log_path().to_string_lossy(),
+        log = xml_escape(log),
     )
+}
+
+/// 生成 launchd plist（使用真实日志路径的生产包装）
+pub fn launchd_plist(interval_days: u32, exe: &str) -> String {
+    launchd_plist_for(interval_days, exe, &schedule_log_path().to_string_lossy())
 }
 
 /// Windows 任务计划程序：`schtasks /create` 的参数（纯函数）
@@ -481,5 +506,36 @@ mod tests {
             assert_eq!(prog, "schtasks");
             assert!(args.iter().any(|a| a == "MacleanCleanup"));
         }
+    }
+
+    // ---------- G-07：launchd plist XML 转义 ----------
+
+    #[test]
+    fn xml_escape_neutralizes_all_five_special_characters() {
+        assert_eq!(
+            xml_escape("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
+        // `&` 先替换，实体里的 & 才不会被二次转义
+        assert_eq!(xml_escape("&"), "&amp;");
+        assert_eq!(xml_escape("plain/path"), "plain/path");
+    }
+
+    #[test]
+    fn launchd_plist_escapes_special_characters_in_exe_and_log_paths() {
+        // G-07 验收：exe 与日志目录含 & < > " ' 时 plist 仍是可解析 XML。
+        // 反向验证：把 launchd_plist_for 里的 xml_escape 去掉，下面断言必红。
+        let exe = "/Applications/My & Co's <App>.app";
+        let log = "/Users/a&b/Logs/<schedule>\"x\".log";
+        let plist = launchd_plist_for(7, exe, log);
+        assert!(plist.contains("<string>/Applications/My &amp; Co&apos;s &lt;App&gt;.app</string>"));
+        assert!(plist
+            .contains("<string>/Users/a&amp;b/Logs/&lt;schedule&gt;&quot;x&quot;.log</string>"));
+        for raw in ["<App>", "<schedule>", "a&b", "Co's"] {
+            assert!(!plist.contains(raw), "路径里的特殊字符未转义: {raw}");
+        }
+        // 标签结构仍完整，StartInterval 不受转义影响
+        assert!(plist.contains("<integer>604800</integer>"));
+        assert!(plist.contains("<string>--scheduled</string>"));
     }
 }

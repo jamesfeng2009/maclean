@@ -42,9 +42,11 @@ jobs:
         # 2026-09-18 起阻塞：7 个 static mut 已迁入 GuiState，102 条存量告警
         # 已清零（含删除 aewp.rs 等整块死代码）。现在 `-D warnings` 能过，
         # 门禁应当真正生效 —— 否则新告警会一直被静默放行。
-        run: cargo clippy --all-targets -- -D warnings
+        # H-04：必须 --workspace —— default-members 仅 apps/maclean-cli，漏掉它
+        # 3 个库 crate 就完全不 lint；本机 --workspace --all-targets 已验证干净。
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: 单元测试（workspace = 5 公开 crate + CLI）
+      - name: 单元测试（workspace = 3 个库 crate + CLI）
         run: cargo test --workspace
 
   macos-build:
@@ -109,14 +111,35 @@ jobs:
             fi
           done
 
-          # 2) 打包脚本不得出现硬编码版本
-          if grep -n '^VERSION' Makefile | grep -q "0\.1\.0\|0\.2\.0"; then
-            echo "错误：Makefile 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
+          # 2) H-07 / I-01：Makefile 求值结果必须等于根 [workspace.package] 版本。
+          #    旧检查只 grep Makefile 里有没有 0.1.0|0.2.0 字面量，抓不到
+          #    `grep '^version' apps/maclean-cli/Cargo.toml` 取到字符串
+          #    "version.workspace = true" 这种错（VERSION 根本不是版本号）。
+          MAKE_VERSION=$(make -s print-version)
+          echo "Makefile 求值版本: $MAKE_VERSION"
+          if [ "$MAKE_VERSION" != "$VERSION" ]; then
+            echo "错误：Makefile VERSION ($MAKE_VERSION) != Cargo.toml ($VERSION)" >&2
             exit 1
           fi
           if grep -n 'VERSION=' scripts/build-cli-package.sh | grep -q '"[0-9]'; then
             echo "错误：build-cli-package.sh 里存在硬编码版本号，应改为从 Cargo.toml 读取" >&2
             exit 1
+          fi
+
+          # 2b) H-07：homebrew formula 引用的 tag 必须可解析、且不得超前于根版本。
+          #     formula 跟随「上一次 release」，平时允许落后一个 patch；严格相等
+          #     （tag == 根版本）由 release-macos.yml 的校验步骤在打 tag 时负责。
+          if [ -f homebrew/maclean.rb ]; then
+            FORMULA_TAG=$(grep -m1 -oE 'archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+' homebrew/maclean.rb | sed 's|.*/v||')
+            echo "homebrew formula tag: ${FORMULA_TAG:-<未解析>}"
+            if [ -z "$FORMULA_TAG" ]; then
+              echo "错误：无法从 homebrew/maclean.rb 解析 release tag" >&2
+              exit 1
+            fi
+            if [ "$(printf '%s\n%s\n' "$FORMULA_TAG" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
+              echo "错误：formula tag $FORMULA_TAG 超前于根版本 $VERSION" >&2
+              exit 1
+            fi
           fi
 
           # 3) 二进制自报版本必须与 workspace 版本一致（防 --version 撒谎）
@@ -165,8 +188,12 @@ jobs:
           echo "✅ 内部依赖均可发布"
 
   security:
-    name: cargo audit · cargo deny（漏洞/许可/来源门禁）
+    # H-06：在原 audit/deny 基础上补依赖评审与防泄漏扫描，失败即阻塞
+    name: cargo audit · cargo deny · dependency review · secret scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v5
 
@@ -194,3 +221,17 @@ jobs:
 
       - name: cargo deny check（许可/来源/重复依赖）
         run: cargo deny check
+
+      # H-06 / G-4：PR 依赖变更评审，新增有漏洞/受限许可依赖即阻塞（仅 PR 有 diff）
+      - name: Dependency review（PR 依赖变更评审）
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: low
+
+      # H-06 / G-6：防泄漏 grep。关闭 gitleaks 官方 action 的理由：其组织使用需
+      # GITLEAKS_LICENSE 授权（付费），且引入第三方 action 有供应链风险；本公开仓库
+      # 无密钥历史，改用仓库内可审计的 scripts/check-no-leaks.sh 覆盖已知模式。
+      # 无 continue-on-error —— 失败即阻塞。
+      - name: 防泄漏扫描（私有包名 / 密钥模式）
+        run: bash scripts/check-no-leaks.sh

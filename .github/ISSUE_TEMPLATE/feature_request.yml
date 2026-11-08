@@ -1,0 +1,28 @@
+# H-06 / G-3：功能建议
+name: 功能建议
+description: 提出 CLI 能力建议（Pro 商业能力请转私有渠道）
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        公开仓库只做免费 CLI。试用 / 付费 / AI / 预测 / 自动化等 Pro 能力
+        在私有仓库，公开 issue 不受理（见 README「产品分层」）。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: 对脚本契约的影响
+      description: 是否改变命令集 / JSON 字段 / 退出码？若改变需 bump contract_version（docs/cli-contract.md）

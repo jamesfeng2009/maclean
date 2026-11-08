@@ -10,7 +10,11 @@ use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::args::{ApfsAction, Cli, Commands, DupIgnoreAction, OptimizeAction, StartupAction};
-use maclean_types::cli::{CliEnvelope, ScanTab};
+use crate::output::{
+    emit_close_envelope, emit_error, emit_json, emit_json_status, set_command, set_request_id,
+    status_for_exit_code, Status,
+};
+use maclean_types::cli::ScanTab;
 
 #[cfg(target_os = "macos")]
 use maclean_core::scanner::apfs::ApfsScanner;
@@ -34,16 +38,18 @@ use maclean_core::scanner::{Recommend, ScanItem};
 // =========================================================================
 //  语义退出码（供脚本/CI 消费，稳定契约）
 //
-//  0 成功；1 通用失败；2 JSON 序列化失败（历史保留）；
-//  4 需确认（非交互环境执行删除未带 --yes）；
-//  7 用户取消（Ctrl+C）；8 带警告完成（clean 有失败/被拦截项）。
+//  E-01：以 docs/cli-contract.md §4 为唯一事实来源：
+//  0 成功；1 通用失败；2 参数错误（clap 默认，保留位）；
+//  3 需确认（未带 --yes）；4 用户取消（Ctrl+C 收敛到此）；
+//  5 带警告完成（clean 有失败/被拦截项）；6 输出序列化失败；
+//  7 Ctrl+C 硬中断（保留位，无常量）。
 //
-//  Open Core 拆分后（2026-10-07）迁入 maclean-types::cli::exit_code，
+//  Open Core 拆分后迁入 maclean-types::cli::exit_code，
 //  此处 re-export 保持既有引用路径不变。
 // =========================================================================
 pub use maclean_types::cli::exit_code::*;
 
-/// 取消标志：Ctrl+C 置位，扫描/删除循环检查后以 7 退出
+/// 取消标志：Ctrl+C 置位，扫描/删除循环检查后以 EXIT_CANCELLED(4) 退出
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 pub fn cancelled() -> bool {
@@ -94,6 +100,7 @@ pub fn run_cli() -> Option<u8> {
 
 /// macOS 发行二进制用：`--version` 必须显示 CLI 自身版本，而不是契约 crate 版本
 pub fn run_cli_with_version(version: &'static str) -> Option<u8> {
+    use clap::parser::ValueSource;
     let matches = Cli::command().version(version).get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
@@ -101,28 +108,25 @@ pub fn run_cli_with_version(version: &'static str) -> Option<u8> {
         None => None, // 无子命令，启动 GUI
         Some(cmd) => {
             install_cancel_handler();
-            // 兼容：--json 等价 --format json
-            let format = if cli.json {
-                OutputFormat::Json
+            // E-09：用户显式传了 --format 时以它为准，不再被 --json 静默覆盖；
+            // 两者同时给定时在 stderr 告警（不污染机器格式 stdout）。
+            let format_explicit = matches.value_source("format") == Some(ValueSource::CommandLine);
+            let format = if format_explicit {
+                if cli.json {
+                    eprintln!("警告：--json 与显式 --format 同时指定，以 --format 为准");
+                }
+                cli.format
+            } else if cli.json {
+                OutputFormat::Json // 兼容：仅 --json 时等价 --format json
             } else {
                 cli.format
             };
             let color_on = color_enabled(cli.color, format);
             // envelope 输出上下文：一次请求一个 request_id
-            REQUEST_ID.with(|r| *r.borrow_mut() = uuid::Uuid::new_v4().to_string());
+            set_request_id(uuid::Uuid::new_v4().to_string());
             Some(run_command(cmd, format, color_on, cli.no_progress))
         }
     }
-}
-
-thread_local! {
-    // 本次请求的 envelope 输出上下文（CLI 单线程，thread_local 足够）
-    /// 当前命令名（`emit_json` / 结束信封行读取）
-    static CURRENT_COMMAND: std::cell::RefCell<&'static str> =
-        const { std::cell::RefCell::new("") };
-    /// 本次请求 ID（`run_cli` 生成一次）
-    static REQUEST_ID: std::cell::RefCell<String> =
-        const { std::cell::RefCell::new(String::new()) };
 }
 
 /// 命令 → envelope.command 的稳定名称（JSON/JSONL 契约字段）
@@ -153,7 +157,7 @@ fn command_name(cmd: &Commands) -> &'static str {
 
 fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bool) -> u8 {
     let prog = progress_enabled(no_progress);
-    CURRENT_COMMAND.with(|c| *c.borrow_mut() = command_name(&cmd));
+    set_command(command_name(&cmd));
     let code = match cmd {
         Commands::Scan {
             tab,
@@ -196,8 +200,8 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
         Commands::List => cmd_list(format),
         Commands::Apps => cmd_apps(format),
         Commands::Uninstall { app, yes } => cmd_uninstall(&app, yes, format),
-        // 日志是给人看的，不做 JSON
-        Commands::Log { tail, open } => cmd_log(tail, open),
+        // E-04：log 接收 format，机器模式输出 envelope 而非人类文本
+        Commands::Log { tail, open } => cmd_log(tail, open, format),
         Commands::Backups { restorable_only } => cmd_backups(restorable_only, format),
         // 还原结果涉及逐个路径的成功/失败，JSON 更有用（脚本可据此重试）
         Commands::Restore { id } => cmd_restore(&id, format),
@@ -211,9 +215,15 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
         Commands::Policy => pro_unavailable("policy", format),
         Commands::Automation => pro_unavailable("automation", format),
     };
-    // JSONL 契约：成功时以结束信封行收尾（data 为 null）
-    if code == EXIT_OK && format == OutputFormat::Jsonl {
-        emit_close_envelope();
+    // E-08/E-10：机器格式补收尾信封。cancelled 单独补一个单对象；
+    // jsonl 不论成功/警告/失败都补结束行（旧实现只在 EXIT_OK 补，
+    // has_warnings 返回非 0 时缺结束信封行）。
+    if format != OutputFormat::Human {
+        if code == EXIT_CANCELLED {
+            emit_close_envelope(format, Status::Cancelled);
+        } else if format == OutputFormat::Jsonl {
+            emit_close_envelope(format, status_for_exit_code(code));
+        }
     }
     code
 }
@@ -221,72 +231,21 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
 // =========================================================================
 //  结构化输出（--json / --jsonl）
 //
-//  所有命令共用这一层：先算出数据，再决定渲染成表格还是 JSON。
-//  绝不能"表格和 JSON 各扫一遍" —— 那两份结果可能对不上。
-//
-//  Open Core 契约（strategy §47 / maclean-types CliEnvelope）：
-//    JSON  → 单个 envelope：{"contract_version","request_id","command","status","data"}
-//    JSONL → 数据行（裸 data，可流式）+ 末尾结束 envelope 行
-//    Human → 人类可读表格（不经此函数）
+//  D-09/E-02/E-08/E-10：统一发射层已下沉到 crate::output，本文件只调用
+//  emit_json / emit_json_status / emit_error / emit_close_envelope。
+//    JSON  → 单个完整 envelope；
+//    JSONL → 每行一个完整 envelope + 收尾信封行；
+//    Human → 各命令自行 println（不经发射层）。
 // =========================================================================
 
-/// 输出一层 JSON 数据（自动套 envelope；JSONL 输出裸 data 行）
-fn emit_json<T: serde::Serialize>(value: &T, format: OutputFormat, pretty: bool) {
-    let command = CURRENT_COMMAND.with(|c| *c.borrow());
-    let request_id = REQUEST_ID.with(|r| r.borrow().clone());
-    let payload = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-    let s = match format {
-        OutputFormat::Json => {
-            let env = CliEnvelope::ok(request_id, command, payload);
-            if pretty {
-                serde_json::to_string_pretty(&env)
-            } else {
-                serde_json::to_string(&env)
-            }
-        }
-        OutputFormat::Jsonl => serde_json::to_string(&payload),
-        OutputFormat::Human => return,
-    };
-    match s {
-        Ok(s) => println!("{}", s),
-        Err(e) => {
-            // 序列化失败不能静默：调用方拿不到任何输出会以为"没有可清理项"
-            eprintln!(
-                "{{\"error\": \"json serialization failed\", \"detail\": \"{}\"}}",
-                e
-            );
-            std::process::exit(EXIT_SERIALIZE as i32);
-        }
-    }
-}
-
-/// JSONL 结束信封行：数据流收尾（status:"ok"，data 为 null）
-fn emit_close_envelope() {
-    let command = CURRENT_COMMAND.with(|c| *c.borrow());
-    let request_id = REQUEST_ID.with(|r| r.borrow().clone());
-    let env = CliEnvelope::<serde_json::Value>::ok(request_id, command, serde_json::Value::Null);
-    if let Ok(s) = serde_json::to_string(&env) {
-        println!("{s}");
-    }
-}
-
-/// Pro 命令占位（P6-3）：公开版不可用，输出错误信封 + 语义退出码
+/// Pro 命令占位（P6-3）：公开版不可用，统一走 emit_error 错误信封。
+/// 这是开源边界 DESIGN-INTENT：只返回错误信封 + 退出码，不"实现" Pro。
 fn pro_unavailable(cmd: &'static str, format: OutputFormat) -> u8 {
-    if format == OutputFormat::Human {
-        println!("命令 `{cmd}` 属于 Pro 能力，公开版不提供（请使用 maclean Pro 构建）。");
-    } else {
-        let request_id = REQUEST_ID.with(|r| r.borrow().clone());
-        let env = CliEnvelope::<()>::error(
-            request_id,
-            cmd,
-            EXIT_FAILURE,
-            format!("Pro 命令 `{cmd}` 仅私有版可用"),
-        );
-        if let Ok(s) = serde_json::to_string(&env) {
-            println!("{s}");
-        }
-    }
-    EXIT_FAILURE
+    emit_error(
+        format,
+        EXIT_FAILURE,
+        format!("Pro 命令 `{cmd}` 仅私有版可用"),
+    )
 }
 
 // =========================================================================
@@ -333,8 +292,11 @@ fn tab_label_for(key: &str) -> &str {
 }
 
 fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
+    // A-07b：扫描前声明准入根。删除阶段的第 8 层只放行这些根下的路径；
+    // 不注册会让所有清理项在删除时被拦，等于关停功能。
+    maclean_core::provenance::register_standard_scan_roots();
     // watchdog：坏目录（APFS 异常等）会让 readdir 永久阻塞；超时返回空并提示，
-    // 进程不再无限挂起（超时 tab 计入退出码 8）。
+    // 进程不再无限挂起（超时 tab 计入 EXIT_WARNINGS=5，E-01 契约口径）。
     const TAB_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
     // 转 String 再 move：scan_with_timeout 要求闭包 'static，不能捕获 &str
     let tab_key_owned = tab_name.to_string();
@@ -427,6 +389,9 @@ struct JsonScan {
     tabs: Vec<JsonTab>,
     total_count: usize,
     total_size: u64,
+    /// E-07：可回收字节（各 Tab 的 safe_size 之和），契约示例
+    /// `jq '.data.reclaimable'` 依赖此字段，与 total_size/safe_size 对齐。
+    reclaimable: u64,
 }
 
 /// 把 CLI 阈值写入 config.json（GUI 与后续扫描共用同一份设置）
@@ -466,6 +431,15 @@ fn cmd_scan(
         // `--deep` 与 `--tab all` 等价：扫描所有当前平台支持的 Tab
         all_supported_tabs()
     } else if let Some(t) = tab {
+        // E-12：显式单 tab 也要过 tab_supported；不支持时给错误信封，
+        // 不能静默返回 0 项 + exit 0（旧行为"扫过了但没东西"）。
+        if !tab_supported(t) {
+            return emit_error(
+                format,
+                EXIT_FAILURE,
+                format!("当前平台不支持扫描类别 {}（{}）", t.key(), t.label()),
+            );
+        }
         vec![(t.key().to_string(), t.label().to_string())]
     } else {
         vec![(
@@ -476,6 +450,7 @@ fn cmd_scan(
 
     let mut total_size: u64 = 0;
     let mut total_count: usize = 0;
+    let mut total_reclaimable: u64 = 0;
     let mut has_warnings = false;
     // JSON 与表格共用同一份扫描结果，绝不各扫一遍
     let mut out_tabs: Vec<JsonTab> = Vec::new();
@@ -540,15 +515,18 @@ fn cmd_scan(
 
         total_size += tab_total;
         total_count += items.len();
+        total_reclaimable += safe_size; // E-07
 
         if format == OutputFormat::Jsonl {
-            // 流式：每个 Tab 扫完立即输出一行，脚本可边收边处理
+            // E-10：流式行也带真实汇总（旧实现把 total_count/total_size 硬编码 0，
+            // 与 Json 模式口径不一致）；每行现在都是完整 envelope。
             emit_json(
                 &JsonScan {
                     command: "scan",
                     tabs: vec![out_tabs.last().unwrap().clone()],
-                    total_count: 0,
-                    total_size: 0,
+                    total_count,
+                    total_size,
+                    reclaimable: total_reclaimable,
                 },
                 format,
                 false,
@@ -598,16 +576,25 @@ fn cmd_scan(
         eprint!("\r\x1b[K");
     }
 
+    // E-07/E-08：补 reclaimable，且 warnings 时信封 status 用 "warnings"
+    // （旧实现恒 status:"ok" 却返回 EXIT_WARNINGS）。
     if format == OutputFormat::Json {
-        emit_json(
+        let status = if has_warnings {
+            Status::Warnings
+        } else {
+            Status::Ok
+        };
+        emit_json_status(
             &JsonScan {
                 command: "scan",
                 tabs: out_tabs,
                 total_count,
                 total_size,
+                reclaimable: total_reclaimable,
             },
             format,
             true,
+            status,
         );
     }
     if has_warnings {
@@ -749,15 +736,19 @@ fn cmd_clean(
     // 安全确认（P0）：
     // - 定时任务（--scheduled）视为用户已在 GUI 配置时确认 → 无人值守自动执行
     // - --yes 显式确认执行
-    // - 否则一律预览（不删除）；非交互终端（stdin 非 TTY）时拒绝执行并退出码 4
+    // - 否则一律预览（不删除）；非交互终端（stdin 非 TTY）时拒绝执行并退出码 3
     let confirmed = yes || scheduled;
     let preview = dry_run || !confirmed;
     // 只有真正执行了删除才记 last_run；预览/被确认保护挡下都不算"跑过"
     let ran_to_completion = !preview;
     if !confirmed && !dry_run && !std::io::stdin().is_terminal() {
         // 非交互环境：不给预览的机会直接要求 --yes（脚本必须显式确认删除意图）
-        eprintln!("非交互环境执行删除必须显式携带 --yes（仅预览请加 --dry-run）");
-        return EXIT_CONFIRM_REQUIRED;
+        // E-02：统一走 emit_error，机器格式输出错误信封而非裸 stdout 文本
+        return emit_error(
+            format,
+            EXIT_CONFIRM_REQUIRED,
+            "非交互环境执行删除必须显式携带 --yes（仅预览请加 --dry-run）",
+        );
     }
 
     // 定时清理不再只清开发缓存：无人值守时覆盖所有"安全默认项"的缓存类 Tab，
@@ -772,6 +763,14 @@ fn cmd_clean(
     let tabs: Vec<String> = if tab == Some(ScanTab::All) {
         all_supported_tabs().into_iter().map(|(k, _)| k).collect()
     } else if let Some(t) = tab {
+        // E-12：单 tab 也过 tab_supported，平台不支持时给错误信封
+        if !tab_supported(t) {
+            return emit_error(
+                format,
+                EXIT_FAILURE,
+                format!("当前平台不支持清理类别 {}（{}）", t.key(), t.label()),
+            );
+        }
         vec![t.key().to_string()]
     } else if scheduled {
         SCHEDULED_SAFE_TABS
@@ -974,6 +973,10 @@ fn cmd_clean(
                             true,
                             std::env::consts::OS,
                         ),
+                        // B-04 新增字段：CLI 的 bool 版 move_to_trash 无法确认
+                        // 废纸篓实际落点，留空 = 无法确认归属，还原时按 failed
+                        // 处理（fail-closed，绝不退回"按 basename 猜一个搬过去"）。
+                        trash_name: String::new(),
                     });
                     if format == OutputFormat::Jsonl {
                         emit_json(
@@ -1083,15 +1086,24 @@ fn cmd_clean(
             #[cfg(target_os = "macos")]
             {
                 if privileged && std::io::stdin().is_terminal() {
-                    // 用户知晓：逐项列出即将提权删除的路径，然后才弹 Touch ID
-                    println!(
-                        "\n  🔐 以下 {} 项需要管理员权限，即将弹出系统授权（Touch ID / 密码）：",
-                        priv_needed.len()
-                    );
-                    for (path, _) in &priv_needed {
-                        println!("    - {}", path);
+                    // E-05：提权提示只在 human 打印；机器格式走 stderr，
+                    // 绝不污染 stdout（否则 jq 解析失败）。
+                    if format == OutputFormat::Human {
+                        // 用户知晓：逐项列出即将提权删除的路径，然后才弹 Touch ID
+                        println!(
+                            "\n  🔐 以下 {} 项需要管理员权限，即将弹出系统授权（Touch ID / 密码）：",
+                            priv_needed.len()
+                        );
+                        for (path, _) in &priv_needed {
+                            println!("    - {}", path);
+                        }
+                        println!("  ⏳ 请在系统弹窗中完成授权（可随时取消）…\n");
+                    } else {
+                        eprintln!(
+                            "以下 {} 项需要管理员权限，即将弹出系统授权（Touch ID / 密码）",
+                            priv_needed.len()
+                        );
                     }
-                    println!("  ⏳ 请在系统弹窗中完成授权（可随时取消）…\n");
                     let (ok_paths, fail_paths) =
                         maclean_core::ops::cli_sudo_delete_touchid(priv_needed);
                     for (path, category) in ok_paths {
@@ -1269,8 +1281,15 @@ fn cmd_clean(
         ));
     }
 
-    if format == OutputFormat::Json {
-        emit_json(
+    // E-10/E-08：Json 与 Jsonl 都输出真实汇总（旧实现只在 Json 输出），
+    // 且部分失败/被拦截时信封 status 用 "warnings"，不再恒 "ok"。
+    if format != OutputFormat::Human {
+        let status = if g_failed > 0 || g_rejected > 0 {
+            Status::Warnings
+        } else {
+            Status::Ok
+        };
+        emit_json_status(
             &JsonClean {
                 command: "clean",
                 preview,
@@ -1285,6 +1304,7 @@ fn cmd_clean(
             },
             format,
             true,
+            status,
         );
     }
 
@@ -1551,9 +1571,15 @@ fn cmd_apfs(action: ApfsAction, format: OutputFormat) -> u8 {
         }
         ApfsAction::Delete { target, yes } => {
             if !yes {
-                eprintln!("删除前需确认：maclean apfs delete '{}' --yes", target);
-                eprintln!("（快照/模拟器运行时删除不可恢复）");
-                return EXIT_CONFIRM_REQUIRED;
+                // E-02：需确认也是错误信封，退出码 EXIT_CONFIRM_REQUIRED(3)
+                return emit_error(
+                    format,
+                    EXIT_CONFIRM_REQUIRED,
+                    format!(
+                        "删除前需确认：maclean apfs delete '{}' --yes（快照/模拟器运行时删除不可恢复）",
+                        target
+                    ),
+                );
             }
 
             // 用扫描结果确认类别；扫描拿不到时按名称形态兜底
@@ -1608,8 +1634,8 @@ fn cmd_apfs(action: ApfsAction, format: OutputFormat) -> u8 {
                 }
                 Err(e) => {
                     maclean_core::logger::warn(&format!("[APFS] 删除失败: {} — {}", target, e));
-                    eprintln!("❌ 删除失败：{}", e);
-                    EXIT_FAILURE
+                    // E-02：失败路径统一错误信封，不再裸 eprintln
+                    emit_error(format, EXIT_FAILURE, format!("❌ 删除失败：{}", e))
                 }
             }
         }
@@ -1652,14 +1678,14 @@ fn cmd_check_disk(breakdown: bool, format: OutputFormat) -> u8 {
     }
     let (total, free) = get_disk_info();
     if total == 0 {
-        if format != OutputFormat::Human {
-            // 拿不到磁盘信息时必须是**结构化的错误**，不能静默成功：
-            // 监控脚本看到 exit 0 且字段全 0 会以为"磁盘空了"
-            eprintln!("{{\"command\": \"check-disk\", \"error\": \"unable to read disk info\"}}");
-            return EXIT_FAILURE;
-        }
-        println!("❌ 无法获取磁盘信息");
-        return EXIT_FAILURE;
+        // E-02：拿不到磁盘信息必须输出完整错误信封（含 contract_version /
+        // request_id / status / error_code），不能手写缺字段的 JSON 到 stderr，
+        // 更不能静默成功。
+        return emit_error(
+            format,
+            EXIT_FAILURE,
+            "无法获取磁盘信息 / unable to read disk info",
+        );
     }
 
     let used = total - free;
@@ -1729,7 +1755,8 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
         ScanTab::CustomRules,
         ScanTab::DupFiles,
     ];
-    let mut categories: Vec<(String, u64)> = Vec::new();
+    // E-11：三元组 (category, size_bytes, count)，聚合时同步累加 count
+    let mut categories: Vec<(String, u64, usize)> = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut total_count: usize = 0;
     let mut scanned: Vec<String> = Vec::new();
@@ -1759,20 +1786,21 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
         total_count += items.len();
         for item in &items {
             total_bytes += item.size_bytes;
-            if let Some(entry) = categories.iter_mut().find(|(c, _)| *c == item.category) {
+            if let Some(entry) = categories.iter_mut().find(|(c, _, _)| *c == item.category) {
                 entry.1 += item.size_bytes;
+                entry.2 += 1; // E-11：同步累加该类目的项数
             } else {
-                categories.push((item.category.clone(), item.size_bytes));
+                categories.push((item.category.clone(), item.size_bytes, 1));
             }
         }
     }
     // 按占用降序；sort_by_key 同样稳定，同尺寸类别保持首次出现顺序
     categories.sort_by_key(|a| std::cmp::Reverse(a.1));
-    categories.retain(|(_, s)| *s > 0);
+    categories.retain(|(_, s, _)| *s > 0);
 
     let entries: Vec<JsonBreakdownEntry> = categories
         .iter()
-        .map(|(cat, size)| JsonBreakdownEntry {
+        .map(|(cat, size, count)| JsonBreakdownEntry {
             category: cat.clone(),
             size_bytes: *size,
             percent: if total_bytes > 0 {
@@ -1780,7 +1808,7 @@ fn cmd_check_disk_breakdown(format: OutputFormat) -> u8 {
             } else {
                 0.0
             },
-            count: 0,
+            count: *count, // E-11：不再是恒 0
         })
         .collect();
 
@@ -1945,13 +1973,13 @@ fn resolve_app_arg(arg: &str) -> Result<String, String> {
 ///
 /// 安全口径与 GUI 完全一致（core ops::uninstall_app）：路径白名单、
 /// 保护级别拦截、官方卸载器优先（跟随设置）、删除逐成员过闸门并移入废纸篓。
-/// 默认只预览；非交互环境不带 --yes 直接拒绝（退出码 4）。
+/// 默认只预览；非交互环境不带 --yes 直接拒绝（退出码 3，E-01）。
 fn cmd_uninstall(app_arg: &str, yes: bool, format: OutputFormat) -> u8 {
     let path = match resolve_app_arg(app_arg) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}", e);
-            return EXIT_FAILURE;
+            // E-02：解析失败统一错误信封
+            return emit_error(format, EXIT_FAILURE, e);
         }
     };
 
@@ -1968,8 +1996,12 @@ fn cmd_uninstall(app_arg: &str, yes: bool, format: OutputFormat) -> u8 {
 
     if !yes {
         if !std::io::stdin().is_terminal() {
-            eprintln!("非交互环境执行卸载必须显式携带 --yes（仅预览请直接查看输出）");
-            return EXIT_CONFIRM_REQUIRED;
+            // E-02：需确认走错误信封（EXIT_CONFIRM_REQUIRED=3）
+            return emit_error(
+                format,
+                EXIT_CONFIRM_REQUIRED,
+                "非交互环境执行卸载必须显式携带 --yes（仅预览请直接查看输出）",
+            );
         }
         let kind = if is_pwa { "PWA" } else { "应用" };
         println!(
@@ -1985,18 +2017,9 @@ fn cmd_uninstall(app_arg: &str, yes: bool, format: OutputFormat) -> u8 {
     let prefer_official = maclean_core::config::load_config().settings_prefer_official_uninstaller;
     let rep = maclean_core::ops::uninstall_app(&path, false, prefer_official);
 
-    if format != OutputFormat::Human {
-        emit_json(&rep, format, true);
-    } else if rep.status == "blocked" {
-        eprintln!("{}", rep.message);
-    } else {
-        println!("{}", rep.message);
-        if rep.restorable > 0 {
-            println!("可还原 {} 项（`maclean backups` 查看清单）", rep.restorable);
-        }
-    }
-
-    match rep.status.as_str() {
+    // 先算退出码，再让信封 status 与之一致（E-02/E-08：不出现 status:"ok"
+    // 配失败退出码，也不出现 status:"ok" 配 EXIT_WARNINGS）。
+    let code = match rep.status.as_str() {
         "done" => {
             if rep.intercepted > 0 {
                 EXIT_WARNINGS
@@ -2006,7 +2029,28 @@ fn cmd_uninstall(app_arg: &str, yes: bool, format: OutputFormat) -> u8 {
         }
         "delegated" => EXIT_OK,
         _ => EXIT_FAILURE,
+    };
+
+    if format == OutputFormat::Human {
+        if rep.status == "blocked" {
+            eprintln!("{}", rep.message);
+        } else {
+            println!("{}", rep.message);
+            if rep.restorable > 0 {
+                println!("可还原 {} 项（`maclean backups` 查看清单）", rep.restorable);
+            }
+        }
+    } else if code == EXIT_FAILURE {
+        emit_error(format, EXIT_FAILURE, rep.message.clone());
+    } else {
+        let status = if code == EXIT_WARNINGS {
+            Status::Warnings
+        } else {
+            Status::Ok
+        };
+        emit_json_status(&rep, format, true, status);
     }
+    code
 }
 
 // =========================================================================
@@ -2036,13 +2080,20 @@ fn now_secs() -> u64 {
 /// 查看 / 注册 / 注销定时清理任务
 fn cmd_schedule(install: bool, remove: bool, days: Option<u32>, format: OutputFormat) -> u8 {
     let mut cfg = maclean_core::config::load_config();
+    let mut result: Option<String> = None;
 
     if let Some(d) = days {
         cfg.schedule_interval_days = maclean_core::scheduler::normalize_interval_days(d);
         maclean_core::config::save_config(&cfg);
+        // E-13：单独 --days 只改配置、不注册系统任务，不能静默 exit 0
+        // 让人以为"已注册"。显式给出提示（--install 组合才真正注册）。
+        if !install {
+            result = Some(format!(
+                "已把间隔设为每 {} 天；未加 --install，系统任务未注册/未变更",
+                cfg.schedule_interval_days
+            ));
+        }
     }
-
-    let mut result: Option<String> = None;
 
     if install {
         cfg.schedule_enabled = true;
@@ -2280,26 +2331,45 @@ struct JsonRestore<'a> {
 /// 按清单还原
 fn cmd_restore(id: &str, format: OutputFormat) -> u8 {
     let Some(manifest) = maclean_core::backup::load(id) else {
-        if format != OutputFormat::Human {
-            emit_json(
-                &serde_json::json!({
-                    "command": "restore",
-                    "manifest_id": id,
-                    "error": "manifest not found",
-                }),
-                format,
-                true,
-            );
-        } else {
-            eprintln!("找不到清单 {}，用 `maclean backups` 查看可用清单", id);
-        }
-        return EXIT_FAILURE;
+        // E-02：找不到清单统一错误信封，不再用 emit_json 造 status:"ok" 配 EXIT_FAILURE
+        return emit_error(
+            format,
+            EXIT_FAILURE,
+            format!("找不到清单 {}，用 `maclean backups` 查看可用清单", id),
+        );
     };
 
     let report = maclean_core::backup::restore(id, &maclean_core::backup::trash_dir());
+    // E-03：两种格式共用同一段退出码计算（旧实现机器分支提前 return EXIT_OK
+    // 跳过 failed 判定，JSON 模式部分失败恒 exit 0，谎报成功）。
+    let code = if !report.failed.is_empty() {
+        EXIT_WARNINGS
+    } else {
+        EXIT_OK
+    };
+    let status = if code == EXIT_WARNINGS {
+        Status::Warnings
+    } else {
+        Status::Ok
+    };
 
-    if format != OutputFormat::Human {
-        emit_json(
+    if format == OutputFormat::Human {
+        println!("\n还原清单 {}（共 {} 项）：\n", id, manifest.entries.len());
+        for p in &report.restored {
+            println!("  ✓ 已还原  {}", p);
+        }
+        // 永久删除的项明确列出：这是事实陈述，不是失败
+        for p in &report.not_restorable {
+            println!("  ⦸ 不可还原（当时为永久删除）  {}", p);
+        }
+        for p in &report.failed {
+            println!("  ✗ 还原失败  {}", p);
+        }
+        if report.restored.is_empty() {
+            println!("\n  本次没有可还原的项。永久删除的数据无法通过清单找回。");
+        }
+    } else {
+        emit_json_status(
             &JsonRestore {
                 command: "restore",
                 manifest_id: id,
@@ -2309,29 +2379,10 @@ fn cmd_restore(id: &str, format: OutputFormat) -> u8 {
             },
             format,
             true,
+            status,
         );
-        return EXIT_OK;
     }
-
-    println!("\n还原清单 {}（共 {} 项）：\n", id, manifest.entries.len());
-    for p in &report.restored {
-        println!("  ✓ 已还原  {}", p);
-    }
-    // 永久删除的项明确列出：这是事实陈述，不是失败
-    for p in &report.not_restorable {
-        println!("  ⦸ 不可还原（当时为永久删除）  {}", p);
-    }
-    for p in &report.failed {
-        println!("  ✗ 还原失败  {}", p);
-    }
-    if report.restored.is_empty() {
-        println!("\n  本次没有可还原的项。永久删除的数据无法通过清单找回。");
-    }
-    if !report.failed.is_empty() {
-        EXIT_WARNINGS
-    } else {
-        EXIT_OK
-    }
+    code
 }
 
 // =========================================================================
@@ -2346,8 +2397,22 @@ fn get_disk_info() -> (u64, u64) {
 //  日志命令
 // =========================================================================
 
-fn cmd_log(tail: Option<usize>, open: bool) -> u8 {
+/// E-04：机器格式的 log 负载（旧实现全程 println!，--json 下 jq 必失败）
+#[derive(serde::Serialize)]
+struct JsonLog {
+    command: &'static str,
+    log_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_log: Option<String>,
+    size_bytes: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tail: Vec<String>,
+    opened: bool,
+}
+
+fn cmd_log(tail: Option<usize>, open: bool, format: OutputFormat) -> u8 {
     let log_dir = maclean_core::logger::log_dir();
+    let machine = format != OutputFormat::Human;
 
     if open {
         // 在文件管理器中打开日志目录
@@ -2359,33 +2424,94 @@ fn cmd_log(tail: Option<usize>, open: bool) -> u8 {
         {
             let _ = std::process::Command::new("explorer").arg(&log_dir).spawn();
         }
-        println!("已在文件管理器中打开: {}", log_dir.display());
+        if machine {
+            emit_json(
+                &JsonLog {
+                    command: "log",
+                    log_dir: log_dir.display().to_string(),
+                    latest_log: None,
+                    size_bytes: 0,
+                    tail: Vec::new(),
+                    opened: true,
+                },
+                format,
+                true,
+            );
+        } else {
+            println!("已在文件管理器中打开: {}", log_dir.display());
+        }
         return EXIT_OK;
     }
 
+    let latest = maclean_core::logger::latest_log_file();
+    let latest_str = latest.as_ref().map(|p| p.display().to_string());
+    let size_bytes = latest
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
     if let Some(n) = tail {
-        // 输出最近 N 行日志
-        if let Some(log_file) = maclean_core::logger::latest_log_file() {
-            if let Ok(content) = std::fs::read_to_string(&log_file) {
-                let lines: Vec<&str> = content.lines().collect();
-                let start = if lines.len() > n { lines.len() - n } else { 0 };
-                for line in &lines[start..] {
-                    println!("{}", line);
+        let mut lines: Vec<String> = Vec::new();
+        let mut read_failed = false;
+        if let Some(log_file) = &latest {
+            match std::fs::read_to_string(log_file) {
+                Ok(content) => {
+                    let all: Vec<&str> = content.lines().collect();
+                    let start = all.len().saturating_sub(n);
+                    lines = all[start..].iter().map(|s| s.to_string()).collect();
                 }
-                println!("\n--- 日志文件: {} ---", log_file.display());
-            } else {
-                println!("无法读取日志文件: {}", log_file.display());
+                Err(_) => read_failed = true,
             }
-        } else {
-            println!("未找到日志文件");
         }
+        if machine {
+            emit_json(
+                &JsonLog {
+                    command: "log",
+                    log_dir: log_dir.display().to_string(),
+                    latest_log: latest_str,
+                    size_bytes,
+                    tail: lines,
+                    opened: false,
+                },
+                format,
+                true,
+            );
+        } else if latest.is_none() {
+            println!("未找到日志文件");
+        } else if read_failed {
+            println!("无法读取日志文件: {}", latest.as_ref().unwrap().display());
+        } else {
+            for line in &lines {
+                println!("{}", line);
+            }
+            println!("\n--- 日志文件: {} ---", latest.as_ref().unwrap().display());
+        }
+        return EXIT_OK;
+    }
+
+    // 显示日志路径和大小
+    if machine {
+        emit_json(
+            &JsonLog {
+                command: "log",
+                log_dir: log_dir.display().to_string(),
+                latest_log: latest_str,
+                size_bytes,
+                tail: Vec::new(),
+                opened: false,
+            },
+            format,
+            true,
+        );
     } else {
-        // 显示日志路径和大小
         println!("日志目录: {}", log_dir.display());
-        if let Some(log_file) = maclean_core::logger::latest_log_file() {
-            let size = std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0);
+        if let Some(log_file) = &latest {
             println!("最新日志: {}", log_file.display());
-            println!("日志大小: {}", maclean_core::scanner::format_size(size));
+            println!(
+                "日志大小: {}",
+                maclean_core::scanner::format_size(size_bytes)
+            );
         } else {
             println!("暂无日志文件");
         }
@@ -2443,8 +2569,8 @@ fn cmd_dup_ignore(action: DupIgnoreAction, format: OutputFormat) -> u8 {
         DupIgnoreAction::Add { pattern } => {
             let pattern = pattern.trim().to_string();
             if pattern.is_empty() {
-                eprintln!("⚠ 忽略模式不能为空");
-                return 2;
+                // E-02：统一错误信封 + 语义退出码（不再返回裸字面量 2）
+                return emit_error(format, EXIT_FAILURE, "⚠ 忽略模式不能为空");
             }
             if cfg.dup_ignore_patterns.contains(&pattern) {
                 if format != OutputFormat::Human {
@@ -2525,7 +2651,7 @@ fn cmd_dup_ignore(action: DupIgnoreAction, format: OutputFormat) -> u8 {
             }
         }
     }
-    0
+    EXIT_OK
 }
 
 #[cfg(target_os = "macos")]
@@ -2630,24 +2756,12 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
         StartupAction::Disable { label } => {
             let items = scan_startup_items();
             let Some(item) = items.into_iter().find(|i| i.label == label) else {
-                if format != OutputFormat::Human {
-                    emit_json(
-                        &JsonStartupResult {
-                            command: "startup",
-                            action: "disable",
-                            label: label.clone(),
-                            plist: String::new(),
-                            ok: false,
-                            error: Some(format!("未找到启动项: {label}")),
-                        },
-                        format,
-                        true,
-                    );
-                } else {
-                    eprintln!("未找到启动项: {}", label);
-                    eprintln!("用 `maclean startup list` 查看可用 label");
-                }
-                return EXIT_FAILURE;
+                // E-02：错误路径统一错误信封，不再 emit_json 造 status:"ok"
+                return emit_error(
+                    format,
+                    EXIT_FAILURE,
+                    format!("未找到启动项: {label}（用 `maclean startup list` 查看可用 label）"),
+                );
             };
             match disable_startup_item(&item, &backup_root) {
                 Ok(target) => {
@@ -2670,23 +2784,8 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
                     EXIT_OK
                 }
                 Err(e) => {
-                    if format != OutputFormat::Human {
-                        emit_json(
-                            &JsonStartupResult {
-                                command: "startup",
-                                action: "disable",
-                                label,
-                                plist: String::new(),
-                                ok: false,
-                                error: Some(e.clone()),
-                            },
-                            format,
-                            true,
-                        );
-                    } else {
-                        eprintln!("禁用失败: {e}");
-                    }
-                    EXIT_FAILURE
+                    // E-02：禁用失败统一错误信封
+                    emit_error(format, EXIT_FAILURE, format!("禁用失败: {e}"))
                 }
             }
         }
@@ -2722,24 +2821,14 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
                 }
             }
             let Some(item) = found else {
-                if format != OutputFormat::Human {
-                    emit_json(
-                        &JsonStartupResult {
-                            command: "startup",
-                            action: "enable",
-                            label: label.clone(),
-                            plist: String::new(),
-                            ok: false,
-                            error: Some(format!("备份中未找到启动项: {label}")),
-                        },
-                        format,
-                        true,
-                    );
-                } else {
-                    eprintln!("备份中未找到启动项: {}", label);
-                    eprintln!("用 `maclean startup list` 查看当前启动项；已禁用的项在 ~/.maclean/disabled_launchd");
-                }
-                return EXIT_FAILURE;
+                // E-02：备份中未找到统一错误信封
+                return emit_error(
+                    format,
+                    EXIT_FAILURE,
+                    format!(
+                        "备份中未找到启动项: {label}（已禁用的项在 ~/.maclean/disabled_launchd）"
+                    ),
+                );
             };
             match enable_startup_item(&item, &backup_root) {
                 Ok(restored) => {
@@ -2762,32 +2851,26 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
                     EXIT_OK
                 }
                 Err(e) => {
-                    if format != OutputFormat::Human {
-                        emit_json(
-                            &JsonStartupResult {
-                                command: "startup",
-                                action: "enable",
-                                label,
-                                plist: String::new(),
-                                ok: false,
-                                error: Some(e.clone()),
-                            },
-                            format,
-                            true,
-                        );
-                    } else {
-                        eprintln!("启用失败: {e}");
-                    }
-                    EXIT_FAILURE
+                    // E-02：启用失败统一错误信封
+                    emit_error(format, EXIT_FAILURE, format!("启用失败: {e}"))
                 }
             }
         }
         StartupAction::LoginItems { open } => {
             #[cfg(target_os = "macos")]
             {
-                let mut code = EXIT_OK;
-                match read_login_items() {
-                    Ok(items) => {
+                // E-02：先定最终成败再选信封，杜绝"status:ok 配失败退出码"
+                // 或重复发两条错误信封（旧实现 open 失败会覆盖 code）。
+                let read = read_login_items();
+                let open_ok = !open || open_login_items_settings();
+                match (read, open_ok) {
+                    (Err(e), _) => emit_error(format, EXIT_FAILURE, e),
+                    (Ok(_), false) => emit_error(
+                        format,
+                        EXIT_FAILURE,
+                        "无法打开系统设置，请手动前往：系统设置 > 通用 > 登录项与扩展",
+                    ),
+                    (Ok(items), true) => {
                         if format != OutputFormat::Human {
                             emit_json(
                                 &JsonLoginItems {
@@ -2812,24 +2895,14 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
                                  （这些项不是 LaunchAgents plist，不能像 startup disable 那样搬走）"
                             );
                         }
-                    }
-                    Err(e) => {
-                        // 读不到不等于列表为空：必须明确报错，不能让用户误以为没有登录项
-                        eprintln!("{e}");
-                        code = EXIT_FAILURE;
+                        EXIT_OK
                     }
                 }
-                if open && !open_login_items_settings() {
-                    eprintln!("无法打开系统设置，请手动前往：系统设置 > 通用 > 登录项与扩展");
-                    code = EXIT_FAILURE;
-                }
-                code
             }
             #[cfg(not(target_os = "macos"))]
             {
                 let _ = open;
-                eprintln!("登录项管理仅支持 macOS");
-                EXIT_FAILURE
+                emit_error(format, EXIT_FAILURE, "登录项管理仅支持 macOS")
             }
         }
     }
@@ -2843,9 +2916,9 @@ fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
 /// 其它平台明确拒绝而不是静默空转，避免脚本误以为"已处理"。
 #[cfg(not(target_os = "macos"))]
 fn cmd_startup(action: StartupAction, format: OutputFormat, color: bool) -> u8 {
-    let _ = (action, format, color);
-    eprintln!("startup 管理仅 macOS 支持");
-    EXIT_FAILURE
+    let _ = (action, color);
+    // E-02：非 macOS 明确拒绝，机器格式输出错误信封
+    emit_error(format, EXIT_FAILURE, "startup 管理仅 macOS 支持")
 }
 
 #[derive(serde::Serialize)]
@@ -2930,70 +3003,55 @@ fn cmd_optimize(action: OptimizeAction, format: OutputFormat, color: bool) -> u8
         OptimizeAction::Run { task, yes } => {
             let tasks = platform_tasks();
             let Some(item) = tasks.into_iter().find(|i| i.path == task) else {
-                if format != OutputFormat::Human {
-                    emit_json(
-                        &JsonOptimizeRun {
-                            command: "optimize",
-                            task,
-                            ok: false,
-                            output: String::new(),
-                            error: Some(
-                                "未找到任务，用 `maclean optimize list-tasks` 查看".to_string(),
-                            ),
-                        },
-                        format,
-                        true,
-                    );
-                } else {
-                    eprintln!("未找到任务: {}", task);
-                    eprintln!("用 `maclean optimize list-tasks` 查看可用任务");
-                }
-                return EXIT_FAILURE;
+                // E-02：未找到任务统一错误信封，不再 emit_json 造 status:"ok"
+                return emit_error(
+                    format,
+                    EXIT_FAILURE,
+                    format!("未找到任务: {task}（用 `maclean optimize list-tasks` 查看）"),
+                );
             };
             // 非 Safe 任务需要显式 --yes（与 GUI 高危险项确认弹窗同口径）
             if !matches!(item.recommend, Recommend::Safe) && !yes {
+                // E-02：需确认走错误信封（EXIT_CONFIRM_REQUIRED=3）
+                return emit_error(
+                    format,
+                    EXIT_CONFIRM_REQUIRED,
+                    format!("任务 {} 非低风险，需 --yes 确认", item.path),
+                );
+            }
+
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                let lang_en = maclean_core::config::load_config().lang_en;
+                #[cfg(target_os = "macos")]
+                let output = maclean_core::ops::execute_macos_optimize_task(&item.path, lang_en);
+                #[cfg(target_os = "windows")]
+                let output = maclean_core::ops::execute_windows_optimize_task(&item.path, lang_en);
+
                 if format != OutputFormat::Human {
                     emit_json(
                         &JsonOptimizeRun {
                             command: "optimize",
                             task,
-                            ok: false,
-                            output: String::new(),
-                            error: Some(format!("任务 {} 非低风险，需 --yes 确认", item.path)),
+                            ok: true,
+                            output: output.clone(),
+                            error: None,
                         },
                         format,
                         true,
                     );
                 } else {
-                    eprintln!("任务 {} 非低风险，需 --yes 确认", item.path);
+                    println!("{}", output);
                 }
-                return EXIT_CONFIRM_REQUIRED;
+                EXIT_OK
             }
-
-            let lang_en = maclean_core::config::load_config().lang_en;
-            #[cfg(target_os = "macos")]
-            let output = maclean_core::ops::execute_macos_optimize_task(&item.path, lang_en);
-            #[cfg(target_os = "windows")]
-            let output = maclean_core::ops::execute_windows_optimize_task(&item.path, lang_en);
+            // E-06：非 mac/win 平台不得"假绿"（旧实现 ok:true + EXIT_OK）。
+            // 统一错误信封 + EXIT_FAILURE，真实反映"未执行"。
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            let output = "当前平台不支持优化任务".to_string();
-
-            if format != OutputFormat::Human {
-                emit_json(
-                    &JsonOptimizeRun {
-                        command: "optimize",
-                        task,
-                        ok: true,
-                        output: output.clone(),
-                        error: None,
-                    },
-                    format,
-                    true,
-                );
-            } else {
-                println!("{}", output);
+            {
+                let _ = (item, yes, task);
+                emit_error(format, EXIT_FAILURE, "当前平台不支持优化任务")
             }
-            EXIT_OK
         }
     }
 }
@@ -3059,10 +3117,12 @@ mod tests {
             }],
             total_count: 1,
             total_size: 10,
+            reclaimable: 10, // E-07：契约示例 jq '.data.reclaimable' 依赖此字段
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&scan).expect("scan 序列化失败"))
                 .expect("scan JSON 非法");
+        assert_eq!(v["reclaimable"], 10, "scan 缺 reclaimable 字段");
         let tab = &v["tabs"][0];
         for field in [
             "key",
@@ -3249,15 +3309,24 @@ mod tests {
     }
 
     #[test]
-    fn log_command_stays_human_readable() {
-        // 日志命令刻意不做 JSON：它是给人排查用的，改成 JSON 反而更难读。
-        // 直接钉签名 —— 一旦有人给 cmd_log 加了 json 参数，这里会红，
-        // 提醒他要么真做 JSON 输出，要么回来改这条用例。
+    fn log_command_emits_envelope_in_machine_format() {
+        // E-04：旧行为「log 全程 println!，--json 下 jq 必失败」已被推翻。
+        // 现在 cmd_log 接收 format，机器模式走 emit_json 输出 envelope。
+        // 断言按 "\nmod tests" 切分生产段，避免测试文本自己命中。
         let src = include_str!("handler.rs");
+        let prod = src.split("\nmod tests").next().unwrap();
+        let body = prod[prod.find("fn cmd_log").expect("cmd_log 不见了")..]
+            .split("\nfn ")
+            .next()
+            .unwrap();
         assert!(
-            src.contains("fn cmd_log(tail: Option<usize>, open: bool) -> u8 {"),
-            "cmd_log 签名变了：要么真的实现 JSON 输出，要么回来改这条用例"
+            body.contains("format: OutputFormat"),
+            "cmd_log 未接收 format 参数"
         );
+        assert!(body.contains("emit_json("), "机器模式未输出 envelope");
+        // global --json / --format 仍能在 log 上解析（未破坏 args.rs 的 global）
+        assert!(Cli::try_parse_from(["maclean", "log", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["maclean", "log", "--format", "jsonl"]).is_ok());
     }
 
     // -----------------------------------------------------------------

@@ -930,28 +930,62 @@ pub fn translate_undeletable_reason(reason: &str, lang_en: bool) -> String {
     reason.to_string()
 }
 
+/// 按占位符把参数填入模板（G-01：单次左到右扫描**原模板**）。
+///
+/// - `{}`：顺序索引，第 k 个 `{}` 用 `args[k]`，游标只在遇到 `{}` 时递增；
+/// - `{i}`：显式索引，直接用 `args[i]`，不影响 `{}` 的顺序游标；
+/// - 参数不足或索引越界时，该占位符原样保留；
+/// - 参数值只被写进结果，**不参与后续匹配**（路径里含 `{}`/`{i}` 字面量
+///   不会再被当成占位符二次替换）。
+fn format_template(template: &str, args: &[&str]) -> String {
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len());
+    let mut seg = 0usize; // 尚未写入的原文片段起点
+    let mut i = 0usize; // 扫描游标
+    let mut auto = 0usize; // `{}` 顺序游标
+    while i < bytes.len() {
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        // 找最近的 '}'；找不到就把剩余原文照抄。`{`/`}` 都是 ASCII，
+        // 多字节 UTF-8 字符的字节永远 >= 0x80，不会被误当分隔符。
+        let Some(rel) = template[i + 1..].find('}') else {
+            break;
+        };
+        let end = i + 1 + rel; // '}' 的字节位置
+        let inner = &template[i + 1..end];
+        let idx: Option<usize> = if inner.is_empty() {
+            let v = auto;
+            auto += 1;
+            Some(v)
+        } else {
+            inner.parse::<usize>().ok()
+        };
+        match idx {
+            Some(n) if n < args.len() => {
+                out.push_str(&template[seg..i]);
+                out.push_str(args[n]);
+                i = end + 1;
+                seg = i;
+            }
+            // 参数不足 / 索引越界 / 非占位符字面量：原样保留，继续向后扫描。
+            _ => i += 1,
+        }
+    }
+    out.push_str(&template[seg..]);
+    out
+}
+
 /// 格式化多语言文本（支持 `{0}`/`{1}` 与无索引 `{}` 两种占位符）。
 ///
 /// 2026-10 阶段 0 从 app.rs 的 `App::tf_lang` 下沉至此：纯字符串处理，
 /// 不依赖任何 UI 状态，core 删除/扫描线程直接用它拼日志文案。
 ///
-/// - 无索引 `{}`：按出现顺序依次替换为 args（第 1 个 `{}` 用 args[0]）；
-/// - 带索引 `{i}`：替换为 args[i]；
-///
-/// 两种占位符可混用；args 不足时多余占位符保持原样。
+/// G-01：占位符替换统一走 [`format_template`]，只扫描一次原模板，
+/// 参数值不参与二次匹配；args 不足时多余占位符保持原样。
 pub fn tf_lang(lang_en: bool, key: &str, args: &[&str]) -> String {
-    let mut s = t_lang(lang_en, key).to_string();
-    for arg in args {
-        if let Some(pos) = s.find("{}") {
-            s.replace_range(pos..pos + 2, arg);
-        } else {
-            break;
-        }
-    }
-    for (i, arg) in args.iter().enumerate() {
-        s = s.replace(&format!("{{{}}}", i), arg);
-    }
-    s
+    format_template(t_lang(lang_en, key), args)
 }
 
 /// 主翻译表（2026-10 从 app.rs 的 `App::t_lang` 下沉至此，逐字保留）。
@@ -2134,5 +2168,72 @@ mod tests {
             translate_undeletable_reason("some other reason", true),
             "some other reason"
         );
+    }
+
+    // ---------- G-01 / G-02：tf_lang 占位符替换 ----------
+
+    #[test]
+    fn tf_lang_replaces_sequential_placeholders_and_is_consistent_across_languages() {
+        assert_eq!(
+            tf_lang(true, "log_intercepted", &["/tmp/a", "blocked"]),
+            "Blocked: /tmp/a - blocked"
+        );
+        assert_eq!(
+            tf_lang(false, "log_intercepted", &["/tmp/a", "blocked"]),
+            "已拦截: /tmp/a - blocked"
+        );
+        // 中英一致性：同一 key 两种语言都要把全部占位符替换掉
+        for en in [true, false] {
+            let out = tf_lang(en, "log_deleted", &["缓存", "/tmp/x", "2", "0"]);
+            assert!(!out.contains("{}"), "残留未替换占位符: {out}");
+            assert!(out.contains("缓存") && out.contains("/tmp/x"));
+        }
+    }
+
+    #[test]
+    fn tf_lang_unknown_key_falls_back_to_empty() {
+        // 缺 key 保持 t_lang 的 fallback 语义
+        assert_eq!(tf_lang(true, "no_such_key_xyz", &["a"]), "");
+        assert_eq!(tf_lang(false, "no_such_key_xyz", &[]), "");
+    }
+
+    #[test]
+    fn tf_lang_argument_values_are_never_reinterpreted() {
+        // G-01 核心回归：参数里含占位符字面量，不得被二次替换。
+        // 旧实现第二阶段对整串 s.replace("{1}", arg) 会把路径里的 {1}
+        // 改写成 reason，安全拦截日志直接错乱。
+        let out = tf_lang(true, "log_intercepted", &["/tmp/a{1}.txt", "REASON"]);
+        assert_eq!(out, "Blocked: /tmp/a{1}.txt - REASON");
+        assert_eq!(
+            tf_lang(false, "log_intercepted", &["价值 {} 的路径", "原因"]),
+            "已拦截: 价值 {} 的路径 - 原因"
+        );
+    }
+
+    #[test]
+    fn format_template_table_driven() {
+        // 表驱动覆盖 {} / {i} / 混用 / 参数不足 / 越界 / 参数含占位符字面量 /
+        // 缺 key（空模板）。反向验证：把 format_template 改回「两段替换」，
+        // 或把 tf_lang 改回旧的 s.replace("{i}", arg) 全局替换，用例必红。
+        let cases: &[(&str, &[&str], &str)] = &[
+            ("{} {}", &["a", "b"], "a b"),
+            ("{0} and {1}", &["a", "b"], "a and b"),
+            ("{1}-{0}", &["a", "b"], "b-a"),
+            // 混用：{} 的顺序游标不受 {i} 影响
+            ("A {} B {0} C {} D {1}", &["x", "y"], "A x B x C y D y"),
+            // 参数不足 / 索引越界：占位符原样保留
+            ("{} {} {}", &["a"], "a {} {}"),
+            ("{5}", &["a"], "{5}"),
+            ("{} {3}", &["a", "b"], "a {3}"),
+            // 参数含占位符字面量：不参与二次匹配
+            ("{} - {1}", &["lit {1} {0} end", "R"], "lit {1} {0} end - R"),
+            // 非占位符字面量原样
+            ("x{foo}y {0}", &["a"], "x{foo}y a"),
+            // 缺 key 对应空模板
+            ("", &["a"], ""),
+        ];
+        for (tpl, args, want) in cases {
+            assert_eq!(format_template(tpl, args), *want, "模板 {tpl:?}");
+        }
     }
 }

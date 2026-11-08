@@ -1,0 +1,16 @@
+# H-06 / G-1：代码所有权（CODEOWNERS）。
+# 后匹配的规则优先；第一行为兜底，所有 PR 至少 1 名维护者 review。
+*                                       @jamesfeng2009
+
+# 删除链 / 安全模型是最高风险区，单独钉住（改动需安全专项 review，见 SECURITY.md）
+/crates/maclean-core/src/safety.rs       @jamesfeng2009
+/crates/maclean-core/src/provenance.rs   @jamesfeng2009
+/crates/maclean-core/src/ops/            @jamesfeng2009
+/crates/maclean-types/                   @jamesfeng2009
+/crates/maclean-core/                    @jamesfeng2009
+
+# CI / 发布 / 供应链配置（H-04/H-05/H-06）改动同样需 owner 复核
+/.github/                               @jamesfeng2009
+/scripts/                               @jamesfeng2009
+/deny.toml                              @jamesfeng2009
+/rust-toolchain.toml                    @jamesfeng2009

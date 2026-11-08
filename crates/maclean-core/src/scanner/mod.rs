@@ -77,6 +77,26 @@ pub trait Scanner {
     fn scan(&self) -> ScanResult;
 }
 
+/// C-17：扫描结果统一收尾（共享 helper / 排序守卫，收敛各 Scanner 的口径）。
+///
+/// - 按路径去重（多规则 / 多来源可能命中同一目录）；
+/// - 按 `size_bytes` 降序排序（macOS 侧既有口径；Windows 侧此前不排序，统一于此）；
+/// - 汇总 `total_size`（去重后之和，避免重复计体积）。
+///
+/// 各 Scanner 在 `scan()` 收尾统一调用，避免「有的排序、有的不排序」「体积口径不一」。
+/// RuleScanner 已接入；作为公开 helper，其它 Scanner 也复用同一实现。
+pub fn finalize_scan_result(mut items: Vec<ScanItem>, scan_time_ms: u64) -> ScanResult {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|i| seen.insert(i.path.clone()));
+    items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
+    let total_size: u64 = items.iter().map(|i| i.size_bytes).sum();
+    ScanResult {
+        total_size,
+        scan_time_ms,
+        items,
+    }
+}
+
 /// 带超时的扫描执行器。
 ///
 /// 文件系统异常（如损坏的 APFS 目录、挂起的网络卷）会让 `read_dir`
@@ -480,15 +500,13 @@ pub fn retain_safe_batch_members(item: &mut ScanItem) -> bool {
     let mut kept_paths: Vec<String> = Vec::with_capacity(before);
     let mut kept_mtimes: Vec<i64> = Vec::with_capacity(before);
     for (i, bp) in item.batch_paths.iter().enumerate() {
-        match crate::safety::check_path_safety_with_category(bp, &item.category) {
-            crate::safety::SafetyCheck::Safe => {
-                kept_paths.push(bp.clone());
-                kept_mtimes.push(item.batch_mtimes.get(i).copied().unwrap_or(0));
-            }
-            // Danger / Warning 在执行层都会被跳过；扫描期就不应把它们算作可清理成员
-            _ => {
-                removed_bytes = removed_bytes.saturating_add(path_disk_size(Path::new(bp)));
-            }
+        // A-07a：统一走闸门。Danger 与 Warning 一律不放行，扫描期就剔除，
+        // 免得用户勾选后在删除阶段才被拒；此前各出口判定口径不一致。
+        if crate::safety::gate_allows(bp, &item.category) {
+            kept_paths.push(bp.clone());
+            kept_mtimes.push(item.batch_mtimes.get(i).copied().unwrap_or(0));
+        } else {
+            removed_bytes = removed_bytes.saturating_add(path_disk_size(Path::new(bp)));
         }
     }
     item.batch_paths = kept_paths;
@@ -547,6 +565,7 @@ mod tests {
     #[test]
     fn retain_safe_batch_members_drops_guarded_and_resyncs() {
         let root = home_dir().join(format!("maclean_retain_test_{}", std::process::id()));
+        crate::provenance::register_root(&root); // A-07b：声明本用例的扫描根
         let safe1 = root.join("a/.DS_Store");
         let safe2 = root.join("b/.DS_Store");
         // node_modules 属“清单管理目录”，其内成员会被第 4.6 层拦（与 go/pkg/mod 同源）
@@ -748,5 +767,36 @@ mod tests {
         );
         assert!(fast < acc, "准确统计必须不小于被深度截断的快速统计");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn finalize_scan_result_sorts_dedups_and_sums() {
+        // C-17：共享 helper 口径 —— 按 size 降序、按路径去重、total_size 为去重后之和。
+        // 反向验证：把排序改成升序 / 去掉去重，下面断言必红。
+        let mk = |path: &str, size: u64| ScanItem {
+            batch_mtimes: vec![],
+            path: path.to_string(),
+            size_bytes: size,
+            category: String::new(),
+            selected: false,
+            deletable: true,
+            undeletable_reason: String::new(),
+            recommend: Recommend::Safe,
+            description: String::new(),
+            batch_paths: vec![],
+        };
+        let items = vec![
+            mk("/a", 100),
+            mk("/c", 300),
+            mk("/a", 999), // 重复路径，应被去重（保留先出现的 100）
+            mk("/b", 200),
+        ];
+        let result = finalize_scan_result(items, 7);
+        assert_eq!(result.scan_time_ms, 7);
+        assert_eq!(result.items.len(), 3, "重复路径应去重");
+        assert_eq!(result.items[0].path, "/c");
+        assert_eq!(result.items[1].path, "/b");
+        assert_eq!(result.items[2].path, "/a");
+        assert_eq!(result.total_size, 600, "应只累加去重后的 100+200+300");
     }
 }

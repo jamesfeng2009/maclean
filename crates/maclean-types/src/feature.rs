@@ -72,24 +72,34 @@ mod tests {
 
     #[test]
     fn feature_identifiers_are_stable() {
+        use std::collections::HashSet;
+        // H-10：遍历全部 8 个变体收集 as_str()，HashSet 长度相等即全局唯一，
+        // 替代原先「把 BasicScan 判两遍」的重复断言（漏检 4 个变体）。
+        let all = [
+            Feature::BasicScan,
+            Feature::BasicCleanup,
+            Feature::AdvancedHistory,
+            Feature::Forecast,
+            Feature::SmartCleanup,
+            Feature::ScheduledAutomation,
+            Feature::PremiumRules,
+            Feature::AiExplanation,
+        ];
+        let ids: HashSet<&str> = all.iter().map(|f| f.as_str()).collect();
+        assert_eq!(ids.len(), all.len(), "Feature::as_str() 标识必须全局唯一");
+        // 钉住几个稳定标识（含 license payload 与 CLI 共用的 automation）
         assert_eq!(Feature::BasicScan.as_str(), "basic_scan");
         assert_eq!(Feature::AdvancedHistory.as_str(), "advanced_history");
         assert_eq!(Feature::ScheduledAutomation.as_str(), "automation");
         assert_eq!(Feature::AiExplanation.as_str(), "ai_explanation");
-        // 与 strategy §18 license payload 的 features 字段对齐
-        let payload_features = [
+        // 与 strategy §18 license payload 的 features 字段对齐：必须是合法子集
+        for f in [
             "advanced_history",
             "forecast",
             "smart_cleanup",
             "automation",
-        ];
-        for f in payload_features {
-            assert!(
-                Feature::BasicScan.as_str() != f
-                    && Feature::BasicCleanup.as_str() != f
-                    && Feature::BasicScan.as_str() != f,
-                "重复标识: {f}"
-            );
+        ] {
+            assert!(ids.contains(f), "payload 标识 {f} 不是合法 Feature");
         }
     }
 

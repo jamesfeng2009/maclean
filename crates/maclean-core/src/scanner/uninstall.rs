@@ -24,17 +24,32 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
 use crate::app_protection::{self, ProtectionLevel};
 
 use super::{
-    dir_size, dir_size_impl, home_dir, read_dir_with_timeout, Recommend, ScanItem, ScanResult,
-    Scanner,
+    dir_size, dir_size_impl, has_home, home_dir, read_dir_with_timeout, Recommend, ScanItem,
+    ScanResult, Scanner,
 };
+
+/// C-12 · 只读外部命令超时（defaults / plutil / sips 都应在预算内返回）。
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// C-12 · 带超时 + 退出码检查的只读命令执行：只有「成功且退出码 0」才取 stdout，
+/// 失败/未启动/超时一律返回 None。命令失败与「确实没有结果」因此可区分
+/// （由 io_pool::CommandOutcome 表达），不再把 `Ok(out)` 当成查询成功。
+fn command_stdout_checked(program: &str, args: &[&str]) -> Option<String> {
+    match super::io_pool::command_output_checked(program, args, COMMAND_TIMEOUT) {
+        super::io_pool::CommandOutcome::Success(out) => {
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
 
 /// macOS 系统自带应用名称（不应卸载）
 ///
@@ -333,6 +348,17 @@ impl Scanner for UninstallScanner {
     fn scan(&self) -> ScanResult {
         let start = Instant::now();
 
+        // C-11 · 与 AppDataScanner 统一 has_home() 守卫：home 为空时
+        // home.join("Applications") 会退化成相对路径，相对 CWD 枚举并标为
+        // 可删。拿不到真实 home 一律返回空结果，绝不误扫。
+        if !has_home() {
+            return ScanResult {
+                items: Vec::new(),
+                total_size: 0,
+                scan_time_ms: 0,
+            };
+        }
+
         // 收集所有 .app 路径
         let app_paths = collect_app_paths();
 
@@ -380,8 +406,17 @@ impl Scanner for UninstallScanner {
 /// 供 IM 容器数据判定与语义化清理项（named_catalog）复用：不依赖 Spotlight，
 /// 直接读文件系统。返回空 Vec 表示目录不可读（异常），调用方需保守处理。
 pub(crate) fn collect_app_paths() -> Vec<PathBuf> {
+    collect_app_paths_with_home(&home_dir())
+}
+
+/// C-11 · home 由入参传入，便于注入「home 解析失败」的场景做行为测试。
+/// 空 home 直接返回空，绝不退化成相对 CWD 枚举（那样会把当前目录下的
+/// .app 标成可删）。
+fn collect_app_paths_with_home(home: &Path) -> Vec<PathBuf> {
+    if home.as_os_str().is_empty() {
+        return Vec::new();
+    }
     let mut paths = Vec::new();
-    let home = home_dir();
 
     // /Applications：仅顶层（保持原行为，避免扫进 Utilities 等系统工具）
     if let Some(entries) = read_dir_with_timeout(Path::new("/Applications")) {
@@ -763,40 +798,21 @@ pub(crate) fn get_bundle_id(app_path: &Path) -> Option<String> {
         return None;
     }
 
-    // 尝试 defaults read
-    let output = Command::new("defaults")
-        .arg("read")
-        .arg(&plist)
-        .arg("CFBundleIdentifier")
-        .output();
+    let plist_str = plist.to_string_lossy();
 
-    if let Ok(out) = output {
-        if out.status.success() {
-            let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !id.is_empty() {
-                return Some(id);
-            }
-        }
+    // C-12 · 超时 + 退出码检查；失败/超时不再被误当成「应用没有 bundle id」
+    if let Some(id) = command_stdout_checked(
+        "defaults",
+        &["read", plist_str.as_ref(), "CFBundleIdentifier"],
+    ) {
+        return Some(id);
     }
 
     // 尝试 plutil 作为后备
-    let output = Command::new("plutil")
-        .arg("-extract")
-        .arg("CFBundleIdentifier")
-        .arg("raw")
-        .arg(&plist)
-        .output();
-
-    if let Ok(out) = output {
-        if out.status.success() {
-            let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !id.is_empty() {
-                return Some(id);
-            }
-        }
-    }
-
-    None
+    command_stdout_checked(
+        "plutil",
+        &["-extract", "CFBundleIdentifier", "raw", plist_str.as_ref()],
+    )
 }
 
 /// 枚举 `/Applications` 与 `~/Applications`（含一层子目录的 PWA）下全部
@@ -829,54 +845,75 @@ pub(crate) fn get_app_display_name(app_path: &Path) -> Option<String> {
         return None;
     }
 
+    let plist_str = plist.to_string_lossy();
     for key in &["CFBundleDisplayName", "CFBundleName"] {
-        let output = Command::new("defaults")
-            .arg("read")
-            .arg(&plist)
-            .arg(key)
-            .output();
-
-        if let Ok(out) = output {
-            if out.status.success() {
-                let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let name = decode_unicode_escapes(&raw);
-                if !name.is_empty() {
-                    return Some(name);
-                }
-            }
+        // C-12 · 超时 + 退出码检查
+        let Some(raw) = command_stdout_checked("defaults", &["read", plist_str.as_ref(), *key])
+        else {
+            continue;
+        };
+        let name = decode_unicode_escapes(&raw);
+        if !name.is_empty() {
+            return Some(name);
         }
     }
 
     None
 }
 
-/// 解码 \uXXXX / \UXXXXXXXX 转义序列
+/// 解码 \uXXXX / \UXXXX 转义序列
 ///
 /// macOS `defaults read` 对非 ASCII 字符会输出 Unicode 转义，例如：
 ///   \u5143\u5b9d -> 元宝
+/// BMP 外字符用 UTF-16 代理对：\ud83d\ude00 -> 😀。
+///
+/// C-10 · 两处修正：
+/// 1. 实测输出里 `\U` 后面同样只跟 4 位十六进制，旧实现按 8 位解析永远
+///    吃不满，整串被原样吐出；
+/// 2. 代理区单独传给 `char::from_u32` 返回 None，旧实现把 `\` 起头整串
+///    原样 push，emoji 应用名变成字面转义串。这里把高/低代理组合成
+///    0x10000+… 的真实码点。
 fn decode_unicode_escapes(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
     let chars: Vec<char> = input.chars().collect();
+    let mut result = String::with_capacity(input.len());
     let mut i = 0;
 
     while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            let next = chars[i + 1];
-            if next == 'u' || next == 'U' {
-                let is_long = next == 'U';
-                let hex_len = if is_long { 8 } else { 4 };
-                let start = i + 2;
-                let end = (start + hex_len).min(chars.len());
-                let hex: String = chars[start..end].iter().collect();
-
-                if hex.len() == hex_len && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                    if let Ok(codepoint) = u32::from_str_radix(&hex, 16) {
-                        if let Some(ch) = char::from_u32(codepoint) {
-                            result.push(ch);
-                            i = end;
-                            continue;
+        if chars[i] == '\\' && i + 1 < chars.len() && (chars[i + 1] == 'u' || chars[i + 1] == 'U') {
+            let start = i + 2;
+            let end = (start + 4).min(chars.len());
+            let hex: String = chars[start..end].iter().collect();
+            if hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                let code = u32::from_str_radix(&hex, 16).unwrap_or(0);
+                // 高代理项：必须与紧随其后的低代理项配成一个码点
+                if (0xD800..=0xDBFF).contains(&code) {
+                    let ns = end;
+                    if ns + 6 <= chars.len()
+                        && chars[ns] == '\\'
+                        && (chars[ns + 1] == 'u' || chars[ns + 1] == 'U')
+                    {
+                        let lo_hex: String = chars[ns + 2..ns + 6].iter().collect();
+                        if lo_hex.len() == 4 && lo_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                            let lo = u32::from_str_radix(&lo_hex, 16).unwrap_or(0);
+                            if (0xDC00..=0xDFFF).contains(&lo) {
+                                let cp = 0x10000 + ((code - 0xD800) << 10) + (lo - 0xDC00);
+                                if let Some(ch) = char::from_u32(cp) {
+                                    result.push(ch);
+                                    i = ns + 6;
+                                    continue;
+                                }
+                            }
                         }
                     }
+                    // 孤立高代理项：保留原转义串，不吞字符
+                    result.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                if let Some(ch) = char::from_u32(code) {
+                    result.push(ch);
+                    i = end;
+                    continue;
                 }
             }
         }
@@ -978,21 +1015,16 @@ pub(crate) fn get_app_version(app_path: &Path) -> Option<String> {
         return None;
     }
 
+    let plist_str = plist.to_string_lossy();
     for key in &["CFBundleShortVersionString", "CFBundleVersion"] {
-        let output = Command::new("defaults")
-            .arg("read")
-            .arg(&plist)
-            .arg(key)
-            .output();
-
-        if let Ok(out) = output {
-            if out.status.success() {
-                let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let version = decode_unicode_escapes(&raw);
-                if !version.is_empty() {
-                    return Some(version);
-                }
-            }
+        // C-12 · 超时 + 退出码检查
+        let Some(raw) = command_stdout_checked("defaults", &["read", plist_str.as_ref(), *key])
+        else {
+            continue;
+        };
+        let version = decode_unicode_escapes(&raw);
+        if !version.is_empty() {
+            return Some(version);
         }
     }
 
@@ -1005,7 +1037,7 @@ pub(crate) fn get_app_version(app_path: &Path) -> Option<String> {
 /// 支持命名变体生成（nospace/underscore/hyphen/lowercase）和
 /// 版本后缀剥离（Nightly/Beta/Dev/Canary 等），确保找到所有残留。
 ///
-/// 扫描范围（共 18 类）：
+/// 扫描范围（共 17 类）：
 /// 1.  Containers — 沙盒应用容器
 /// 2.  Group Containers — 共享容器（App Group）
 /// 3.  Caches — 应用缓存
@@ -1023,7 +1055,10 @@ pub(crate) fn get_app_version(app_path: &Path) -> Option<String> {
 /// 15. LaunchAgents — 用户级启动代理
 /// 16. LaunchDaemons — 系统级守护进程（需 sudo 删除）
 /// 17. Caches/Application Support（按命名变体匹配）
-/// 18. Embedded bundle ID（XPC/appex 内嵌的 bundle ID）
+///
+/// D-13 · 旧文档曾列第 18 类「内嵌 XPC/appex 的 bundle ID」，但代码里
+/// 只有一行占位注释，且函数签名没有 app_path 无从枚举；已删除该条并把
+/// 编号收敛为 17 类，文档与实现保持一致（不再假装实现了这一路）。
 ///
 /// `~/Library/Group Containers` 不再整目录枚举：改在 [`find_associated_files`]
 /// 内按 `<bundle_id>` / `group.<bundle_id>` 定点 stat，避免卸载被大目录 read_dir 拖住。
@@ -1135,7 +1170,8 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
         }
     }
 
-    // 7. 浏览器 PWA 的「浏览器侧数据」刻意不在此枚举/删除：
+    // 注（D-13 · 原误标「7.」与 Logs 重复）：浏览器 PWA 的「浏览器侧数据」
+    // 刻意不在此枚举/删除：
     //    Chromium 系 PWA 的内部注册（Preferences / LevelDB 的 web_apps 注册表）与
     //    `Web Applications/Manifest Resources/<资源id>` 使用的是与快捷方式 extension id
     //    不同的独立标识，无法从 shim `.app` 安全映射（盲删可能误删共享资源），且浏览器
@@ -1256,12 +1292,11 @@ pub(crate) fn find_associated_files(bundle_id: &str, app_name: &str) -> Vec<Stri
         }
     }
 
-    // 18. Embedded bundle ID — 扫描 .app 包内嵌的 XPC/appex 的 bundle ID
-    // 这些是应用插件/扩展，它们的关联文件需要一并清理
-    // (在 scan_app 中调用时传入 app_path，这里通过额外参数实现)
+    // D-13 · 第 18 类「内嵌 XPC/appex 的 bundle ID」原为占位注释，已按
+    // 文档口径一并移除（见模块头 17 类说明），不再留下未实现的承诺。
 
     // 出口兜底：只保留落在允许根目录之内的路径。
-    // 上面 18 个拼接点任何一个漏校验，这里都能拦住。
+    // 上面 17 个拼接点任何一个漏校验，这里都能拦住。
     paths
         .into_iter()
         .filter(|p| is_allowed_associated_path(Path::new(p), &home))
@@ -2100,34 +2135,12 @@ fn read_plist_string(app_path: &Path, key: &str) -> Option<String> {
     if !plist.exists() {
         return None;
     }
-    if let Ok(out) = Command::new("defaults")
-        .arg("read")
-        .arg(&plist)
-        .arg(key)
-        .output()
-    {
-        if out.status.success() {
-            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
+    let plist_str = plist.to_string_lossy();
+    // C-12 · 两次都走带超时 + 退出码检查的统一执行器
+    if let Some(v) = command_stdout_checked("defaults", &["read", plist_str.as_ref(), key]) {
+        return Some(v);
     }
-    if let Ok(out) = Command::new("plutil")
-        .arg("-extract")
-        .arg(key)
-        .arg("raw")
-        .arg(&plist)
-        .output()
-    {
-        if out.status.success() {
-            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
+    command_stdout_checked("plutil", &["-extract", key, "raw", plist_str.as_ref()])
 }
 
 /// 综合判定一个 `.app` 是否为浏览器安装的 PWA / Web App，并返回来源名。
@@ -2399,6 +2412,18 @@ pub fn app_inventory_sizes_emit<F: Fn(AppInventorySize) + Sync>(paths: &[String]
 /// 领取新任务，已在跑的单个大目录不强行中断（其内部 `dir_size` 有看门狗，
 /// 会在子树级超时后自然结束），detach 到后台自生自灭，本函数准时返回，
 /// 因此 UI 绝不会无限停留在「统计中…」。返回预算内实际算完的条目。
+/// C-09 · 取出预算内已算完的结果。
+///
+/// 旧实现 `Arc::try_unwrap(done)`：预算到点后 drop(workers) 只是 detach，
+/// 仍在跑的 worker 持有 done 的 Arc 克隆，try_unwrap 必然失败 →
+/// unwrap_or_default() 返回空 Vec，与文档「返回预算内实际算完的条目」
+/// 完全相反。直接 lock + clone 即可，不要求独占。
+fn take_completed_results(
+    done: &std::sync::Arc<std::sync::Mutex<Vec<AppInventorySize>>>,
+) -> Vec<AppInventorySize> {
+    done.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 pub fn app_inventory_sizes_bounded<F>(
     paths: Vec<String>,
     concurrency: usize,
@@ -2470,10 +2495,8 @@ where
     // 本次完整算出的目录落盘：机器空闲算过一次后，随后即便磁盘繁忙也能秒回。
     crate::scanner::sizecache::flush();
 
-    std::sync::Arc::try_unwrap(done)
-        .ok()
-        .and_then(|m| m.into_inner().ok())
-        .unwrap_or_default()
+    // C-09：超时后 detach 的 worker 仍持有 Arc 克隆，不能再靠 try_unwrap 独占
+    take_completed_results(&done)
 }
 
 // ---- 应用真实图标提取（.icns → PNG data URL，使用系统自带 sips，零新依赖）----
@@ -2564,16 +2587,23 @@ fn extract_app_icon_data_url(app_path: &Path) -> Option<String> {
     app_path.hash(&mut hasher);
     let tmp = std::env::temp_dir().join(format!("maclean_icon_{:016x}.png", hasher.finish()));
 
-    let ok = Command::new("/usr/bin/sips")
-        .args(["-s", "format", "png", "-Z", "128"])
-        .arg(&icns)
-        .arg("--out")
-        .arg(&tmp)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // C-12 · sips 原先零超时且每个应用一次，统一走带超时 + 退出码检查的执行器
+    let icns_str = icns.to_string_lossy();
+    let tmp_str = tmp.to_string_lossy();
+    let sips_args = [
+        "-s",
+        "format",
+        "png",
+        "-Z",
+        "128",
+        icns_str.as_ref(),
+        "--out",
+        tmp_str.as_ref(),
+    ];
+    let ok = matches!(
+        super::io_pool::command_output_checked("/usr/bin/sips", &sips_args, COMMAND_TIMEOUT),
+        super::io_pool::CommandOutcome::Success(_)
+    );
     if !ok {
         return None;
     }
@@ -3138,5 +3168,59 @@ mod tests {
                 "体积补算口径必须与完整清单一致"
             );
         }
+    }
+
+    // --- C-09 / C-10 / C-11 ---
+
+    #[test]
+    fn c09_bounded_inventory_returns_partial_results_even_with_shared_arc() {
+        // 模拟「预算到点、detach 的 worker 仍持有 done 的 Arc 克隆」：
+        // 旧实现 Arc::try_unwrap 必失败返回空，新实现直接 lock().clone()。
+        let done = std::sync::Arc::new(std::sync::Mutex::new(vec![
+            AppInventorySize {
+                path: "/Applications/Foo.app".to_string(),
+                app_size: 1024,
+                data_size: 0,
+                cache_size: 0,
+            },
+            AppInventorySize {
+                path: "/Applications/Bar.app".to_string(),
+                app_size: 2048,
+                data_size: 0,
+                cache_size: 0,
+            },
+        ]));
+        let _detached_worker_holds_clone = std::sync::Arc::clone(&done);
+        let got = take_completed_results(&done);
+        assert_eq!(got.len(), 2, "部分完成的结果必须被返回，而不是丢弃成空");
+        assert_eq!(got[0].path, "/Applications/Foo.app");
+        // 反向验证：把生产改回 Arc::try_unwrap(...).unwrap_or_default()，
+        // 因 _detached_worker_holds_clone 存在，got 会变成空，断言必红。
+    }
+
+    #[test]
+    fn c10_decode_unicode_escapes_handles_cjk_and_surrogate_pairs() {
+        assert_eq!(
+            decode_unicode_escapes(r"YuanBao_\u5143\u5b9d"),
+            "YuanBao_元宝"
+        );
+        // emoji：\ud83d\ude00 -> 😀
+        assert_eq!(
+            decode_unicode_escapes(r"YuanBao_\u5143\u5b9d_\ud83d\ude00"),
+            "YuanBao_元宝_😀"
+        );
+        // \U 也按 4 位处理（旧实现按 8 位，永远吃不满）
+        assert_eq!(decode_unicode_escapes(r"\U5143"), "元");
+        assert_eq!(decode_unicode_escapes(r"Foo \u0041 Bar"), "Foo A Bar");
+        // 孤立高代理项保留原串，不吞字符
+        assert_eq!(decode_unicode_escapes(r"\ud83d"), r"\ud83d");
+        // 反向验证：去掉代理对组合分支，emoji 断言必红（变字面转义串）
+    }
+
+    #[test]
+    fn c11_empty_home_never_produces_relative_app_paths() {
+        // home 解析失败 → 空 PathBuf → 必须返回空，绝不相对 CWD 枚举。
+        // 反向验证：去掉空 home 守卫，/Applications 会被枚举出 .app，断言必红。
+        assert!(collect_app_paths_with_home(Path::new("")).is_empty());
     }
 }

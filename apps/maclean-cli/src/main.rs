@@ -16,8 +16,11 @@
 //! 命令集合（`maclean --help` 查看完整列表）：
 //! ```text
 //! maclean scan / clean / schedule / check-disk / list / apps / uninstall
-//! maclean log / backups / restore / startup / optimize / dup-ignore
+//! maclean system-data / apfs / log / backups / restore / startup / optimize
+//! maclean dup-ignore
 //! ```
+//! E-14：system-data 与 apfs（list / delete）是已实现的公开命令，
+//! 命令集以 `docs/cli-contract.md` §2 为准。
 //! 结构化输出：`--format json|jsonl`，配合稳定退出码供脚本消费。
 
 use maclean_core::logger;
