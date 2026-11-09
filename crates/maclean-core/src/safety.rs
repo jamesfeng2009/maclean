@@ -2808,16 +2808,45 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&app);
 
-        // 2) 豁免只挂在第 4.6 层：系统受保护的 App Support 子目录（通讯录）在更早
-        //    的第 3/4 层就被拦 —— 即使它形状上同样是「Application Support 直接子项」。
-        //    只读判定（不创建/删除该系统目录），该层按路径组件匹配、不依赖目录存在。
+        // 2) 豁免只挂在第 4.6 层：更早的第 4 层 home 黑名单不能被它盖过。
+        //    通讯录（macOS 表）形状上同样是「Application Support 直接子项」，
+        //    正好与 4.6 豁免重叠；Windows 表用凭据管理器作对应红线。
+        //    两套表都由入参注入、在开发机上真跑，不是 cfg 跳过（Windows runner
+        //    上原本只有 4.6 误拦让这条断言碰巧变绿，修好误拦后才暴露出来）。
         let protected = Path::new(&home).join("Library/Application Support/AddressBook");
         assert!(
             is_app_support_data_root(&protected),
             "通讯录目录形状上也是 Application Support 直接子项"
         );
-        let pp = protected.to_string_lossy().into_owned();
-        let r2 = check_path_safety_with_category(&pp, "AddressBook");
+        let homes = protected_homes();
+        for windows in [false, true] {
+            let (p, label) = if windows {
+                (
+                    Path::new(&home).join("AppData/Local/Microsoft/Credentials"),
+                    "Windows 凭据管理器",
+                )
+            } else {
+                (protected.clone(), "通讯录")
+            };
+            let s = p.to_string_lossy().into_owned();
+            assert!(
+                check_home_paths_for_platform(&p, &s, &homes, windows).is_some(),
+                "{label} 必须在第 4 层被拦（windows={windows}）"
+            );
+        }
+        // 生产入口：当前平台自己的红线目录仍必须返回 Danger。
+        let (pp, label) = if cfg!(target_os = "windows") {
+            (
+                Path::new(&home)
+                    .join("AppData/Local/Microsoft/Credentials")
+                    .to_string_lossy()
+                    .into_owned(),
+                "Credentials",
+            )
+        } else {
+            (protected.to_string_lossy().into_owned(), "AddressBook")
+        };
+        let r2 = check_path_safety_with_category(&pp, label);
         assert!(
             matches!(r2, SafetyCheck::Danger(_)),
             "系统受保护目录必须在 4.6 之前的层被拦: {:?}",
