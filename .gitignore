@@ -40,6 +40,10 @@ homebrew/.DS_Store
 # 文档不入库（2026-10-13 决策：*.md 不提交；根 README 例外——仓库门面）
 *.md
 !README.md
+# E-14 契约测试用 include_str! 在编译期读取这份「公开 · 稳定」CLI 契约，
+# 干净 checkout（CI / 新克隆）缺它直接编译失败，必须随源码入库。
+# 其余内部/审查文档仍按 2026-10-13 决策不提交。
+!docs/cli-contract.md
 
 # 内部审查资料（docx/pdf 非代码，不公开）
 MacLean-技术审查与上线整改报告/

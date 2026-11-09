@@ -787,7 +787,7 @@ mod tests {
         assert_eq!(plan.restored.len(), 2);
         for e in &m.entries {
             assert!(
-                restore_from_trash(&trash_s, &e.trash_name, &e.path, &[tmp.clone()]),
+                restore_from_trash(&trash_s, &e.trash_name, &e.path, std::slice::from_ref(&tmp)),
                 "{} 按记录搬回失败",
                 e.path
             );
@@ -882,7 +882,7 @@ mod tests {
         let report = execute_restore(
             &c08_manifest(&target, "payload.bin"),
             &trash_s,
-            &[home.clone()],
+            std::slice::from_ref(&home),
         );
         assert!(report.restored.is_empty());
         assert_eq!(report.failed, vec![target.to_string_lossy().into_owned()]);
@@ -897,7 +897,7 @@ mod tests {
         let report = execute_restore(
             &c08_manifest(&inside, "payload.bin"),
             &trash_s,
-            &[home.clone()],
+            std::slice::from_ref(&home),
         );
         assert_eq!(report.restored, vec![inside.to_string_lossy().into_owned()]);
         assert_eq!(std::fs::read(&inside).unwrap(), b"payload");
@@ -918,13 +918,13 @@ mod tests {
         symlink(&outside, &link).unwrap();
         let via_link = link.join("payload.bin");
         assert!(
-            !restore_target_within_home(&via_link.to_string_lossy(), &[home.clone()]),
+            !restore_target_within_home(&via_link.to_string_lossy(), std::slice::from_ref(&home)),
             "canonical 后越出 home 的父目录必须被拒"
         );
         let report = execute_restore(
             &c08_manifest(&via_link, "payload.bin"),
             &trash_s,
-            &[home.clone()],
+            std::slice::from_ref(&home),
         );
         assert!(report.restored.is_empty());
         assert!(
@@ -944,7 +944,7 @@ mod tests {
         let report = execute_restore(
             &c08_manifest(&dangling, "payload.bin"),
             &trash_s,
-            &[home.clone()],
+            std::slice::from_ref(&home),
         );
         assert_eq!(report.failed, vec![dangling.to_string_lossy().into_owned()]);
         assert!(
