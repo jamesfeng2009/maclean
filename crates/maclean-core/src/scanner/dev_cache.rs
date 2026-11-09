@@ -3318,9 +3318,12 @@ mod tests {
         // C-03：Homebrew 整目录与其 downloads 子目录同时入列，父项
         // dir_size 已含子项，必须只保留父项，杜绝父子嵌套重复计体积。
         // 反向验证：把 dedup_items_by_path 的包含剔除去掉，子项会留下 → 红。
-        let parent = "/Users/u/Library/Caches/Homebrew";
-        let child = "/Users/u/Library/Caches/Homebrew/downloads";
-        let items = vec![mk_dev_item(parent, 1000), mk_dev_item(child, 400)];
+        // 用真实 home 构造绝对路径：`/Users/u/...` 在 Windows 上只是
+        // rooted 而非 absolute，生产去重里的 `is_absolute()` 守卫会直接跳过。
+        let base = home_dir().join("Library/Caches/Homebrew");
+        let parent = base.to_string_lossy().into_owned();
+        let child = base.join("downloads").to_string_lossy().into_owned();
+        let items = vec![mk_dev_item(&parent, 1000), mk_dev_item(&child, 400)];
         let out = dedup_items_by_path(items);
         assert_eq!(out.len(), 1, "被父项包含的子项必须剔除");
         assert_eq!(out[0].path, parent);

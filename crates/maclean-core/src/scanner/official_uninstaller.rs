@@ -291,7 +291,14 @@ mod tests {
         let app = base.join("Foo.app");
         let helpers = app.join("Contents").join("Helpers");
         std::fs::create_dir_all(&helpers).unwrap();
-        let exe = helpers.join("uninstall_foo.sh");
+        // Windows 侧 `is_executable` 按扩展名判定（.exe/.bat/.cmd/.ps1），
+        // `.sh` 不是可执行卸载器；Unix 侧仍按执行位。两边都验证同一条
+        // Contents/Helpers 包内搜索链。
+        let exe = if cfg!(windows) {
+            helpers.join("uninstall_foo.exe")
+        } else {
+            helpers.join("uninstall_foo.sh")
+        };
         std::fs::write(&exe, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {

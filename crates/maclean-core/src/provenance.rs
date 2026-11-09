@@ -72,20 +72,65 @@ pub fn register_root(root: &Path) {
     }
 }
 
-/// 组件级前缀判定：`path == root` 或 `path` 是 `root` 的后代。
-/// 用 `Component` 而不是字符串 `starts_with`，避免 `CachesEvil` 命中 `Caches`。
-fn components_under(path: &Path, root: &Path) -> bool {
-    let mut p = path.components();
-    let mut r = root.components();
-    loop {
-        match r.next() {
-            Some(rc) => match p.next() {
-                Some(pc) if pc == rc => continue,
-                _ => return false,
-            },
-            None => return true,
-        }
+/// 平台无关的路径组件键。
+///
+/// Windows 的 `canonicalize()` 返回 `\\?\C:\...` verbatim 前缀，而注册表 /
+/// `dirs::home_dir()` 给的是 `C:\...`；两者的 `Component::Prefix` 不相等，
+/// 直接按 `Path::components()` 比较会让「扫描根准入」「home 黑名单」这类
+/// 组件级前缀判定在 Windows 上**整体失效**（曾表现为第 8 层恒 false）。
+/// 这里统一：归一分隔符、剥掉 verbatim 前缀、Windows 下大小写不敏感。
+///
+/// `windows_style` 由入参传入而非 `cfg!`，这样 Windows 分支在开发机上也能真跑。
+pub(crate) fn path_component_key_for(path: &Path, windows_style: bool) -> Vec<String> {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let stripped = raw.strip_prefix("//?/").unwrap_or(raw.as_str());
+    stripped
+        .split('/')
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            if windows_style {
+                c.to_ascii_lowercase()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn path_component_key(path: &Path) -> Vec<String> {
+    path_component_key_for(path, cfg!(target_os = "windows"))
+}
+
+/// 平台无关的字符串键：归一分隔符并剥掉 Windows verbatim 前缀，
+/// 保留前导 `/` 与盘符，供仍按字符串前缀匹配的准入表使用。
+pub(crate) fn path_key_string(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    raw.strip_prefix("//?/").unwrap_or(&raw).to_string()
+}
+
+/// 把 `canonicalize()` 返回的 `\\?\C:\...` 还原成普通盘符路径。
+///
+/// 只剥盘符形态（第三个字符是盘符、第四个是冒号）；`\\?\UNC\...` 保持原样，
+/// 避免造出一个根本不存在的路径。下游凡是按 `Path::starts_with` / 组件比较的
+/// 判定，都要求 canonical 与 home 有同一形态的 Prefix。
+pub(crate) fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => p,
     }
+}
+
+/// `path == root` 或 `path` 位于 `root` 之下（组件级，跨平台）。
+/// 用组件而不是裸字符串 `starts_with`，避免 `CachesEvil` 命中 `Caches`。
+pub(crate) fn path_is_under_key(path: &Path, root: &Path) -> bool {
+    let p = path_component_key(path);
+    let r = path_component_key(root);
+    !r.is_empty() && p.len() >= r.len() && r.iter().zip(p.iter()).all(|(a, b)| a == b)
+}
+
+fn components_under(path: &Path, root: &Path) -> bool {
+    path_is_under_key(path, root)
 }
 
 /// 路径是否落在任何已声明的扫描根下（fail-closed：无根注册时恒 false）。

@@ -190,6 +190,13 @@ fn rename_to_staging(path: &std::path::Path) -> Result<std::path::PathBuf, Delet
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     for attempt in 0..64u32 {
+        // 并发删除：另一线程可能已把源删掉。Windows 上 rename 撞上共享冲突
+        // 常返回 Other/AlreadyExists，若只在 NotFound 分支收手，会白重试 64
+        // 次后报 Err(Other)（真实 Windows runner 实测第 9 轮复现）。
+        // 每次重试前先看一眼目标状态，两个 cfg 分支共用同一口径。
+        if !path.exists() && path.symlink_metadata().is_err() {
+            return Ok(path.to_path_buf());
+        }
         let name = format!(
             ".maclean_stage_{}_{:x}_{}",
             std::process::id(),
@@ -426,11 +433,14 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
     };
     match res {
         Ok(()) if gone(&deleted_path) => Ok(()),
+        // 与 macOS / Linux 分支对称：cmd 与 Rust API 都可能拿到竞态错误
+        // （ENOENT / 共享冲突），只要目标确实已消失就不能误报「失败 1 项」。
+        Err(_) if gone(&deleted_path) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Err(DeleteFailure::PermissionDenied)
         }
         Err(_) => Err(DeleteFailure::Other),
-        _ => Err(DeleteFailure::Other),
+        Ok(()) => Err(DeleteFailure::Other),
     }
 }
 

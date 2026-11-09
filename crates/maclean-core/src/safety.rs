@@ -191,8 +191,12 @@ fn loose_component_key(s: &str) -> String {
 }
 
 fn loose_components(p: &Path) -> Vec<String> {
-    p.components()
-        .map(|c| loose_component_key(&c.as_os_str().to_string_lossy()))
+    // 复用 provenance 的跨平台组件键：Windows canonicalize 的 `\\?\` verbatim
+    // 前缀与 home 的普通盘符前缀不相等，直接用 Path::components() 会让整个
+    // 第 4 层 home 黑名单在 Windows 上静默失防。
+    crate::provenance::path_component_key(p)
+        .iter()
+        .map(|c| loose_component_key(c))
         .collect()
 }
 
@@ -277,7 +281,16 @@ const WINDOWS_HOMES_EXACT: &[&str] = &[
     "AppData/Local/Google/Chrome/User Data/Default", // Chrome profile（内含密码/历史）
     "AppData/Local/Microsoft/Edge/User Data/Default", // Edge profile
     "Documents/Outlook Files",          // Outlook 本地数据文件
-    "OneDrive",                         // 同步根目录（删了会连带云端）
+    // 云同步盘根：Windows 客户端同样会把这些目录建在 home 下，删根会连带云端。
+    // 之前只在 macOS 表里有，Windows  runner 上实测整批漏保护。
+    "OneDrive",
+    "OneDrive - ",
+    "Dropbox",
+    "Google Drive",
+    "iCloud Drive",
+    "Nextcloud",
+    "OwnCloud",
+    "Box",
 ];
 
 /// Windows 侧 home 黑名单：前缀匹配（自身与整个子树都禁）
@@ -303,6 +316,7 @@ const WINDOWS_HOMES_PREFIX: &[&str] = &[
     ".password-store",  // pass 密码库
     ".git-credentials", // Git 明文凭证
     ".docker",          // Docker 配置与登录态
+    ".env",             // 环境变量文件（常含密钥），Windows 项目里同样常见
 ];
 
 /// 按平台取 home 黑名单
@@ -656,8 +670,10 @@ fn reclaimable_cache_root_with_homes(path: &Path, homes: &[PathBuf]) -> bool {
         let Ok(rel) = path.strip_prefix(home) else {
             continue;
         };
-        let rel = rel.to_string_lossy();
-        if RECLAIMABLE_CACHE_ROOT_REL.contains(&rel.as_ref()) {
+        // 白名单是 POSIX 相对路径；Windows 的 `strip_prefix` 结果用 `\`，
+        // 必须先归一分隔符，否则整份白名单在 Windows 上形同虚设。
+        let rel = crate::provenance::path_key_string(rel);
+        if RECLAIMABLE_CACHE_ROOT_REL.contains(&rel.as_str()) {
             return true;
         }
         // 更新器残留：Library/Caches 下的直接子项且名字以 .ShipIt 结尾
@@ -696,7 +712,9 @@ fn app_support_data_root_with_homes(path: &Path, homes: &[PathBuf]) -> bool {
         let Ok(rel) = path.strip_prefix(home) else {
             continue;
         };
-        let rel = rel.to_string_lossy();
+        // 归一分隔符：Windows 上 `Library\Application Support\<App>` 用
+        // 字面量 "Library/Application Support/" 永远 strip 不掉。
+        let rel = crate::provenance::path_key_string(rel);
         let rel = rel.trim_start_matches('/');
         // 必须恰好是 Library/Application Support/<一个直接子项>：
         // Application Support 根本身、以及再深一层的嵌套目录都不放行。
@@ -815,7 +833,10 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     }
 
     let canonical = match p.canonicalize() {
-        Ok(c) => c,
+        // Windows 的 `\\?\C:\...` verbatim 前缀与 home / 注册表给出的 `C:\...`
+        // 不是同一个 Prefix 组件，会让下面按组件比较的白名单、home 黑名单、
+        // provenance 准入整片失效。剥掉后再进入 7 层检查，形态与普通路径一致。
+        Ok(c) => crate::provenance::strip_verbatim(c),
         Err(_) => {
             // canonicalize 失败不一定是路径不存在，可能是 TCC 保护导致 realpath() 无权限。
             // 回退到原始路径（规范化斜杠但不解析符号链接），继续做安全检查。
@@ -1017,9 +1038,15 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
 
     // 已卸载 App 的偏好设置 plist（~/Library/Preferences/<name>.plist）可安全删除，
     // 即使文件名包含 credential/password 等关键字（如 git-credential-manager.plist）。
+    // 分隔符归一后再比：Windows 上 `C:\Users\...` 与字面量 `/Library/...`
+    // 拼在一起永远对不上，plist 会被敏感名检测误判成 Warning。
+    let canonical_key = crate::provenance::path_key_string(&canonical);
     let is_leftover_pref = file_name.ends_with(".plist")
         && homes.iter().any(|h| {
-            canonical_str.starts_with(&format!("{}/Library/Preferences/", h.to_string_lossy()))
+            canonical_key.starts_with(&format!(
+                "{}/Library/Preferences/",
+                crate::provenance::path_key_string(h)
+            ))
         });
 
     if !is_leftover_pref {
@@ -1492,8 +1519,11 @@ pub(crate) fn is_critical_system_path(path: &str) -> bool {
 /// 所有前缀判定必须走组件级 `is_same_or_under` / `is_direct_child`；
 /// 裸 `starts_with` 会让 `~/Library/CachesEvil` 被当成缓存目录（见 A-03）。
 fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
-    let canonical_str = canonical.to_string_lossy();
-    let home_str = home.to_string_lossy();
+    // 准入表用 `format!("{}/...", home)` 的 POSIX 斜杠形态书写。Windows 上
+    // canonical/home 都是 `\`，直接比字符串永远不命中；统一归一分隔符并剥掉
+    // verbatim 前缀后再比，两个平台共用同一张表。
+    let canonical_str = crate::provenance::path_key_string(canonical);
+    let home_str = crate::provenance::path_key_string(home);
 
     // ================================================================
     //  大文件/目录特殊策略
@@ -1705,8 +1735,11 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
 /// 检查 path 是否等于 prefix 或位于 prefix 之下
 /// 自动处理末尾 / 的差异
 fn is_same_or_under(path: &str, prefix: &str) -> bool {
-    let normalized_path = path.trim_end_matches('/');
-    let normalized_prefix = prefix.trim_end_matches('/');
+    // 分隔符归一：Windows 路径用 `\`，只 trim `/` 会让尾斜杠规则失效。
+    let p = path.replace('\\', "/");
+    let q = prefix.replace('\\', "/");
+    let normalized_path = p.trim_end_matches('/');
+    let normalized_prefix = q.trim_end_matches('/');
     normalized_path == normalized_prefix
         || normalized_path.starts_with(&format!("{}/", normalized_prefix))
 }
@@ -1727,7 +1760,9 @@ fn is_direct_child(path: &str, prefix: &str) -> bool {
 /// 检查路径中是否包含某个目录/文件名组件
 /// 例如 /a/b/node_modules/c 包含 node_modules
 fn path_contains_component(path: &str, name: &str) -> bool {
-    path.split('/').any(|component| component == name)
+    // Windows 分隔符同样要切：否则 `node_modules`、`target` 这类项目级
+    // 缓存名在 Windows 上永远匹配不到，第 8 层准入会把正常清理全拦掉。
+    path.split(['/', '\\']).any(|component| component == name)
 }
 
 // ================================================================
@@ -1746,15 +1781,21 @@ fn path_contains_component(path: &str, name: &str) -> bool {
 ///
 /// 返回 None 表示变量缺失或为空 —— 调用方必须拒绝该规则（fail-closed）。
 /// 环境变量可能被进程内篡改，因此优先用 passwd/注册表真实 home 兜底。
-fn resolve_root_variable(root: &str) -> Option<String> {
-    let homes = protected_homes();
-    let home = homes.first()?;
+fn resolve_root_variable_for(
+    root: &str,
+    home: &std::path::Path,
+    windows_style: bool,
+) -> Option<String> {
     let home_str = home.to_string_lossy();
     // %APPDATA% / %LOCALAPPDATA% 按平台映射：Windows 走 AppData 目录，
     // macOS 无 Roaming/Local 之分，统一落在 ~/Library/Application Support
     // （与 Windows 侧语义最接近；规则根里的这些变量在另一平台扫描不到，
     // 由 validate 的"至少一个可用根"兜底，不会误删）。
-    let (appdata, localappdata) = if std::env::consts::OS == "windows" {
+    //
+    // `windows_style` 与 `home` 都由入参注入：这样「喂 macOS 策略 + macOS 风格
+    // home」在 Windows runner 上也能真跑，不会因为本机 HOME 是 `C:\Users\...`
+    // 就整条 macOS 分支测不到（CORE-06 收敛的同一条约定）。
+    let (appdata, localappdata) = if windows_style {
         let roaming = format!("{}\\AppData\\Roaming", home_str);
         let local = format!("{}\\AppData\\Local", home_str);
         (roaming, local)
@@ -1965,14 +2006,16 @@ impl RootPolicy {
 
     /// 空策略：证明共用校验逻辑不依赖根表完备性（CORE-06 的验收口径）。
     /// 只作测试夹具，生产二进制里不该存在这个构造入口。
+    ///
+    /// 刻意保留当前平台的分隔符规则与 homes：这两项不属于「根表」，清空
+    /// 会让 `$HOME` 模板解析在 Windows 上必然错配，测到的只是环境噪声，
+    /// 而不是「空表也不 fail-open」这件事本身。
     #[cfg(test)]
     fn empty() -> Self {
-        Self {
-            protected_roots: Vec::new(),
-            forbidden_subtrees: Vec::new(),
-            homes: Vec::new(),
-            windows_style: false,
-        }
+        let mut p = Self::for_os(std::env::consts::OS, protected_homes());
+        p.protected_roots.clear();
+        p.forbidden_subtrees.clear();
+        p
     }
 }
 
@@ -2091,7 +2134,15 @@ pub const MAX_RULE_ROOT_COMPONENTS: usize = 3;
 /// 只校验空串与 "/" 的实现，Linux 上 $HOME / 相对路径 / `..` 全部放行
 /// —— 已删除，不再有第二份。
 fn validate_rule_root_checked(root: &str, policy: &RootPolicy) -> Result<String, String> {
-    let resolved = resolve_root_variable(root)
+    // 模板变量解析必须跟随被测策略的 home 与平台分隔符规则，否则「拿 macOS
+    // 策略测 $HOME」在 Windows 上会被本机 `C:\Users\...` 污染成必然失败。
+    let home = policy
+        .homes
+        .first()
+        .cloned()
+        .or_else(|| protected_homes().into_iter().next())
+        .ok_or_else(|| "无法确定用户主目录，规则根拒绝（fail-closed）".to_string())?;
+    let resolved = resolve_root_variable_for(root, &home, policy.windows_style)
         .ok_or_else(|| format!("规则根含未解析模板变量或为空: {root}"))?;
     if !root_is_absolute(&resolved, policy.windows_style) {
         return Err(format!("规则根必须为绝对路径: {root}"));
@@ -2238,6 +2289,19 @@ fn chrono_like_timestamp() -> String {
 mod tests {
     use super::*;
 
+    /// 与生产判定同源的 home。Windows runner 上 `$HOME` 环境变量常常是
+    /// `D:\Users\u` 之类，与 `dirs::home_dir()` / 注册表给出的真实 home 不同；
+    /// 测试一旦用 `std::env::var("HOME")` 或硬编码 `/Users/u` 构造路径，
+    /// 第 4 层与第 8 层的组件比较就会因为 home 不匹配而整片失效。
+    fn test_home_str() -> String {
+        protected_homes()
+            .into_iter()
+            .next()
+            .expect("有 home")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     // ---------- 第 4.6 层: 清单管理目录保护 ----------
 
     #[test]
@@ -2307,7 +2371,7 @@ mod tests {
     fn container_data_paths_are_never_deletable() {
         // 容器数据目录（Docker Desktop / OrbStack 镜像与卷）是数据库结构，
         // 直接删文件破坏镜像元数据（9-30 事故）。任何类目任何入口都 Danger。
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        let home = test_home_str();
         for p in [
             format!(
                 "{}/Library/Containers/com.docker.docker/Data/vms/0/docker.raw",
@@ -2439,7 +2503,7 @@ mod tests {
         // 缓存目录内、无"用户数据扩展名"的副本允许删除（清理价值保留）。
         // is_repeat_cache_dir 用 protected_homes（真实 HOME）判定，
         // 测试路径必须以真实 home 构造，否则目录白名单命中不了。
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        let home = test_home_str();
         // 4.8 目录白名单形态判定：
         let cache_p1 = Path::new(&home).join("Library/Caches/app/video.mp4");
         assert!(
@@ -2479,7 +2543,7 @@ mod tests {
     fn duplicate_category_denies_user_doc_extension_in_cache() {
         // 缓存目录内命中"用户数据扩展名"（文档/代码/数据库/压缩包/字体）
         // 也拒绝 —— 极可能是同步/备份工具误放的用户数据。
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        let home = test_home_str();
         let cases = [
             ("report.pdf", "pdf"),
             ("code.ts", "ts"),
@@ -2510,7 +2574,7 @@ mod tests {
         // 扫描允许判定（duplicate_candidate_allowed）与删除期 4.8 层必须
         // 精确互补：allowed=false ⟺ 重复文件类目 Danger。扫描按它过滤，
         // 删除按它拦截 —— "扫得出的都能删、删不掉的都不扫"。
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        let home = test_home_str();
         // 缓存目录内、无用户扩展名 → allowed，删除期不 Danger
         let ok = Path::new(&home)
             .join("Library/Caches/app/video.mp4")
@@ -2700,7 +2764,8 @@ mod tests {
     #[test]
     fn orphan_im_documents_root_allowed_but_other_apps_docs_root_blocked() {
         use std::path::PathBuf;
-        let h = PathBuf::from("/Users/u");
+        // 准入表按 home 前缀比对，硬编码 Unix home 在 Windows 上永远不命中。
+        let h = PathBuf::from(test_home_str());
         let wl = |rel: &str| check_whitelist(&h.join(rel), &h, "应用缓存");
         // IM（微信 / QQ / 企微）Documents 根：App 已卸载后的孤儿数据可清理
         assert!(wl(
@@ -2723,7 +2788,7 @@ mod tests {
     #[test]
     fn app_support_root_bundled_runtime_not_blocked_but_redlines_hold() {
         use std::path::Path;
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/u".to_string());
+        let home = test_home_str();
         let pid = std::process::id();
 
         // 1) App 根内捆绑、仅与虚拟环境同名的目录（PyCharm typeshed 存根 venv）
@@ -2835,10 +2900,10 @@ mod tests {
         // $HOME/Library/Caches 这类正常规则根必须通过
         let resolved = validate_rule_root("$HOME/Library/Caches").expect("正常规则根应通过校验");
         assert!(
-            resolved.starts_with('/'),
+            root_is_absolute(&resolved, cfg!(target_os = "windows")),
             "解析后的根应为绝对路径: {resolved}"
         );
-        assert!(resolved.ends_with("Library/Caches"));
+        assert!(resolved.replace('\\', "/").ends_with("Library/Caches"));
     }
 
     #[cfg(target_os = "macos")]
@@ -3107,7 +3172,9 @@ mod tests {
 
     #[test]
     fn rp_macos_policy_rejects_system_subtree_but_not_home_cache() {
-        let mac = RootPolicy::for_os("macos", vec![]);
+        // 注入 macOS 风格 home：模板解析不再读本机 HOME，Windows runner 上
+        // 也能真跑 macOS 分支（否则 $HOME 会被解析成 C:\Users\... 而必然错配）。
+        let mac = RootPolicy::for_os("macos", vec![PathBuf::from("/Users/tester")]);
         assert!(validate_rule_root_checked("/System/Library/Caches", &mac).is_err());
         assert!(validate_rule_root_checked("/Library/Caches/Homebrew", &mac).is_err());
         // 内置 44 条规则的根全在 $HOME 下，不能被 /Users 误伤
@@ -3146,13 +3213,37 @@ mod tests {
 
     #[test]
     fn rp_production_entry_rejects_three_component_system_root() {
-        // 直接打生产入口，而不是注入的策略：报告点名的 Linux fail-open
-        // 在开发机（macOS 根表同样含 /usr）也必须被挡住。
-        assert!(
-            validate_rule_root("/usr/local/lib").is_err(),
-            "生产入口仍允许把规则根设在系统目录的子树下"
-        );
-        assert!(validate_rule_root("/usrEvil/lib/cache").is_ok());
+        // 纯逻辑先跑三张表：Windows 分支在 macOS 开发机上同样真跑，避免
+        // 「喂 Unix 绝对路径给 Windows 生产入口、因为非绝对而假红」。
+        let cases: &[(&str, &str, &str)] = &[
+            ("macos", "/usr/local/lib", "/usrEvil/lib/cache"),
+            ("linux", "/usr/local/lib", "/usrEvil/lib/cache"),
+            (
+                "windows",
+                r"C:\Windows\System32",
+                r"C:\WindowsEvil\lib\cache",
+            ),
+        ];
+        for &(os, forbidden, benign) in cases {
+            let policy = RootPolicy::for_os(os, vec![]);
+            assert!(
+                validate_rule_root_checked(forbidden, &policy).is_err(),
+                "{os} 策略仍允许把规则根设在系统目录的子树下"
+            );
+            assert!(
+                validate_rule_root_checked(benign, &policy).is_ok(),
+                "{os} 同名前缀兄弟不应被误伤: {benign}"
+            );
+        }
+        // 生产入口：按当前平台取等价样本，确认接线没退化（报告点名的
+        // Linux fail-open 在 macOS 根表同样含 /usr，也必须被挡住）。
+        let (bad, ok) = if cfg!(target_os = "windows") {
+            (r"C:\Windows\System32", r"C:\WindowsEvil\lib\cache")
+        } else {
+            ("/usr/local/lib", "/usrEvil/lib/cache")
+        };
+        assert!(validate_rule_root(bad).is_err());
+        assert!(validate_rule_root(ok).is_ok());
         // 用户缓存根不能因这次收紧被误伤
         assert!(validate_rule_root("$HOME/Library/Caches").is_ok());
     }
@@ -3707,50 +3798,71 @@ mod tests {
         let real_home = PathBuf::from("/Users/realhome");
         let homes = [env_home.clone(), real_home.clone()];
 
-        for home in &homes {
-            // 4a: 目录本身（精确匹配）
-            for exact in [
-                "Library/Preferences",
-                "Library/Caches",
-                "Library/Containers",
-            ] {
-                let p = home.join(exact);
-                assert!(
-                    check_home_paths(&p, &p.to_string_lossy(), &homes).is_some(),
-                    "4a 未拦截: {}",
-                    p.display()
-                );
-            }
-            // 4b: 前缀匹配（含子路径）
-            for (prefix, child) in [
-                ("Library/Keychains", "login.keychain-db"),
-                ("Library/Mail", "V10/INBOX.mbox"),
-                (".ssh", "id_rsa"),
-            ] {
-                let base = home.join(prefix);
-                let deep = base.join(child);
-                for target in [base, deep] {
+        // 平台差异由入参注入：macOS 与 Windows 两张黑名单在开发机上都要真跑。
+        // 原先直接调生产入口 `check_home_paths`（按当前 OS 选表），Windows runner
+        // 上喂 macOS 形态的路径必然不命中 —— 那测的是环境，不是「遍历每份 home」。
+        for windows in [false, true] {
+            let exact: &[&str] = if windows {
+                &["AppData/Local", "AppData/Roaming", "OneDrive"]
+            } else {
+                &[
+                    "Library/Preferences",
+                    "Library/Caches",
+                    "Library/Containers",
+                ]
+            };
+            let prefixes: &[(&str, &str)] = if windows {
+                &[
+                    ("AppData/Local/Microsoft/Credentials", "cred"),
+                    ("AppData/Roaming/Microsoft/Protect", "key"),
+                    (".ssh", "id_rsa"),
+                ]
+            } else {
+                &[
+                    ("Library/Keychains", "login.keychain-db"),
+                    ("Library/Mail", "V10/INBOX.mbox"),
+                    (".ssh", "id_rsa"),
+                ]
+            };
+            let check = |p: &std::path::Path| {
+                check_home_paths_for_platform(p, &p.to_string_lossy(), &homes, windows)
+            };
+            for home in &homes {
+                // 4a: 目录本身（精确匹配）
+                for &rel in exact {
+                    let p = home.join(rel);
                     assert!(
-                        check_home_paths(&target, &target.to_string_lossy(), &homes).is_some(),
-                        "4b 未拦截: {}",
-                        target.display()
+                        check(&p).is_some(),
+                        "4a 未拦截(windows={windows}): {}",
+                        p.display()
                     );
                 }
+                // 4b: 前缀匹配（含子路径）
+                for &(prefix, child) in prefixes {
+                    let base = home.join(prefix);
+                    let deep = base.join(child);
+                    for target in [base, deep] {
+                        assert!(
+                            check(&target).is_some(),
+                            "4b 未拦截(windows={windows}): {}",
+                            target.display()
+                        );
+                    }
+                }
+                // 主目录本身
+                assert!(
+                    check(home).is_some(),
+                    "主目录本身必须被拦截(windows={windows}): {}",
+                    home.display()
+                );
             }
-            // 主目录本身
+            // 对照组：两份 home 之外的同名目录不在保护范围（确认没有过度拦截）
+            let unrelated = PathBuf::from("/Volumes/OtherDisk/Library/Mail");
             assert!(
-                check_home_paths(home, &home.to_string_lossy(), &homes).is_some(),
-                "主目录本身必须被拦截: {}",
-                home.display()
+                check(&unrelated).is_none(),
+                "不应越界拦截保护名单之外的路径(windows={windows})"
             );
         }
-
-        // 对照组：两份 home 之外的同名目录不在保护范围（确认没有过度拦截）
-        let unrelated = PathBuf::from("/Volumes/OtherDisk/Library/Mail");
-        assert!(
-            check_home_paths(&unrelated, &unrelated.to_string_lossy(), &homes).is_none(),
-            "不应越界拦截保护名单之外的路径"
-        );
     }
 
     #[test]
@@ -3775,7 +3887,7 @@ mod tests {
     #[test]
     fn test_leftover_plist_with_credential_allowed() {
         // ~/Library/Preferences/ 下含 credential 关键字的 plist 应允许删除
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/NONEXISTENT"));
+        let home = PathBuf::from(test_home_str());
         let path = home.join("Library/Preferences/git-credential-manager.plist");
         let result = check_path_safety_with_category(path.to_string_lossy().as_ref(), "");
         assert!(matches!(result, SafetyCheck::Safe));

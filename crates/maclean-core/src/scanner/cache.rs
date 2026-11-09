@@ -110,7 +110,19 @@ fn path_is_deletable(p: &str) -> bool {
 /// 复用 `scanner/mod.rs::retain_safe_batch_members` 的「筛掉成员后回减
 /// size_bytes」口径，但缓存复核不触发递归统计，避免让缓存失去意义。
 fn batch_member_backoff(bp: &str) -> u64 {
-    std::fs::symlink_metadata(bp).map(|m| m.len()).unwrap_or(0)
+    let Ok(meta) = std::fs::symlink_metadata(bp) else {
+        return 0;
+    };
+    let len = meta.len();
+    if len == 0 && meta.file_type().is_symlink() {
+        // Windows 的符号链接 `symlink_metadata().len()` 常为 0：直接用它会让
+        // 「剔除失效成员」零回减，缓存里继续虚报可回收空间。与 Unix 侧
+        // 「按链接串长度回减」的既有口径对齐。
+        return std::fs::read_link(bp)
+            .map(|t| t.as_os_str().to_string_lossy().len() as u64)
+            .unwrap_or(0);
+    }
+    len
 }
 
 /// C-01：对 `batch_paths` 逐个做 TOCTOU 复核（存在且非软链），剔除失效成员、

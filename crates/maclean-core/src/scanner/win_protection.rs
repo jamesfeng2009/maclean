@@ -101,6 +101,20 @@ const SYSTEM_INSTALL_PATH_PREFIXES: &[&str] = &[
     "c:\\programdata\\microsoft\\",
 ];
 
+/// Windows 自带组件的**目录本体**：注册表经常把 install_location 直接写成
+/// `C:\Program Files\Windows Defender`（无尾斜杠），上面的前缀表匹配不到。
+/// 这些是实打实的系统组件，漏判会让卸载器把系统防护目录当成普通应用。
+/// 逐项精确匹配 + 组件边界，避免 `Windows DefenderEvil` 这类同名前缀误伤。
+const SYSTEM_INSTALL_DIRS: &[&str] = &[
+    "c:\\program files\\windows defender",
+    "c:\\program files\\windows nt",
+    "c:\\program files\\windows kits",
+    "c:\\program files\\windows security",
+    "c:\\program files (x86)\\windows defender",
+    "c:\\program files (x86)\\windows nt",
+    "c:\\program files (x86)\\windows kits",
+];
+
 /// 系统应用名称关键词（仅当发布者为 Microsoft 时才匹配）
 ///
 /// 这些是功能类别词，不是具体应用名，可覆盖同一类别的所有应用。
@@ -221,11 +235,15 @@ pub fn is_critical_system_app(app: &WindowsAppInfo) -> bool {
 
     // 规则 2: 安装在系统目录
     if let Some(ref loc) = app.install_location {
-        let loc_lower = loc.to_lowercase();
-        if SYSTEM_INSTALL_PATH_PREFIXES
+        let loc_lower = loc.replace('/', "\\").to_lowercase();
+        let loc_lower = loc_lower.trim_end_matches('\\');
+        let under_prefix = SYSTEM_INSTALL_PATH_PREFIXES
             .iter()
-            .any(|p| loc_lower.starts_with(p))
-        {
+            .any(|p| loc_lower.starts_with(p));
+        let system_dir = SYSTEM_INSTALL_DIRS
+            .iter()
+            .any(|d| loc_lower == *d || loc_lower.starts_with(&format!("{d}\\")));
+        if under_prefix || system_dir {
             return true;
         }
     }

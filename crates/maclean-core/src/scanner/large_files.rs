@@ -632,9 +632,16 @@ mod tests {
 
         // 注入逻辑长度口径保持小文件用例确定性；生产入口用物理占用（C-06）。
         let got = collect_large_files_under_with(root, 5, logical_size);
+        // 相对路径统一成 POSIX 分隔符：Windows 的 `strip_prefix` 结果用 `\`，
+        // 断言里写 "a/big.mkv" 会因为平台分隔符不同而假红。
         let names: Vec<String> = got
             .iter()
-            .map(|(p, _)| p.strip_prefix(root).unwrap().to_string_lossy().to_string())
+            .map(|(p, _)| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
 
         assert!(
