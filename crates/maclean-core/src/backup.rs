@@ -391,11 +391,49 @@ fn sort_restore_order(mut paths: Vec<String>) -> Vec<String> {
     paths
 }
 
+/// CORE-08：还原目标是否落在预期 home 内（解析符号链接之后仍在内）。
+///
+/// 清单是 `~/.maclean/backups/*.json`，无签名、无特权校验，任何以该用户
+/// 身份运行的进程都能改它。`target` 直接来自清单：只做 `dst.exists()`
+/// 的话，被篡改的清单能把废纸篓里的文件 rename 到任意目录；而且
+/// `Path::exists()` 会跟随符号链接，悬空链接会被判「不存在」后直接覆盖。
+///
+/// `homes` 由调用方注入（生产是 `safety::protected_homes()` 的双源集合），
+/// 这样测试能喂一个临时 home，不必依赖真实家目录。
+fn restore_target_within_home(target: &str, homes: &[PathBuf]) -> bool {
+    let dst = Path::new(target);
+    if !dst.is_absolute() {
+        return false;
+    }
+    // 词法形态里出现 . / .. 一律按篡改处理（清单记录的是删除前的绝对路径）
+    if dst.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return false;
+    }
+    let Some(parent) = dst.parent() else {
+        return false;
+    };
+    // canonicalize 解析整条父链上的符号链接；父目录不存在也直接失败
+    let Ok(real_parent) = parent.canonicalize() else {
+        return false;
+    };
+    homes.iter().any(|home| {
+        home.canonicalize()
+            .is_ok_and(|h| real_parent.starts_with(&h))
+    })
+}
+
 /// B-04：按清单记录的 `trash_name` 从废纸篓搬回目标（不猜 basename）。
 ///
 /// 目标父目录不存在、目标已存在、或落点名字含路径分隔符（防被篡改的清单
 /// 穿越）都判失败 —— 覆盖一个当前正在用的文件比不还原更糟。
-fn restore_from_trash(trash_dir: &str, trash_name: &str, target: &str) -> bool {
+/// CORE-08 追加：目标父目录 canonical 后必须仍在预期 home 内，且用
+/// `symlink_metadata` 判存在（悬空符号链接也算「已存在」，不许覆盖）。
+fn restore_from_trash(trash_dir: &str, trash_name: &str, target: &str, homes: &[PathBuf]) -> bool {
     if trash_dir.is_empty() || trash_name.is_empty() {
         return false;
     }
@@ -408,26 +446,20 @@ fn restore_from_trash(trash_dir: &str, trash_name: &str, target: &str) -> bool {
     }
     let src = Path::new(trash_dir).join(trash_name);
     let dst = Path::new(target);
-    if dst.exists() {
+    if dst.symlink_metadata().is_ok() {
         return false;
     }
-    if let Some(parent) = dst.parent() {
-        if !parent.exists() {
-            return false;
-        }
+    if !restore_target_within_home(target, homes) {
+        return false;
     }
     std::fs::rename(src, dst).is_ok()
 }
 
-/// 执行还原（尽力而为）
-///
-/// 只处理废纸篓里的项，且按清单记录的落点取回（B-04）：目标父目录不存在
-/// 就跳过，目标已存在也跳过 —— 覆盖一个当前正在用的文件比不还原更糟。
-pub fn restore(id: &str, trash_dir: &str) -> RestoreReport {
-    let Some(manifest) = load(id) else {
-        return RestoreReport::default();
-    };
-    let plan = restore_plan(&manifest, trash_dir);
+/// 执行还原计划（CORE-08 抽出的可测入口）：与 `restore()` 同一段逻辑，只是
+/// 把「从磁盘读清单」换成入参，让测试能直接喂一份被篡改的清单，而不必碰
+/// 全局的 `set_test_backup_dir` 钩子（并行测试会互相覆盖那个钩子）。
+fn execute_restore(manifest: &BackupManifest, trash_dir: &str, homes: &[PathBuf]) -> RestoreReport {
+    let plan = restore_plan(manifest, trash_dir);
     let mut report = RestoreReport {
         not_restorable: plan.not_restorable,
         ..Default::default()
@@ -445,13 +477,24 @@ pub fn restore(id: &str, trash_dir: &str) -> RestoreReport {
             .find(|e| e.path == target)
             .map(|e| e.trash_name.as_str())
             .unwrap_or("");
-        if restore_from_trash(trash_dir, trash_name, &target) {
+        if restore_from_trash(trash_dir, trash_name, &target, homes) {
             report.restored.push(target);
         } else {
             report.failed.push(target);
         }
     }
     report
+}
+
+/// 执行还原（尽力而为）
+///
+/// 只处理废纸篓里的项，且按清单记录的落点取回（B-04）：目标父目录不存在
+/// 就跳过，目标已存在也跳过 —— 覆盖一个当前正在用的文件比不还原更糟。
+pub fn restore(id: &str, trash_dir: &str) -> RestoreReport {
+    let Some(manifest) = load(id) else {
+        return RestoreReport::default();
+    };
+    execute_restore(&manifest, trash_dir, &crate::safety::protected_homes())
 }
 
 /// B-04：删除前声明废纸篓落点名字。名字已被占用（Finder 会重名改名）或路径
@@ -744,7 +787,7 @@ mod tests {
         assert_eq!(plan.restored.len(), 2);
         for e in &m.entries {
             assert!(
-                restore_from_trash(&trash_s, &e.trash_name, &e.path),
+                restore_from_trash(&trash_s, &e.trash_name, &e.path, &[tmp.clone()]),
                 "{} 按记录搬回失败",
                 e.path
             );
@@ -777,7 +820,7 @@ mod tests {
         let plan = restore_plan(&m, "/tmp/Trash");
         assert!(plan.restored.is_empty(), "无归属记录不得猜名字还原");
         assert_eq!(plan.failed, vec!["/a/b/f.txt".to_string()]);
-        assert!(!restore_from_trash("/tmp/Trash", "", "/a/b/f.txt"));
+        assert!(!restore_from_trash("/tmp/Trash", "", "/a/b/f.txt", &[]));
     }
 
     #[test]
@@ -794,6 +837,121 @@ mod tests {
         assert_eq!(claim_trash_name(&s, "/a/b/f.txt"), "");
         assert_eq!(confirm_trash_name(&s, "f.txt"), "f.txt");
         assert_eq!(confirm_trash_name(&s, "missing.txt"), "");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---------- CORE-08：被篡改的清单不得越界写回 ----------
+    //
+    // 威胁模型已核实：清单就是 `~/.maclean/backups/*.json`，`load()` 只读
+    // JSON、无签名无权限校验，任何以该用户身份运行的进程都能改 `entries[].path`。
+
+    fn c08_layout(tag: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("maclean_c08_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        let outside = tmp.join("outside");
+        let trash = tmp.join("Trash");
+        for d in [&home, &outside, &trash] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(trash.join("payload.bin"), b"payload").unwrap();
+        (tmp, home, outside, trash)
+    }
+
+    fn c08_manifest(target: &Path, trash_name: &str) -> BackupManifest {
+        BackupManifest {
+            id: "c08".to_string(),
+            created_at: 0,
+            platform: "macos".to_string(),
+            entries: vec![BackupEntry {
+                path: target.to_string_lossy().into_owned(),
+                size_bytes: 7,
+                category: "大文件".to_string(),
+                restorable: true,
+                trash_name: trash_name.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn c08_manifest_target_outside_home_is_refused_without_writing() {
+        let (tmp, home, outside, trash) = c08_layout("outside");
+        let trash_s = trash.to_string_lossy().to_string();
+        let target = outside.join("payload.bin");
+
+        let report = execute_restore(
+            &c08_manifest(&target, "payload.bin"),
+            &trash_s,
+            &[home.clone()],
+        );
+        assert!(report.restored.is_empty());
+        assert_eq!(report.failed, vec![target.to_string_lossy().into_owned()]);
+        assert!(!target.exists(), "home 之外不该被写入");
+        assert!(
+            trash.join("payload.bin").exists(),
+            "失败的还原不得消耗废纸篓条目"
+        );
+
+        // 反向验证：正常 home 内目标仍能还原，别把功能改死
+        let inside = home.join("restored.bin");
+        let report = execute_restore(
+            &c08_manifest(&inside, "payload.bin"),
+            &trash_s,
+            &[home.clone()],
+        );
+        assert_eq!(report.restored, vec![inside.to_string_lossy().into_owned()]);
+        assert_eq!(std::fs::read(&inside).unwrap(), b"payload");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c08_symlinked_manifest_targets_are_refused() {
+        use std::os::unix::fs::symlink;
+
+        let (tmp, home, outside, trash) = c08_layout("symlink");
+        let trash_s = trash.to_string_lossy().to_string();
+
+        // 形态一：清单里的父目录是符号链接，指向 home 外。
+        // canonicalize 前它看起来在 home 内，旧实现会直接把文件写出去。
+        let link = home.join("escape");
+        symlink(&outside, &link).unwrap();
+        let via_link = link.join("payload.bin");
+        assert!(
+            !restore_target_within_home(&via_link.to_string_lossy(), &[home.clone()]),
+            "canonical 后越出 home 的父目录必须被拒"
+        );
+        let report = execute_restore(
+            &c08_manifest(&via_link, "payload.bin"),
+            &trash_s,
+            &[home.clone()],
+        );
+        assert!(report.restored.is_empty());
+        assert!(
+            !outside.join("payload.bin").exists(),
+            "不得穿越 symlink 越界写入"
+        );
+
+        // 形态二：target 自身是悬空 symlink。旧实现用 dst.exists() 跟随链接，
+        // 会把它判成「不存在」然后 rename 覆盖。
+        let dangling = home.join("dangling.bin");
+        symlink(outside.join("nowhere.bin"), &dangling).unwrap();
+        assert!(dangling.symlink_metadata().is_ok());
+        assert!(
+            !dangling.exists(),
+            "exists() 会跟随链接 —— 这正是旧实现看到的假象"
+        );
+        let report = execute_restore(
+            &c08_manifest(&dangling, "payload.bin"),
+            &trash_s,
+            &[home.clone()],
+        );
+        assert_eq!(report.failed, vec![dangling.to_string_lossy().into_owned()]);
+        assert!(
+            !outside.join("nowhere.bin").exists(),
+            "悬空 symlink 不得被覆盖成越界写入"
+        );
+        assert!(trash.join("payload.bin").exists(), "废纸篓条目不该被消耗");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

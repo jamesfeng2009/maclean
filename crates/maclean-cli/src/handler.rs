@@ -294,6 +294,7 @@ fn tab_label_for(key: &str) -> &str {
 fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
     // A-07b：扫描前声明准入根。删除阶段的第 8 层只放行这些根下的路径；
     // 不注册会让所有清理项在删除时被拦，等于关停功能。
+    // CORE-10：用户数据目录不在常驻表里，由 large-files 扫描器按需注册。
     maclean_core::provenance::register_standard_scan_roots();
     // watchdog：坏目录（APFS 异常等）会让 readdir 永久阻塞；超时返回空并提示，
     // 进程不再无限挂起（超时 tab 计入 EXIT_WARNINGS=5，E-01 契约口径）。
@@ -3340,16 +3341,31 @@ mod tests {
     //  所以这里用源码级断言钉住接线，防止有人把校验删回去。
     // -----------------------------------------------------------------
 
+    /// CORE-05：源码级断言只认「活的」代码行。把调用注释掉但保留字符串、
+    /// 或塞进块注释里，都不算接线（参考 platform/reg_safety.rs 的 H-02）。
+    fn has_live_call(body: &str, needle: &str) -> bool {
+        body.lines().any(|line| {
+            let t = line.trim();
+            !t.starts_with("//")
+                && !t.starts_with("/*")
+                && !t.starts_with('*')
+                && t.contains(needle)
+        })
+    }
+
     #[test]
     fn clean_command_runs_the_same_pre_delete_gate_as_the_gui() {
+        // CORE-05：先按 `\nmod tests` 切出生产段，避免测试模块自己的字面量
+        // 命中；再断言真实调用表达式，而不是裸字符串包含。
         let src = include_str!("handler.rs");
-        let body = src[src.find("fn cmd_clean").expect("cmd_clean 不见了")..]
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        let body = prod[prod.find("fn cmd_clean").expect("cmd_clean 不见了")..]
             .split("\nfn ")
             .next()
             .unwrap();
 
         assert!(
-            body.contains("sanitize_before_delete("),
+            has_live_call(body, "= maclean_core::ops::sanitize_before_delete("),
             "CLI 删除前没有复做安全校验，等于绕过保护直接删"
         );
         // 删除循环必须遍历校验放行后的列表，而不是原始扫描结果。
@@ -3371,15 +3387,40 @@ mod tests {
 
     #[test]
     fn clean_command_reports_intercepted_items_instead_of_deleting_them() {
-        // 被拦截的项必须显式告知用户，不能静默跳过 —— 否则用户以为删干净了
+        // 被拦截的项必须显式告知用户，不能静默跳过 —— 否则用户以为删干净了。
+        // CORE-05：同样按 `\nmod tests` 切生产段 + 只认活代码行；并且必须
+        // 钉住「拦截结果真的来自安全闸门」，否则把调用注释掉、只留一句打印
+        // 文案也能骗过断言（旧实现的假绿）。
         let src = include_str!("handler.rs");
-        let body = src[src.find("fn cmd_clean").expect("cmd_clean 不见了")..]
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        let body = prod[prod.find("fn cmd_clean").expect("cmd_clean 不见了")..]
             .split("\nfn ")
             .next()
             .unwrap();
         assert!(
-            body.contains("已拦截"),
+            has_live_call(body, "= maclean_core::ops::sanitize_before_delete("),
+            "没有真实的拦截结果来源，打印「已拦截」只是摆设"
+        );
+        assert!(
+            has_live_call(body, "for (path, _category, reason) in &rejected"),
+            "拦截结果没有被逐条打印"
+        );
+        assert!(
+            has_live_call(body, "已拦截"),
             "被安全校验拦下的项没有打印出来，用户无从得知"
         );
+    }
+
+    #[test]
+    fn clean_pre_delete_gate_really_rejects_unsafe_paths() {
+        // CORE-05 的第二个影响：源码级断言只能证明「调用还在」，证明不了
+        // 「闸门真的会拦」。把 sanitize_before_delete 改成恒放行
+        //（return (items, vec![])）时，这条行为断言必须变红。
+        let (allowed, rejected) = maclean_core::ops::sanitize_before_delete(
+            vec![("/".to_string(), "系统缓存".to_string())],
+            false,
+        );
+        assert!(allowed.is_empty(), "根目录必须被删除前闸门拦下");
+        assert_eq!(rejected.len(), 1, "被拦项必须显式回报，不能静默丢弃");
     }
 }

@@ -101,41 +101,57 @@ pub fn is_vetted(path: &Path) -> bool {
     })
 }
 
+/// 标准可清理根（A-07b / CORE-10）：只登记**明确属于可清理范围**的根，
+/// 即已知工具缓存 / 应用数据目录；绝不把整个 `$HOME` 注册进来 —— 那样等于
+/// 把准入制退化成原来的纯黑名单，§6.1 的 fail-closed 收敛就白做了。
+///
+/// Downloads / Desktop / Documents / 项目目录属于**用户数据**而非可再生缓存，
+/// 已从本表移出，改由「大文件」类目按需登记，见 [`LARGE_FILE_HOME_ROOTS`]。
+/// 抽成常量是为了能直接断言口径，且不受进程内全局注册表的并行测试干扰。
+const STANDARD_HOME_ROOTS: &[&str] = &[
+    "Library/Caches",
+    "Library/Application Support",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Logs",
+    "Library/Preferences",
+    "Library/Saved Application State",
+    "Library/HTTPStorages",
+    "Library/Developer",
+    ".cache",
+    ".npm",
+    ".yarn",
+    ".cargo",
+    ".gradle",
+    ".m2",
+    ".pub-cache",
+    ".nuget",
+    "go",
+];
+
+/// CORE-10：「大文件 / 大目录」类目专用的准入根。
+///
+/// 这些是用户数据目录，不是可再生缓存根。它们只在
+/// `LargeFileScanner::scan()` 运行时登记（谁枚举谁声明），且删除仍要求
+/// 用户在大文件视图里**主动勾选** —— 第 8 层只做来源准入，不代替用户选择。
+/// 常驻登记会让其它类目也顺带获得这些根的删除许可，把准入面放大。
+const LARGE_FILE_HOME_ROOTS: &[&str] = &[
+    "Downloads",
+    "Desktop",
+    "Documents",
+    "workspace",
+    "projects",
+    "dev",
+    "Development",
+];
+
 /// 注册 CLI 扫描入口的一组**标准可清理根**（A-07b）。
 ///
-/// 只登记「明确属于可清理范围」的根，绝不把整个 `$HOME` 注册进来 ——
-/// 那样等于把准入制退化成原来的纯黑名单。各扫描器若枚举了表外的根，
-/// 应在自己的 `scan()` 里追加 [`register_root`]；漏注册只会少删，不会误删。
+/// 各扫描器若枚举了表外的根，应在自己的 `scan()` 里追加 [`register_root`]
+/// 或 [`register_large_file_roots`]；漏注册只会少删，不会误删。
 pub fn register_standard_scan_roots() {
     if let Some(home) = dirs::home_dir() {
-        const HOME_ROOTS: &[&str] = &[
-            "Library/Caches",
-            "Library/Application Support",
-            "Library/Containers",
-            "Library/Group Containers",
-            "Library/Logs",
-            "Library/Preferences",
-            "Library/Saved Application State",
-            "Library/HTTPStorages",
-            "Library/Developer",
-            ".cache",
-            ".npm",
-            ".yarn",
-            ".cargo",
-            ".gradle",
-            ".m2",
-            ".pub-cache",
-            ".nuget",
-            "go",
-            "Downloads",
-            "Desktop",
-            "Documents",
-            "workspace",
-            "projects",
-            "dev",
-            "Development",
-        ];
-        for rel in HOME_ROOTS {
+        for rel in STANDARD_HOME_ROOTS {
             register_root(&home.join(rel));
         }
     }
@@ -150,6 +166,17 @@ pub fn register_standard_scan_roots() {
         register_root(Path::new(p));
     }
     register_root(&std::env::temp_dir());
+}
+
+/// CORE-10：由大文件扫描器**按需**声明用户数据根。
+///
+/// 不在 [`register_standard_scan_roots`] 里常驻登记：其它类目的扫描器没有
+/// 枚举这些根，也不该获得它们的删除许可。`home` 由调用方传入，测试可用
+/// 临时 HOME 验证而不依赖进程环境。
+pub fn register_large_file_roots(home: &Path) {
+    for rel in LARGE_FILE_HOME_ROOTS {
+        register_root(&home.join(rel));
+    }
 }
 
 /// 当前已注册的准入根快照（诊断/测试用）。
@@ -226,5 +253,45 @@ mod tests {
     fn standard_roots_registration_is_not_empty() {
         register_standard_scan_roots();
         assert!(!registered_roots().is_empty());
+    }
+
+    // ---------- CORE-10：准入根口径与文档一致 ----------
+
+    #[test]
+    fn c10_standard_roots_exclude_user_data_directories() {
+        // 表本身的口径：标准根只含可再生缓存 / 应用数据根，两张表不重叠。
+        for r in STANDARD_HOME_ROOTS {
+            assert!(
+                !LARGE_FILE_HOME_ROOTS.contains(r),
+                "用户数据根混进了标准准入根表: {r}"
+            );
+        }
+        // registered_roots() 快照与文档口径一致：表内每一项都确实登记了。
+        // 只断言「在快照里」，不受其它用例并行追加注册的干扰。
+        register_standard_scan_roots();
+        let snap = registered_roots();
+        let home = dirs::home_dir().unwrap_or_default();
+        for rel in STANDARD_HOME_ROOTS {
+            assert!(
+                snap.iter().any(|p| p == &home.join(rel)),
+                "标准根表里的 {rel} 没出现在 registered_roots() 快照中"
+            );
+        }
+    }
+
+    #[test]
+    fn c10_large_file_roots_are_registered_on_demand() {
+        // 用不存在的唯一假 home：真实 /tmp 已被标准表注册，is_vetted 会
+        // 放行 /tmp 下的一切，用它会把断言掩盖掉。
+        let home = Path::new("/__maclean_c10_probe__");
+        let target = home.join("Downloads/big.dmg");
+        assert!(!is_vetted(&target), "标准根不该覆盖用户数据目录");
+        register_large_file_roots(home);
+        assert!(is_vetted(&target), "大文件类目按需注册后应放行");
+        assert!(is_vetted(&home.join("Documents/report.pdf")));
+        assert!(
+            !is_vetted(&home.join("Movies/never.declared")),
+            "未声明的目录仍应 fail-closed"
+        );
     }
 }

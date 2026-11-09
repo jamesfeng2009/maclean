@@ -133,6 +133,48 @@ impl DeleteFailure {
     }
 }
 
+/// CORE-02：单路径删除的唯一结果。把「执行」与「归因」合并成一次调用，
+/// 避免失败分支为了拿失败原因再跑一遍有副作用的删除流程。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SingleDeleteOutcome {
+    /// 成功删除 / 成功移入废纸篓
+    Deleted,
+    /// 废纸篓失败：保留文件，且不进 sudo 重试列表（sudo rm -rf 会让它不可恢复）
+    TrashFailed,
+    /// 普通删除失败，携带归因
+    Failed(DeleteFailure),
+}
+
+/// CORE-02：执行**恰好一次**删除并返回结果。
+///
+/// 生产传 `move_to_trash` 与 `best_effort_delete_with_reason`；测试传桩验证
+/// 「第一次 Err、第二次 Ok」时仍判失败 —— 旧实现会在失败分支再调一次，
+/// 而 staging rename 已让原路径消失，第二次按「目标已消失」返回 Ok，
+/// 于是归因丢失、项仍进 sudo 列表、日志与实际状态相反。
+pub fn perform_single_delete<F, G>(use_trash: bool, trash: F, permanent: G) -> SingleDeleteOutcome
+where
+    F: FnOnce() -> bool,
+    G: FnOnce() -> Result<(), DeleteFailure>,
+{
+    if use_trash {
+        if trash() {
+            SingleDeleteOutcome::Deleted
+        } else {
+            SingleDeleteOutcome::TrashFailed
+        }
+    } else {
+        match permanent() {
+            Ok(()) => SingleDeleteOutcome::Deleted,
+            Err(f) => SingleDeleteOutcome::Failed(f),
+        }
+    }
+}
+
+/// CORE-02：只有「普通删除失败」才允许进 sudo 重试列表。
+pub fn should_sudo_retry(outcome: SingleDeleteOutcome) -> bool {
+    matches!(outcome, SingleDeleteOutcome::Failed(_))
+}
+
 /// 把 path 原子改名到同目录下不可预测的 staging 名（TOCTOU 防护辅助）。
 ///
 /// - macOS：`renameatx_np(RENAME_EXCL)` —— "目标不存在才 rename"，原子且绝不覆盖外部文件；
@@ -607,6 +649,105 @@ pub fn resolve_simulator_uuids(path: &str) -> Result<Vec<String>, String> {
     Ok(uuids)
 }
 
+/// CORE-01：模拟器卷删除前置安全闸门的拒绝原因。
+/// 用枚举分类而不是比对 i18n 文本 —— 文案会随语言变化，不能当判据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimSafetyRefusal {
+    /// Xcode/Simulator/CoreSimulatorService 正在运行
+    Running,
+    /// mount 命令失败，无法确认挂载状态
+    MountUnknown,
+    /// 该卷仍被挂载使用
+    MountedInUse,
+    /// 没有可删除的 runtime（A-13：绝不 fallback 到 sudo rm -rf 整卷）
+    NoDeletableRuntime,
+}
+
+/// CORE-01：三个平台探测结果 → 闸门结论。
+/// 探测值用入参传入，纯逻辑在两个平台都能真跑（项目约定：跨平台纯逻辑不加 cfg）。
+pub fn sim_volume_gate_decision(
+    simulator_running: bool,
+    mount_points_available: bool,
+    path_mounted: bool,
+) -> Result<(), SimSafetyRefusal> {
+    if simulator_running {
+        return Err(SimSafetyRefusal::Running);
+    }
+    if !mount_points_available {
+        return Err(SimSafetyRefusal::MountUnknown);
+    }
+    if path_mounted {
+        return Err(SimSafetyRefusal::MountedInUse);
+    }
+    Ok(())
+}
+
+/// CORE-01：sudo 预处理阶段对模拟器卷的决策。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimSudoPlan {
+    /// 安全闸门拒绝：不生成 xcrun 脚本，也不 sudo rm
+    SkipSafety(SimSafetyRefusal),
+    /// 解析失败 / 无可删 runtime：沿用 A-13 的 fail-closed 跳过
+    SkipUnresolved,
+    /// 闸门通过且解析到可删 uuid：允许生成 xcrun 精确删脚本
+    Xcrun,
+}
+
+/// CORE-01：sudo 预处理唯一决策入口。
+/// `Xcrun` 是**唯一**允许产出提权删除脚本的分支；安全拒绝绝不能因为
+/// 走了提权路径就被绕过（旧实现两处 sudo 预处理只调 resolve_simulator_uuids，
+/// 完全没跑进程/挂载检测）。
+pub fn sim_sudo_plan(
+    gate: Result<(), SimSafetyRefusal>,
+    resolved: &Result<Vec<String>, String>,
+    filtered_uuids: &[String],
+) -> SimSudoPlan {
+    if let Err(refusal) = gate {
+        return SimSudoPlan::SkipSafety(refusal);
+    }
+    if sim_volume_requires_skip_rm(resolved, filtered_uuids) {
+        return SimSudoPlan::SkipUnresolved;
+    }
+    SimSudoPlan::Xcrun
+}
+
+/// CORE-01：删除模拟器卷的失败分类。安全拒绝不得进入 sudo 重试列表，
+/// 只有 xcrun 执行/解析这类操作性失败才值得提权重试。
+#[derive(Debug)]
+pub enum SimVolumeError {
+    Safety(SimSafetyRefusal),
+    Operational(String),
+}
+
+/// CORE-01：闸门拒绝原因 → 与旧实现一致的 i18n 文案（保持日志契约不变）。
+pub fn sim_refusal_message(refusal: SimSafetyRefusal, lang_en: bool) -> String {
+    match refusal {
+        SimSafetyRefusal::Running => crate::i18n::t_lang(lang_en, "log_skip_running")
+            .replace("[{}]", "")
+            .trim()
+            .to_string(),
+        SimSafetyRefusal::MountUnknown => {
+            crate::i18n::t_lang(lang_en, "log_cannot_get_mount").to_string()
+        }
+        SimSafetyRefusal::MountedInUse => {
+            crate::i18n::t_lang(lang_en, "log_mount_in_use").to_string()
+        }
+        SimSafetyRefusal::NoDeletableRuntime => {
+            crate::i18n::t_lang(lang_en, "log_no_sim_runtimes").to_string()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sim_volume_gate_now(path: &str) -> Result<(), SimSafetyRefusal> {
+    let mounts = get_mount_points();
+    sim_volume_gate_decision(
+        safety::is_simulator_running(),
+        !mounts.is_empty(),
+        is_path_mounted(path, &mounts),
+    )
+}
+
 /// 安全删除模拟器运行时镜像（/Library/Developer/CoreSimulator/Volumes）
 ///
 /// 安全检查层：
@@ -617,30 +758,18 @@ pub fn resolve_simulator_uuids(path: &str) -> Result<Vec<String>, String> {
 ///    策略 **skip_rm 并上报**，绝不 fallback 到 sudo rm -rf 整卷（整卷删除会绕过
 ///    下方的进程/挂载检测，且不可恢复）。
 #[cfg(target_os = "macos")]
-pub fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<String, String> {
-    // 1. 进程检测：模拟器运行中时拒绝删除
-    if safety::is_simulator_running() {
-        return Err(crate::i18n::t_lang(lang_en, "log_skip_running")
-            .replace("[{}]", "")
-            .trim()
-            .to_string());
-    }
-
-    // 2. 挂载点检测：如果路径被挂载使用，跳过
-    let mount_points = get_mount_points();
-    if mount_points.is_empty() {
-        // mount 命令失败，无法确认安全，拒绝删除
-        return Err(crate::i18n::t_lang(lang_en, "log_cannot_get_mount").to_string());
-    }
-    if is_path_mounted(path, &mount_points) {
-        return Err(crate::i18n::t_lang(lang_en, "log_mount_in_use").to_string());
+pub fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<String, SimVolumeError> {
+    // CORE-01：1~2 层进程/挂载检测与 sudo 预处理共用同一个闸门，
+    // 并把「安全拒绝」与「xcrun 操作失败」分开，前者绝不进 sudo 重试列表。
+    if let Err(refusal) = sim_volume_gate_now(path) {
+        return Err(SimVolumeError::Safety(refusal));
     }
 
     // 3. 只解析归属于该路径、且系统允许删除的 runtime
-    let uuids: Vec<String> = resolve_simulator_uuids(path)?;
+    let uuids: Vec<String> = resolve_simulator_uuids(path).map_err(SimVolumeError::Operational)?;
 
     if uuids.is_empty() {
-        return Err(crate::i18n::t_lang(lang_en, "log_no_sim_runtimes").to_string());
+        return Err(SimVolumeError::Safety(SimSafetyRefusal::NoDeletableRuntime));
     }
 
     // 4. 逐个删除（只删上面筛出来的这些，不再"全删"）
@@ -688,11 +817,11 @@ pub fn delete_simulator_volumes(path: &str, lang_en: bool) -> Result<String, Str
         );
         Ok(msg)
     } else {
-        Err(format!(
+        Err(SimVolumeError::Operational(format!(
             "{}: {}",
             crate::i18n::t_lang(lang_en, "log_unknown"),
             fail_msgs.join("; ")
-        ))
+        )))
     }
 }
 
@@ -1150,11 +1279,14 @@ pub fn start_delete(
                                 }
                                 // 止血：批量分支尊重 use_trash —— 重复文件等批量项
                                 // 同样走废纸篓，不再一律 best_effort 永久删除。
-                                let deleted_ok = if use_trash {
-                                    move_to_trash(bp)
-                                } else {
-                                    best_effort_delete_with_reason(p).is_ok()
-                                };
+                                // CORE-02：与单路径分支同源，删除只执行一次，
+                                // 失败原因从缓存的 outcome 取，不再二次调用。
+                                let outcome = perform_single_delete(
+                                    use_trash,
+                                    || move_to_trash(bp),
+                                    || best_effort_delete_with_reason(p),
+                                );
+                                let deleted_ok = matches!(outcome, SingleDeleteOutcome::Deleted);
                                 if deleted_ok {
                                     success_count += 1;
                                     // M-2：批量项真删掉也记备份清单
@@ -1195,8 +1327,11 @@ pub fn start_delete(
                                             .trim()
                                             .to_string()
                                     } else {
-                                        let failure =
-                                            best_effort_delete_with_reason(p).err();
+                                        // CORE-02：归因来自唯一一次删除的结果。
+                                        let failure = match outcome {
+                                            SingleDeleteOutcome::Failed(f) => Some(f),
+                                            _ => None,
+                                        };
                                         #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
                                         let mut reason: String = failure
                                             .map(|f| crate::i18n::t_lang(lang_en, f.label_key()).to_string())
@@ -1305,8 +1440,20 @@ pub fn start_delete(
                                             format!("✓ {}", msg), path.clone(), category.clone(), true));
                                         safety::log_deletion(&path, &category, true, None);
                                     }
-                                    Err(e) => {
-                                        // xcrun 失败，加入 sudo 重试列表
+                                    // CORE-01：安全拒绝（运行中/挂载中/无可删 runtime）
+                                    // 不得进入 sudo 重试列表 —— 提权后也不能精确删。
+                                    Err(SimVolumeError::Safety(refusal)) => {
+                                        let reason = sim_refusal_message(refusal, lang_en);
+                                        let _ = tx.send(DeleteMessage::Log(
+                                            format!("⛔ {} — {}", path, reason),
+                                            path.clone(), category.clone(), false));
+                                        safety::log_deletion(&path, &category, false, Some(&reason));
+                                        crate::logger::warn(&format!(
+                                            "[删除] 模拟器镜像安全拒绝: {} — {}", path, reason
+                                        ));
+                                    }
+                                    // 只有 xcrun 操作性失败才值得提权重试
+                                    Err(SimVolumeError::Operational(e)) => {
                                         failed_items.lock().unwrap_or_else(|e| e.into_inner()).push((path.clone(), category.clone()));
                                         let _ = tx.send(DeleteMessage::Info(
                                             format!("🔄 {}", crate::i18n::tf_lang(lang_en, "log_xcrun_failed", &[&e])),
@@ -1408,11 +1555,15 @@ pub fn start_delete(
                         // 尽力删除：废纸篓模式或永久删除
                         // P0-3：use_trash 项在废纸篓失败时**不得**降级为永久删除，
                         // 也不得进入 sudo 重试列表（sudo rm -rf 会让它彻底不可恢复）
-                        let deleted_ok = if use_trash {
-                            move_to_trash(&path)
-                        } else {
-                            best_effort_delete_with_reason(p).is_ok()
-                        };
+                        // CORE-02：删除只执行一次，结果缓存给归因分支复用。
+                        // 二次调用有真实副作用（staging rename / rm -rf / chflags），
+                        // 且第一次已 rename 时第二次会按「目标已消失」误判 Ok。
+                        let outcome = perform_single_delete(
+                            use_trash,
+                            || move_to_trash(&path),
+                            || best_effort_delete_with_reason(p),
+                        );
+                        let deleted_ok = matches!(outcome, SingleDeleteOutcome::Deleted);
 
                         if deleted_ok {
                             let action = crate::i18n::t_lang(lang_en, if use_trash { "log_action_trashed" } else { "log_action_deleted" });
@@ -1440,14 +1591,17 @@ pub fn start_delete(
                                         .unwrap_or_default(),
                                 });
                             }
-                        } else if use_trash {
+                        } else if !should_sudo_retry(outcome) {
                             // 废纸篓失败：保留文件 + 明确告知，不进 sudo 重试列表
                             let _ = tx.send(DeleteMessage::Log(
                                 format!("✗ {}", crate::i18n::tf_lang(lang_en, "log_trash_failed", &[&path])), path.clone(), category.clone(), false));
                             safety::log_deletion(&path, &category, false, Some(crate::i18n::t_lang(lang_en, "log_trash_failed").replace("{}", "").trim()));
                         } else {
-                            // 普通删除失败，加入待 sudo 列表；先归因失败原因展示给用户
-                            let failure = best_effort_delete_with_reason(p).err();
+                            // 普通删除失败，加入待 sudo 列表；归因来自唯一一次删除的结果
+                            let failure = match outcome {
+                                SingleDeleteOutcome::Failed(f) => Some(f),
+                                _ => None,
+                            };
                             #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
                             let mut reason: String = failure
                                 .map(|f| crate::i18n::t_lang(lang_en, f.label_key()).to_string())
@@ -1825,8 +1979,11 @@ pub fn start_sudo_delete(
         let mut remaining_items: Vec<(String, String)> = Vec::new();
         for (path, category) in &failed_items {
             if category == "模拟器镜像" || category == "模拟器Cryptex" {
-                // A-13（X+）：先解析归属 runtime 列表。任何解析失败/无目标都 fail-closed
-                // 锁定，绝不 sudo rm -rf 整卷（绕过 deletable/挂载/进程三道闸门 = 不可恢复误删）。
+                // CORE-01：提权路径必须与普通路径跑同一套安全闸门。旧实现
+                // 只调 resolve_simulator_uuids，完全绕过进程/挂载检测；现在由
+                // sim_sudo_plan 统一决策，Xcrun 是唯一能往下生成脚本的分支。
+                let gate = sim_volume_gate_now(path);
+                // A-13（X+）：解析失败/无目标都 fail-closed 锁定，绝不 sudo rm -rf 整卷。
                 let resolved = resolve_simulator_uuids(path);
                 let sim_uuids: Vec<String> = resolved
                     .clone()
@@ -1834,27 +1991,45 @@ pub fn start_sudo_delete(
                     .into_iter()
                     .filter(|u| u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
                     .collect();
-                if sim_volume_requires_skip_rm(&resolved, &sim_uuids) {
-                    // A-13：解析失败或无 deletable runtime —— 仅上报，绝不 sudo rm -rf 整卷。
-                    let reason = match &resolved {
-                        Err(e) => format!("模拟器镜像解析失败（{e}），已跳过 sudo rm 以防误删"),
-                        Ok(_) => "该模拟器卷下未解析到可删运行时，已跳过 sudo rm".to_string(),
-                    };
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!(
-                            "⚠️ {} — {}",
-                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
-                            reason
-                        ),
-                        path.clone(),
-                        category.clone(),
-                        false,
-                    ));
-                    crate::logger::warn(&format!(
-                        "[删除] 模拟器镜像跳过 sudo rm: {} — {}",
-                        path, reason
-                    ));
-                    continue;
+                match sim_sudo_plan(gate, &resolved, &sim_uuids) {
+                    SimSudoPlan::SkipSafety(refusal) => {
+                        let reason = sim_refusal_message(refusal, lang_en);
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("⛔ {} — {}", path, reason),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
+                        safety::log_deletion(path, category, false, Some(&reason));
+                        crate::logger::warn(&format!(
+                            "[删除] 模拟器镜像安全拒绝，跳过 sudo xcrun: {} — {}",
+                            path, reason
+                        ));
+                        continue;
+                    }
+                    SimSudoPlan::SkipUnresolved => {
+                        // A-13：解析失败或无 deletable runtime —— 仅上报，绝不 sudo rm -rf 整卷。
+                        let reason = match &resolved {
+                            Err(e) => format!("模拟器镜像解析失败（{e}），已跳过 sudo rm 以防误删"),
+                            Ok(_) => "该模拟器卷下未解析到可删运行时，已跳过 sudo rm".to_string(),
+                        };
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!(
+                                "⚠️ {} — {}",
+                                crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                                reason
+                            ),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
+                        crate::logger::warn(&format!(
+                            "[删除] 模拟器镜像跳过 sudo rm: {} — {}",
+                            path, reason
+                        ));
+                        continue;
+                    }
+                    SimSudoPlan::Xcrun => {}
                 }
                 let uuid_list = sim_uuids
                     .iter()
@@ -2350,8 +2525,11 @@ pub fn start_sudo_delete_touchid(
                     crate::i18n::tf_lang(lang_en, "log_touchid_prepare_xcrun", &[category])
                 )));
 
-                // A-13（X+）：先解析归属 runtime 列表。任何解析失败/无目标都 fail-closed
-                // 锁定，绝不 sudo rm -rf 整卷（绕过 deletable/挂载/进程三道闸门 = 不可恢复误删）。
+                // CORE-01：提权路径必须与普通路径跑同一套安全闸门。旧实现
+                // 只调 resolve_simulator_uuids，完全绕过进程/挂载检测；现在由
+                // sim_sudo_plan 统一决策，Xcrun 是唯一能往下生成脚本的分支。
+                let gate = sim_volume_gate_now(path);
+                // A-13（X+）：解析失败/无目标都 fail-closed 锁定，绝不 sudo rm -rf 整卷。
                 let resolved = resolve_simulator_uuids(path);
                 let sim_uuids: Vec<String> = resolved
                     .clone()
@@ -2359,27 +2537,45 @@ pub fn start_sudo_delete_touchid(
                     .into_iter()
                     .filter(|u| u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
                     .collect();
-                if sim_volume_requires_skip_rm(&resolved, &sim_uuids) {
-                    // A-13：解析失败或无 deletable runtime —— 仅上报，绝不 sudo rm -rf 整卷。
-                    let reason = match &resolved {
-                        Err(e) => format!("模拟器镜像解析失败（{e}），已跳过 sudo rm 以防误删"),
-                        Ok(_) => "该模拟器卷下未解析到可删运行时，已跳过 sudo rm".to_string(),
-                    };
-                    let _ = tx.send(DeleteMessage::Log(
-                        format!(
-                            "⚠️ {} — {}",
-                            crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
-                            reason
-                        ),
-                        path.clone(),
-                        category.clone(),
-                        false,
-                    ));
-                    crate::logger::warn(&format!(
-                        "[删除] 模拟器镜像跳过 sudo rm: {} — {}",
-                        path, reason
-                    ));
-                    continue;
+                match sim_sudo_plan(gate, &resolved, &sim_uuids) {
+                    SimSudoPlan::SkipSafety(refusal) => {
+                        let reason = sim_refusal_message(refusal, lang_en);
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!("⛔ {} — {}", path, reason),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
+                        safety::log_deletion(path, category, false, Some(&reason));
+                        crate::logger::warn(&format!(
+                            "[删除] 模拟器镜像安全拒绝，跳过 sudo xcrun: {} — {}",
+                            path, reason
+                        ));
+                        continue;
+                    }
+                    SimSudoPlan::SkipUnresolved => {
+                        // A-13：解析失败或无 deletable runtime —— 仅上报，绝不 sudo rm -rf 整卷。
+                        let reason = match &resolved {
+                            Err(e) => format!("模拟器镜像解析失败（{e}），已跳过 sudo rm 以防误删"),
+                            Ok(_) => "该模拟器卷下未解析到可删运行时，已跳过 sudo rm".to_string(),
+                        };
+                        let _ = tx.send(DeleteMessage::Log(
+                            format!(
+                                "⚠️ {} — {}",
+                                crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                                reason
+                            ),
+                            path.clone(),
+                            category.clone(),
+                            false,
+                        ));
+                        crate::logger::warn(&format!(
+                            "[删除] 模拟器镜像跳过 sudo rm: {} — {}",
+                            path, reason
+                        ));
+                        continue;
+                    }
+                    SimSudoPlan::Xcrun => {}
                 }
                 let uuid_list = sim_uuids
                     .iter()
@@ -2438,28 +2634,28 @@ exit 0
 
                 // P0-2：随机名 + O_EXCL + 0600，避免日志被符号链接劫持
                 let (xcrun_log, xcrun_log_file) =
-                        match create_private_temp_file("maclean_xcrun_tid", "log") {
-                            Some(v) => v,
-                            None => {
-                                // A-13（X+）：无法安全创建 xcrun 日志文件，fail-closed 跳过，
-                                // 不 sudo rm -rf 整卷。
-                                crate::logger::warn(&format!(
-                                    "[删除] 模拟器镜像无法创建日志文件，跳过 sudo rm: {}",
-                                    path
-                                ));
-                                let _ = tx.send(DeleteMessage::Log(
-                                    format!(
-                                        "⚠️ {} — {}",
-                                        crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
-                                        "无法创建 xcrun 日志文件，已跳过 sudo rm"
-                                    ),
-                                    path.clone(),
-                                    category.clone(),
-                                    false,
-                                ));
-                                continue;
-                            }
-                        };
+                    match create_private_temp_file("maclean_xcrun_tid", "log") {
+                        Some(v) => v,
+                        None => {
+                            // A-13（X+）：无法安全创建 xcrun 日志文件，fail-closed 跳过，
+                            // 不 sudo rm -rf 整卷。
+                            crate::logger::warn(&format!(
+                                "[删除] 模拟器镜像无法创建日志文件，跳过 sudo rm: {}",
+                                path
+                            ));
+                            let _ = tx.send(DeleteMessage::Log(
+                                format!(
+                                    "⚠️ {} — {}",
+                                    crate::i18n::tf_lang(lang_en, "log_still_exists", &[path]),
+                                    "无法创建 xcrun 日志文件，已跳过 sudo rm"
+                                ),
+                                path.clone(),
+                                category.clone(),
+                                false,
+                            ));
+                            continue;
+                        }
+                    };
                 let xcrun_log_file = Some(xcrun_log_file);
 
                 // 不用 -S，sudo 会自动弹出 Touch ID；stdout 重定向到文件避免 pipe 死锁
@@ -3929,6 +4125,117 @@ pub fn cli_sudo_delete_touchid(items: Vec<(String, String)>) -> CliSudoResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- CORE-01：sudo 路径不得绕过模拟器安全闸门 ----------
+
+    #[test]
+    fn core01_running_simulator_never_produces_xcrun_script() {
+        // 复刻「delete_simulator_volumes 返回 log_skip_running」：即使 xcrun
+        // 解析成功且拿到合法 uuid，安全拒绝也必须拦在生成脚本之前。
+        let gate = sim_volume_gate_decision(true, true, false);
+        assert_eq!(gate, Err(SimSafetyRefusal::Running));
+        let resolved: Result<Vec<String>, String> = Ok(vec!["A-B-C".to_string()]);
+        let plan = sim_sudo_plan(gate, &resolved, &["A-B-C".to_string()]);
+        assert_eq!(plan, SimSudoPlan::SkipSafety(SimSafetyRefusal::Running));
+    }
+
+    #[test]
+    fn core01_all_safety_refusals_block_even_with_valid_uuids() {
+        let uuids = vec!["A-B-C".to_string()];
+        let resolved: Result<Vec<String>, String> = Ok(uuids.clone());
+        for (gate, refusal) in [
+            (
+                sim_volume_gate_decision(true, true, false),
+                SimSafetyRefusal::Running,
+            ),
+            (
+                sim_volume_gate_decision(false, false, false),
+                SimSafetyRefusal::MountUnknown,
+            ),
+            (
+                sim_volume_gate_decision(false, true, true),
+                SimSafetyRefusal::MountedInUse,
+            ),
+        ] {
+            assert_eq!(
+                sim_sudo_plan(gate, &resolved, &uuids),
+                SimSudoPlan::SkipSafety(refusal)
+            );
+        }
+        // 只有闸门通过 + 解析到可删 uuid 才允许 Xcrun
+        assert_eq!(sim_sudo_plan(Ok(()), &resolved, &uuids), SimSudoPlan::Xcrun);
+        assert_eq!(
+            sim_sudo_plan(Ok(()), &resolved, &[]),
+            SimSudoPlan::SkipUnresolved
+        );
+    }
+
+    #[test]
+    fn core01_both_sudo_paths_use_the_shared_plan() {
+        // 源码级接线断言：两处 sudo 预处理（密码 / Touch ID）都必须走 gate。
+        // 按 "\nmod tests" 切出生产段，避免把本测试里的字面量数进去。
+        let src = include_str!("mod.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert_eq!(
+            prod.matches("sim_sudo_plan(gate, &resolved, &sim_uuids)")
+                .count(),
+            2,
+            "两处 sudo 预处理必须都调用共享决策"
+        );
+        assert_eq!(
+            prod.matches("sim_volume_gate_now(path)").count(),
+            3, // 定义 1 次 + 两处 sudo 调用 + 普通路径经 delete_simulator_volumes
+            "安全闸门必须在提权路径接线"
+        );
+    }
+
+    // ---------- CORE-02：单路径删除只执行一次 ----------
+
+    #[test]
+    fn core02_failed_delete_invokes_deletion_exactly_once() {
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        // 桩：第一次 Err，若二次调用则 Ok —— 旧实现会把这个 Ok 当成
+        // 「已删除成功」，归因丢失、项仍进 sudo 列表、日志与实际状态相反。
+        let outcome = perform_single_delete(
+            false,
+            || panic!("use_trash=false 不应调废纸篓"),
+            || {
+                let n = calls.get() + 1;
+                calls.set(n);
+                if n == 1 {
+                    Err(DeleteFailure::PermissionDenied)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(calls.get(), 1, "删除函数被调用了不止一次");
+        assert_eq!(
+            outcome,
+            SingleDeleteOutcome::Failed(DeleteFailure::PermissionDenied)
+        );
+        assert!(should_sudo_retry(outcome), "失败归因必须保留");
+    }
+
+    #[test]
+    fn core02_trash_failure_never_sudo_retries() {
+        let outcome =
+            perform_single_delete(true, || false, || panic!("use_trash=true 不应调永久删除"));
+        assert_eq!(outcome, SingleDeleteOutcome::TrashFailed);
+        assert!(!should_sudo_retry(outcome));
+    }
+
+    #[test]
+    fn core02_production_calls_delete_once_per_branch() {
+        let src = include_str!("mod.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert_eq!(
+            prod.matches("best_effort_delete_with_reason(p)").count(),
+            2, // 批量分支 1 次 + 单路径分支 1 次
+            "生产段出现第三次删除调用 = CORE-02 回归"
+        );
+    }
 
     // ---------- 抖动修复：App 卸载页一次性出结果 ----------
 

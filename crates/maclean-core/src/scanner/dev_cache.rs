@@ -35,8 +35,13 @@ impl DevCacheScanner {
 /// 准入根。这些子扫描产出的是可删缓存项，漏注册会让它们在删除阶段被第 8 层
 /// fail-closed 拦下（按模型设计，漏注册只「少删」不会误删）。只登记下列窄的
 /// 工具级目录，**绝不登记整个 `$HOME`** —— 那会把准入制退化回纯黑名单；
-/// 标准根表已覆盖的（Library/Caches、.cache、.cargo、go、Downloads、
+/// 标准根表已覆盖的（Library/Caches、.cache、.cargo、go、
 /// /Library/Developer 等）不重复登记。
+///
+/// CORE-10：标准根表不再常驻登记用户数据目录。本扫描器确实会枚举
+/// `~/Downloads`、`~/Desktop` 下的安装包与项目缓存（见 scan_installers /
+/// scan_ai_models 等），按「谁枚举谁声明」自行登记这两个根；其余项目根
+/// 由 `LargeFileScanner` 按需注册，不在本模块常驻。
 fn register_dev_cache_roots() {
     let home = home_dir();
     for rel in [
@@ -51,7 +56,11 @@ fn register_dev_cache_roots() {
     ] {
         crate::provenance::register_root(&home.join(rel));
     }
-    // Homebrew Caskroom 旧版本缓存是绝对路径，不在 HOME_ROOTS 表内。
+    // CORE-10：用户数据根由实际枚举它的扫描器声明，不再依赖常驻标准表。
+    for rel in ["Downloads", "Desktop"] {
+        crate::provenance::register_root(&home.join(rel));
+    }
+    // Homebrew Caskroom 旧版本缓存是绝对路径，不在 STANDARD_HOME_ROOTS 表内。
     for p in ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"] {
         crate::provenance::register_root(Path::new(p));
     }

@@ -176,16 +176,96 @@ pub fn path_on_readonly_volume(path: &str) -> bool {
     }
 }
 
+/// 端到端验证用的「隔离废纸篓」注入点，**仅 debug 构建存在**。
+///
+/// macOS 的 `NSFileManager` 用 `NSHomeDirectory()` 决定废纸篓位置，忽略
+/// `$HOME`，所以 `HOME=$TMPHOME` 只能隔离 config/日志/备份清单，隔离不了
+/// 真实 `~/.Trash`。真跑 `clean --tab large-files --yes` 必须换掉这个 sink。
+///
+/// release 构建里这个函数恒返回 `None`，整条分支被编译器消掉 —— 生产行为
+/// 与加这段之前逐字一致，没有可被环境变量改变的用户面开关。
+#[cfg(debug_assertions)]
+fn test_trash_sink() -> Option<PathBuf> {
+    let sink = std::env::var_os("MACLEAN_TEST_TRASH_DIR").map(PathBuf::from)?;
+    // 误配置的防御：真实废纸篓（以及它的祖先/子孙）绝不能被当 sink，
+    // 否则测试文件会写进用户数据区，正是我们要避开的地方。
+    #[cfg(target_os = "macos")]
+    let real_trash = real_home_dir().join(".Trash");
+    #[cfg(not(target_os = "macos"))]
+    let real_trash = home_dir().join(".Trash");
+    if !sink.is_absolute() || sink.starts_with(&real_trash) || real_trash.starts_with(&sink) {
+        return None;
+    }
+    Some(sink)
+}
+
+#[cfg(not(debug_assertions))]
+fn test_trash_sink() -> Option<PathBuf> {
+    None
+}
+
+/// 把文件改名进隔离 sink，**同名绝不覆盖**。
+///
+/// 只用 `symlink_metadata` 预判会有 TOCTOU 窗口（判空与 rename 之间名字
+/// 可能被占用，而 POSIX `rename` 会直接覆盖目标）。这里改用 `create_new`
+/// 独占创建占位：名字归本进程之后，rename 覆盖的是自己的占位文件，
+/// 不可能碰到任何别人的数据。悬空 symlink 同样会让 `create_new` 失败。
+///
+/// 刻意只支持普通文件：目录无法用占位文件原子占名，猜错就是数据丢失。
+/// 目录返回 false → 调用方按 `TrashFailed` 保留原文件，绝不降级永久删除。
+fn rename_into_sink(path: &str, sink: &Path) -> bool {
+    let src = Path::new(path);
+    if !src.is_file() {
+        return false;
+    }
+    if std::fs::create_dir_all(sink).is_err() {
+        return false;
+    }
+    let Some(name) = src.file_name() else {
+        return false;
+    };
+    let base = name.to_string_lossy();
+    for n in 0..1000u32 {
+        let candidate = if n == 0 {
+            sink.join(name)
+        } else {
+            sink.join(format!("{base} [{n}]"))
+        };
+        let Ok(_guard) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        else {
+            continue;
+        };
+        return match std::fs::rename(src, &candidate) {
+            Ok(()) => true,
+            Err(_) => {
+                // rename 失败时把占位清掉，不在 sink 里留垃圾
+                let _ = std::fs::remove_file(candidate);
+                false
+            }
+        };
+    }
+    false
+}
+
 /// 移动文件/目录到废纸篓（跨平台）
 ///
 /// macOS: 进程内 `NSFileManager`（静默回收）→ `NSWorkspace.recycleURLs`
 ///   （由本 App 弹正规 Touch ID / 密码授权），详见 [`macos_trash`]；
 ///   失败时**绝不**降级为永久删除。
 /// Windows: 调用 SHFileOperation FO_DELETE + FOF_ALLOWUNDO
+///
+/// debug 构建可通过 `MACLEAN_TEST_TRASH_DIR` 把回收动作改写到隔离目录，
+/// 供端到端「真删」验证；release 构建不含此通道。
 pub fn move_to_trash(path: &str) -> bool {
     let p = Path::new(path);
     if !p.exists() && p.symlink_metadata().is_err() {
         return false;
+    }
+    if let Some(sink) = test_trash_sink() {
+        return rename_into_sink(path, &sink);
     }
 
     #[cfg(target_os = "macos")]
@@ -427,5 +507,112 @@ mod tests {
         );
         // 无效 JSON 明确 (0,0)，不再静默误报容量
         assert_eq!(parse_psdrive_json("not json"), (0, 0));
+    }
+
+    // ---------- 隔离废纸篓 sink（端到端 `--yes` 真删验证用） ----------
+
+    fn sink_fixture(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("maclean_sink_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sink_rename_never_overwrites_same_name() {
+        let tmp = sink_fixture("same_name");
+        let sink = tmp.join("Trash");
+        let src_dir = tmp.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src = src_dir.join("big.bin");
+
+        std::fs::write(&src, b"first").unwrap();
+        assert!(rename_into_sink(&src.to_string_lossy(), &sink));
+        std::fs::write(&src, b"second").unwrap();
+        assert!(rename_into_sink(&src.to_string_lossy(), &sink));
+
+        assert_eq!(
+            std::fs::read(sink.join("big.bin")).unwrap(),
+            b"first".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(sink.join("big.bin [1]")).unwrap(),
+            b"second".to_vec()
+        );
+        assert!(!src.exists(), "源文件应已被搬走");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sink_rename_treats_dangling_symlink_as_occupied() {
+        use std::os::unix::fs::symlink;
+        let tmp = sink_fixture("dangling");
+        let sink = tmp.join("Trash");
+        std::fs::create_dir_all(&sink).unwrap();
+        let taken = sink.join("big.bin");
+        symlink("/definitely/not/existing/target", &taken).unwrap();
+
+        let src = tmp.join("big.bin");
+        std::fs::write(&src, b"payload").unwrap();
+        assert!(rename_into_sink(&src.to_string_lossy(), &sink));
+
+        // 悬空链接原样保留（create_new 认的是名字被占用，不看目标是否存在）
+        assert!(taken.symlink_metadata().is_ok());
+        assert_eq!(
+            std::fs::read_link(&taken).unwrap(),
+            PathBuf::from("/definitely/not/existing/target")
+        );
+        assert_eq!(
+            std::fs::read(sink.join("big.bin [1]")).unwrap(),
+            b"payload".to_vec()
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sink_rename_is_fail_closed_for_dirs_and_missing_sources() {
+        let tmp = sink_fixture("fail_closed");
+        let sink = tmp.join("Trash");
+        let dir = tmp.join("adir");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!rename_into_sink(&dir.to_string_lossy(), &sink));
+        assert!(dir.exists(), "目录必须原样保留，绝不猜一个搬法");
+        assert!(!rename_into_sink(
+            &tmp.join("nope.bin").to_string_lossy(),
+            &sink
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sink_is_debug_only_and_wired_into_move_to_trash() {
+        // 源码级接线断言：按 \nmod tests 切掉测试段，避免自命中。
+        let src = include_str!("mod.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            prod.contains("if let Some(sink) = test_trash_sink()"),
+            "move_to_trash 没有接上隔离 sink"
+        );
+        assert!(
+            prod.contains("return rename_into_sink(path, &sink);"),
+            "sink 分支没有真正调用改名实现"
+        );
+        assert!(
+            prod.contains("#[cfg(debug_assertions)]"),
+            "env 读取必须被 debug_assertions 包住"
+        );
+        assert!(
+            prod.contains("#[cfg(not(debug_assertions))]"),
+            "release 构建必须有恒 None 的桩"
+        );
+        assert!(
+            prod.contains(".create_new(true)"),
+            "同名防覆盖必须靠独占创建，不能退化成先 exists 再 rename"
+        );
+        assert!(
+            prod.contains("sink.starts_with(&real_trash)"),
+            "真实废纸篓必须被排除在允许的 sink 之外"
+        );
     }
 }

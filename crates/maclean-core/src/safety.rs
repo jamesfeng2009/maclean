@@ -138,7 +138,7 @@ fn extract_reg_value(output: &str, name: &str) -> Option<String> {
     None
 }
 
-fn protected_homes() -> Vec<PathBuf> {
+pub(crate) fn protected_homes() -> Vec<PathBuf> {
     #[cfg(unix)]
     #[cfg(unix)]
     let real = real_home_dir();
@@ -1713,13 +1713,15 @@ fn is_same_or_under(path: &str, prefix: &str) -> bool {
 
 /// 检查 path 是否是 prefix 的直接子项（即 path = prefix + name，无更多层级）
 /// 用于确保只允许删除 Containers/Group Containers 等目录的直接子目录，而非任意深层路径
+///
+/// CORE-07 / A-03：一律用组件级 `Path::starts_with` + 组件数差恰好 1。
+/// 旧实现是裸字符串前缀：`/Users/fooEvil` 的前缀命中 `/Users/foo`、
+/// 后缀又是 "Evil"（不含 '/'），于是被当成 home 的直接子项放行 ——
+/// 第 8 层来源准入因此能被同名前缀的兄弟目录整个绕过。
 fn is_direct_child(path: &str, prefix: &str) -> bool {
-    if !path.starts_with(prefix) {
-        return false;
-    }
-    let suffix = &path[prefix.len()..];
-    // 直接子项：suffix 中不包含额外的 /
-    !suffix.is_empty() && !suffix.contains('/')
+    let p = std::path::Path::new(path);
+    let base = std::path::Path::new(prefix);
+    p.starts_with(base) && p.components().count() == base.components().count() + 1
 }
 
 /// 检查路径中是否包含某个目录/文件名组件
@@ -1778,50 +1780,280 @@ fn resolve_root_variable(root: &str) -> Option<String> {
     Some(out)
 }
 
-/// 受保护根：永远不允许作为删除根目标的本体路径
+// =========================================================================
+//  受保护根（CORE-06 后续）：三平台共用一份纯逻辑，平台差异只剩「数据」
+// =========================================================================
+//
+// 修复前这里有三份 #[cfg] 实现：macOS 用 canonicalize + 字符串相等、
+// Windows 用 replace('/', "\\") + trim_end_matches、其它平台只认空串与 "/"。
+// Linux 那份等于没有防护，而且在本机 0 编译 0 测试。现在所有判定都收敛到
+// 组件级纯函数，平台只提供三张根表 + 分隔符/大小写规则（由 os 入参决定），
+// 于是 macos / windows / linux 三个分支都能在开发机上真跑真测。
+
+/// 受保护根**本体**：待删路径等于其中任一项即拒绝（相等语义）。
 ///
-/// 与黑名单（保护目录本身/子项可删）不同，这里保护的是**根本身**：
-/// 待删路径等于这些路径时必须拒绝 —— 规则根解析若退化到这里，直接 fail-closed。
-#[cfg(target_os = "macos")]
-fn macos_protected_roots() -> Vec<&'static str> {
-    vec![
-        "/",
-        "/Users",
-        "/System",
-        "/Library",
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/private",
-        "/etc",
-        "/var",
-        "/Applications",
-        "/Volumes",
-        "/cores",
-        "/opt",
-        "/dev",
-        "/tmp",
-    ]
+/// 含 home 容器根（/Users、/home、C:\Users）与盘符根 —— 这些只挡本体，
+/// 因为用户缓存根全在 home 之下，扩大成前缀语义会把正常清理全拦掉。
+const MACOS_PROTECTED_ROOTS: &[&str] = &[
+    "/",
+    "/Users",
+    "/System",
+    "/Library",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/private",
+    "/etc",
+    "/var",
+    "/Applications",
+    "/Volumes",
+    "/cores",
+    "/opt",
+    "/dev",
+    "/tmp",
+];
+
+/// Linux / 其它 Unix：FHS 系统根。修复前这张表根本不存在。
+const LINUX_PROTECTED_ROOTS: &[&str] = &[
+    "/",
+    "/home",
+    "/root",
+    "/usr",
+    "/usr/local",
+    "/usr/lib",
+    "/usr/lib64",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/share",
+    "/usr/include",
+    "/usr/src",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/bin",
+    "/sbin",
+    "/etc",
+    "/var",
+    "/var/lib",
+    "/var/log",
+    "/var/cache",
+    "/opt",
+    "/boot",
+    "/boot/efi",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/srv",
+    "/mnt",
+    "/media",
+    "/tmp",
+    "/var/tmp",
+];
+
+const WINDOWS_PROTECTED_ROOTS: &[&str] = &[
+    "C:\\",
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\Users",
+    "C:\\ProgramData",
+    "C:\\Recovery",
+    "C:\\System Volume Information",
+];
+
+/// 规则根不得落在这些目录的**本体或任意子孙**下（组件级前缀）。
+///
+/// 与 `*_PROTECTED_ROOTS` 的区别：那条管「待删路径等于根本身」，这条管
+/// 「声明式规则把扫描根设在系统目录里」。`/usr/local/lib` 组件数 3，只靠
+/// 「组件数 ≥ 3」和「不等于受保护根本体」两道检查会放行 —— 这里补上第三道。
+///
+/// 三张表都**不含** `/`、`home 容器根`、`盘符根`：否则任何绝对路径、
+/// `$HOME/Library/Caches`、`%LOCALAPPDATA%/Cache` 都会被一刀切拒掉
+///（内置 44 条规则的根全部落在 home 之下，已核对 builtin_rules.json）。
+const MACOS_FORBIDDEN_SUBTREES: &[&str] = &[
+    "/System",
+    "/Library",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/private",
+    "/etc",
+    "/var",
+    "/Applications",
+    "/Volumes",
+    "/cores",
+    "/opt",
+    "/dev",
+    "/tmp",
+];
+
+const LINUX_FORBIDDEN_SUBTREES: &[&str] = &[
+    "/usr", "/lib", "/lib32", "/lib64", "/libx32", "/bin", "/sbin", "/etc", "/var", "/opt",
+    "/boot", "/proc", "/sys", "/dev", "/run", "/srv", "/mnt", "/media", "/root", "/tmp",
+];
+
+const WINDOWS_FORBIDDEN_SUBTREES: &[&str] = &[
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\ProgramData",
+    "C:\\Recovery",
+    "C:\\System Volume Information",
+];
+
+#[derive(Debug, Clone)]
+struct RootPolicy {
+    protected_roots: Vec<String>,
+    forbidden_subtrees: Vec<String>,
+    homes: Vec<PathBuf>,
+    /// 分隔符与大小写规则：Windows 用 '\' 且大小写不敏感
+    windows_style: bool,
 }
 
-#[cfg(target_os = "windows")]
-fn windows_protected_roots() -> Vec<String> {
-    let mut roots: Vec<String> = vec![
-        "C:\\".into(),
-        "C:\\Windows".into(),
-        "C:\\Program Files".into(),
-        "C:\\Program Files (x86)".into(),
-        "C:\\Users".into(),
-        "C:\\ProgramData".into(),
-        "C:\\Recovery".into(),
-        "C:\\System Volume Information".into(),
-    ];
-    // 盘符根一律保护：D:\、E:\ ... 防止规则解析到任一盘的根
-    for drive in b'C'..=b'Z' {
-        let letter = (drive as char).to_ascii_uppercase();
-        roots.push(format!("{}:\\", letter));
+impl RootPolicy {
+    /// `os` 由入参传入，不是 cfg —— 三张表在开发机上都能取到、都能测。
+    fn for_os(os: &str, homes: Vec<PathBuf>) -> Self {
+        let windows_style = os == "windows";
+        let (protected_roots, forbidden_subtrees): (Vec<String>, Vec<String>) = if windows_style {
+            let mut roots: Vec<String> = WINDOWS_PROTECTED_ROOTS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            // 盘符根一律保护：D:\、E:\ ... 防止规则解析到任一盘的根
+            for drive in b'C'..=b'Z' {
+                roots.push(format!("{}:\\", (drive as char).to_ascii_uppercase()));
+            }
+            (
+                roots,
+                WINDOWS_FORBIDDEN_SUBTREES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            )
+        } else if os == "macos" {
+            (
+                MACOS_PROTECTED_ROOTS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                MACOS_FORBIDDEN_SUBTREES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            )
+        } else {
+            (
+                LINUX_PROTECTED_ROOTS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                LINUX_FORBIDDEN_SUBTREES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            )
+        };
+        Self {
+            protected_roots,
+            forbidden_subtrees,
+            homes,
+            windows_style,
+        }
     }
-    roots
+
+    /// 空策略：证明共用校验逻辑不依赖根表完备性（CORE-06 的验收口径）。
+    /// 只作测试夹具，生产二进制里不该存在这个构造入口。
+    #[cfg(test)]
+    fn empty() -> Self {
+        Self {
+            protected_roots: Vec::new(),
+            forbidden_subtrees: Vec::new(),
+            homes: Vec::new(),
+            windows_style: false,
+        }
+    }
+}
+
+/// A-03：一律组件级比较，绝不用裸字符串前缀（CORE-07 的教训）。
+/// 同时吃掉尾斜杠、重复分隔符、Windows 的反斜杠与大小写差异。
+fn root_components(path: &str, windows_style: bool) -> Vec<String> {
+    let normalized = if windows_style {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    };
+    let sep = if windows_style { '\\' } else { '/' };
+    normalized
+        .split(sep)
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            if windows_style {
+                c.to_ascii_lowercase()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// `path` 是否等于 `root` 或落在其子树下（组件级）。
+/// `!r.is_empty()` 很关键："/" 切完是空组件，若允许会匹配所有绝对路径。
+fn path_is_under(path: &str, root: &str, windows_style: bool) -> bool {
+    let p = root_components(path, windows_style);
+    let r = root_components(root, windows_style);
+    !r.is_empty() && p.len() >= r.len() && r.iter().zip(p.iter()).all(|(a, b)| a == b)
+}
+
+/// 三平台共用的受保护根本体判定（相等语义，纯函数）。
+///
+/// 刻意**不**改成前缀语义：`ops::sanitize_before_delete` 用它拦「待删路径
+/// 就是 / 或 home 本身」，若把 `/Users/me/Library/Caches/foo` 也判成受保护
+/// 根，正常缓存清理会被全拦。`canonical` 作为第二个候选一起比（macOS 原实现
+/// 的口径），只可能让判定更严，不会更松。
+fn is_protected_root_checked(path: &str, canonical: Option<&str>, policy: &RootPolicy) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    let candidates: Vec<Vec<String>> = std::iter::once(path)
+        .chain(canonical)
+        .map(|p| root_components(p, policy.windows_style))
+        .collect();
+    let forbidden: Vec<Vec<String>> = policy
+        .protected_roots
+        .iter()
+        .map(|r| root_components(r, policy.windows_style))
+        .chain(
+            policy
+                .homes
+                .iter()
+                .map(|h| root_components(&h.to_string_lossy(), policy.windows_style)),
+        )
+        .collect();
+    candidates.iter().any(|c| forbidden.iter().any(|r| r == c))
+}
+
+/// 绝对路径判定也平台无关、由入参决定。
+///
+/// 不能直接用 `std::path::Path::is_absolute()`：在开发机（Unix）上喂
+/// `C:\Windows\System32` 会返回 false，Windows 分支的测试就会「因为别的
+/// 原因变绿」，测不到真正想测的子树拦截。
+fn root_is_absolute(resolved: &str, windows_style: bool) -> bool {
+    if windows_style {
+        let b = resolved.as_bytes();
+        (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b[2] == b'\\' || b[2] == b'/'))
+            || resolved.starts_with("\\\\")
+    } else {
+        resolved.starts_with('/')
+    }
+}
+
+fn current_root_policy() -> RootPolicy {
+    RootPolicy::for_os(std::env::consts::OS, protected_homes())
 }
 
 /// 判断 path（已解析、规范化后）是否为受保护根本身
@@ -1829,75 +2061,62 @@ fn windows_protected_roots() -> Vec<String> {
 /// 供两个场景使用：
 /// 1. 规则根校验（validate_rule_root）：解析后的根不能是这里任一值
 /// 2. 删除前二次校验（ops::sanitize_before_delete）：待删路径不能是这里任一值
-#[cfg(target_os = "macos")]
+///
+/// 平台差异全部收敛在 `current_root_policy()` 返回的三张表里；这里只剩
+/// 一次 `canonicalize` IO，判定逻辑本身是上面那份无 cfg 的纯函数。
 pub fn is_protected_root(path: &str) -> bool {
-    if path.is_empty() {
-        return true;
-    }
+    let policy = current_root_policy();
     let canonical = std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string());
-    // home 根本身
-    if protected_homes().iter().any(|h| {
-        h.as_os_str() == std::ffi::OsStr::new(&canonical)
-            || h.as_os_str() == std::ffi::OsStr::new(path)
-    }) {
-        return true;
-    }
-    macos_protected_roots()
-        .iter()
-        .any(|r| canonical == *r || path == *r)
-}
-
-#[cfg(target_os = "windows")]
-pub fn is_protected_root(path: &str) -> bool {
-    if path.is_empty() {
-        return true;
-    }
-    let normalized = path.replace('/', "\\").trim_end_matches('\\').to_string();
-    if protected_homes()
-        .iter()
-        .any(|h| h.to_string_lossy().as_ref() == normalized)
-    {
-        return true;
-    }
-    windows_protected_roots()
-        .iter()
-        .any(|r| normalized == r.trim_end_matches('\\'))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn is_protected_root(path: &str) -> bool {
-    path.is_empty() || path == "/"
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    is_protected_root_checked(path, canonical.as_deref(), &policy)
 }
 
 /// 规则根组件数上限：防止"根模板过浅"通过校验
-#[cfg_attr(not(test), allow(dead_code))] // P2 声明式规则将消费
 pub const MAX_RULE_ROOT_COMPONENTS: usize = 3;
 
-/// 校验声明式规则的根模板，返回解析后的安全绝对路径
+/// 校验声明式规则的根模板，返回解析后的安全绝对路径（CORE-06 起三平台共用一份）。
 ///
 /// fail-closed：任何一步失败都返回 Err，调用方必须拒绝该规则。
 /// - 模板变量缺失/未知 → Err
 /// - 解析后非绝对路径 → Err
 /// - 解析后是受保护根本身 → Err
-/// - 解析后组件数 ≤ 3（如 $HOME 本身、/ 等浅根直接拒绝）→ Err
-#[cfg(target_os = "macos")]
-#[cfg_attr(not(test), allow(dead_code))] // P2 声明式规则将消费
-pub fn validate_rule_root(root: &str) -> Result<String, String> {
+/// - 解析后落在系统受保护目录的子树下（CORE-06 后续）→ Err
+/// - 解析后组件数 < 3（如 $HOME 本身、/ 等浅根直接拒绝）→ Err
+///
+/// 平台差异只由 `policy` 携带（三张根表 + 分隔符/大小写规则）。测试可以喂
+/// `RootPolicy::for_os("linux" | "windows", ...)`，把「本机 0 编译」的分支
+/// 在开发机上真跑一遍；也可以喂 `RootPolicy::empty()` 证明共用逻辑本身
+/// 不依赖根表完备性。历史上 `#[cfg(not(any(macos, windows)))]` 另有一份
+/// 只校验空串与 "/" 的实现，Linux 上 $HOME / 相对路径 / `..` 全部放行
+/// —— 已删除，不再有第二份。
+fn validate_rule_root_checked(root: &str, policy: &RootPolicy) -> Result<String, String> {
     let resolved = resolve_root_variable(root)
         .ok_or_else(|| format!("规则根含未解析模板变量或为空: {root}"))?;
-    let p = std::path::Path::new(&resolved);
-    if !p.is_absolute() {
+    if !root_is_absolute(&resolved, policy.windows_style) {
         return Err(format!("规则根必须为绝对路径: {root}"));
     }
     if resolved.contains("..") || resolved.chars().any(|c| c.is_control()) {
         return Err(format!("规则根含目录遍历或控制字符: {root}"));
     }
-    if is_protected_root(&resolved) {
+    if is_protected_root_checked(&resolved, None, policy) {
         return Err(format!("规则根是受保护根本身: {root}"));
     }
-    let components = resolved.split('/').filter(|c| !c.is_empty()).count();
+    // CORE-06 后续：组件数达标（≥3）不代表安全 —— /usr/local/lib 恰好 3 个组件，
+    // 却落在系统目录下。按组件级前缀再拦一道，绝不退化成字符串 starts_with。
+    if let Some(hit) = policy
+        .forbidden_subtrees
+        .iter()
+        .find(|r| path_is_under(&resolved, r, policy.windows_style))
+    {
+        return Err(format!("规则根落在系统受保护目录 {hit} 下: {root}"));
+    }
+    // macOS 用 '/'、Windows 用 '\'：两种分隔符都切开，组件数与旧两版逐一对齐
+    //（macOS "$HOME/Library/Caches" = 4；Windows "C:\Users\Name" = 3）。
+    let components = resolved
+        .split(['/', '\\'])
+        .filter(|c| !c.is_empty())
+        .count();
     if components < MAX_RULE_ROOT_COMPONENTS {
         return Err(format!(
             "规则根过浅（{components} 个组件 < {MAX_RULE_ROOT_COMPONENTS}），拒绝: {root}"
@@ -1906,37 +2125,9 @@ pub fn validate_rule_root(root: &str) -> Result<String, String> {
     Ok(resolved)
 }
 
-#[cfg(target_os = "windows")]
+/// 生产入口：平台差异全部收敛在 `current_root_policy()` 返回的数据里。
 pub fn validate_rule_root(root: &str) -> Result<String, String> {
-    let resolved = resolve_root_variable(root)
-        .ok_or_else(|| format!("规则根含未解析模板变量或为空: {root}"))?;
-    let p = std::path::Path::new(&resolved);
-    if !p.is_absolute() {
-        return Err(format!("规则根必须为绝对路径: {root}"));
-    }
-    if resolved.contains("..") || resolved.chars().any(|c| c.is_control()) {
-        return Err(format!("规则根含目录遍历或控制字符: {root}"));
-    }
-    if is_protected_root(&resolved) {
-        return Err(format!("规则根是受保护根本身: {root}"));
-    }
-    // Windows：至少 3 个组件，如 C:\Users\Name 起步
-    let normalized = resolved.replace('/', "\\");
-    let components = normalized.split('\\').filter(|c| !c.is_empty()).count();
-    if components < MAX_RULE_ROOT_COMPONENTS {
-        return Err(format!(
-            "规则根过浅（{components} 个组件 < {MAX_RULE_ROOT_COMPONENTS}），拒绝: {root}"
-        ));
-    }
-    Ok(resolved)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn validate_rule_root(root: &str) -> Result<String, String> {
-    if root.is_empty() || root == "/" {
-        return Err("规则根无效".to_string());
-    }
-    Ok(root.to_string())
+    validate_rule_root_checked(root, &current_root_policy())
 }
 
 /// 记录删除日志到文件
@@ -2748,6 +2939,270 @@ mod tests {
         assert!(
             validate_rule_root("$HOME/Library/Caches\n").is_err(),
             "控制字符应被拒绝"
+        );
+    }
+
+    // ---------- CORE-06：三平台共用一份校验，Linux 不再 fail-open ----------
+
+    #[test]
+    fn c06_shared_validator_holds_with_empty_root_policy() {
+        // 用「一张根表都没有」的空策略喂共用实现：三个历史 fail-open 用例
+        // 仍必须被拒绝 —— 证明防护不依赖受保护根表的完备性，且这条逻辑
+        // 在开发机（macOS）上真跑真测。本轮收敛后策略改为结构体而非闭包。
+        let weak = RootPolicy::empty();
+        let home = protected_homes()
+            .into_iter()
+            .next()
+            .expect("有 home")
+            .to_string_lossy()
+            .into_owned();
+        for bad in [
+            "$HOME".to_string(),
+            "Library/Caches".to_string(),
+            format!("{home}/Library/../.."),
+        ] {
+            assert!(
+                validate_rule_root_checked(&bad, &weak).is_err(),
+                "共用实现在空策略下仍应拒绝: {bad}"
+            );
+        }
+        // 正常规则根不该被误伤
+        assert!(validate_rule_root_checked("$HOME/Library/Caches", &weak).is_ok());
+        // 生产入口与共用实现同口径（报告要求的 $HOME 验收）
+        assert!(validate_rule_root("$HOME").is_err(), "$HOME 本身不应通过");
+    }
+
+    // ---------- CORE-06 后续：受保护根表三平台彻底收敛 ----------
+
+    #[test]
+    fn rp_three_platform_policies_are_distinct_and_reachable() {
+        // os 是入参，不是 cfg：三张表在开发机（macOS）上都能真取真测。
+        let mac = RootPolicy::for_os("macos", vec![]);
+        let win = RootPolicy::for_os("windows", vec![]);
+        let linux = RootPolicy::for_os("linux", vec![]);
+        assert!(!mac.windows_style && !linux.windows_style);
+        assert!(win.windows_style);
+
+        // Linux 不再退化成「只认空串和 /」：系统根表必须是实打实的一张表。
+        assert!(
+            linux.protected_roots.len() >= 20,
+            "Linux 受保护根表仍是弱化实现: {:?}",
+            linux.protected_roots
+        );
+        assert!(linux.forbidden_subtrees.contains(&"/usr".to_string()));
+        assert!(linux.protected_roots.contains(&"/usr/local".to_string()));
+        // 三张表的子树名单必须各自独立，不能沿用 macOS 那份
+        assert!(mac
+            .forbidden_subtrees
+            .contains(&"/Applications".to_string()));
+        assert!(!linux
+            .forbidden_subtrees
+            .contains(&"/Applications".to_string()));
+        assert!(win.forbidden_subtrees.contains(&"C:\\Windows".to_string()));
+        // 盘符根只挡本体，绝不进 forbidden_subtrees
+        assert!(win.protected_roots.contains(&"Z:\\".to_string()));
+        assert!(!win.forbidden_subtrees.contains(&"C:\\".to_string()));
+    }
+
+    #[test]
+    fn rp_linux_rejects_three_component_system_roots() {
+        let linux = RootPolicy::for_os("linux", vec![]);
+        // 报告点名的 fail-open：/usr/local/lib 组件数恰好 3，旧实现只查
+        // 「不是受保护根本体 + 组件数 ≥ 3」就会放行。
+        for bad in [
+            "/usr/local/lib",
+            "/usr/local",
+            "/usr/lib/debug",
+            "/var/cache/apt",
+            "/opt/homebrew/lib",
+            "/etc/opt/foo",
+            "/boot/efi/EFI",
+            "/root/.cache",
+            "/tmp/work/cache",
+        ] {
+            assert!(
+                validate_rule_root_checked(bad, &linux).is_err(),
+                "Linux 不应允许把规则根设在系统目录下: {bad}（得到 {:?}）",
+                validate_rule_root_checked(bad, &linux)
+            );
+        }
+        // home 容器根只挡本体：用户缓存根全在 /home 下，不能被一刀切
+        assert!(validate_rule_root_checked("/home", &linux).is_err());
+        assert!(validate_rule_root_checked("/home/me/.cache/pip", &linux).is_ok());
+    }
+
+    #[test]
+    fn rp_subtree_guard_is_component_level_not_string_prefix() {
+        let linux = RootPolicy::for_os("linux", vec![]);
+        // /usrEvil 是 /usr 的同名前缀兄弟目录，组件级判定不能误伤
+        assert!(validate_rule_root_checked("/usrEvil/lib/cache", &linux).is_ok());
+        assert!(validate_rule_root_checked("/usre/lib/cache", &linux).is_ok());
+        assert!(!path_is_under("/usrEvil/lib", "/usr", false));
+        assert!(path_is_under("/usr/local/lib", "/usr", false));
+    }
+
+    #[test]
+    fn rp_subtree_guard_reverse_check_is_not_fake_green() {
+        // 反向验证：把 forbidden_subtrees 清空，/usr/local/lib 必须立刻
+        // 变成 Ok —— 否则上面那些「is_err()」可能只是被组件数或别的原因挡住。
+        let mut linux = RootPolicy::for_os("linux", vec![]);
+        assert!(validate_rule_root_checked("/usr/local/lib", &linux).is_err());
+        linux.forbidden_subtrees.clear();
+        assert!(
+            validate_rule_root_checked("/usr/local/lib", &linux).is_ok(),
+            "清空子树名单后仍被拒，说明拦截来自别处，c11 的断言是假绿"
+        );
+    }
+
+    #[test]
+    fn rp_windows_policy_rejects_system_subtree_but_not_user_cache() {
+        let win = RootPolicy::for_os("windows", vec![]);
+        assert!(validate_rule_root_checked(r"C:\Windows\System32\drivers", &win).is_err());
+        assert!(validate_rule_root_checked(r"C:\Program Files\Common Files", &win).is_err());
+        // 大小写不敏感 + 正斜杠也要能识别
+        assert!(validate_rule_root_checked("c:/windows/temp", &win).is_err());
+        // 用户缓存根不能被盘符根 / C:\Users 误伤
+        assert!(validate_rule_root_checked(r"C:\Users\me\AppData\Local\Cache", &win).is_ok());
+        // Windows 绝对路径判定必须由入参决定，不能依赖开发机的 Path::is_absolute
+        assert!(root_is_absolute(r"D:\Data\Cache", true));
+        assert!(!root_is_absolute("Data/Cache", true));
+    }
+
+    #[test]
+    fn rp_macos_policy_rejects_system_subtree_but_not_home_cache() {
+        let mac = RootPolicy::for_os("macos", vec![]);
+        assert!(validate_rule_root_checked("/System/Library/Caches", &mac).is_err());
+        assert!(validate_rule_root_checked("/Library/Caches/Homebrew", &mac).is_err());
+        // 内置 44 条规则的根全在 $HOME 下，不能被 /Users 误伤
+        assert!(validate_rule_root_checked("$HOME/Library/Caches", &mac).is_ok());
+    }
+
+    #[test]
+    fn rp_is_protected_root_stays_equality_only() {
+        // 相等语义是删除闸门的契约：ops::sanitize_before_delete 用它拦
+        // 「待删路径就是 / 或 home 本身」。扩大成前缀会把正常清理全拦。
+        let linux = RootPolicy::for_os("linux", vec![]);
+        assert!(is_protected_root_checked("", None, &linux));
+        assert!(is_protected_root_checked("/", None, &linux));
+        assert!(is_protected_root_checked("/usr", None, &linux));
+        assert!(!is_protected_root_checked("/usr/local/lib", None, &linux));
+        assert!(!is_protected_root_checked(
+            "/home/me/.cache/pip",
+            None,
+            &linux
+        ));
+        // canonicalize 作为第二候选：只可能让判定更严
+        assert!(is_protected_root_checked(
+            "/some/link",
+            Some("/usr"),
+            &linux
+        ));
+        // home 候选由入参注入，不依赖进程环境
+        let with_home = RootPolicy::for_os("linux", vec![PathBuf::from("/home/me")]);
+        assert!(is_protected_root_checked("/home/me", None, &with_home));
+        assert!(!is_protected_root_checked(
+            "/home/me/.cache",
+            None,
+            &with_home
+        ));
+    }
+
+    #[test]
+    fn rp_production_entry_rejects_three_component_system_root() {
+        // 直接打生产入口，而不是注入的策略：报告点名的 Linux fail-open
+        // 在开发机（macOS 根表同样含 /usr）也必须被挡住。
+        assert!(
+            validate_rule_root("/usr/local/lib").is_err(),
+            "生产入口仍允许把规则根设在系统目录的子树下"
+        );
+        assert!(validate_rule_root("/usrEvil/lib/cache").is_ok());
+        // 用户缓存根不能因这次收紧被误伤
+        assert!(validate_rule_root("$HOME/Library/Caches").is_ok());
+    }
+
+    #[test]
+    fn rp_production_entries_are_wired_to_shared_policy() {
+        // 源码级接线断言：按 \nmod tests 切掉测试段，避免自命中。
+        let src = include_str!("safety.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            prod.contains("is_protected_root_checked(path, canonical.as_deref(), &policy)"),
+            "is_protected_root 没有委托给共用纯函数"
+        );
+        assert!(
+            prod.contains("validate_rule_root_checked(root, &current_root_policy())"),
+            "validate_rule_root 没有用可注入策略"
+        );
+        // 三份 #[cfg] 实现必须真的消失，而不是加了一份共用实现却留着旧分支
+        let cfg_split = format!(
+            "#[cfg(not(any(target_os = \"macos\", target_os = \"windows\")))]\n{} is_protected_root",
+            "pub fn"
+        );
+        assert!(
+            !prod.contains(&cfg_split),
+            "仍存在 Linux 专用的 is_protected_root cfg 分身"
+        );
+        assert!(
+            !prod.contains("path.is_empty() || path == \"/\"\n}"),
+            "Linux 弱化实现仍在生产段里"
+        );
+    }
+
+    // ---------- CORE-07：is_direct_child 组件级边界 ----------
+
+    #[test]
+    fn c07_direct_child_rejects_sibling_with_same_string_prefix() {
+        // A-03：裸字符串前缀会把 /Users/fooEvil 当成 /Users/foo 的直接子项。
+        assert!(!is_direct_child("/Users/fooEvil", "/Users/foo"));
+        assert!(!is_direct_child("/Users/foo", "/Users/foo"));
+        assert!(!is_direct_child("/Users/foo/a/b", "/Users/foo"));
+        assert!(is_direct_child("/Users/foo/Downloads", "/Users/foo"));
+        // 调用点用的是带尾斜杠的前缀（Containers / HTTPStorages 等），
+        // 换实现后语义必须保持一致
+        assert!(is_direct_child(
+            "/Users/foo/Library/Containers/com.x",
+            "/Users/foo/Library/Containers/"
+        ));
+        assert!(!is_direct_child(
+            "/Users/foo/Library/ContainersX",
+            "/Users/foo/Library/Containers/"
+        ));
+        // 第 8 层白名单：大文件类目不得靠兄弟前缀绕过来源准入
+        assert!(!check_whitelist(
+            std::path::Path::new("/Users/fooEvil"),
+            std::path::Path::new("/Users/foo"),
+            "大文件"
+        ));
+    }
+
+    #[test]
+    fn c07_large_file_category_cannot_escape_home_end_to_end() {
+        let home = protected_homes().into_iter().next().expect("有 home");
+        let evil = format!("{}Evil", home.to_string_lossy());
+        // 路径不存在 → canonicalize 回退到原字符串，正好模拟被污染的
+        // 清单 / 缓存项。修复前会在第 8 层被 is_direct_child 放行成 Safe。
+        let r = check_path_safety_with_category(&evil, "大文件");
+        let verdict = match &r {
+            SafetyCheck::Safe => "Safe",
+            SafetyCheck::Warning(_) => "Warning",
+            SafetyCheck::Danger(_) => "Danger",
+        };
+        assert!(
+            matches!(r, SafetyCheck::Danger(_)),
+            "大文件类目把 home 外的同名前缀兄弟目录放行了: {evil}（判定={verdict}）"
+        );
+    }
+
+    #[test]
+    fn c06_only_one_rule_root_validator_is_wired() {
+        // 反向验证：有人再按 cfg 复制出第二份 `pub fn validate_rule_root`，
+        // 这条断言必红 —— 那份弱化实现正是 CORE-06 的根因。
+        let src = include_str!("safety.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert_eq!(
+            prod.matches("pub fn validate_rule_root(").count(),
+            1,
+            "规则根校验出现第二份平台实现，Linux fail-open 回归"
         );
     }
 

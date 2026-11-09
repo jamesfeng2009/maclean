@@ -1,7 +1,8 @@
 name: CI
 
-# 质量门禁：格式 / 静态检查 / 单元测试 / macOS 构建
-# Windows 构建仍由 windows-ci.yml 负责
+# 质量门禁：格式 / 静态检查 / 单元测试 / macOS 构建 / Linux 原生门禁
+# Windows 构建与测试仍由 windows-ci.yml 的原生 runner 负责
+# （macOS 本机不做 MSVC 交叉编译：ring 的 C 构建需要 MSVC SDK）
 
 on:
   push:
@@ -48,6 +49,51 @@ jobs:
 
       - name: 单元测试（workspace = 3 个库 crate + CLI）
         run: cargo test --workspace
+
+  # CORE-06 后续：此前 ci.yml 的两个 ubuntu job（version-consistency / security）
+  # 全是 shell 脚本与 cargo audit/deny，没有一个跑 Rust 编译或测试 ——
+  # #[cfg(not(any(macos, windows)))] 分支在 CI 上长期 0 编译 0 测试，
+  # 而该分支历史上正是 validate_rule_root 的 fail-open 实现所在。
+  # 必须用原生 Linux runner 覆盖，不能靠 macOS 上的交叉编译（缺 Linux C 编译器）。
+  linux-check:
+    name: check · clippy · test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (pinned 1.90.0)
+        uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-linux-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-linux-
+
+      # --all-targets 必须带：否则 #[cfg(test)] 里的 Linux 分支根本不编译，
+      # 与 windows-ci.yml 里 H-05 吃过的是同一个亏。
+      - name: Cargo check (Linux, --all-targets)
+        run: cargo check --target x86_64-unknown-linux-gnu --workspace --all-targets
+
+      # 这里刻意不加 -D warnings：本机实测
+      # `cargo clippy -p maclean-core --all-targets --target x86_64-unknown-linux-gnu`
+      # 有 38 条存量 warning（绝大多数是 macOS 专属函数在非 mac 平台 dead_code，
+      # 另有 6 条 cloned_ref_to_slice_refs），本次改动未新增任何一条。
+      # 存量清理需单独排期，不该让新加的 Linux 门禁第一天就红。
+      # clippy 仍运行：能抓 Linux cfg 分支里的真实 lint 问题，只是暂不阻塞。
+      - name: Clippy (Linux, 存量 warning 暂不阻塞)
+        run: cargo clippy --target x86_64-unknown-linux-gnu --workspace --all-targets
+
+      # 首次在 Linux runner 实跑后按结果收口平台专属用例；本机无 Linux 执行
+      # 环境，只做过 --all-targets 的交叉 clippy，不冒充已验证运行时行为。
+      - name: 单元测试（workspace）
+        run: cargo test --target x86_64-unknown-linux-gnu --workspace --no-fail-fast
 
   macos-build:
     name: macOS release build
