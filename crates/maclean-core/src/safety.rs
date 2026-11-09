@@ -2242,35 +2242,41 @@ mod tests {
 
     #[test]
     fn monorepo_category_node_modules_is_precisely_exempted() {
+        // 第 8 层来源准入按当前机器的 home 判定。硬编码 /Users/fengyu/... 在
+        // CI（HOME=/Users/runner 或 /home/runner）必然落到「不在任何已声明
+        // 扫描根下」，开发机却全绿 —— 典型的环境假绿。用生产同一份 homes 构造。
+        let home = protected_homes().first().expect("有 home").clone();
+        let project = home.join("Downloads/myproject/workspace/onlineStudy");
+        let nm = project.join("node_modules");
+        let nm_s = nm.to_string_lossy().to_string();
         // Monorepo依赖 类目的目标就是 node_modules（npm install 可再生、
         // 删除走废纸篓可恢复）—— 4.6 层精确豁免，删除不再"扫得出删不掉"。
-        let nm = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/node_modules";
-        let r = check_path_safety_with_category(nm, "Monorepo依赖");
+        let r = check_path_safety_with_category(&nm_s, "Monorepo依赖");
         assert!(
             matches!(r, SafetyCheck::Safe),
             "Monorepo依赖 + node_modules 应放行: {:?}",
             r
         );
         // 子包 node_modules 同样放行
-        let nm2 = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/voice-tutor-worker/node_modules";
+        let nm2 = project.join("voice-tutor-worker/node_modules");
         assert!(matches!(
-            check_path_safety_with_category(nm2, "Monorepo依赖"),
+            check_path_safety_with_category(&nm2.to_string_lossy(), "Monorepo依赖"),
             SafetyCheck::Safe
         ));
         // 精确性：豁免只匹配组件名为 node_modules 的目录；相似名
         // （node_modulesx）不命中清单标记，走普通路径、不享受豁免。
-        let nm3 = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/node_modulesx";
-        assert!(!canonical_has_component(Path::new(nm3), "node_modules"));
-        assert!(canonical_has_component(Path::new(nm), "node_modules"));
+        let nm3 = project.join("node_modulesx");
+        assert!(!canonical_has_component(&nm3, "node_modules"));
+        assert!(canonical_has_component(&nm, "node_modules"));
         // 非 Monorepo 类目遇到 node_modules 仍无条件拦截（防重复文件误删）
         assert!(matches!(
-            check_path_safety_with_category(nm, "重复文件"),
+            check_path_safety_with_category(&nm_s, "重复文件"),
             SafetyCheck::Danger(_)
         ));
         // Monorepo依赖 遇到其它清单目录（site-packages 等）仍拦截
-        let sp = "/Users/fengyu/Downloads/myproject/workspace/onlineStudy/.venv/lib/python3.13/site-packages/x";
+        let sp = project.join(".venv/lib/python3.13/site-packages/x");
         assert!(matches!(
-            check_path_safety_with_category(sp, "Monorepo依赖"),
+            check_path_safety_with_category(&sp.to_string_lossy(), "Monorepo依赖"),
             SafetyCheck::Danger(_)
         ));
     }
@@ -2917,17 +2923,48 @@ mod tests {
     #[test]
     fn protected_root_detection_blocks_system_and_home_roots() {
         let homes = protected_homes();
-        let home = homes.first().expect("有 home");
-        let home_str = home.to_string_lossy().to_string();
-        for bad in ["/", "/Library", "/System", "/Users", "/usr", &home_str] {
-            assert!(is_protected_root(bad), "应识别为受保护根: {bad}");
+        let home_str = homes
+            .first()
+            .expect("有 home")
+            .to_string_lossy()
+            .to_string();
+        // os 由入参传入（不是 cfg）：macOS / Linux 两张表在开发机与 Linux
+        // runner 上都能真跑。/Library 只是 macOS 根表里的项，拿它当跨平台
+        // 通用断言必然在 Linux 假红。
+        let macos = RootPolicy::for_os("macos", homes.clone());
+        for bad in ["/", "/Library", "/System", "/Users", "/usr"] {
+            assert!(
+                is_protected_root_checked(bad, None, &macos),
+                "macos 应识别为受保护根: {bad}"
+            );
         }
-        // 普通可删路径不是受保护根
-        assert!(!is_protected_root("/Users/me/Library/Caches/foo"));
-        assert!(!is_protected_root(&format!(
-            "{}/Library/Caches/foo",
-            home_str
-        )));
+        let linux = RootPolicy::for_os("linux", homes.clone());
+        for bad in ["/", "/etc", "/usr", "/bin", "/home", "/var"] {
+            assert!(
+                is_protected_root_checked(bad, None, &linux),
+                "linux 应识别为受保护根: {bad}"
+            );
+        }
+        // home 本体在两种策略下都受保护
+        for policy in [&macos, &linux] {
+            assert!(
+                is_protected_root_checked(&home_str, None, policy),
+                "home 本体应识别为受保护根: {home_str}"
+            );
+        }
+        // 普通可删路径不是受保护根（相等语义，不能扩成前缀）
+        assert!(!is_protected_root_checked(
+            "/Users/me/Library/Caches/foo",
+            None,
+            &macos
+        ));
+        assert!(!is_protected_root_checked(
+            &format!("{home_str}/Library/Caches/foo"),
+            None,
+            &macos
+        ));
+        // 生产入口（当前平台）再直打一次，防止纯函数与接线脱节
+        assert!(is_protected_root(&home_str), "生产入口应拦下 home 本体");
     }
 
     #[test]

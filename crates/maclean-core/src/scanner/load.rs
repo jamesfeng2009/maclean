@@ -289,7 +289,9 @@ mod tests {
         Load {
             gate: Mutex::new(Gate {
                 active: 0,
-                limit: start_concurrency(),
+                // 夹具不能依赖机器核数：start_concurrency() 在 ≤4 核的 CI runner
+                // 恒为 4，恰好等于 BUSY_CONCURRENCY，会让 load_is_busy 恒 true。
+                limit: BUSY_CONCURRENCY + 4,
             }),
             cv: Condvar::new(),
             ewma_us: AtomicU64::new(0),

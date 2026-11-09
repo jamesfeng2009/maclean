@@ -437,6 +437,12 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
 /// 尝试删除并归因失败原因（其他平台）
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
+    // 与 macOS / Windows 分支的 gone(&deleted_path) 同一口径：路径本体与其
+    // symlink 元数据都不存在，才叫「目标状态已达成」。
+    let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
+    if gone(path) {
+        return Ok(());
+    }
     let res = if path.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
@@ -444,6 +450,9 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
     };
     match res {
         Ok(()) => Ok(()),
+        // 定时清理与手动清理同时删同一目录时，后到的一方可能拿到 ENOENT、
+        // ENOTDIR 等任一竞态错误；只要目标确实已消失就不能误报「失败 1 项」。
+        Err(_) if gone(path) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Err(DeleteFailure::PermissionDenied)
         }
