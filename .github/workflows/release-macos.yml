@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain (pinned 1.90.0)
+      - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
@@ -228,7 +228,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain (pinned 1.90.0)
+      - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
 
       - name: 发布（幂等：已存在的版本跳过）

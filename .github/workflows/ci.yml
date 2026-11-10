@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain (pinned 1.90.0)
+      - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
@@ -61,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain (pinned 1.90.0)
+      - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
@@ -102,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain (pinned 1.90.0)
+      - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo registry
@@ -243,7 +243,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain (pinned 1.90.0)
+      - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Cache cargo registry
