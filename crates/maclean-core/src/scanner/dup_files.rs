@@ -197,26 +197,23 @@ impl Scanner for DuplicateFileScanner {
             .into_iter()
             .take(self.max_groups)
         {
-            let total_dup: u64 = batch_paths
+            // CORE-09：metadata 失败即剔除该副本（fail-closed 少删）。旧实现
+            // `.unwrap_or(0)` 把 IO 错误静默降级成「释放 0 B」，副本却仍
+            // deletable: true，UI 显示 0 B 而实际删了文件。
+            let verified = verified_duplicates(&batch_paths);
+            if verified.is_empty() {
+                // 整组都拿不到 metadata：不呈现、不删，也不造空壳条目
+                continue;
+            }
+            let total_dup: u64 = verified.iter().map(|(_, size, _)| *size).sum();
+            let batch: Vec<String> = verified
                 .iter()
-                .map(|p| p.metadata().map(|m| m.len()).unwrap_or(0))
-                .sum();
-            let batch: Vec<String> = batch_paths
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|(p, _, _)| p.to_string_lossy().into_owned())
                 .collect();
-            // 每个可删副本的修改时间（unix 秒），供 UI 逐行展示（对标 MangoDisk 的 Last modified）
-            let batch_mtimes: Vec<i64> = batch_paths
-                .iter()
-                .map(|p| {
-                    p.metadata()
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0)
-                })
-                .collect();
+            // 每个可删副本的修改时间（unix 秒），供 UI 逐行展示
+            //（对标 MangoDisk 的 Last modified）。mtime 只影响展示，
+            // 读不到按 0 标记未知，不影响体积判定的完整性。
+            let batch_mtimes: Vec<i64> = verified.iter().map(|(_, _, m)| *m).collect();
             let keep_name = keep
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -260,6 +257,28 @@ impl Scanner for DuplicateFileScanner {
             scan_time_ms: start.elapsed().as_millis() as u64,
         }
     }
+}
+
+/// CORE-09：只保留 metadata 成功的**可删副本**。
+///
+/// 抽成函数是为了能在测试里直接构造「metadata 失败」的副本：拿不到体积就
+/// 把副本剔除，绝不用 0 冒充真实体积还照样允许删除（宁可少删不可误报）。
+/// 返回值 `(路径, 实际体积, mtime unix 秒)`；mtime 只影响展示，读不到按
+/// 0 标记未知，不影响体积的完整性与可删性。
+fn verified_duplicates(paths: &[PathBuf]) -> Vec<(PathBuf, u64, i64)> {
+    paths
+        .iter()
+        .filter_map(|p| {
+            let meta = p.metadata().ok()?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            Some((p.clone(), meta.len(), mtime))
+        })
+        .collect()
 }
 
 /// 是否应跳过该目录子树（安全 + 效率）
@@ -569,6 +588,47 @@ fn full_hash(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- CORE-09：IO 错误不得静默降级成 0 B ----------
+
+    #[test]
+    fn c09_metadata_failure_drops_copy_instead_of_reporting_zero_bytes() {
+        let tmp = std::env::temp_dir().join(format!("maclean_c09_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let good = tmp.join("good.bin");
+        std::fs::write(&good, b"1234567890").unwrap();
+        // 扫描后已被移走 / 无法 stat 的副本：metadata() 返回 Err
+        let missing = tmp.join("deleted_after_scan.bin");
+
+        let got = verified_duplicates(&[good.clone(), missing.clone()]);
+        assert_eq!(got.len(), 1, "metadata 失败的副本必须被剔除");
+        assert_eq!(got[0].0, good);
+        assert_eq!(got[0].1, 10, "体积必须来自真实 metadata，不能降级成 0");
+        assert!(
+            !got.iter().any(|(p, _, _)| p == &missing),
+            "失败的副本不得出现在 batch_paths 里"
+        );
+        // 整组都失败 → 返回空，scan() 跳过整组，不产出 deletable 空壳条目
+        assert!(verified_duplicates(&[missing]).is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn c09_scan_is_wired_to_verified_duplicates() {
+        // 接线检查：纯函数再对，scan() 没调用就等于没修（clippy 的
+        // dead_code 只会报「写了没接」，这里把接线本身钉住）。
+        let src = include_str!("dup_files.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            prod.contains("let verified = verified_duplicates(&batch_paths);"),
+            "scan() 没有走 fail-closed 的副本筛选"
+        );
+        assert!(
+            !prod.contains(".metadata().map(|m| m.len()).unwrap_or(0)"),
+            "体积静默降级为 0 的旧实现又回来了"
+        );
+    }
 
     #[test]
     fn partial_and_full_hash_agree_on_identical_files() {

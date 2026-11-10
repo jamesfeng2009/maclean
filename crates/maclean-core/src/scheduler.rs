@@ -493,8 +493,18 @@ mod tests {
     fn uninstall_command_targets_the_same_task_name() {
         // 卸载命令必须与安装时用同一个任务标识，否则会留下一个永远跑的孤儿任务
         let (prog, args) = uninstall_command();
-        assert!(!prog.is_empty());
-        assert!(!args.is_empty());
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            assert!(!prog.is_empty());
+            assert!(!args.is_empty());
+        }
+        // Linux 尚无定时任务实现：卸载命令必须显式为空（fail-closed），
+        // 不能伪装成调用一个不存在的调度器。
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            assert!(prog.is_empty());
+            assert!(args.is_empty());
+        }
         #[cfg(target_os = "macos")]
         {
             assert_eq!(prog, "launchctl");

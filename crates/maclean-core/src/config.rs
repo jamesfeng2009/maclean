@@ -169,7 +169,7 @@ pub fn load_config_checked() -> Result<AppConfig, String> {
 /// "使用默认设置"就万事大吉；`save_config` 会在写盘前复核，损坏文件一律
 /// 拒绝覆盖，用户数据不会被默认值冲掉。是否重置由用户决定（见 `reset_config`）。
 pub fn load_config() -> AppConfig {
-    match load_config_checked() {
+    let cfg = match load_config_checked() {
         Ok(cfg) => cfg,
         Err(e) => {
             crate::logger::error(&format!(
@@ -178,6 +178,67 @@ pub fn load_config() -> AppConfig {
             ));
             AppConfig::default()
         }
+    };
+    // CORE-U03：配置「加载/应用处」把 settings_scan_all_disks 灌进运行期开关。
+    apply_runtime_config(&cfg);
+    cfg
+}
+
+// =========================================================================
+//  CORE-U03 · settings_scan_all_disks 接线
+//
+//  背景：windows_apps::should_scan_all_disks() = AtomicBool || 环境变量，是 OR
+//  关系；但此前 settings_scan_all_disks 字段零读取、set_scan_all_disks 零调用，
+//  config=true 时 AtomicBool 恒 false，只能靠 MACLEAN_SCAN_ALL_DISKS 生效。
+//  这里在 load_config() 里把 config 值灌进 set_scan_all_disks，且**不破坏** OR：
+//  只按有效值置位 true、绝不复位 false（复位会清掉别人已置位的 true，且环境
+//  变量由 should_scan_all_disks 自己的 OR 分支独立承担，无需在此固化）。
+// =========================================================================
+
+/// CORE-U03 · 「扫描全部磁盘」有效判定（纯逻辑、跨平台、入参注入）。
+/// 与 windows_apps::should_scan_all_disks 一致：程序内开关（config 置位）与
+/// 环境变量 OR，任一为真即扫全部磁盘（环境变量优先级不被接线覆盖）。
+pub fn scan_all_disks_enabled(runtime_flag: bool, env_flag: bool) -> bool {
+    runtime_flag || env_flag
+}
+
+/// CORE-U03 · 环境变量真值解析（纯逻辑，入参注入；测试不碰真实进程环境）。
+pub fn parse_scan_all_disks_env(raw: Option<&str>) -> bool {
+    raw.map(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+    .unwrap_or(false)
+}
+
+/// CORE-U03 · 把 config 灌进运行期开关（真实生产调用点，setter 注入）。
+///
+/// `cfg.settings_scan_all_disks` 在此被真实读取；`env_flag` 由调用方注入
+/// （生产读环境变量、测试注入定值，避免机器相关夹具）。只按 OR 有效值置位
+/// true、绝不复位 false。setter 注入：生产在 Windows 注入真实的
+/// `windows_apps::set_scan_all_disks`，非 Windows 注入 no-op。
+pub fn apply_scan_all_disks<F: FnOnce(bool)>(cfg: &AppConfig, env_flag: bool, set: F) {
+    if scan_all_disks_enabled(cfg.settings_scan_all_disks, env_flag) {
+        set(true);
+    }
+}
+
+/// CORE-U03 · load_config() 的应用钩子：平台分支只在 Windows 下发真实开关。
+fn apply_runtime_config(cfg: &AppConfig) {
+    let env_flag =
+        parse_scan_all_disks_env(std::env::var("MACLEAN_SCAN_ALL_DISKS").ok().as_deref());
+    #[cfg(target_os = "windows")]
+    {
+        apply_scan_all_disks(cfg, env_flag, |v| {
+            crate::scanner::windows_apps::set_scan_all_disks(v);
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 非 Windows 无该运行期开关：仍跑同一套纯逻辑判定，setter 为 no-op。
+        apply_scan_all_disks(cfg, env_flag, |_v| {});
     }
 }
 
@@ -333,6 +394,48 @@ pub fn import_config(src_dir: &std::path::Path) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_u03_config_flag_enables_all_disks_without_env() {
+        // 跨平台纯逻辑、入参注入：不碰真实进程环境、不硬编码开发机绝对路径。
+        // 反向验证：把 `||` 改成 `&&`、或把 apply_scan_all_disks 改成无条件
+        // set(cfg.settings_scan_all_disks)（复位 false），下面断言立刻红。
+        assert!(
+            scan_all_disks_enabled(true, false),
+            "config=true 不应依赖环境变量即可扫全部磁盘"
+        );
+        assert!(
+            scan_all_disks_enabled(false, true),
+            "环境变量优先级必须保留（OR 关系）"
+        );
+        assert!(!scan_all_disks_enabled(false, false));
+        assert!(parse_scan_all_disks_env(Some("1")));
+        assert!(parse_scan_all_disks_env(Some(" YES ")));
+        assert!(parse_scan_all_disks_env(Some("on")));
+        assert!(!parse_scan_all_disks_env(Some("0")));
+        assert!(!parse_scan_all_disks_env(None));
+
+        let cfg_true = AppConfig {
+            settings_scan_all_disks: true,
+            ..Default::default()
+        };
+        let cfg_false = AppConfig {
+            settings_scan_all_disks: false,
+            ..Default::default()
+        };
+        let mut calls: Vec<bool> = Vec::new();
+        // config=true, env=false → 下发 true（config 独立生效）
+        apply_scan_all_disks(&cfg_true, false, |v| calls.push(v));
+        assert_eq!(calls, vec![true], "config=true 必须下发 true");
+        // config=false, env=true → 仍下发 true（环境变量优先级不被覆盖）
+        calls.clear();
+        apply_scan_all_disks(&cfg_false, true, |v| calls.push(v));
+        assert_eq!(calls, vec![true], "env=true 仍应开启扫描");
+        // config=false, env=false → 不下发（绝不复位已置位的 true）
+        calls.clear();
+        apply_scan_all_disks(&cfg_false, false, |v| calls.push(v));
+        assert!(calls.is_empty(), "不得下发 false 复位 OR 开关");
+    }
 
     #[test]
     fn a12_broken_config_is_preserved_and_never_overwritten_by_a_default_save() {

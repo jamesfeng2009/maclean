@@ -18,6 +18,7 @@
 //! maclean scan / clean / schedule / check-disk / list / apps / uninstall
 //! maclean system-data / apfs / log / backups / restore / startup / optimize
 //! maclean dup-ignore
+//! maclean residuals / restore-last   （仅 Windows 破坏性命令，--yes 才执行）
 //! ```
 //! E-14：system-data 与 apfs（list / delete）是已实现的公开命令，
 //! 命令集以 `docs/cli-contract.md` §2 为准。

@@ -193,6 +193,28 @@ pub enum Commands {
         id: String,
     },
 
+    /// Windows: 列出 / 清理应用卸载残留（注册表 / 环境变量 / 文件）
+    ///
+    /// 默认只列出不删除；加 --yes 才按 deletable 派发清理，且每个删除出口
+    /// 都过 safety::check_path_safety_with_category。非 Windows 明确返回
+    /// 「仅 Windows 可用」，不静默成功。
+    Residuals {
+        /// 确认执行清理（缺省只列出，非交互环境必须显式携带才真删）
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Windows: 还原上次注册表备份（reg import，高风险写操作）
+    ///
+    /// 默认只显示最近备份摘要；加 --yes 才真正执行还原，且复用 reg_safety
+    /// 既有目标校验（备份目录内 + 子树 + canonicalize），绝不绕过。
+    /// 非 Windows 明确不支持。
+    RestoreLast {
+        /// 确认执行 reg import（高风险写操作，必须显式携带）
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// macOS 启动项管理（LaunchAgents / LaunchDaemons）
     Startup {
         #[command(subcommand)]
@@ -353,6 +375,33 @@ mod tests {
     }
 
     #[test]
+    fn residuals_and_restore_last_parse_with_yes_flag() {
+        // CORE-U01/U02：两个 Windows 破坏性命令必须可从命令行到达，且 --yes
+        // 是「列出/预览」与「真删/真还原」的唯一分界。反向验证：删掉任一
+        // 变体或 --yes 字段，这里立刻红。
+        let list = Cli::try_parse_from(["maclean", "residuals"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Some(Commands::Residuals { yes: false })
+        ));
+        let clean = Cli::try_parse_from(["maclean", "residuals", "--yes"]).unwrap();
+        assert!(matches!(
+            clean.command,
+            Some(Commands::Residuals { yes: true })
+        ));
+        let preview = Cli::try_parse_from(["maclean", "restore-last"]).unwrap();
+        assert!(matches!(
+            preview.command,
+            Some(Commands::RestoreLast { yes: false })
+        ));
+        let restore = Cli::try_parse_from(["maclean", "restore-last", "--yes"]).unwrap();
+        assert!(matches!(
+            restore.command,
+            Some(Commands::RestoreLast { yes: true })
+        ));
+    }
+
+    #[test]
     fn full_command_set_has_all_public_and_pro_commands() {
         // 带必需子命令/参数的命令单独验证；其余命令可裸解析
         for cmd in [
@@ -364,6 +413,8 @@ mod tests {
             "apps",
             "log",
             "backups",
+            "residuals",
+            "restore-last",
             "history",
             "growth",
             "forecast",
@@ -486,6 +537,8 @@ mod tests {
             "log",
             "backups",
             "restore",
+            "residuals",
+            "restore-last",
             "startup",
             "optimize",
             "dup-ignore",

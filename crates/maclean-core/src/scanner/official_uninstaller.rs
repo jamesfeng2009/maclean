@@ -159,7 +159,14 @@ pub fn find_official_uninstaller(app_path: &str, app_name: &str) -> Option<Offic
 
     // 1) 包内：只在辅助目录里找
     for sub in BUNDLE_SEARCH_DIRS {
-        let dir = app.join(sub);
+        // 常量用 `Contents/Helpers` 这种 POSIX 形态书写。Windows 上
+        // `join("Contents/Helpers")` 会把这段 `/` 原样留在路径里，生成
+        // `...\Foo.app\Contents/Helpers\...` 的混合分隔符：目录能打开，
+        // 但和调用方按组件拼出的路径不相等，路径比较/展示都会出错。
+        // 按组件逐段 join，三平台都产出本平台原生形态。
+        let dir = sub
+            .split('/')
+            .fold(app.to_path_buf(), |p, comp| p.join(comp));
         if let Some(u) = scan_dir(&dir, &self_name, false) {
             return Some(u);
         }
@@ -291,7 +298,14 @@ mod tests {
         let app = base.join("Foo.app");
         let helpers = app.join("Contents").join("Helpers");
         std::fs::create_dir_all(&helpers).unwrap();
-        let exe = helpers.join("uninstall_foo.sh");
+        // Windows 侧 `is_executable` 按扩展名判定（.exe/.bat/.cmd/.ps1），
+        // `.sh` 不是可执行卸载器；Unix 侧仍按执行位。两边都验证同一条
+        // Contents/Helpers 包内搜索链。
+        let exe = if cfg!(windows) {
+            helpers.join("uninstall_foo.exe")
+        } else {
+            helpers.join("uninstall_foo.sh")
+        };
         std::fs::write(&exe, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {

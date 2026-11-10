@@ -70,8 +70,9 @@ impl CleanRule {
     /// 该规则是否适用于给定 OS（H-01：纯逻辑，os 由入参传入，
     /// macos / windows / 其它 三个分支都能在开发机上真跑、真测）。
     fn matches_platform_for(&self, os: &str) -> bool {
-        matches!(self.platform.as_str(), "all" | "macos" if os == "macos")
-            || matches!(self.platform.as_str(), "all" | "windows" if os == "windows")
+        // "all" 是「跨平台」，不能塞进某个具体 OS 的守卫里：旧写法把 36 条
+        // platform="all" 的内置规则在 Linux 上全部拒掉（加载数为 0）。
+        self.platform == "all" || self.platform.as_str() == os
     }
 
     /// 该规则是否适用于当前平台（生产入口，委托给纯逻辑）。
@@ -395,8 +396,11 @@ mod tests {
 
     #[test]
     fn builtin_rules_full_coverage_2026_09() {
-        // P0：开发者缓存/AI/容器全覆盖 —— 总数与类别断言
-        let rules = RuleScanner::load_builtin();
+        // P0：开发者缓存/AI/容器全覆盖 —— 这是「内置规则文件」的属性，与当前
+        // OS 无关。load_builtin() 会按平台过滤（Linux 天然少 8 条 macos 规则），
+        // 拿它数总数会把「平台过滤正常」误判成「文件缺规则」。
+        let rules: Vec<CleanRule> =
+            serde_json::from_str(BUILTIN_RULES_JSON).expect("内置规则 JSON 必须可解析");
         let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
         assert!(rules.len() >= 40, "规则总数应 >= 40，实际 {}", rules.len());
 
@@ -443,6 +447,19 @@ mod tests {
         assert!(
             !vscode.required_stopped_processes.is_empty(),
             "vscode 应锁定进程"
+        );
+
+        // 生产入口仍要按平台过滤：Linux 加载 36 条 all、macOS 加载全部，
+        // 但绝不能因平台分支写错而一条都不加载（CI 首跑的真实回归）。
+        let loaded = RuleScanner::load_builtin();
+        assert!(
+            loaded.len() >= 8,
+            "当前平台加载的内置规则过少: {}",
+            loaded.len()
+        );
+        assert!(
+            loaded.iter().all(|r| r.matches_platform()),
+            "加载了不属于当前平台的规则"
         );
     }
 
@@ -519,6 +536,8 @@ mod tests {
         // H-01：平台过滤改表驱动具体输入，不再写
         // `matches_platform() == (OS == "windows")` 这种「改坏实现仍绿」的恒等式。
         // 反向验证：把 matches_platform_for 的 os 守卫去掉 / 改错，下面用例必红。
+        // "all" 的语义是跨平台；旧表把 ("all","linux") 写成 false，等于把
+        // 「Linux 加载不到内置规则」这个 bug 固化成期望 —— 已订正。
         let mk = |platform: &str| CleanRule {
             id: "t".into(),
             name_key: "x".into(),
@@ -535,7 +554,8 @@ mod tests {
         let cases = [
             ("all", "macos", true),
             ("all", "windows", true),
-            ("all", "linux", false),
+            ("all", "linux", true),
+            ("all", "freebsd", true),
             ("macos", "macos", true),
             ("macos", "windows", false),
             ("macos", "linux", false),

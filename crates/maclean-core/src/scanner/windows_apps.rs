@@ -3568,6 +3568,24 @@ pub fn clean_all_residuals(residual: &UninstallResidual) -> (usize, usize, usize
     (reg_cleaned, env_cleaned, fs_cleaned)
 }
 
+/// CORE-U01 · 只读扫描：列出当前已安装应用可检出的卸载残留。
+///
+/// 不运行卸载程序、不删除任何东西（`maclean residuals` 的「仅列出」数据源），
+/// 加 --yes 后 CLI 把同一份清单交给 [`clean_selected_residuals`] 清理。
+/// 复用三个 `scan_*_residual`，与 `clean_uninstall` 的扫描阶段同一套判定。
+pub fn scan_installed_residuals() -> Vec<UninstallResidual> {
+    get_installed_apps()
+        .iter()
+        .filter(|app| !app.name.trim().is_empty())
+        .map(|app| UninstallResidual {
+            registry: scan_registry_residual(&app.name, app.install_location.as_deref()),
+            env_vars: scan_env_var_residual(&app.name, app.install_location.as_deref()),
+            filesystem: scan_filesystem_residual(&app.name),
+        })
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
 /// D-01 · 「清理选中残留」的公开入口（ops 侧在 `clean_uninstall` 之后调用）。
 /// 返回 (成功, 失败, 跳过) 三个计数。
 ///

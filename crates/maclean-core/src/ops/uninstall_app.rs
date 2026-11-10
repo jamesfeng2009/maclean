@@ -288,6 +288,12 @@ pub fn uninstall_app(
                     report.restorable = restorable;
                     report.total = total;
                 }
+                // CORE-U04：ResidualCleaned 是 cfg(windows) 变体，显式 arm 输出
+                // 可读信息（复用 ops 的生产摘要），不再被 `_ => {}` 静默吞掉。
+                #[cfg(target_os = "windows")]
+                DeleteMessage::ResidualCleaned(reg, env, files) => {
+                    logger::info(&crate::ops::residual_cleaned_summary(reg, env, files));
+                }
                 DeleteMessage::Done => break,
                 _ => {}
             }
@@ -393,6 +399,41 @@ pub(crate) fn tcc_domain_of_path(path: &str) -> TccDomain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_u04_residual_cleaned_has_explicit_match_arm() {
+        // CORE-U04：ResidualCleaned 是 cfg(windows) 变体，本机（macOS）无法
+        // 构造该枚举值，故用源码级断言钉住「生产 match 有显式 arm」。
+        // 反向验证：删掉 / 注释掉该 arm，下面两条断言立刻红。
+        let src = include_str!("uninstall_app.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        let has_arm = prod.lines().any(|l| {
+            let t = l.trim();
+            !t.starts_with("//")
+                && !t.starts_with("/*")
+                && !t.starts_with('*')
+                && t.contains("DeleteMessage::ResidualCleaned")
+        });
+        assert!(
+            has_arm,
+            "消费端缺少 DeleteMessage::ResidualCleaned 显式 arm"
+        );
+        assert!(
+            prod.lines().any(|l| {
+                let t = l.trim();
+                !t.starts_with("//") && t.contains("residual_cleaned_summary")
+            }),
+            "ResidualCleaned arm 没有输出可读摘要"
+        );
+    }
+
+    #[test]
+    fn core_u04_residual_cleaned_summary_is_readable() {
+        // 行为测试：摘要把三个计数都渲染出来，不是空串。
+        let s = crate::ops::residual_cleaned_summary(1, 2, 3);
+        assert!(s.contains("残留清理完成"), "摘要不可读: {s}");
+        assert!(s.contains('1') && s.contains('2') && s.contains('3'));
+    }
 
     #[test]
     fn invalid_paths_are_rejected_without_touching_fs() {

@@ -144,6 +144,8 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Log { .. } => "log",
         Commands::Backups { .. } => "backups",
         Commands::Restore { .. } => "restore",
+        Commands::Residuals { .. } => "residuals",
+        Commands::RestoreLast { .. } => "restore-last",
         Commands::Startup { .. } => "startup",
         Commands::Optimize { .. } => "optimize",
         Commands::DupIgnore { .. } => "dup-ignore",
@@ -205,6 +207,9 @@ fn run_command(cmd: Commands, format: OutputFormat, color: bool, no_progress: bo
         Commands::Backups { restorable_only } => cmd_backups(restorable_only, format),
         // 还原结果涉及逐个路径的成功/失败，JSON 更有用（脚本可据此重试）
         Commands::Restore { id } => cmd_restore(&id, format),
+        // CORE-U01/U02：Windows 破坏性命令，缺省只列出 / 只预览，--yes 才执行
+        Commands::Residuals { yes } => cmd_residuals(yes, format),
+        Commands::RestoreLast { yes } => cmd_restore_last(yes, format),
         Commands::Startup { action } => cmd_startup(action, format, color),
         Commands::Optimize { action } => cmd_optimize(action, format, color),
         Commands::DupIgnore { action } => cmd_dup_ignore(action, format),
@@ -294,6 +299,7 @@ fn tab_label_for(key: &str) -> &str {
 fn scan_tab(tab_name: &str) -> (Vec<ScanItem>, bool) {
     // A-07b：扫描前声明准入根。删除阶段的第 8 层只放行这些根下的路径；
     // 不注册会让所有清理项在删除时被拦，等于关停功能。
+    // CORE-10：用户数据目录不在常驻表里，由 large-files 扫描器按需注册。
     maclean_core::provenance::register_standard_scan_roots();
     // watchdog：坏目录（APFS 异常等）会让 readdir 永久阻塞；超时返回空并提示，
     // 进程不再无限挂起（超时 tab 计入 EXIT_WARNINGS=5，E-01 契约口径）。
@@ -2386,6 +2392,198 @@ fn cmd_restore(id: &str, format: OutputFormat) -> u8 {
 }
 
 // =========================================================================
+//  CORE-U01 / CORE-U02 · Windows 破坏性命令
+//
+//  CLI 层不含任何 cfg(windows) 代码块：平台判定用 cfg! 注入
+//  destructive_decision，真实业务全部委托 core 的 run_residuals /
+//  run_restore_last（其 Windows 实现由 core 的交叉编译门禁验证）。
+// =========================================================================
+
+#[derive(serde::Serialize)]
+struct JsonResiduals<'a> {
+    command: &'a str,
+    preview: bool,
+    yes: bool,
+    total: usize,
+    deletable: usize,
+    lines: &'a [maclean_core::ops::ResidualLine],
+}
+
+#[derive(serde::Serialize)]
+struct JsonResidualsCleaned {
+    command: &'static str,
+    preview: bool,
+    yes: bool,
+    success: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+/// CORE-U01 · `maclean residuals`：列出 / 清理卸载残留（仅 Windows）。
+///
+/// - 平台闸门：`destructive_decision(cfg!(windows), yes)` 为 Unsupported 时
+///   明确返回「仅 Windows 可用」错误信封，绝不静默成功；
+/// - 不带 --yes：只列出（core 返回 Preview），输出走现有 OutputFormat；
+/// - 带 --yes：core 调 `windows_apps::clean_selected_residuals` 真删（按
+///   deletable 派发，删除出口过 `check_path_safety_with_category`）。
+fn cmd_residuals(yes: bool, format: OutputFormat) -> u8 {
+    if matches!(
+        maclean_core::ops::destructive_decision(cfg!(target_os = "windows"), yes),
+        maclean_core::ops::DestructiveDecision::Unsupported
+    ) {
+        return emit_error(
+            format,
+            EXIT_FAILURE,
+            "maclean residuals 仅 Windows 可用（残留扫描依赖 Windows 注册表与盘符）",
+        );
+    }
+
+    let outcome = maclean_core::ops::run_residuals(yes);
+    match outcome {
+        maclean_core::ops::ResidualsOutcome::Unsupported => emit_error(
+            format,
+            EXIT_FAILURE,
+            "maclean residuals 仅 Windows 可用（残留扫描依赖 Windows 注册表与盘符）",
+        ),
+        maclean_core::ops::ResidualsOutcome::Preview {
+            lines,
+            total,
+            deletable,
+        } => {
+            // 只列出，不删除；输出走现有 OutputFormat（human / json / jsonl）
+            if format == OutputFormat::Human {
+                println!(
+                    "\n卸载残留（共 {} 项，可清理 {} 项）—— 仅列出，未删除：\n",
+                    total, deletable
+                );
+                for l in &lines {
+                    let mark = if l.deletable { "✓" } else { "⛔" };
+                    let reason = if l.reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", l.reason)
+                    };
+                    println!("  {} {:<10} {}{}", mark, l.kind, l.target, reason);
+                }
+                println!("\n确认清理请加 --yes（maclean residuals --yes）");
+            } else {
+                emit_json(
+                    &JsonResiduals {
+                        command: "residuals",
+                        preview: true,
+                        yes,
+                        total,
+                        deletable,
+                        lines: &lines,
+                    },
+                    format,
+                    true,
+                );
+            }
+            EXIT_OK
+        }
+        maclean_core::ops::ResidualsOutcome::Cleaned {
+            success,
+            failed,
+            skipped,
+        } => {
+            let code = if failed > 0 { EXIT_WARNINGS } else { EXIT_OK };
+            let status = if failed > 0 {
+                Status::Warnings
+            } else {
+                Status::Ok
+            };
+            if format == OutputFormat::Human {
+                println!(
+                    "\n残留清理完成：成功 {}，失败 {}，跳过 {}",
+                    success, failed, skipped
+                );
+            } else {
+                emit_json_status(
+                    &JsonResidualsCleaned {
+                        command: "residuals",
+                        preview: false,
+                        yes,
+                        success,
+                        failed,
+                        skipped,
+                    },
+                    format,
+                    true,
+                    status,
+                );
+            }
+            code
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct JsonRestoreLast<'a> {
+    command: &'a str,
+    yes: bool,
+    status: &'a str,
+    message: &'a str,
+}
+
+/// CORE-U02 · `maclean restore-last`：还原上次注册表备份（仅 Windows）。
+///
+/// `reg import` 是高风险写操作：只有 --yes 才让 core 执行 `restore_last_backup`
+/// （其内部复用 reg_safety 目标校验，绝不绕过）；缺省只显示最近备份摘要。
+/// i18n 的 restore_last_* 文案经 `restore_last_message` 真正被取用。
+fn cmd_restore_last(yes: bool, format: OutputFormat) -> u8 {
+    if matches!(
+        maclean_core::ops::destructive_decision(cfg!(target_os = "windows"), yes),
+        maclean_core::ops::DestructiveDecision::Unsupported
+    ) {
+        return emit_error(
+            format,
+            EXIT_FAILURE,
+            "maclean restore-last 仅 Windows 可用（依赖 reg import 与注册表备份目录）",
+        );
+    }
+
+    let outcome = maclean_core::ops::run_restore_last(yes);
+    if let maclean_core::ops::RestoreLastOutcome::Unsupported = &outcome {
+        return emit_error(format, EXIT_FAILURE, "maclean restore-last 仅 Windows 可用");
+    }
+    let lang_en = maclean_core::config::load_config().lang_en;
+    let message = maclean_core::ops::restore_last_message(lang_en, &outcome);
+    let status = match &outcome {
+        maclean_core::ops::RestoreLastOutcome::Preview { .. } => "preview",
+        maclean_core::ops::RestoreLastOutcome::NoBackup => "no_backup",
+        maclean_core::ops::RestoreLastOutcome::Restored { .. } => "restored",
+        maclean_core::ops::RestoreLastOutcome::Failed { .. } => "failed",
+        maclean_core::ops::RestoreLastOutcome::Unsupported => "unsupported",
+    };
+    let code = match &outcome {
+        maclean_core::ops::RestoreLastOutcome::Failed { .. } => EXIT_FAILURE,
+        _ => EXIT_OK,
+    };
+
+    if format == OutputFormat::Human {
+        println!("{message}");
+        if status == "preview" {
+            println!("确认还原请加 --yes（reg import 为高风险写操作）");
+        }
+    } else if code == EXIT_FAILURE {
+        emit_error(format, EXIT_FAILURE, message);
+    } else {
+        emit_json(
+            &JsonRestoreLast {
+                command: "restore-last",
+                yes,
+                status,
+                message: &message,
+            },
+            format,
+            true,
+        );
+    }
+    code
+}
+
+// =========================================================================
 //  磁盘信息获取（跨平台，委托给 platform 模块）
 // =========================================================================
 
@@ -3290,6 +3488,48 @@ mod tests {
     }
 
     #[test]
+    fn residuals_and_restore_last_are_wired_into_dispatch() {
+        // CORE-U01/U02：命令可达 + 生产 dispatch 真实调用 core 入口 + 平台闸门。
+        // 反向验证：删掉任一变体 / 分派臂 / core 调用，下面断言立刻红。
+        assert!(Cli::try_parse_from(["maclean", "residuals"]).is_ok());
+        assert!(Cli::try_parse_from(["maclean", "residuals", "--yes"]).is_ok());
+        assert!(Cli::try_parse_from(["maclean", "restore-last"]).is_ok());
+        assert!(Cli::try_parse_from(["maclean", "restore-last", "--yes"]).is_ok());
+
+        let src = include_str!("handler.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            has_live_call(prod, "cmd_residuals(yes, format)"),
+            "dispatch 缺少 residuals 分派臂"
+        );
+        assert!(
+            has_live_call(prod, "cmd_restore_last(yes, format)"),
+            "dispatch 缺少 restore-last 分派臂"
+        );
+        assert!(
+            has_live_call(prod, "maclean_core::ops::run_residuals(yes)"),
+            "cmd_residuals 未接 core 生产入口"
+        );
+        assert!(
+            has_live_call(prod, "maclean_core::ops::run_restore_last(yes)"),
+            "cmd_restore_last 未接 core 生产入口"
+        );
+        // 非 Windows 明确拒绝（平台闸门用 cfg! 注入，不静默成功）
+        assert!(
+            has_live_call(
+                prod,
+                "destructive_decision(cfg!(target_os = \"windows\"), yes)"
+            ),
+            "缺少平台闸门，非 Windows 会静默成功"
+        );
+        // i18n 文案真正被取用
+        assert!(
+            has_live_call(prod, "restore_last_message(lang_en, &outcome)"),
+            "restore_last_* 文案未被取用"
+        );
+    }
+
+    #[test]
     fn schedule_command_is_wired_with_its_flags() {
         // 定时清理没有命令行入口的话，"应用没开"这个主场景就完全覆盖不到。
         assert!(Cli::try_parse_from(["maclean", "schedule"]).is_ok());
@@ -3340,16 +3580,31 @@ mod tests {
     //  所以这里用源码级断言钉住接线，防止有人把校验删回去。
     // -----------------------------------------------------------------
 
+    /// CORE-05：源码级断言只认「活的」代码行。把调用注释掉但保留字符串、
+    /// 或塞进块注释里，都不算接线（参考 platform/reg_safety.rs 的 H-02）。
+    fn has_live_call(body: &str, needle: &str) -> bool {
+        body.lines().any(|line| {
+            let t = line.trim();
+            !t.starts_with("//")
+                && !t.starts_with("/*")
+                && !t.starts_with('*')
+                && t.contains(needle)
+        })
+    }
+
     #[test]
     fn clean_command_runs_the_same_pre_delete_gate_as_the_gui() {
+        // CORE-05：先按 `\nmod tests` 切出生产段，避免测试模块自己的字面量
+        // 命中；再断言真实调用表达式，而不是裸字符串包含。
         let src = include_str!("handler.rs");
-        let body = src[src.find("fn cmd_clean").expect("cmd_clean 不见了")..]
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        let body = prod[prod.find("fn cmd_clean").expect("cmd_clean 不见了")..]
             .split("\nfn ")
             .next()
             .unwrap();
 
         assert!(
-            body.contains("sanitize_before_delete("),
+            has_live_call(body, "= maclean_core::ops::sanitize_before_delete("),
             "CLI 删除前没有复做安全校验，等于绕过保护直接删"
         );
         // 删除循环必须遍历校验放行后的列表，而不是原始扫描结果。
@@ -3371,15 +3626,40 @@ mod tests {
 
     #[test]
     fn clean_command_reports_intercepted_items_instead_of_deleting_them() {
-        // 被拦截的项必须显式告知用户，不能静默跳过 —— 否则用户以为删干净了
+        // 被拦截的项必须显式告知用户，不能静默跳过 —— 否则用户以为删干净了。
+        // CORE-05：同样按 `\nmod tests` 切生产段 + 只认活代码行；并且必须
+        // 钉住「拦截结果真的来自安全闸门」，否则把调用注释掉、只留一句打印
+        // 文案也能骗过断言（旧实现的假绿）。
         let src = include_str!("handler.rs");
-        let body = src[src.find("fn cmd_clean").expect("cmd_clean 不见了")..]
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        let body = prod[prod.find("fn cmd_clean").expect("cmd_clean 不见了")..]
             .split("\nfn ")
             .next()
             .unwrap();
         assert!(
-            body.contains("已拦截"),
+            has_live_call(body, "= maclean_core::ops::sanitize_before_delete("),
+            "没有真实的拦截结果来源，打印「已拦截」只是摆设"
+        );
+        assert!(
+            has_live_call(body, "for (path, _category, reason) in &rejected"),
+            "拦截结果没有被逐条打印"
+        );
+        assert!(
+            has_live_call(body, "已拦截"),
             "被安全校验拦下的项没有打印出来，用户无从得知"
         );
+    }
+
+    #[test]
+    fn clean_pre_delete_gate_really_rejects_unsafe_paths() {
+        // CORE-05 的第二个影响：源码级断言只能证明「调用还在」，证明不了
+        // 「闸门真的会拦」。把 sanitize_before_delete 改成恒放行
+        //（return (items, vec![])）时，这条行为断言必须变红。
+        let (allowed, rejected) = maclean_core::ops::sanitize_before_delete(
+            vec![("/".to_string(), "系统缓存".to_string())],
+            false,
+        );
+        assert!(allowed.is_empty(), "根目录必须被删除前闸门拦下");
+        assert_eq!(rejected.len(), 1, "被拦项必须显式回报，不能静默丢弃");
     }
 }

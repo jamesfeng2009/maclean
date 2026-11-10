@@ -110,7 +110,19 @@ fn path_is_deletable(p: &str) -> bool {
 /// 复用 `scanner/mod.rs::retain_safe_batch_members` 的「筛掉成员后回减
 /// size_bytes」口径，但缓存复核不触发递归统计，避免让缓存失去意义。
 fn batch_member_backoff(bp: &str) -> u64 {
-    std::fs::symlink_metadata(bp).map(|m| m.len()).unwrap_or(0)
+    let Ok(meta) = std::fs::symlink_metadata(bp) else {
+        return 0;
+    };
+    let len = meta.len();
+    if len == 0 && meta.file_type().is_symlink() {
+        // Windows 的符号链接 `symlink_metadata().len()` 常为 0：直接用它会让
+        // 「剔除失效成员」零回减，缓存里继续虚报可回收空间。与 Unix 侧
+        // 「按链接串长度回减」的既有口径对齐。
+        return std::fs::read_link(bp)
+            .map(|t| t.as_os_str().to_string_lossy().len() as u64)
+            .unwrap_or(0);
+    }
+    len
 }
 
 /// C-01：对 `batch_paths` 逐个做 TOCTOU 复核（存在且非软链），剔除失效成员、
@@ -652,15 +664,21 @@ mod tests {
         assert_eq!(entry.scan_time_ms, 2, "最终文件应是最后一次写入");
         assert_eq!(entry.items[0].size_bytes, 20);
 
+        // cache_dir() 在测试下是**所有 cache 用例共享**的目录，且测试并行跑。
+        // 另一个用例（test_tab_save_load）此刻可能正在写它自己的 .tmp 中间态，
+        // 扫全目录会把别人的中间文件误判成「原子写残留」（Linux runner 实测
+        // 偶发）。只统计本用例 tab 的临时文件，断言仍是严格的 0 个：本用例
+        // 的两次 save_cache 若留下任何半截文件，照样变红。
+        let own_prefix = format!(".{tab}.json.tmp.");
         let leftovers: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.contains(".tmp."))
+            .filter(|n| n.starts_with(&own_prefix))
             .collect();
         assert!(
             leftovers.is_empty(),
-            "原子写后不应留下 .tmp 文件: {leftovers:?}"
+            "原子写后不应留下本 tab 的 .tmp 文件: {leftovers:?}"
         );
 
         let _ = std::fs::remove_file(&real);

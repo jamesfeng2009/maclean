@@ -343,6 +343,10 @@ impl Scanner for LargeFileScanner {
         }
         let start = Instant::now();
         let home = home_dir();
+        // CORE-10：用户数据目录（Downloads / Desktop / Documents / 项目根）
+        // 不是常驻准入根，只有本类目扫描时才声明 —— 谁枚举谁声明，
+        // 且删除仍要求用户在大文件视图里主动勾选。
+        crate::provenance::register_large_file_roots(&home);
 
         // 大文件（递归单文件，按类型分类；放在前，默认视图）
         let mut result = scan_large_files(self.min_bytes);
@@ -628,9 +632,16 @@ mod tests {
 
         // 注入逻辑长度口径保持小文件用例确定性；生产入口用物理占用（C-06）。
         let got = collect_large_files_under_with(root, 5, logical_size);
+        // 相对路径统一成 POSIX 分隔符：Windows 的 `strip_prefix` 结果用 `\`，
+        // 断言里写 "a/big.mkv" 会因为平台分隔符不同而假红。
         let names: Vec<String> = got
             .iter()
-            .map(|(p, _)| p.strip_prefix(root).unwrap().to_string_lossy().to_string())
+            .map(|(p, _)| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
 
         assert!(
@@ -713,6 +724,53 @@ mod tests {
         assert!(
             production.contains("crate::scanner::sizecache::flush()"),
             "磁盘分析 scan 收尾必须调用 flush()，否则持久化增量缓存从不落盘"
+        );
+    }
+
+    #[test]
+    fn c10_registered_large_file_root_passes_delete_gate_and_really_deletes() {
+        // 验收「修口径没把功能改死」：模拟 scan() 声明根之后的完整删除链，
+        // 走真实的删除前闸门，并真的删掉一个临时文件。
+        //
+        // 这里刻意不碰 NSFileManager 废纸篓：macOS 的 large-files 删除恒走
+        // 系统回收 API，会把文件写进**用户真实** ~/.Trash 且可能弹授权窗，
+        // 不适合在测试里制造副作用。闸门放行后用 remove_file 验证可删性。
+        let home = std::env::temp_dir().join(format!("maclean_c10_e2e_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dl = home.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        let big = dl.join("big.bin");
+        std::fs::write(&big, vec![0xABu8; 4096]).unwrap();
+
+        crate::provenance::register_large_file_roots(&home);
+        assert!(
+            crate::provenance::is_vetted(&big),
+            "按需注册后大文件路径应通过来源准入"
+        );
+        let (allowed, rejected) = crate::ops::sanitize_before_delete(
+            vec![(big.to_string_lossy().into_owned(), "大文件".to_string())],
+            false,
+        );
+        assert!(
+            rejected.is_empty(),
+            "大文件不该被删除前闸门拦下: {rejected:?}"
+        );
+        assert_eq!(allowed.len(), 1, "删除清单必须包含这个大文件");
+        std::fs::remove_file(&big).unwrap();
+        assert!(!big.exists(), "闸门放行后文件应可被真实删除");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn c10_large_file_scan_declares_its_own_roots() {
+        // CORE-10：用户数据根已从常驻标准表移出，必须由本扫描器按需声明。
+        // 反向验证：删掉这行调用，clean --tab large-files 会在第 8 层被
+        // fail-closed 全拦下，这条断言必须变红。
+        let src = include_str!("large_files.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            prod.contains("crate::provenance::register_large_file_roots(&home)"),
+            "LargeFileScanner::scan 没有按需声明用户数据准入根"
         );
     }
 }

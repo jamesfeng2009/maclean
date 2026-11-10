@@ -1001,9 +1001,14 @@ fn is_allowed_associated_path(path: &Path, home: &Path) -> bool {
         return false;
     }
 
-    // 能解析就用真实路径比对（防符号链接穿越），否则退化为原路径
+    // 能解析就用真实路径比对（防符号链接穿越），否则退化为原路径。
+    // Windows 的 `canonicalize()` 带 `\\?\` verbatim 前缀，与注册表给出的
+    // `C:\...` 不是同一个 Prefix 组件，直接 `Path::starts_with` 会让整个
+    // 「关联文件必须在 home 内」的判定在 Windows 上恒 false。
     let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    roots.iter().any(|r| target.starts_with(r))
+    roots
+        .iter()
+        .any(|r| crate::provenance::path_is_under_key(&target, r))
 }
 
 /// 从 Info.plist 读取应用版本号

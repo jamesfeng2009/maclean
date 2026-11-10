@@ -35,8 +35,13 @@ impl DevCacheScanner {
 /// 准入根。这些子扫描产出的是可删缓存项，漏注册会让它们在删除阶段被第 8 层
 /// fail-closed 拦下（按模型设计，漏注册只「少删」不会误删）。只登记下列窄的
 /// 工具级目录，**绝不登记整个 `$HOME`** —— 那会把准入制退化回纯黑名单；
-/// 标准根表已覆盖的（Library/Caches、.cache、.cargo、go、Downloads、
+/// 标准根表已覆盖的（Library/Caches、.cache、.cargo、go、
 /// /Library/Developer 等）不重复登记。
+///
+/// CORE-10：标准根表不再常驻登记用户数据目录。本扫描器确实会枚举
+/// `~/Downloads`、`~/Desktop` 下的安装包与项目缓存（见 scan_installers /
+/// scan_ai_models 等），按「谁枚举谁声明」自行登记这两个根；其余项目根
+/// 由 `LargeFileScanner` 按需注册，不在本模块常驻。
 fn register_dev_cache_roots() {
     let home = home_dir();
     for rel in [
@@ -51,7 +56,11 @@ fn register_dev_cache_roots() {
     ] {
         crate::provenance::register_root(&home.join(rel));
     }
-    // Homebrew Caskroom 旧版本缓存是绝对路径，不在 HOME_ROOTS 表内。
+    // CORE-10：用户数据根由实际枚举它的扫描器声明，不再依赖常驻标准表。
+    for rel in ["Downloads", "Desktop"] {
+        crate::provenance::register_root(&home.join(rel));
+    }
+    // Homebrew Caskroom 旧版本缓存是绝对路径，不在 STANDARD_HOME_ROOTS 表内。
     for p in ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"] {
         crate::provenance::register_root(Path::new(p));
     }
@@ -3309,9 +3318,12 @@ mod tests {
         // C-03：Homebrew 整目录与其 downloads 子目录同时入列，父项
         // dir_size 已含子项，必须只保留父项，杜绝父子嵌套重复计体积。
         // 反向验证：把 dedup_items_by_path 的包含剔除去掉，子项会留下 → 红。
-        let parent = "/Users/u/Library/Caches/Homebrew";
-        let child = "/Users/u/Library/Caches/Homebrew/downloads";
-        let items = vec![mk_dev_item(parent, 1000), mk_dev_item(child, 400)];
+        // 用真实 home 构造绝对路径：`/Users/u/...` 在 Windows 上只是
+        // rooted 而非 absolute，生产去重里的 `is_absolute()` 守卫会直接跳过。
+        let base = home_dir().join("Library/Caches/Homebrew");
+        let parent = base.to_string_lossy().into_owned();
+        let child = base.join("downloads").to_string_lossy().into_owned();
+        let items = vec![mk_dev_item(&parent, 1000), mk_dev_item(&child, 400)];
         let out = dedup_items_by_path(items);
         assert_eq!(out.len(), 1, "被父项包含的子项必须剔除");
         assert_eq!(out[0].path, parent);
