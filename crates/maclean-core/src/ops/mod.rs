@@ -1565,6 +1565,24 @@ pub fn start_delete(
                                 let deleted_ok = matches!(outcome, SingleDeleteOutcome::Deleted);
                                 if deleted_ok {
                                     success_count += 1;
+                                    // L1：批量项（如 __pycache__ 聚合项带 136 个子路径）过去
+                                    // 只在整批跑完后发一条汇总，期间调用方收不到任何事件 →
+                                    // 弹窗一直停在「正在准备删除…」，看起来像卡死。
+                                    // 这里逐条推送，进度与操作日志同步推进；汇总改 Info，
+                                    // 避免同一路径被重复计数。
+                                    let _ = tx.send(DeleteMessage::Log(
+                                        format!(
+                                            "✓ {}",
+                                            crate::i18n::tf_lang(
+                                                lang_en,
+                                                "log_deleted_member",
+                                                &[bp]
+                                            )
+                                        ),
+                                        bp.clone(),
+                                        category.clone(),
+                                        true,
+                                    ));
                                     // M-2：批量项真删掉也记备份清单
                                     let restorable = crate::backup::is_restorable_by_move(
                                         use_trash,
@@ -1636,9 +1654,16 @@ pub fn start_delete(
                                     ));
                                 }
                             }
-                            let _ = tx.send(DeleteMessage::Log(
-                                format!("✓ {}", crate::i18n::tf_lang(lang_en, "log_deleted", &[&category, &path, &success_count.to_string(), &fail_count.to_string()])),
-                                path.clone(), category.clone(), fail_count == 0));
+                            // L1：批量成员已逐条按路径推送并各自计入统计，这里只发
+                            // 过程提示（Info 不计入成功/失败/跳过），避免整批再被算 1 项。
+                            let _ = tx.send(DeleteMessage::Info(format!(
+                                "✓ {}",
+                                crate::i18n::tf_lang(
+                                    lang_en,
+                                    "log_deleted",
+                                    &[&category, &path, &success_count.to_string(), &fail_count.to_string()]
+                                )
+                            )));
                             // 聚合伪路径（如 "Monorepo: xxx (N 个子包)"）不是真实文件，
                             // 不落 delete.log —— 否则每轮必记一条 FAIL 虚高失败数、
                             // 弹窗报"失败 N 项"误导用户。真实路径仍正常记录。
