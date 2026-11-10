@@ -409,6 +409,48 @@ pub(crate) fn collect_app_paths() -> Vec<PathBuf> {
     collect_app_paths_with_home(&home_dir())
 }
 
+/// 应用目录枚举的兜底：`/Applications` / `~/Applications` 只用来「列出 .app」，
+/// 百来项、单次 `readdir` 本身是毫秒级；但旧实现一旦撞上繁忙期被看门狗判超时就直接
+/// 返回空向量——整个「已安装应用」模块随之变成「0 个应用 / 0 B」（真机复现过的部分
+/// 结果）。对这两个**关键且极小**的顶层目录改走三级兜底：
+/// 1) 常规看门狗路径（有界 IO 池 + 执行期超时）；
+/// 2) 直连 `std::fs::read_dir`（绕开闸门排队，本地 APFS 顶层目录基本不会真的卡住）；
+/// 3) 短退避后再直连一次。
+///
+/// 只有三级都失败才返回 `None`（调用方按「目录不可读」保守处理）。
+fn list_apps_dir(dir: &Path) -> Option<Vec<PathBuf>> {
+    if let Some(entries) = read_dir_with_timeout(dir) {
+        return Some(entries);
+    }
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                let mut out: Vec<PathBuf> = Vec::new();
+                for e in entries.flatten() {
+                    out.push(e.path());
+                }
+                crate::logger::warn(&format!(
+                    "[apps] 看门狗路径未能枚举应用目录，已直连 read_dir 兜底（第 {} 次，{} 项）: {}",
+                    attempt + 1,
+                    out.len(),
+                    dir.display()
+                ));
+                return Some(out);
+            }
+            Err(e) => {
+                crate::logger::warn(&format!(
+                    "[apps] 直连 read_dir 仍未读到应用目录（{e}）: {}",
+                    dir.display()
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// C-11 · home 由入参传入，便于注入「home 解析失败」的场景做行为测试。
 /// 空 home 直接返回空，绝不退化成相对 CWD 枚举（那样会把当前目录下的
 /// .app 标成可删）。
@@ -419,7 +461,7 @@ fn collect_app_paths_with_home(home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     // /Applications：仅顶层（保持原行为，避免扫进 Utilities 等系统工具）
-    if let Some(entries) = read_dir_with_timeout(Path::new("/Applications")) {
+    if let Some(entries) = list_apps_dir(Path::new("/Applications")) {
         for path in entries {
             if is_app_bundle(&path) {
                 paths.push(path);
@@ -429,7 +471,7 @@ fn collect_app_paths_with_home(home: &Path) -> Vec<PathBuf> {
 
     // ~/Applications：顶层 + 一层子目录
     let user_apps = home.join("Applications");
-    if let Some(entries) = read_dir_with_timeout(&user_apps) {
+    if let Some(entries) = list_apps_dir(&user_apps) {
         for path in entries {
             if is_app_bundle(&path) {
                 paths.push(path);

@@ -27,19 +27,17 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// C-14 · 一个阻塞 IO 任务：附带截止时间。
+/// C-14 修订 · 一个阻塞 IO 任务。
 ///
-/// 超时只放弃「取结果」，任务仍留在无界 channel 里排队；带上截止时间后，
-/// worker 取出时先判过期即跳过，不再真的执行一个已经被放弃的任务。
+/// 早期版本给任务带「提交时刻截止时间」，worker 取出时一旦过期就直接跳过不执行。
+/// 在繁忙机器上这会造成**误判**：任务先要在自适应并发闸门（繁忙时只放行 2 个）
+/// 后面排队，排队几十秒后到点被丢弃，调用方却把它记成「该目录枚举超时」，于是整段
+/// 子树被剪枝（实测 `/Applications` 顶层因此返回 0 项，应用模块直接空结果）。
+/// 现在任务不再带提交截止时间：**排队不是卡死**，看门狗只衡量真正执行的那一段时间。
 struct Task {
-    deadline: Instant,
     job: Box<dyn FnOnce() + Send + 'static>,
-}
-
-fn task_is_expired(deadline: Instant) -> bool {
-    Instant::now() >= deadline
 }
 
 struct Pool {
@@ -84,12 +82,7 @@ fn pool() -> &'static Pool {
                         };
                         match next {
                             Ok(task) => {
-                                // C-14：超时被放弃的任务仍排在无界 channel 里，
-                                // 取出后先判过期，不再执行（避免「超时了却照样跑」）。
-                                if task_is_expired(task.deadline) {
-                                    continue;
-                                }
-                                let Task { job, .. } = task;
+                                let Task { job } = task;
                                 // gated_run 负责自适应并发闸门（繁忙时限在途 IO）与执行
                                 // 延迟反馈；catch_unwind 兜底确保任务 panic 不杀死 worker
                                 //（否则池容量会悄悄缩小）。
@@ -112,11 +105,19 @@ fn pool() -> &'static Pool {
     })
 }
 
-/// 在有界 IO 池中执行阻塞操作 `f`，最多等待 `timeout`。
+/// 等「真正开始执行」的排队上限。超过它说明系统已经饱和到任务根本排不上，
+/// 此时放弃并上报拥塞，而不是无限期挂住调用方所在的扫描线程。
+const QUEUE_WAIT_LIMIT: Duration = Duration::from_secs(30);
+
+/// 在有界 IO 池中执行阻塞操作 `f`。
+///
+/// 计时口径（C-14 修订）：`timeout` 只约束**执行**这一段，从 worker 拿到并发名额、
+/// 真正开始跑 `f` 起算；任务的排队等待另用 [`QUEUE_WAIT_LIMIT`] 约束。这样繁忙机器上
+/// 「排在闸门后面」不会被误记成「目录枚举超时」而剪掉整段子树。
 ///
 /// - 正常完成：`Some(result)`。
-/// - 超时 / 池关闭 / `f` panic：`None`。超时后底层操作可能仍在某个 worker
-///   内阻塞（不可取消的内核 IO），但受线程池上界约束，不影响主流程。
+/// - 执行超时 / 排队超限 / 池关闭 / `f` panic：`None`。超时后底层操作可能仍在某个
+///   worker 内阻塞（不可取消的内核 IO），但受线程池上界约束，不影响主流程。
 ///
 /// 回传通道使用**无界** `mpsc::channel`：即便调用方已超时放弃接收，worker
 /// 完成后 `send` 也不会因此阻塞（结果留在缓冲区里随通道一起丢弃），避免
@@ -127,9 +128,11 @@ where
     R: Send + 'static,
 {
     let (tx, rx) = channel::<R>();
+    // 「已开始执行」信号：worker 拿到闸门名额后才发，调用方据此才开始计时。
+    let (started_tx, started_rx) = channel::<()>();
     let task = Task {
-        deadline: Instant::now() + timeout,
         job: Box::new(move || {
+            let _ = started_tx.send(());
             if let Ok(result) = catch_unwind(AssertUnwindSafe(f)) {
                 let _ = tx.send(result);
             }
@@ -138,6 +141,12 @@ where
     if pool().tx.send(task).is_err() {
         return None;
     }
+    // 1) 排队阶段：受闸门限流时可能要等，超过上限才放弃（这是真饱和，不是卡死）。
+    if started_rx.recv_timeout(QUEUE_WAIT_LIMIT).is_err() {
+        super::load::note_wait_timeout();
+        return None;
+    }
+    // 2) 执行阶段：看门狗预算从此刻起算。
     match rx.recv_timeout(timeout) {
         Ok(r) => Some(r),
         Err(err) => {
@@ -145,9 +154,6 @@ where
             // 全被释放却没发结果（任务 panic 被 catch_unwind 吞掉），与 IO
             // 拥塞无关，不能再误报给负载自适应。
             if should_note_congestion(&err) {
-                // 到点仍未拿到结果：可能是池内排队（繁忙期限流）也可能是内核
-                // IO 卡死。两者都驱动自适应并发下降；底层任务即便之后才完成
-                // 也只是被丢弃结果，受有界池上界约束，不影响主流程。
                 super::load::note_wait_timeout();
             }
             None
@@ -218,12 +224,22 @@ mod tests {
     }
 
     #[test]
-    fn c14_expired_task_is_skipped() {
-        assert!(!task_is_expired(Instant::now() + Duration::from_secs(60)));
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .unwrap_or_else(Instant::now);
-        assert!(task_is_expired(past));
+    fn c14_execution_timeout_still_enforced() {
+        // 执行期预算仍须生效：任务本身睡 200ms、预算 100ms → None（判为本次不可枚举）。
+        // 反向验证：把 recv_timeout 换成无界 recv，本用例必红。
+        let slow = run_with_timeout(
+            || {
+                std::thread::sleep(Duration::from_millis(200));
+                1u32
+            },
+            Duration::from_millis(100),
+        );
+        assert!(slow.is_none(), "执行超过预算必须判超时");
+        // 快任务照常拿到结果：预留 Gates 排队不影响小预算下的正常结果。
+        assert_eq!(
+            run_with_timeout(|| 7u32, Duration::from_millis(100)),
+            Some(7)
+        );
     }
 
     #[cfg(unix)]
