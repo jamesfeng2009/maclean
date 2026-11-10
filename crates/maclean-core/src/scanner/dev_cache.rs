@@ -24,6 +24,14 @@ use crate::safety;
 #[derive(Debug, Default)]
 pub struct DevCacheScanner;
 
+/// dev_cache 内部的子扫描数量（用于把「已完成段数」换算成模块内百分比）。
+/// macOS 19 段；非 macOS 少 5 个 macOS 专属段（xcode/homebrew/docker/ds_store/launchd）。
+#[cfg(target_os = "macos")]
+const TOTAL_SUBSCANS: usize = 19;
+/// 非 macOS 平台的子扫描数量（14 段）。
+#[cfg(not(target_os = "macos"))]
+const TOTAL_SUBSCANS: usize = 14;
+
 impl DevCacheScanner {
     /// 创建新的开发者缓存扫描器实例
     pub fn new() -> Self {
@@ -72,57 +80,95 @@ impl Scanner for DevCacheScanner {
         // 会被第 8 层拦下（见 register_dev_cache_roots 说明）。
         register_dev_cache_roots();
         let start = Instant::now();
+
+        // 二轮真机复测结论（2026-11-10）：dev_cache 内部再并行，会和全量体检的
+        // 模块级并行叠加——进程里同时枚举目录的线程从 3 个涨到 6 个，目录看门狗
+        // 把 /Applications、/Applications/Xcode.app/… 这类根目录判成「枚举超时」后
+        // 整段跳过，直接导致 apps「0 个应用」、large「0 个大文件」（日志见
+        // [dir_watchdog] / 扫描器 large 超过 180s）。所以内部维持串行：先跑轻量
+        // 语言/应用缓存让进度先动起来，把 25~70 s 的 rust 放到最后。
+        // 真正的提速前提是**进程级 IO 并发上限**（见 scanner::io_gate 提案），
+        // 在那之前单靠加线程只会让看门狗误杀。
+        let mut timings: Vec<(&'static str, u128)> = Vec::new();
+        // 子扫描级进度：每完成一段就把「dev_cache 内部百分比」上报壳层，
+        // 避免前端在 40 秒里一直停在模块级 10% 的假死观感。
+        let sub_done = std::sync::atomic::AtomicUsize::new(0);
+        macro_rules! timed {
+            ($t:expr, $name:expr, $label:expr, $e:expr) => {{
+                let __t = Instant::now();
+                let __v = $e;
+                $t.push(($name, __t.elapsed().as_millis()));
+                let __c = sub_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                // 标签只给「子扫描中文名」，前缀（缓存与应用数据 · 开发者缓存 ·）由
+                // 壳层统一拼接，避免两端各拼一次出现「开发者缓存 · dev_cache · …」。
+                crate::scanner::progress::report(
+                    $label,
+                    ((__c * 100) / TOTAL_SUBSCANS).min(99) as u8,
+                );
+                __v
+            }};
+        }
+
         let mut items = Vec::new();
-
-        // 各类开发者缓存在此维持**串行**调度。真机实测：这些子扫描的耗时主要
-        // 在海量小文件的目录枚举/stat（IO bound），若顶层再开十几个线程并行，
-        // 在与 app_cache/app_data 及其它全量模块并发时会互相争抢磁盘元数据，
-        // 反而把本可秒级完成的轻量模块拖到数百秒，总墙钟没有收益。
-        // 真正的并行放在两处、且都有界：①全量体检在「模块级」并行
-        // （all/large/apps）；②每个目录大小统计 dir_size_impl 内部用分层
-        // rayon BFS（活跃枚举线程数≈CPU 核数）。
-        items.extend(scan_rust_caches());
-        // Xcode 缓存仅 macOS
+        items.extend(timed!(timings, "node", "Node 缓存", scan_node_caches()));
+        items.extend(timed!(timings, "go", "Go 模块", scan_go_caches()));
+        items.extend(timed!(timings, "pip", "pip 缓存", scan_pip_caches()));
+        items.extend(timed!(timings, "jetbrains", "JetBrains", scan_jetbrains_caches()));
+        timed!(timings, "java", "Java/Gradle", scan_java_caches(&mut items));
+        timed!(timings, "python", "Python 缓存", scan_python_caches(&mut items));
+        let reg = timed!(
+            timings,
+            "registry",
+            "工具链注册表",
+            super::cache_registry::RegistryScanner::new().scan()
+        );
+        items.extend(reg.items);
+        // Xcode / Homebrew 仅 macOS
         #[cfg(target_os = "macos")]
-        items.extend(scan_xcode_caches());
-        items.extend(scan_node_caches());
-        items.extend(scan_go_caches());
-        // Homebrew 仅 macOS
+        items.extend(timed!(timings, "xcode", "Xcode", scan_xcode_caches()));
         #[cfg(target_os = "macos")]
-        items.extend(scan_homebrew_caches());
-        items.extend(scan_pip_caches());
-        // JetBrains 跨平台：macOS 与 Windows 各有自己的根目录，见 jetbrains_roots
-        items.extend(scan_jetbrains_caches());
-
-        // Java/Gradle/Maven 和 Python 缓存（跨平台）
-        scan_java_caches(&mut items);
-        scan_python_caches(&mut items);
-
-        // 更多语言缓存（注册表驱动：37 个固定路径缓存，跨平台）
-        items.extend(super::cache_registry::RegistryScanner::new().scan().items);
-
-        // 构建产物递归扫描（dist/.next/.nuxt 等，跨平台）
-        scan_build_artifacts(&mut items);
-
-        // K8s（跨平台） / Docker（macOS 专属 Docker Desktop 路径）
-        items.extend(scan_k8s_caches());
+        items.extend(timed!(timings, "homebrew", "Homebrew", scan_homebrew_caches()));
+        items.extend(timed!(timings, "k8s", "K8s", scan_k8s_caches()));
         #[cfg(target_os = "macos")]
-        items.extend(scan_docker_caches());
-        items.extend(scan_ai_model_caches());
+        items.extend(timed!(timings, "docker", "Docker", scan_docker_caches()));
+        items.extend(timed!(timings, "ai_model", "AI 模型缓存", scan_ai_model_caches()));
         // AI CLI 的会话历史属于用户数据：只展示，绝不参与清理
-        items.extend(scan_ai_cli_history_info());
-        items.extend(scan_monorepo_caches());
-
-        // 安装包清理（跨平台，按平台扩展名过滤）
-        scan_installer_files(&mut items);
-
+        items.extend(timed!(
+            timings,
+            "ai_history",
+            "AI CLI 历史",
+            scan_ai_cli_history_info()
+        ));
         // 孤儿 LaunchAgent/LaunchDaemon 检测（仅 macOS）
         #[cfg(target_os = "macos")]
-        items.extend(scan_orphaned_launchd());
-
-        // .DS_Store 文件清理（仅 macOS）
+        items.extend(timed!(timings, "launchd", "孤儿启动项", scan_orphaned_launchd()));
+        // 安装包清理（跨平台，按平台扩展名过滤）
+        timed!(timings, "installer", "安装包", scan_installer_files(&mut items));
         #[cfg(target_os = "macos")]
-        items.extend(scan_ds_store_files());
+        items.extend(timed!(timings, "ds_store", ".DS_Store", scan_ds_store_files()));
+        items.extend(timed!(
+            timings,
+            "monorepo",
+            "Monorepo node_modules",
+            scan_monorepo_caches()
+        ));
+        timed!(
+            timings,
+            "build_artifacts",
+            "构建产物",
+            scan_build_artifacts(&mut items)
+        );
+        // rust 最后跑：单个子扫描就可能 25~70 s，放末尾不阻塞前面十几段的上报。
+        items.extend(timed!(timings, "rust", "Rust 编译产物", scan_rust_caches()));
+
+        crate::logger::info(&format!(
+            "[dev_cache] 子扫描耗时(ms): {}",
+            timings
+                .iter()
+                .map(|(k, ms)| format!("{k}={ms}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
 
         // Windows 专属扫描器
         #[cfg(target_os = "windows")]

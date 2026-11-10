@@ -30,6 +30,9 @@ pub mod named_catalog;
 // 必须先于各扫描器声明，供 dir_size / read_dir 及具体扫描器复用。
 pub mod fs_guard;
 pub mod io_pool;
+// 扫描子进度钩子：dev_cache 等长耗时扫描器每完成一个子扫描就上报一次，
+// 壳层（Tauri）把「模块内部百分比」映射到整体进度，避免长时间钉死在 10%。
+pub mod progress;
 // 目录批量枚举（macOS getattrlistbulk：一次 syscall 取回一批条目类型 + 物理占用）。
 pub(crate) mod bulkdir;
 // 只读「大目录」占用分析的持久化增量体积缓存（P2，重扫提速）。
