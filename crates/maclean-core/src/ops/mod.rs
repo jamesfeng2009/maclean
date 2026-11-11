@@ -3468,13 +3468,56 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
         }
     }
 
-    // 6) 提权执行：osascript 的 administrator privileges。
-    //    这里**不能**用 `sudo -n`：-n 是非交互，sudo 根本不会走 PAM 的
-    //    Touch ID / 密码对话，无票据时直接退出 1 —— 用户侧表现为
-    //    「点了卸载、什么都没弹、应用还在」（实测有道云笔记连续 4 次
-    //    退出码 1）。osascript 会拉起系统授权弹窗（Touch ID 或密码），
-    //    这也与「不依赖用户先配好 sudo 票据」的设计意图一致。
-    let shell_cmd = format!("mv -- '{}' '{}'", path, dst.to_string_lossy());
+    // 6) 提权：按「不打扰用户」的程度分三级，能免密/指纹就不让打字。
+    //
+    //    6a) sudo -n：已有有效票据（NOPASSWD、或刚授权过）时静默完成。
+    //    6b) Touch ID：/etc/pam.d/sudo{,_local} 配了 pam_tid 时，用 pty
+    //        跑 *交互式* sudo，让系统直接弹指纹，用户不用输密码。
+    //        （旧实现只用 `sudo -n`，-n 是非交互，永远走不到 PAM 对话，
+    //        所以既不弹指纹也不弹密码，直接退出 1 —— 实测有道云笔记
+    //        连续 4 次退出码 1、用户完全无感。）
+    //    6c) 兜底：osascript `with administrator privileges`，弹密码框。
+    //        没开 Touch ID 的机器、或指纹多次失败时走这里。
+    let dst_str = dst.to_string_lossy().into_owned();
+
+    match run_sudo_move(path, &dst_str, true) {
+        Ok(true) => {
+            crate::logger::info(&format!(
+                "[trash-sudo] 免密票据直接移入废纸篓成功: {} -> {}",
+                path, dst_str
+            ));
+            return true;
+        }
+        Ok(false) => {}
+        Err(e) => crate::logger::warn(&format!("[trash-sudo] sudo -n 不可用（{}）: {}", e, path)),
+    }
+
+    if pam_tid_enabled() {
+        match run_sudo_move(path, &dst_str, false) {
+            Ok(true) => {
+                crate::logger::info(&format!(
+                    "[trash-sudo] Touch ID 授权移入废纸篓成功: {} -> {}",
+                    path, dst_str
+                ));
+                return true;
+            }
+            // 指纹失败/取消时 sudo 会退化成文本密码提示 —— 那条提示在
+            // 不可见的 pty 里，用户看不到；此时立刻转 osascript 弹窗，
+            // 避免让用户对着「什么都没发生」干等。
+            Ok(false) => crate::logger::warn(&format!(
+                "[trash-sudo] Touch ID 未通过，转系统密码弹窗: {}",
+                path
+            )),
+            Err(e) => crate::logger::warn(&format!(
+                "[trash-sudo] Touch ID 路径失败（{}）: {}",
+                e, path
+            )),
+        }
+    } else {
+        crate::logger::info("[trash-sudo] 未配置 pam_tid，跳过 Touch ID，直接走系统授权弹窗");
+    }
+
+    let shell_cmd = format!("mv -- '{}' '{}'", path, dst_str);
     let applescript = admin_move_applescript(&shell_cmd);
 
     match Command::new("/usr/bin/osascript")
@@ -3516,6 +3559,141 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
             ));
             false
         }
+    }
+}
+
+/// sudo 是否配置了 Touch ID（pam_tid）：
+/// macOS 用 `/etc/pam.d/sudo_local` 追加，老系统也可能直接写在 `/etc/pam.d/sudo`。
+fn pam_tid_enabled() -> bool {
+    ["/etc/pam.d/sudo_local", "/etc/pam.d/sudo"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .any(|c| pam_tid_declared(&c))
+}
+
+/// 从 pam 配置文本判断是否启用了 pam_tid（注释行不算）。
+fn pam_tid_declared(content: &str) -> bool {
+    content.lines().any(|line| {
+        let l = line.trim_start();
+        !l.starts_with('#') && l.contains("pam_tid")
+    })
+}
+
+/// sudo 需要密码时打印的哨兵串：用来在不可见的 pty 里判断
+/// 「Touch ID 没通过，sudo 退化成要密码了」，好及时转成用户看得见的弹窗。
+const SUDO_PASSWORD_SENTINEL: &str = "MACLEAN_SUDO_PASSWORD_PROMPT";
+
+/// 跑一次 `sudo mv -- src dst`。
+///
+/// - `non_interactive = true`：`sudo -n`，只吃现成票据，不弹任何东西。
+/// - `non_interactive = false`：用 `script` 套一个 pty 再跑交互式 sudo，
+///   pam_tid 才能在 PAM 对话里拉起 Touch ID。pty 里的文本用户看不到，
+///   所以一旦出现密码哨兵就 kill 并返回错误，由上层改弹系统授权窗口。
+fn run_sudo_move(path: &str, dst: &str, non_interactive: bool) -> Result<bool, String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    if non_interactive {
+        let out = Command::new("/usr/bin/sudo")
+            .args(["-n", "/bin/mv", "--", path, dst])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("无法启动 sudo: {e}"))?;
+        if out.status.success() {
+            return Ok(true);
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("退出码 {:?}", out.status.code())
+        } else {
+            err
+        });
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let log_path =
+        std::env::temp_dir().join(format!("maclean_tid_{}_{}.log", std::process::id(), stamp));
+    let log = std::fs::File::create(&log_path).map_err(|e| format!("无法创建临时日志: {e}"))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| format!("无法复制日志句柄: {e}"))?;
+
+    // 注：sudo 的 -p 只改「要密码」时的提示文案，这里用它当哨兵；
+    //     Touch ID 走的是 pam_tid，不受 -p 影响。
+    let mut child = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "/dev/null",
+            "/usr/bin/sudo",
+            "-p",
+            SUDO_PASSWORD_SENTINEL,
+            "/bin/mv",
+            "--",
+            path,
+            dst,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .map_err(|e| format!("无法启动 script/sudo: {e}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut status = None;
+    let mut needed_password = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                status = Some(st);
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&log_path);
+                return Err(format!("等待 sudo 失败: {e}"));
+            }
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&log_path);
+            return Err("等待 Touch ID 超时（60s）".to_string());
+        }
+        let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if text.contains(SUDO_PASSWORD_SENTINEL) {
+            needed_password = true;
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    let tail = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&log_path);
+
+    if needed_password {
+        return Err("Touch ID 未通过、sudo 要求密码（pty 内不可见），改走系统弹窗".to_string());
+    }
+    match status {
+        Some(st) if st.success() => Ok(true),
+        Some(st) => {
+            let err = tail.trim().replace('\n', " ");
+            crate::logger::warn(&format!(
+                "[trash-sudo] sudo 退出码 {:?} — {}",
+                st.code(),
+                err
+            ));
+            Ok(false)
+        }
+        None => Ok(false),
     }
 }
 
@@ -4460,6 +4638,21 @@ mod tests {
     // -------------------------------------------------------------
     //  X-09 · 符号语义表（供商业仓对齐）
     // -------------------------------------------------------------
+    #[test]
+    fn pam_tid_declared_ignores_comments_and_blank_lines() {
+        // 只要不是在注释里出现 pam_tid，就认为 Touch ID 可用；
+        // 注释掉的配置绝不能当成启用（否则会白白等 60s 指纹超时）。
+        assert!(pam_tid_declared("auth       sufficient     pam_tid.so"));
+        assert!(pam_tid_declared(
+            "# sudo_local\nauth sufficient pam_tid.so\nsession ..."
+        ));
+        assert!(!pam_tid_declared("#auth       sufficient     pam_tid.so"));
+        assert!(!pam_tid_declared(
+            "auth       sufficient     pam_smartcard.so"
+        ));
+        assert!(!pam_tid_declared(""));
+    }
+
     #[test]
     fn admin_move_applescript_escapes_quotes_and_backslashes() {
         // osascript 是「能真弹授权框」的唯一路径，命令拼接错了会静默失败，
