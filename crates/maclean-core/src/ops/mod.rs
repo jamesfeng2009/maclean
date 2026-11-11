@@ -4461,7 +4461,6 @@ mod tests {
     //  X-09 · 符号语义表（供商业仓对齐）
     // -------------------------------------------------------------
     #[test]
-    #[test]
     fn admin_move_applescript_escapes_quotes_and_backslashes() {
         // osascript 是「能真弹授权框」的唯一路径，命令拼接错了会静默失败，
         // 所以转义规则必须钉住。
@@ -4482,6 +4481,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn x09_delete_log_symbol_table_is_the_single_source_of_truth() {
         // 反向验证：删掉任一行 / 改错 ok / 改错符号，下面断言立刻红。
         assert_eq!(DELETE_LOG_SYMBOLS.len(), 5, "符号语义表必须覆盖 5 个符号");

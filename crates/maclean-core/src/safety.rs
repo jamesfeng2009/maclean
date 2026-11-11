@@ -2557,7 +2557,7 @@ mod tests {
             "用例前提：包内确实含清单结构"
         );
         assert!(
-            app_bundle_target_with_homes(&app, &[home.clone()]),
+            app_bundle_target_with_homes(&app, std::slice::from_ref(&home)),
             "~/Applications 下的 .app 应被识别为 app bundle"
         );
 
