@@ -113,9 +113,19 @@ impl Scanner for DevCacheScanner {
         items.extend(timed!(timings, "node", "Node 缓存", scan_node_caches()));
         items.extend(timed!(timings, "go", "Go 模块", scan_go_caches()));
         items.extend(timed!(timings, "pip", "pip 缓存", scan_pip_caches()));
-        items.extend(timed!(timings, "jetbrains", "JetBrains", scan_jetbrains_caches()));
+        items.extend(timed!(
+            timings,
+            "jetbrains",
+            "JetBrains",
+            scan_jetbrains_caches()
+        ));
         timed!(timings, "java", "Java/Gradle", scan_java_caches(&mut items));
-        timed!(timings, "python", "Python 缓存", scan_python_caches(&mut items));
+        timed!(
+            timings,
+            "python",
+            "Python 缓存",
+            scan_python_caches(&mut items)
+        );
         let reg = timed!(
             timings,
             "registry",
@@ -127,11 +137,21 @@ impl Scanner for DevCacheScanner {
         #[cfg(target_os = "macos")]
         items.extend(timed!(timings, "xcode", "Xcode", scan_xcode_caches()));
         #[cfg(target_os = "macos")]
-        items.extend(timed!(timings, "homebrew", "Homebrew", scan_homebrew_caches()));
+        items.extend(timed!(
+            timings,
+            "homebrew",
+            "Homebrew",
+            scan_homebrew_caches()
+        ));
         items.extend(timed!(timings, "k8s", "K8s", scan_k8s_caches()));
         #[cfg(target_os = "macos")]
         items.extend(timed!(timings, "docker", "Docker", scan_docker_caches()));
-        items.extend(timed!(timings, "ai_model", "AI 模型缓存", scan_ai_model_caches()));
+        items.extend(timed!(
+            timings,
+            "ai_model",
+            "AI 模型缓存",
+            scan_ai_model_caches()
+        ));
         // AI CLI 的会话历史属于用户数据：只展示，绝不参与清理
         items.extend(timed!(
             timings,
@@ -141,11 +161,26 @@ impl Scanner for DevCacheScanner {
         ));
         // 孤儿 LaunchAgent/LaunchDaemon 检测（仅 macOS）
         #[cfg(target_os = "macos")]
-        items.extend(timed!(timings, "launchd", "孤儿启动项", scan_orphaned_launchd()));
+        items.extend(timed!(
+            timings,
+            "launchd",
+            "孤儿启动项",
+            scan_orphaned_launchd()
+        ));
         // 安装包清理（跨平台，按平台扩展名过滤）
-        timed!(timings, "installer", "安装包", scan_installer_files(&mut items));
+        timed!(
+            timings,
+            "installer",
+            "安装包",
+            scan_installer_files(&mut items)
+        );
         #[cfg(target_os = "macos")]
-        items.extend(timed!(timings, "ds_store", ".DS_Store", scan_ds_store_files()));
+        items.extend(timed!(
+            timings,
+            "ds_store",
+            ".DS_Store",
+            scan_ds_store_files()
+        ));
         items.extend(timed!(
             timings,
             "monorepo",
