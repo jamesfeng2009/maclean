@@ -1222,16 +1222,20 @@ pub fn is_simulator_running() -> bool {
 
 /// 检查指定应用是否正在运行
 ///
-/// macOS: 通过 `pgrep -f` 搜索进程列表
-/// Windows: 通过 `tasklist` 搜索进程列表
+/// macOS：只认「进程可执行文件确实位于 `<name>.app/Contents/MacOS/` 里」，
+/// 不能用 `pgrep -f <name>` —— 那是**整条命令行子串匹配**，名字短的应用
+/// （X、QQ、ai）会匹配到一堆无关进程（比如参数里带 X 的 Xcode、路径里带
+/// 名字的其它工具），把没运行的应用判成「正在运行」，进而被安全层拦下、
+/// 用户还看到一句莫名其妙的「需要管理员授权」。
+/// Windows：`tasklist` 按镜像名精确匹配。
 fn is_app_running(app_name: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("/usr/bin/pgrep")
-            .args(["-f", app_name])
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-Ao", "pid=,comm="])
             .output();
         if let Ok(out) = output {
-            return out.status.success() && !out.stdout.is_empty();
+            return bundle_in_command_lines(&String::from_utf8_lossy(&out.stdout), app_name);
         }
         false
     }
@@ -1251,6 +1255,37 @@ fn is_app_running(app_name: &str) -> bool {
     {
         let _ = app_name;
         false
+    }
+}
+
+/// 从 `ps -Ao command` 的输出判断某个 .app 是否真在运行（纯函数，可测）。
+///
+/// 判据是命令行里出现 `<name>.app/Contents/MacOS/`：只有进程是从这个
+/// bundle 里拉起来的才算，光出现名字（Xcode 的参数里有 X）不算。
+fn bundle_in_command_lines(ps_output: &str, app_name: &str) -> bool {
+    let needle = format!("/{}.app/Contents/MacOS/", app_name);
+    ps_output.lines().any(|line| {
+        // 输入是 `ps -Ao pid=,comm=`：每行「PID + 可执行文件路径」，不含参数。
+        // 剥掉 PID 后整段都是可执行文件（路径里的空格要保留），所以不会再
+        // 出现「参数里带了同名串」或「子串撞名」的误判。
+        let exe = line
+            .trim_start()
+            .split_once(' ')
+            .map(|(_, c)| c.trim_start())
+            .unwrap_or("");
+        exe.contains(&needle)
+    })
+}
+
+/// 按 bundle 路径判断这个 .app 是否正在运行（卸载链路复用）。
+pub fn app_bundle_running(app_path: &str) -> bool {
+    match std::path::Path::new(app_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.trim_end_matches(".app"))
+    {
+        Some(name) if !name.is_empty() => is_app_running(name),
+        _ => false,
     }
 }
 
@@ -2345,6 +2380,28 @@ mod tests {
     }
 
     // ---------- 第 4.6 层: 清单管理目录保护 ----------
+
+    #[test]
+    fn running_app_detection_requires_bundle_path_not_name() {
+        // 回归：X / QQ 这类短名字以前用 `pgrep -f <name>` 子串匹配，
+        // 会把无关进程（参数里带相同字母的 Xcode 等）当成"应用在运行"，
+        // 导致卸载被拦还给出误导性的"需要管理员授权"。
+        let ps = "  1 /sbin/launchd\n 42 /Applications/Xcode.app/Contents/MacOS/Xcode\n 77 /usr/bin/env\n";
+        assert!(!bundle_in_command_lines(ps, "X"));
+
+        let ps_running = " 88 /Users/u/Applications/Chrome Apps.localized/X.app/Contents/MacOS/X\n";
+        assert!(bundle_in_command_lines(ps_running, "X"));
+
+        // 别人的可执行文件不含这个 bundle（参数里出现路径也不算）
+        let ps_args = " 99 /bin/zsh\n";
+        assert!(!bundle_in_command_lines(ps_args, "X"));
+
+        assert!(bundle_in_command_lines(
+            " 12 /Applications/有道云笔记.app/Contents/MacOS/ynote",
+            "有道云笔记"
+        ));
+        assert!(!bundle_in_command_lines("", "X"));
+    }
 
     #[test]
     fn monorepo_category_node_modules_is_precisely_exempted() {

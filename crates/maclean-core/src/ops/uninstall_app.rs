@@ -71,6 +71,10 @@ pub struct UninstallAppReport {
     /// 若已通过提权移入废纸篓兜底成功，本字段为 false。
     #[serde(default)]
     pub needs_app_management: bool,
+    /// 应用本体还在运行、删不掉。此时**不能**引导用户去开「App 管理」——
+    /// 那不是权限问题，用户开了开关照样删不掉。
+    #[serde(default)]
+    pub needs_running: bool,
 }
 
 impl UninstallAppReport {
@@ -93,6 +97,43 @@ impl UninstallAppReport {
 
 /// 一键卸载的路径白名单校验
 ///
+/// 删除前先温和退出目标应用（best-effort）。
+///
+/// 不是"强制 kill"：`osascript ... to quit` 走应用自己的退出流程，
+/// 该存盘的能存盘。退不掉也不阻塞卸载，最后由安全层给出明确原因。
+#[cfg(target_os = "macos")]
+fn quit_app_before_uninstall(app_path: &str, bundle_id: &str) {
+    use std::time::{Duration, Instant};
+
+    if !crate::safety::app_bundle_running(app_path) {
+        return;
+    }
+    let script = format!("tell application id \"{}\" to quit", bundle_id);
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < deadline {
+        if !crate::safety::app_bundle_running(app_path) {
+            logger::info(&format!("[uninstall] 已先退出应用: {}", app_path));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    logger::warn(&format!(
+        "[uninstall] 应用仍在运行，删除前需要用户先退出: {}",
+        app_path
+    ));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quit_app_before_uninstall(_app_path: &str, _bundle_id: &str) {}
+
 /// 只允许 `.app` 包、且位于 `/Applications/` 或 `~/Applications/`（含一层
 /// 子目录，PWA 快捷方式所在）之下。用规范化后的真实路径比对，杜绝符号
 /// 链接穿越；显式 `..` 组件直接拒绝。
@@ -202,6 +243,11 @@ pub fn uninstall_app(
         }
     }
 
+    // 4.5) 删除前先温和退出：正在运行的应用删不掉，而用户往往不知道该退
+    //      什么（PWA 就是浏览器里的一个窗口）。先 quit，留 2.5s 给它收尾；
+    //      退不掉就照常尝试，失败时会给出「请先退出应用」的明确提示。
+    quit_app_before_uninstall(app_path, &bundle_id);
+
     // 5) 组装删除条目（category 与扫描器同款，安全闸门口径一致）
     let associated = find_associated_files(&bundle_id, &name);
     let (cache_paths, data_paths): (Vec<String>, Vec<String>) =
@@ -307,10 +353,17 @@ pub fn uninstall_app(
     //   取消/没有 Touch ID 且密码框被拒）时才引导「App 管理」授权。
     let mut needs_fda = false;
     let mut needs_am = false;
+    let mut needs_running = false;
     for fp in &failed_paths {
         match tcc_domain_of_path(fp) {
             TccDomain::FullDiskAccess => needs_fda = true,
             TccDomain::AppManagement => {
+                // 还在跑就没必要提权、更不该让用户去开「App 管理」：
+                // 先如实告诉用户把应用退出。
+                if crate::safety::app_bundle_running(fp) {
+                    needs_running = true;
+                    continue;
+                }
                 #[cfg(target_os = "macos")]
                 let removed = super::sudo_remove_app(fp, lang_en);
                 #[cfg(not(target_os = "macos"))]
@@ -327,6 +380,7 @@ pub fn uninstall_app(
     }
     report.needs_full_disk_access = needs_fda;
     report.needs_app_management = needs_am;
+    report.needs_running = needs_running;
 
     // 卸载改变了大目录占用：丢弃只读体积缓存（与 clean_execute 一致）
     scanner::sizecache::invalidate_all();
@@ -348,6 +402,9 @@ pub fn uninstall_app(
     //「1 项被拦截或删除失败」却不知道下一步该做什么。
     if report.needs_app_management {
         message.push_str(i18n::t_lang(lang_en, "uninstall_hint_app_management"));
+    }
+    if report.needs_running {
+        message.push_str(i18n::t_lang(lang_en, "uninstall_hint_running"));
     }
     if report.needs_full_disk_access {
         message.push_str(i18n::t_lang(lang_en, "uninstall_hint_fda"));
