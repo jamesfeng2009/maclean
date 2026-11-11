@@ -732,6 +732,37 @@ fn is_app_support_data_root(path: &Path) -> bool {
     app_support_data_root_with_homes(path, &protected_homes())
 }
 
+/// 判定被删路径是否为一个**已安装的 app bundle**（/Applications 或 ~/Applications 下、
+/// 带 Contents/Info.plist 的 .app）。
+///
+/// 卸载应用是用户显式发起、且默认移入废纸篓的可恢复操作。app 包内部常见
+/// `site-packages` / `node_modules` / `venv`（Electron 应用自带运行时、内置 Python
+/// 组件等），若沿用第 4.6 层「后代含清单结构就拒删祖先」的规则，会导致
+/// **卸载应用永远失败**（实测：卸载有道云笔记被拦，delete.log 留下
+/// "目录内部含清单管理结构…拒绝删除祖先目录"）。
+fn app_bundle_target_with_homes(path: &Path, homes: &[PathBuf]) -> bool {
+    if path.extension().and_then(|e| e.to_str()) != Some("app") {
+        return false;
+    }
+    if !path.join("Contents/Info.plist").is_file() {
+        return false;
+    }
+    let key = crate::provenance::path_key_string(path);
+    if key.starts_with("/Applications/") {
+        return true;
+    }
+    homes.iter().any(|h| {
+        key.starts_with(&format!(
+            "{}/Applications/",
+            crate::provenance::path_key_string(h)
+        ))
+    })
+}
+
+fn is_app_bundle_target(path: &Path, homes: &[PathBuf]) -> bool {
+    app_bundle_target_with_homes(path, homes)
+}
+
 /// 伪路径标记的格式白名单（A-10）。
 ///
 /// 只接受「已知前缀 + 由安全字符组成的标识」，绝不允许 `/`、`\`、`..`，
@@ -949,6 +980,9 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
         // 不是用户项目环境；整目录删除经高级风险确认、且走废纸篓可恢复，放行。
         // 系统关键 / 容器数据 / .git / 敏感文件等其它层的红线不受影响。
         || is_app_support_data_root(&canonical)
+        // 已安装 app bundle（卸载场景）：包内自带运行时/组件是常态，
+        // 卸载是显式动作且走废纸篓，不按"清单树祖先"拦。
+        || is_app_bundle_target(&canonical, &homes)
         || category == "Monorepo依赖" && canonical_has_component(&canonical, "node_modules"))
     {
         return SafetyCheck::Danger(format!(
@@ -1657,6 +1691,14 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
     let user_saved_state = format!("{}/Library/Saved Application State/", home_str);
     if canonical_str.starts_with(&user_saved_state) {
         return is_direct_child(&canonical_str, &user_saved_state);
+    }
+
+    // Application Scripts 子目录（App 卸载场景）：~/Library/Application Scripts/<bundle-id>
+    // 是应用注册的脚本目录，卸载时必须能随应用一起清掉；此前不在准入表里，
+    // 表现为「应用本体删掉了、这层数据永远删不掉」。
+    let user_app_scripts = format!("{}/Library/Application Scripts/", home_str);
+    if canonical_str.starts_with(&user_app_scripts) {
+        return is_direct_child(&canonical_str, &user_app_scripts);
     }
 
     // HTTPStorages 子目录（App 卸载场景）
@@ -2496,6 +2538,87 @@ mod tests {
             r2
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn app_bundle_with_manifest_inside_is_not_blocked_as_manifest_ancestor() {
+        // 回归：Electron 应用包内自带 site-packages/venv 时，第 4.6 层曾把它
+        // 当成「清单树祖先」拦下，导致卸载应用永远失败。
+        let tmp = std::env::temp_dir().join(format!("maclean_appbundle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        let app = home.join("Applications/Test.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), b"<plist/>").unwrap();
+        std::fs::create_dir_all(app.join("Contents/Resources/site-packages/pkg")).unwrap();
+
+        assert!(
+            contains_manifest_managed_descendant(&app),
+            "用例前提：包内确实含清单结构"
+        );
+        assert!(
+            app_bundle_target_with_homes(&app, &[home.clone()]),
+            "~/Applications 下的 .app 应被识别为 app bundle"
+        );
+
+        // 非 .app 的同结构目录仍按清单树祖先拦截（豁免不能放宽到任意目录）
+        let plain = home.join("Applications/plain/site-packages/x");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(
+            contains_manifest_managed_descendant(&home.join("Applications/plain")),
+            "非 app bundle 目录仍应命中清单祖先判定"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 真机校验：本机实际存在 /Applications/有道云笔记.app（卸载被拦的那个），
+    /// 确认它现在能通过安全闸门。手动运行：
+    /// `cargo test -p maclean-core -- --ignored real_app_bundle_uninstall`
+    #[test]
+    #[ignore = "真实路径验证，手动运行"]
+    fn real_app_bundle_uninstall_passes_gate() {
+        let app = std::path::Path::new("/Applications/有道云笔记.app");
+        if !app.exists() {
+            eprintln!("跳过：本机没有该测试应用");
+            return;
+        }
+        let r = check_path_safety_with_category(app.to_str().unwrap(), "有道云笔记 (卸载)");
+        assert!(
+            !matches!(r, SafetyCheck::Danger(_)),
+            "卸载应用不应被安全闸门拦下: {:?}",
+            r
+        );
+        eprintln!("闸门结果: {:?}", r);
+
+        // 同一应用的数据目录也必须放行，否则「本体删掉、数据永远留着」
+        let scripts =
+            std::path::Path::new("/Users/fengyu/Library/Application Scripts/ynote-desktop");
+        if scripts.exists() {
+            let r2 = check_path_safety_with_category(scripts.to_str().unwrap(), "有道云笔记 数据");
+            assert!(
+                !matches!(r2, SafetyCheck::Danger(_)),
+                "卸载应用的数据目录不应被来源准入拦下: {:?}",
+                r2
+            );
+            eprintln!("数据目录闸门结果: {:?}", r2);
+        }
+    }
+
+    #[test]
+    fn application_scripts_direct_child_is_whitelisted() {
+        // 卸载应用时 ~/Library/Application Scripts/<bundle-id> 必须能随应用清掉
+        let home = PathBuf::from("/Users/u");
+        assert!(check_whitelist(
+            Path::new("/Users/u/Library/Application Scripts/ynote-desktop"),
+            &home,
+            "App残留"
+        ));
+        // 只放行直接子项，深层路径仍由其它层判定
+        assert!(!check_whitelist(
+            Path::new("/Users/u/Library/Application Scripts/a/b"),
+            &home,
+            "App残留"
+        ));
     }
 
     #[test]
