@@ -3379,13 +3379,11 @@ exit 0
 /// - 元数据属主必须是 root（`uid == 0`），用户自有文件本可普通回收，
 ///   不需要也不应走提权；
 /// - 拒绝换行 / 反引号 / `$(` / 单引号等可突破脚本引号包裹的字符；
-/// - 目标限定 `~/.Trash/<原名> [N]`，探测已存在条目避免覆盖；
-/// - 源与 `~/.Trash` 跨卷时放弃（不做意外的大文件复制）；
-/// - sudo 脚本走不可预测文件名 + O_EXCL + 0600（复用 `write_private_temp_file`），
-///   执行后立即删除；
-/// - `sudo -n` 非交互：未启用 Touch ID / 无票据时不弹密码框，立即失败不阻塞。
+/// - 动作是**永久删除**（`rm -rf`）：卸载的目的就是释放空间，
+///   进废纸篓等于没释放、还要再逼用户清倒一次，这也是清洁类工具的通行做法；
+/// - 提权链路与其它提权动作共用：sudo 票据 → Touch ID → osascript 密码框。
 #[cfg(target_os = "macos")]
-pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
+pub fn sudo_remove_app(path: &str, lang_en: bool) -> bool {
     use std::os::unix::fs::MetadataExt;
     use std::process::Command;
 
@@ -3421,53 +3419,6 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
         ));
         return false;
     }
-    // 4) 目标 ~/.Trash：必须存在且与源同卷
-    let home = crate::scanner::home_dir();
-    let trash = home.join(".Trash");
-    let Ok(trash_meta) = trash.metadata() else {
-        crate::logger::warn("[trash-sudo] ~/.Trash 不可用，放弃提权回收");
-        return false;
-    };
-    if trash_meta.dev() != meta.dev() {
-        crate::logger::warn(&format!(
-            "[trash-sudo] 源与废纸篓跨卷，放弃（避免意外大复制）: {}",
-            path
-        ));
-        return false;
-    }
-
-    // 5) 目标名避免覆盖：Finder 语义的 "name 2"、"name 3"…
-    let file_name = p
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if file_name.is_empty() {
-        return false;
-    }
-    let stem = p
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| file_name.clone());
-    let ext = p
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let mut dst = trash.join(&file_name);
-    let mut n: u64 = 2;
-    while dst.exists() {
-        let alt = if ext.is_empty() {
-            format!("{} {}", stem, n)
-        } else {
-            format!("{} {}.{}", stem, n, ext)
-        };
-        dst = trash.join(alt);
-        n += 1;
-        if n > 999 {
-            crate::logger::warn(&format!("[trash-sudo] 废纸篓同名条目过多，放弃: {}", path));
-            return false;
-        }
-    }
-
     // 6) 提权：按「不打扰用户」的程度分三级，能免密/指纹就不让打字。
     //
     //    6a) sudo -n：已有有效票据（NOPASSWD、或刚授权过）时静默完成。
@@ -3478,14 +3429,9 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
     //        连续 4 次退出码 1、用户完全无感。）
     //    6c) 兜底：osascript `with administrator privileges`，弹密码框。
     //        没开 Touch ID 的机器、或指纹多次失败时走这里。
-    let dst_str = dst.to_string_lossy().into_owned();
-
-    match run_sudo_move(path, &dst_str, true) {
+    match run_sudo_rm(path, true) {
         Ok(true) => {
-            crate::logger::info(&format!(
-                "[trash-sudo] 免密票据直接移入废纸篓成功: {} -> {}",
-                path, dst_str
-            ));
+            crate::logger::info(&format!("[trash-sudo] 免密票据直接永久删除成功: {}", path));
             return true;
         }
         Ok(false) => {}
@@ -3496,12 +3442,9 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
     // 所以指纹失败/取消时直接返回失败，不再弹密码框逼人打字；
     // 只有「没有 Touch ID」的机器才落到 osascript 密码弹窗。
     if pam_tid_enabled() && touch_id_enrolled() {
-        return match run_sudo_move(path, &dst_str, false) {
+        return match run_sudo_rm(path, false) {
             Ok(true) => {
-                crate::logger::info(&format!(
-                    "[trash-sudo] Touch ID 授权移入废纸篓成功: {} -> {}",
-                    path, dst_str
-                ));
+                crate::logger::info(&format!("[trash-sudo] Touch ID 授权永久删除成功: {}", path));
                 true
             }
             Ok(false) => {
@@ -3523,7 +3466,7 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
 
     crate::logger::info("[trash-sudo] 本机不支持 Touch ID（或无指纹录入），走 osascript 密码弹窗");
 
-    let shell_cmd = format!("mv -- '{}' '{}'", path, dst_str);
+    let shell_cmd = format!("rm -rf -- '{}'", path);
     let applescript = admin_move_applescript(&shell_cmd);
 
     match Command::new("/usr/bin/osascript")
@@ -3535,11 +3478,7 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
         .output()
     {
         Ok(out) if out.status.success() => {
-            crate::logger::info(&format!(
-                "[trash-sudo] 提权移入废纸篓成功: {} -> {}",
-                path,
-                dst.to_string_lossy()
-            ));
+            crate::logger::info(&format!("[trash-sudo] 提权永久删除成功: {}", path));
             true
         }
         Ok(out) => {
@@ -3610,19 +3549,19 @@ fn bioutil_reports_enrolled(stdout: &str) -> bool {
 /// 「Touch ID 没通过，sudo 退化成要密码了」，好及时转成用户看得见的弹窗。
 const SUDO_PASSWORD_SENTINEL: &str = "MACLEAN_SUDO_PASSWORD_PROMPT";
 
-/// 跑一次 `sudo mv -- src dst`。
+/// 跑一次 `sudo rm -rf -- path`。
 ///
 /// - `non_interactive = true`：`sudo -n`，只吃现成票据，不弹任何东西。
 /// - `non_interactive = false`：用 `script` 套一个 pty 再跑交互式 sudo，
 ///   pam_tid 才能在 PAM 对话里拉起 Touch ID。pty 里的文本用户看不到，
 ///   所以一旦出现密码哨兵就 kill 并返回错误，由上层改弹系统授权窗口。
-fn run_sudo_move(path: &str, dst: &str, non_interactive: bool) -> Result<bool, String> {
+fn run_sudo_rm(path: &str, non_interactive: bool) -> Result<bool, String> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     if non_interactive {
         let out = Command::new("/usr/bin/sudo")
-            .args(["-n", "/bin/mv", "--", path, dst])
+            .args(["-n", "/bin/rm", "-rf", "--", path])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -3659,10 +3598,10 @@ fn run_sudo_move(path: &str, dst: &str, non_interactive: bool) -> Result<bool, S
             "/usr/bin/sudo",
             "-p",
             SUDO_PASSWORD_SENTINEL,
-            "/bin/mv",
+            "/bin/rm",
+            "-rf",
             "--",
             path,
-            dst,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))

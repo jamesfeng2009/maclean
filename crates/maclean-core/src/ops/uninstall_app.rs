@@ -220,7 +220,7 @@ pub fn uninstall_app(
         app_path.to_string(),
         format!("{} (卸载)", name),
         vec![app_path.to_string()],
-        true,
+        false,
         app_size,
     ));
 
@@ -232,7 +232,7 @@ pub fn uninstall_app(
             data_paths[0].clone(),
             format!("{} 数据", name),
             data_paths,
-            true,
+            false,
             data_size,
         ));
     }
@@ -244,7 +244,7 @@ pub fn uninstall_app(
             cache_paths[0].clone(),
             format!("{} 缓存", name),
             cache_paths,
-            true,
+            false,
             cache_size,
         ));
     }
@@ -302,9 +302,9 @@ pub fn uninstall_app(
 
     // 失败归因 + 提权兜底：
     // - 沙盒容器 / 共享容器 / HTTPStorages 等 → 需「完全磁盘访问」，只能去设置开；
-    // - `/Applications` 下 root 安装的 .app 本体 → 优先用 sudo 提权移入废纸篓
-    //   （可恢复，不依赖系统弹窗）；提权不可用（Touch ID 未启用/用户取消）时
-    //   才引导「App 管理」授权。
+    // - `/Applications` 下 root 安装的 .app 本体 → 用 sudo 提权**永久删除**
+    //   （卸载就是要腾空间，不移废纸篓）；提权不可用（Touch ID 未启用/用户
+    //   取消/没有 Touch ID 且密码框被拒）时才引导「App 管理」授权。
     let mut needs_fda = false;
     let mut needs_am = false;
     for fp in &failed_paths {
@@ -312,10 +312,10 @@ pub fn uninstall_app(
             TccDomain::FullDiskAccess => needs_fda = true,
             TccDomain::AppManagement => {
                 #[cfg(target_os = "macos")]
-                let trashed = super::sudo_move_app_to_trash(fp, lang_en);
+                let removed = super::sudo_remove_app(fp, lang_en);
                 #[cfg(not(target_os = "macos"))]
-                let trashed = false;
-                if trashed {
+                let removed = false;
+                if removed {
                     report.deleted += 1;
                     report.intercepted = report.intercepted.saturating_sub(1);
                 } else {
@@ -512,25 +512,22 @@ mod tests {
     }
 
     #[test]
-    fn sudo_move_app_to_trash_rejects_unsafe_inputs_without_touching_fs() {
+    fn sudo_remove_app_rejects_unsafe_inputs_without_touching_fs() {
         // 形态不符 / 非 /Applications / 含危险字符的路径必须在提权前被拒绝
         // （这些分支不触碰文件系统，任何机器上都能测）
         #[cfg(target_os = "macos")]
         {
-            assert!(!crate::ops::sudo_move_app_to_trash(
-                "/Users/x/foo.app",
-                false
-            ));
-            assert!(!crate::ops::sudo_move_app_to_trash("/tmp/foo.app", false));
-            assert!(!crate::ops::sudo_move_app_to_trash(
+            assert!(!crate::ops::sudo_remove_app("/Users/x/foo.app", false));
+            assert!(!crate::ops::sudo_remove_app("/tmp/foo.app", false));
+            assert!(!crate::ops::sudo_remove_app(
                 "/Applications/evil$(rm -rf /).app",
                 false
             ));
-            assert!(!crate::ops::sudo_move_app_to_trash(
+            assert!(!crate::ops::sudo_remove_app(
                 "/Applications/evil'.app",
                 false
             ));
-            assert!(!crate::ops::sudo_move_app_to_trash(
+            assert!(!crate::ops::sudo_remove_app(
                 "/Applications/notanapp",
                 false
             ));
