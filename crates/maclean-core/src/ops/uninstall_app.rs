@@ -331,7 +331,7 @@ pub fn uninstall_app(
     // 卸载改变了大目录占用：丢弃只读体积缓存（与 clean_execute 一致）
     scanner::sizecache::invalidate_all();
 
-    report.message = if report.intercepted == 0 {
+    let mut message = if report.intercepted == 0 {
         tf_lang(
             lang_en,
             "uninstall_done",
@@ -344,6 +344,15 @@ pub fn uninstall_app(
             &[&name, &report.intercepted.to_string()],
         )
     };
+    // 把「为什么被拦」直接写进提示：只报数字，用户只能看到
+    //「1 项被拦截或删除失败」却不知道下一步该做什么。
+    if report.needs_app_management {
+        message.push_str(i18n::t_lang(lang_en, "uninstall_hint_app_management"));
+    }
+    if report.needs_full_disk_access {
+        message.push_str(i18n::t_lang(lang_en, "uninstall_hint_fda"));
+    }
+    report.message = message;
 
     logger::info(&format!(
         "[uninstall] {} 一键卸载完成: {} 项, {} 项被拦截, 涉及 {} 字节 (fda={}, am={})",

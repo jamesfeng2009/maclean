@@ -1668,7 +1668,19 @@ pub fn start_delete(
                             // 不落 delete.log —— 否则每轮必记一条 FAIL 虚高失败数、
                             // 弹窗报"失败 N 项"误导用户。真实路径仍正常记录。
                             if std::path::Path::new(&path).exists() {
-                                safety::log_deletion(&path, &category, fail_count == 0, None);
+                                // 批量项失败时把条数写进 delete.log：原来传 None，
+                                // 审计日志只剩 `FAIL [cat] path=...` 没有 error=，
+                                // 事后无法判断是安全拦截还是删除失败。
+                                let bulk_reason = format!(
+                                    "{} 个成员删除失败（逐条原因见实时日志）",
+                                    fail_count
+                                );
+                                safety::log_deletion(
+                                    &path,
+                                    &category,
+                                    fail_count == 0,
+                                    (fail_count > 0).then_some(bulk_reason.as_str()),
+                                );
                             }
                             continue;
                         }
@@ -3456,30 +3468,24 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
         }
     }
 
-    // 6) 写提权脚本：mv -- 'src' 'dst'（' 已被拒，单引号包裹安全；-- 防 - 开头名）
-    let script = format!(
-        "#!/bin/bash\nmv -- '{}' '{}'\nexit $?\n",
-        path,
-        dst.to_string_lossy()
-    );
-    let Some(tmp_script) = write_private_temp_file("maclean_trash_tid", "sh", &script) else {
-        crate::logger::error("[trash-sudo] 无法安全创建临时脚本，放弃提权回收");
-        return false;
-    };
+    // 6) 提权执行：osascript 的 administrator privileges。
+    //    这里**不能**用 `sudo -n`：-n 是非交互，sudo 根本不会走 PAM 的
+    //    Touch ID / 密码对话，无票据时直接退出 1 —— 用户侧表现为
+    //    「点了卸载、什么都没弹、应用还在」（实测有道云笔记连续 4 次
+    //    退出码 1）。osascript 会拉起系统授权弹窗（Touch ID 或密码），
+    //    这也与「不依赖用户先配好 sudo 票据」的设计意图一致。
+    let shell_cmd = format!("mv -- '{}' '{}'", path, dst.to_string_lossy());
+    let applescript = admin_move_applescript(&shell_cmd);
 
-    // 7) sudo -n：启用 Touch ID 时弹系统 Touch ID；未启用/无票据时立即失败
-    let result = Command::new("/usr/bin/sudo")
-        .arg("-n")
-        .arg("/bin/bash")
-        .arg(&tmp_script)
+    match Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&applescript)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    let _ = std::fs::remove_file(&tmp_script);
-
-    match result {
-        Ok(s) if s.success() => {
+        .stderr(std::process::Stdio::piped())
+        .output()
+    {
+        Ok(out) if out.status.success() => {
             crate::logger::info(&format!(
                 "[trash-sudo] 提权移入废纸篓成功: {} -> {}",
                 path,
@@ -3487,19 +3493,43 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
             ));
             true
         }
-        Ok(s) => {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let cancelled = stderr.contains("-128") || stderr.contains("User canceled");
             crate::logger::warn(&format!(
-                "[trash-sudo] 提权回收未完成（退出码 {:?}，多为 Touch ID 未启用/取消）: {}",
-                s.code(),
-                path
+                "[trash-sudo] 提权回收未完成（退出码 {:?}，{}）: {} — {}",
+                out.status.code(),
+                if cancelled {
+                    "用户取消授权"
+                } else {
+                    "授权失败"
+                },
+                path,
+                stderr.trim().replace('\n', " ")
             ));
             false
         }
         Err(e) => {
-            crate::logger::warn(&format!("[trash-sudo] 无法启动 sudo: {} — {}", path, e));
+            crate::logger::warn(&format!(
+                "[trash-sudo] 无法启动 osascript: {} — {}",
+                path, e
+            ));
             false
         }
     }
+}
+
+/// 生成「管理员权限执行一条 shell 命令」的 AppleScript。
+///
+/// AppleScript 字符串里 `\` 与 `"` 必须转义；shell 命令内部的路径已由
+/// 上层用单引号包裹（并拒绝含 `'` 的路径），所以这里只处理 AppleScript 层。
+/// 抽成独立函数是为了能直接单测转义，不必真弹一次系统授权框。
+fn admin_move_applescript(shell_cmd: &str) -> String {
+    let escaped = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "do shell script \"{}\" with administrator privileges",
+        escaped
+    )
 }
 
 /// 跨平台在默认浏览器打开 URL
@@ -4431,6 +4461,27 @@ mod tests {
     //  X-09 · 符号语义表（供商业仓对齐）
     // -------------------------------------------------------------
     #[test]
+    #[test]
+    fn admin_move_applescript_escapes_quotes_and_backslashes() {
+        // osascript 是「能真弹授权框」的唯一路径，命令拼接错了会静默失败，
+        // 所以转义规则必须钉住。
+        let script =
+            admin_move_applescript(r#"mv -- '/Applications/A"B.app' '/Users/u/.Trash/A"B.app'"#);
+        assert!(script.starts_with("do shell script \""), "{script}");
+        assert!(
+            script.ends_with("\" with administrator privileges"),
+            "{script}"
+        );
+        assert!(!script.contains(r#"A"B"#), "内部双引号必须被转义: {script}");
+        assert!(script.contains(r#"A\"B"#), "内部双引号应转成 \": {script}");
+
+        let backslash = admin_move_applescript(r"mv -- 'a\b' 'c'");
+        assert!(
+            backslash.contains(r"a\\b"),
+            "反斜杠必须成对转义: {backslash}"
+        );
+    }
+
     fn x09_delete_log_symbol_table_is_the_single_source_of_truth() {
         // 反向验证：删掉任一行 / 改错 ok / 改错符号，下面断言立刻红。
         assert_eq!(DELETE_LOG_SYMBOLS.len(), 5, "符号语义表必须覆盖 5 个符号");
