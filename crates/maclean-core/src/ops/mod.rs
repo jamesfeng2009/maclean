@@ -3492,30 +3492,36 @@ pub fn sudo_move_app_to_trash(path: &str, lang_en: bool) -> bool {
         Err(e) => crate::logger::warn(&format!("[trash-sudo] sudo -n 不可用（{}）: {}", e, path)),
     }
 
-    if pam_tid_enabled() {
-        match run_sudo_move(path, &dst_str, false) {
+    // 有 Touch ID 的机器只走指纹：用户明确要求「能指纹就别输密码」，
+    // 所以指纹失败/取消时直接返回失败，不再弹密码框逼人打字；
+    // 只有「没有 Touch ID」的机器才落到 osascript 密码弹窗。
+    if pam_tid_enabled() && touch_id_enrolled() {
+        return match run_sudo_move(path, &dst_str, false) {
             Ok(true) => {
                 crate::logger::info(&format!(
                     "[trash-sudo] Touch ID 授权移入废纸篓成功: {} -> {}",
                     path, dst_str
                 ));
-                return true;
+                true
             }
-            // 指纹失败/取消时 sudo 会退化成文本密码提示 —— 那条提示在
-            // 不可见的 pty 里，用户看不到；此时立刻转 osascript 弹窗，
-            // 避免让用户对着「什么都没发生」干等。
-            Ok(false) => crate::logger::warn(&format!(
-                "[trash-sudo] Touch ID 未通过，转系统密码弹窗: {}",
-                path
-            )),
-            Err(e) => crate::logger::warn(&format!(
-                "[trash-sudo] Touch ID 路径失败（{}）: {}",
-                e, path
-            )),
-        }
-    } else {
-        crate::logger::info("[trash-sudo] 未配置 pam_tid，跳过 Touch ID，直接走系统授权弹窗");
+            Ok(false) => {
+                crate::logger::warn(&format!(
+                    "[trash-sudo] Touch ID 未通过（取消/超次数），不转密码框，等用户重试: {}",
+                    path
+                ));
+                false
+            }
+            Err(e) => {
+                crate::logger::warn(&format!(
+                    "[trash-sudo] Touch ID 路径失败（{}），不转密码框: {}",
+                    e, path
+                ));
+                false
+            }
+        };
     }
+
+    crate::logger::info("[trash-sudo] 本机不支持 Touch ID（或无指纹录入），走 osascript 密码弹窗");
 
     let shell_cmd = format!("mv -- '{}' '{}'", path, dst_str);
     let applescript = admin_move_applescript(&shell_cmd);
@@ -3576,6 +3582,27 @@ fn pam_tid_declared(content: &str) -> bool {
     content.lines().any(|line| {
         let l = line.trim_start();
         !l.starts_with('#') && l.contains("pam_tid")
+    })
+}
+
+/// 本机是否真的能用 Touch ID（指纹已录入）。
+///
+/// `pam_tid` 只是「启用指纹认证」的配置；如果机器没有 Touch ID 硬件，
+/// 或用户一枚指纹都没录，指纹永远过不了 —— 那种情况应该直接走
+/// osascript 密码弹窗，而不是让用户等一次注定失败的指纹。
+fn touch_id_enrolled() -> bool {
+    std::process::Command::new("/usr/bin/bioutil")
+        .arg("-r")
+        .output()
+        .map(|o| bioutil_reports_enrolled(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false)
+}
+
+/// 解析 `bioutil -r` 的输出：`Biometrics for unlock: 1` 才代表已录入指纹。
+fn bioutil_reports_enrolled(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        let l = line.trim();
+        l.starts_with("Biometrics for unlock:") && l.ends_with('1')
     })
 }
 
@@ -4651,6 +4678,18 @@ mod tests {
             "auth       sufficient     pam_smartcard.so"
         ));
         assert!(!pam_tid_declared(""));
+    }
+
+    #[test]
+    fn bioutil_enrolled_detection_matches_real_output() {
+        // 形如实测输出：只有 "Biometrics for unlock: 1" 才算可用；
+        // "Effective biometrics" 行与 0 值都不能当成已录入。
+        let enrolled = "User Touch ID configuration:\n\tBiometrics for unlock: 1\n\tBiometrics for ApplePay: 1\n\tEffective biometrics for unlock: 1\nUser 501:\t1 biometric template(s)\n";
+        assert!(bioutil_reports_enrolled(enrolled));
+
+        let none = "User Touch ID configuration:\n\tBiometrics for unlock: 0\n\tBiometrics for ApplePay: 0\n";
+        assert!(!bioutil_reports_enrolled(none));
+        assert!(!bioutil_reports_enrolled(""));
     }
 
     #[test]
