@@ -3390,18 +3390,29 @@ pub fn sudo_remove_app(path: &str, lang_en: bool) -> bool {
     let p = std::path::Path::new(path);
     let _ = lang_en;
 
-    // 1) 形态：/Applications 下的 .app 包
-    if !path.starts_with("/Applications/") || !path.ends_with(".app") {
+    // 1) 形态：/Applications 或 ~/Applications 下的 .app 包
+    //    ~/Applications 是 Chrome/Chromium 系 PWA 的位置，同样会被 TCC 的
+    //    App 管理挡住普通删除，需要同一条提权兜底。
+    let home_apps = format!(
+        "{}/Applications/",
+        crate::platform::home_dir().to_string_lossy()
+    );
+    if !(path.starts_with("/Applications/") || path.starts_with(&home_apps))
+        || !path.ends_with(".app")
+    {
         crate::logger::warn(&format!("[trash-sudo] 形态不符，拒绝提权回收: {}", path));
         return false;
     }
-    // 2) root 属主
+    // 2) 属主：root 装的，或就是当前用户自己的（PWA 这类，普通删除被 TCC 挡住）
     let Ok(meta) = p.symlink_metadata() else {
         return false;
     };
-    if meta.uid() != 0 {
+    let me = std::fs::metadata(crate::platform::home_dir())
+        .map(|m| m.uid())
+        .unwrap_or(u32::MAX);
+    if meta.uid() != 0 && meta.uid() != me {
         crate::logger::warn(&format!(
-            "[trash-sudo] 非 root 属主，不走提权（应由普通回收处理）: {}",
+            "[trash-sudo] 属主既不是 root 也不是当前用户，拒绝提权回收: {}",
             path
         ));
         return false;

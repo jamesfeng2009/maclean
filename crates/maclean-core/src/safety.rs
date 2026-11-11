@@ -1742,8 +1742,11 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
         return is_direct_child(&canonical_str, &user_http_storages);
     }
 
-    // /Applications/ 下的 .app 包（App 卸载场景）
-    if canonical_str.starts_with("/Applications/") && canonical_str.ends_with(".app") {
+    // 已安装的 app bundle（App 卸载场景）：/Applications/ 与 ~/Applications/ 都算。
+    // 后者是 Chrome/Chromium 系 PWA 的安装位置（Chrome Apps.localized/<名字>.app），
+    // 以前只放行 /Applications，导致 PWA 卸载被判"不在任何已声明扫描根下"。
+    // 判据与第 4.6 层共用：必须是 .app 且确实有 Contents/Info.plist。
+    if app_bundle_target_with_homes(canonical, &[home.to_path_buf()]) {
         return true;
     }
 
@@ -2380,6 +2383,31 @@ mod tests {
     }
 
     // ---------- 第 4.6 层: 清单管理目录保护 ----------
+
+    #[test]
+    fn user_applications_pwa_bundle_passes_provenance_gate() {
+        // 回归：Chrome PWA 装在 ~/Applications/<浏览器> Apps.localized/X.app，
+        // 来源准入以前只认 /Applications，导致卸载被判"不在任何扫描根下"。
+        let home = std::env::temp_dir().join(format!(
+            "maclean-pwa-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let bundle = home.join("Applications/Chrome Apps.localized/X.app");
+        std::fs::create_dir_all(bundle.join("Contents")).unwrap();
+        std::fs::write(bundle.join("Contents/Info.plist"), b"<plist/>").unwrap();
+
+        assert!(check_whitelist(&bundle, &home, "应用"));
+        // 只有名字像 .app、没有 Info.plist 的假目录仍然要拦
+        let fake = home.join("Applications/NotReally.app");
+        std::fs::create_dir_all(&fake).unwrap();
+        assert!(!check_whitelist(&fake, &home, "应用"));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn running_app_detection_requires_bundle_path_not_name() {

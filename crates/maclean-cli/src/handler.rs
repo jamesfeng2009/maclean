@@ -2011,7 +2011,7 @@ fn cmd_uninstall(app_arg: &str, yes: bool, format: OutputFormat) -> u8 {
         }
         let kind = if is_pwa { "PWA" } else { "应用" };
         println!(
-            "[预览] 将卸载 {kind}「{}」（{}），释放 {}，移入废纸篓可还原",
+            "[预览] 将卸载 {kind}「{}」（{}），永久删除并释放 {}（不可恢复）",
             name,
             path,
             format_size(release)
