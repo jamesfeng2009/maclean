@@ -580,7 +580,7 @@ mod tests {
     /// 表格「容错边界」：外置卷拔掉时 GC 会按方案标 done，线索随之消失；
     /// 卷重新插回后残留「复活」，必须仍能被 Layer 2 同目录扫描收掉，
     /// 否则就成了永久残留。
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn reappearing_volume_leftover_is_still_collectable_by_layer2() {
         let f = Fixture::new("volume");

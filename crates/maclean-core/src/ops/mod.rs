@@ -5477,6 +5477,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn age_path(p: &std::path::Path, secs: u64) {
         let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
         let f = std::fs::File::open(p).expect("打开路径以改 mtime");
@@ -5484,6 +5485,11 @@ mod tests {
     }
 
     /// P0：真实删除必须留下「开始 + 完成」两条 journal 记录，且不留未完成项。
+    ///
+    /// 只在 macOS / Windows 跑：Linux 分支刻意不做 staging 改名与 journal，
+    /// 直接把对象删掉（见 `best_effort_delete_with_reason` 的平台分支注释），
+    /// 这两条断言在 Linux 上必然不成立。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn p0_real_delete_writes_start_and_done_to_journal() {
         let d = GcTestDir::new("journal-lifecycle");
@@ -5525,6 +5531,7 @@ mod tests {
     /// 活进程的、太新的都绝不能被误删。
     #[cfg(unix)]
     #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn p1_sweep_removes_only_stale_dead_staging_siblings() {
         let d = GcTestDir::new("layer2");
         let stale_dead = d.staging(".maclean_stage_999999_abc_0");
