@@ -362,3 +362,70 @@ fn scheduled_only_if_due_skips_without_error() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// 崩溃收尾（GC）：CLI 是短生命周期进程，必须在命令入口**同步** replay，
+/// 不能像 GUI 那样 spawn 后台线程（命令跑完进程就退出，线程可能没执行完）。
+///
+/// 造一个「上次进程死在 rename 之后」的残留 + 一条未完成 journal 记录，
+/// 跑一个只读命令，断言残留被清掉，且 stdout 仍是干净的 envelope
+/// （收尾日志只允许走 stderr / 日志文件）。
+#[test]
+fn cli_recovers_stale_staging_at_command_startup() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = std::env::temp_dir().join(format!("maclean-cli-gc-{}-{nanos}", std::process::id()));
+    let home = root.join("home");
+    let work = root.join("work");
+    std::fs::create_dir_all(home.join(".maclean")).expect("建临时 HOME");
+    std::fs::create_dir_all(&work).expect("建工作目录");
+
+    let staging = work.join(".maclean_stage_999999_abc_0");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("payload.bin"), vec![0u8; 4096]).unwrap();
+
+    // 手写一条未完成记录：pid 999999 在 macOS 必死；dev/ino 全 0 时 GC
+    // 跳过物理身份比对，让夹具只聚焦「CLI 到底有没有来收」。
+    let journal = home.join(".maclean").join("staging.journal");
+    let line = serde_json::json!({
+        "v": 1,
+        "ts": 1,
+        "pid": 999999,
+        "path": staging.to_string_lossy(),
+        "dev": 0,
+        "ino": 0
+    });
+    std::fs::write(&journal, format!("{line}\n")).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_maclean"))
+        .args(["list", "--format", "json"])
+        .env("HOME", &home)
+        .env("MACLEAN_NO_TELEMETRY", "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("maclean 二进制应可执行");
+    assert_eq!(
+        code(&out),
+        0,
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let envelope: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("收尾不能污染 stdout: {e}\n{stdout}"));
+    assert_eq!(envelope["command"], "list");
+
+    assert!(
+        staging.symlink_metadata().is_err(),
+        "CLI 启动时必须同步收掉上次崩溃的 staging 残留"
+    );
+    let after = std::fs::read_to_string(&journal).unwrap_or_default();
+    assert!(
+        !after.lines().any(|l| l.contains("\"path\"")),
+        "journal 应压缩掉已完成的记录: {after}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
