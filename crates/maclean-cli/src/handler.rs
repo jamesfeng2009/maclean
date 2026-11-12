@@ -108,6 +108,15 @@ pub fn run_cli_with_version(version: &'static str) -> Option<u8> {
         None => None, // 无子命令，启动 GUI
         Some(cmd) => {
             install_cancel_handler();
+
+            // 崩溃收尾（GC）：CLI 是短生命周期进程，不能像 GUI 那样 spawn
+            // 后台线程 —— 命令跑完进程就退出，线程可能根本没执行完。按业内
+            // 通用形态（crash.journal / WAL open-time replay / dpkg --configure -a）
+            // 在命令入口**同步**做一次幂等 recovery。
+            // 无残留时只做一次小文件读 + .pending.json 对账，不写 journal，
+            // 日志走 stderr/文件，不污染 --format json 的 stdout。
+            let _ = maclean_core::gc::recover_if_needed();
+
             // E-09：用户显式传了 --format 时以它为准，不再被 --json 静默覆盖；
             // 两者同时给定时在 stderr 告警（不污染机器格式 stdout）。
             let format_explicit = matches.value_source("format") == Some(ValueSource::CommandLine);
