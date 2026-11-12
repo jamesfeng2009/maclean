@@ -12,9 +12,26 @@
 
 use std::process::{Command, Output, Stdio};
 
+/// 测试子进程的日志目录：必须与用户真实日志隔离。
+///
+/// 本文件的用例（含表驱动矩阵）会派生约 29 个 CLI 进程，每个进程启动都会写
+/// 启动横幅 + 规则加载日志。2026-11-12 实测：一天 4985 行主日志里 58% 是
+/// `cargo test` 灌进来的 —— 用户贴日志求助时前几十页全是测试进程，
+/// 真正的删除事件（11 条）被埋掉。
+fn cli_test_log_dir() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let p = std::env::temp_dir().join(format!("maclean-cli-logs-{}", std::process::id()));
+        std::fs::create_dir_all(&p).expect("创建测试日志目录");
+        p
+    })
+    .clone()
+}
+
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_maclean"))
         .args(args)
+        .env("MACLEAN_LOG_DIR", cli_test_log_dir())
         .stdin(Stdio::null())
         .output()
         .expect("maclean 二进制应可执行")
@@ -423,6 +440,7 @@ fn cli_recovers_stale_staging_at_command_startup() {
         .env("APPDATA", &home)
         .env("USERPROFILE", &home)
         .env("MACLEAN_NO_TELEMETRY", "1")
+        .env("MACLEAN_LOG_DIR", cli_test_log_dir())
         .stdin(Stdio::null())
         .output()
         .expect("maclean 二进制应可执行");

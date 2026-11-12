@@ -89,6 +89,7 @@ pub trait Scanner {
 /// 各 Scanner 在 `scan()` 收尾统一调用，避免「有的排序、有的不排序」「体积口径不一」。
 /// RuleScanner 已接入；作为公开 helper，其它 Scanner 也复用同一实现。
 pub fn finalize_scan_result(mut items: Vec<ScanItem>, scan_time_ms: u64) -> ScanResult {
+    flush_enum_failures();
     let mut seen = std::collections::HashSet::new();
     items.retain(|i| seen.insert(i.path.clone()));
     items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
@@ -97,6 +98,21 @@ pub fn finalize_scan_result(mut items: Vec<ScanItem>, scan_time_ms: u64) -> Scan
         total_size,
         scan_time_ms,
         items,
+    }
+}
+
+/// 把本轮累积的「目录枚举失败」汇总成一行日志输出（已输出过则为空转）。
+///
+/// 一次扫描一行，取代原来「每个不可枚举目录一条 WARN」——2026-11-12 实测：
+/// 一次全盘 75 条、一天 1601 条，占主日志 32%，其中 80% 是永远读不到的 TCC 目录。
+/// 体积被低计这件事仍然可见（权限 N 个），只是不再刷屏。
+///
+/// 扫描编排的收尾处（CLI `scan`/`clean`、App 的扫描与磁盘分析）都应调用一次；
+/// 由于是「取走并清零」，重复调用安全。`finalize_scan_result` 里也调了一次，
+/// 这样只走单个 Scanner 的路径（不经过编排层）同样能收口。
+pub fn flush_enum_failures() {
+    if let Some(summary) = bulkdir::take_enum_failures() {
+        crate::logger::info(&format!("[dir_size] {summary}"));
     }
 }
 
@@ -346,6 +362,15 @@ struct WalkTotals {
     incomplete: std::sync::atomic::AtomicBool,
 }
 
+impl WalkTotals {
+    fn new() -> Self {
+        Self {
+            bytes: std::sync::atomic::AtomicU64::new(0),
+            incomplete: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
 /// Photos / Music / TV 资源库 bundle 有意整体跳过（与历史 filter 一致）。
 fn is_media_library_bundle(name: &str) -> bool {
     let lower = name.to_lowercase();
@@ -363,10 +388,7 @@ fn walk_tree(root: &Path, mode: WalkMode) -> (u64, bool) {
     if fs_guard::is_remote_path(root) {
         return (0, true);
     }
-    let totals = WalkTotals {
-        bytes: std::sync::atomic::AtomicU64::new(0),
-        incomplete: std::sync::atomic::AtomicBool::new(false),
-    };
+    let totals = WalkTotals::new();
     rayon::scope(|s| visit_dir(s, &totals, root.to_path_buf(), 0, mode));
     (
         totals.bytes.load(Ordering::Relaxed),
@@ -403,24 +425,31 @@ fn visit_dir<'scope>(
         &dir,
         mode.first_timeout(),
         mode.retry_timeout(),
-        move || bulkdir::list_dir(&task).unwrap_or_default(),
+        move || match bulkdir::list_dir(&task) {
+            Ok(l) => (l, None),
+            // 整目录读不到：体积仍按 0 计（与旧行为一致），但不再静默 ——
+            // 按原因记账，扫描收尾统一输出一行汇总，而不是每个目录一条 WARN。
+            Err(e) => (
+                bulkdir::DirListing::default(),
+                Some(bulkdir::classify_enum_failure(&e)),
+            ),
+        },
     );
 
     let listing = match listed {
-        Some(l) => l,
+        Some((listing, failure)) => {
+            if let Some(kind) = failure {
+                bulkdir::record_enum_failure(&dir, kind);
+            }
+            listing
+        }
         None => {
             // 该目录本次枚举超时（IO 卡死/忙）：本次只跳过其子树并标记不完整，
             // 不落盘、不记忆——下次扫描无条件重试。
+            // 逐目录 WARN 改为记账：一天 354 条超时 WARN 单独刷屏没有价值，
+            // 汇总成「N 个目录枚举超时」反而更容易看出是哪类目录在拖。
             w.incomplete.store(true, Ordering::Relaxed);
-            let tag = if matches!(mode, WalkMode::Accurate) {
-                "dir_size_accurate"
-            } else {
-                "dir_size"
-            };
-            crate::logger::warn(&format!(
-                "[{tag}] 目录本次枚举超时（IO 忙/卡死），本轮跳过其子树、下次扫描重试: {}",
-                dir.display()
-            ));
+            bulkdir::record_enum_timeout(&dir);
             return;
         }
     };

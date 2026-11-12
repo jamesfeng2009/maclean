@@ -104,6 +104,10 @@ fn main() {
     // CLI 分发：所有子命令经 maclean-cli-contract crate 处理，返回语义退出码。
     // run_cli() 返回 Some(code) 表示已执行并应退出；None 表示未提供子命令。
     if let Some(code) = maclean_cli_contract::run_cli_with_version(env!("CARGO_PKG_VERSION")) {
+        // 目录枚举失败汇总：一次命令一行（取走并清零，重复调用安全）。
+        // 放在进程退出前是因为扫描编排分散在 scan/clean/list 各处，
+        // 逐处调用容易漏；这里是唯一必经的收口点。
+        maclean_core::scanner::flush_enum_failures();
         std::process::exit(code as i32);
     }
 

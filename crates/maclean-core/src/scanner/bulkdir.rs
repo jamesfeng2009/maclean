@@ -57,17 +57,166 @@ impl InodeDedup {
     }
 }
 
+/// 目录枚举失败的归类。
+///
+/// 用来把「每个目录一条 WARN」压成「每次统计一行汇总」（2026-11-12 实测：
+/// 一次全盘扫描 75 条，一天 1601 条，占主日志 32%，而其中 80% 是永远读不到的
+/// TCC 目录 —— 逐条记录只会淹没真正的失败）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnumFailure {
+    /// 权限不足（EPERM / EACCES）：TCC 保护的 App 缓存、其他用户的目录。
+    /// 这类目录**每轮扫描都会失败**，属于预期，不该刷 WARN。
+    Denied,
+    /// 枚举期间路径消失（ENOENT / ENOTDIR）：并发删除或遍历期竞态。
+    Vanished,
+    /// 其他（EINTR / EIO / 数据异常等）：真正值得看一眼的那一类。
+    Other,
+}
+
+/// 把 `io::Error` 归到三类之一。纯函数，便于单测钉住分类口径。
+pub(crate) fn classify_enum_failure(err: &std::io::Error) -> EnumFailure {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => EnumFailure::Denied,
+        std::io::ErrorKind::NotFound => EnumFailure::Vanished,
+        // ENOTDIR 在稳定版 Rust 里没有对应 ErrorKind，但它在本场景同样意味着
+        // 「路径声称是目录、实际不是」，按消失处理。
+        #[cfg(unix)]
+        _ if err.raw_os_error() == Some(libc::ENOTDIR) => EnumFailure::Vanished,
+        _ => EnumFailure::Other,
+    }
+}
+
+/// 一次扫描内累积的枚举失败计数。
+///
+/// 为什么是进程级全局而不是 `WalkTotals` 里的字段：`dir_size` 在清理链路里是
+/// **每个候选目录调用一次**，计数挂在单次 walk 上，一次全盘扫描会输出 80+ 行
+/// 「1 个目录未能枚举」—— 比原来的逐条 WARN 还多。改为全局累积，由扫描收尾
+/// （[`crate::scanner::flush_enum_failures`]）统一输出一行，才是真的降噪。
+///
+/// 抽成独立结构是为了能单测：全局静态在并行测试里被多个用例同时读写，
+/// 断言具体数字必然不稳。
+#[derive(Default)]
+pub(crate) struct FailureTally {
+    denied: u64,
+    vanished: u64,
+    other: u64,
+    /// 枚举超时（IO 卡死 / 忙）而跳过子树的目录数。与上面三类不同：
+    /// 这是可以恢复的，下次扫描会无条件重试。
+    timeouts: u64,
+    /// 批量枚举失败、退回标准枚举的次数（性能信号，不影响正确性）。
+    bulk_fallback: u64,
+    /// 第一个不可枚举的路径，仅用于定位。
+    sample: Option<String>,
+}
+
+impl FailureTally {
+    fn record(&mut self, dir: &Path, kind: EnumFailure) {
+        match kind {
+            EnumFailure::Denied => self.denied += 1,
+            EnumFailure::Vanished => self.vanished += 1,
+            EnumFailure::Other => self.other += 1,
+        }
+        if self.sample.is_none() {
+            self.sample = Some(dir.display().to_string());
+        }
+    }
+
+    fn record_timeout(&mut self, dir: &Path) {
+        self.timeouts += 1;
+        if self.sample.is_none() {
+            self.sample = Some(dir.display().to_string());
+        }
+    }
+
+    /// 只有 macOS 有批量枚举接口，回退计数也只在那里产生；
+    /// 测试（unix）直接调它验证汇总拼装，因此两者都要能编译到。
+    #[cfg(any(all(test, unix), target_os = "macos"))]
+    fn record_fallback(&mut self) {
+        self.bulk_fallback += 1;
+    }
+
+    /// 取走并清零；没有失败也没有超时时返回 `None`。
+    ///
+    /// 只拼有内容的段落：「0 个已消失」这类零值不出现，日志行才好读。
+    fn take(&mut self) -> Option<String> {
+        let failed = self.denied + self.vanished + self.other;
+        if failed == 0 && self.timeouts == 0 {
+            self.bulk_fallback = 0;
+            return None;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if failed > 0 {
+            parts.push(format!(
+                "{failed} 个目录未能枚举（权限 {} / 已消失 {} / 其他 {}）",
+                self.denied, self.vanished, self.other
+            ));
+        }
+        if self.timeouts > 0 {
+            parts.push(format!(
+                "{} 个目录枚举超时（IO 忙/卡死，下次扫描重试）",
+                self.timeouts
+            ));
+        }
+        let mut msg = parts.join("，");
+        msg.push_str("，这部分体积未计入");
+        if self.bulk_fallback > 0 {
+            msg.push_str(&format!("；批量枚举回退 {} 次", self.bulk_fallback));
+        }
+        if let Some(sample) = self.sample.as_deref() {
+            msg.push_str(&format!("；示例: {sample}"));
+        }
+        *self = FailureTally::default();
+        Some(msg)
+    }
+}
+
+static ENUM_FAILURES: std::sync::Mutex<FailureTally> = std::sync::Mutex::new(FailureTally {
+    denied: 0,
+    vanished: 0,
+    other: 0,
+    timeouts: 0,
+    bulk_fallback: 0,
+    sample: None,
+});
+
+/// 目录枚举失败时的记账（不写日志）。
+pub(crate) fn record_enum_failure(dir: &Path, kind: EnumFailure) {
+    if let Ok(mut acc) = ENUM_FAILURES.lock() {
+        acc.record(dir, kind);
+    }
+}
+
+/// 目录枚举超时（跳过其子树）时的记账。
+pub(crate) fn record_enum_timeout(dir: &Path) {
+    if let Ok(mut acc) = ENUM_FAILURES.lock() {
+        acc.record_timeout(dir);
+    }
+}
+
+/// 批量枚举回退计数（性能信号）。仅 macOS 有批量接口，故只在 macOS 编译。
+#[cfg(target_os = "macos")]
+pub(crate) fn record_bulk_fallback() {
+    if let Ok(mut acc) = ENUM_FAILURES.lock() {
+        acc.record_fallback();
+    }
+}
+
+/// 取出并清零本轮计数，返回一行可直接写日志的汇总（无失败时返回 `None`）。
+pub(crate) fn take_enum_failures() -> Option<String> {
+    ENUM_FAILURES.lock().ok().and_then(|mut acc| acc.take())
+}
+
 /// 枚举一个目录。返回「打不开」级别的 IO 错误；单条目异常被忽略。
+///
+/// 批量枚举失败会退回标准枚举（结果一致，只慢一点），失败与回退都只记账、
+/// 不写日志 —— 由扫描收尾统一汇总，避免一次全盘扫描刷 80 条 WARN。
 pub(crate) fn list_dir(dir: &Path) -> std::io::Result<DirListing> {
     #[cfg(target_os = "macos")]
     {
         match list_dir_bulk(dir) {
             Ok(listing) => Ok(listing),
-            Err(e) => {
-                crate::logger::warn(&format!(
-                    "[bulkdir] getattrlistbulk 失败，退回标准枚举 {}: {e}",
-                    dir.display()
-                ));
+            Err(_) => {
+                record_bulk_fallback();
                 list_dir_std(dir)
             }
         }
@@ -428,10 +577,9 @@ mod tests {
     #[test]
     fn bulk_unreadable_dir_returns_err_not_zero_byte_complete_listing() {
         // C-08：「打不开」级别的 IO 错误必须由 list_dir 以 Err 返回，供
-        // visit_dir 透传后置 incomplete=true；绝不能退化成「0 字节且完整」
-        // 的 Ok 结果。scanner/mod.rs 的 visit_dir 目前用
-        // list_dir(...).unwrap_or_default() 吞掉 Err —— 那侧的 Result 透传
-        // 属于该文件（本轮文件边界禁止修改），本模块只保证 Err 契约。
+        // visit_dir 分类计数后汇总上报；绝不能退化成「0 字节且完整」的 Ok 结果。
+        // （2026-11-12：visit_dir 不再 `unwrap_or_default()` 静默吞掉，改为按
+        // errno 分类累加，walk_tree 收尾输出一行汇总。）
         let tmp = std::env::temp_dir().join(format!("maclean_bulk_noacc_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
@@ -449,6 +597,84 @@ mod tests {
         }
         fs::set_permissions(&tmp, fs::Permissions::from_mode(orig)).ok();
         fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn failure_tally_accumulates_by_bucket_then_drains() {
+        // 纯结构测试：不碰全局静态，避免与并行用例抢计数。
+        let mut t = FailureTally::default();
+        assert!(t.take().is_none(), "没有失败时不得输出汇总行");
+
+        t.record(Path::new("/a/one"), EnumFailure::Denied);
+        t.record(Path::new("/a/two"), EnumFailure::Denied);
+        t.record(Path::new("/a/three"), EnumFailure::Denied);
+        t.record(Path::new("/b/gone"), EnumFailure::Vanished);
+        t.record(Path::new("/c/weird"), EnumFailure::Other);
+        t.record_timeout(Path::new("/d/slow"));
+        t.record_timeout(Path::new("/e/slow"));
+        t.record_fallback();
+        t.record_fallback();
+
+        let line = t.take().expect("有失败时必须输出一行汇总");
+        assert!(
+            line.starts_with("5 个目录未能枚举（权限 3 / 已消失 1 / 其他 1）"),
+            "实际: {line}"
+        );
+        assert!(line.contains("2 个目录枚举超时"), "超时计数错: {line}");
+        assert!(line.contains("这部分体积未计入"), "应说明体积未计: {line}");
+        assert!(line.contains("批量枚举回退 2 次"), "回退计数错: {line}");
+        // 示例取第一条失败路径，用于定位
+        assert!(line.contains("/a/one"), "示例路径应为首个失败: {line}");
+
+        // 取走即清零：下一轮扫描不能带着上一轮的数字
+        assert!(t.take().is_none(), "汇总后必须清零");
+    }
+
+    #[test]
+    fn failure_tally_speaks_up_when_only_timeouts_happened() {
+        // 只有超时（没有 EPERM 之类）时也必须输出一行，否则「子树被跳过」
+        // 这件事就彻底不可见了。
+        let mut t = FailureTally::default();
+        t.record_timeout(Path::new("/a/slow"));
+        let line = t.take().expect("只有超时也要汇总");
+        assert!(line.starts_with("1 个目录枚举超时"), "实际: {line}");
+        assert!(!line.contains("未能枚举"), "不应虚构权限类失败: {line}");
+    }
+
+    #[test]
+    fn classify_maps_errno_to_three_buckets() {
+        use std::io::Error;
+        // TCC 保护的 App 缓存走这一类：每轮都失败，属预期，只计数不刷日志
+        assert_eq!(
+            classify_enum_failure(&Error::from_raw_os_error(libc::EACCES)),
+            EnumFailure::Denied
+        );
+        assert_eq!(
+            classify_enum_failure(&Error::from_raw_os_error(libc::EPERM)),
+            EnumFailure::Denied,
+            "EPERM 也是权限不足（TCC 保护的目录报的就是它），不能归到 Other"
+        );
+        // 遍历期被并发删除：正常竞态
+        assert_eq!(
+            classify_enum_failure(&Error::from_raw_os_error(libc::ENOENT)),
+            EnumFailure::Vanished
+        );
+        assert_eq!(
+            classify_enum_failure(&Error::from_raw_os_error(libc::ENOTDIR)),
+            EnumFailure::Vanished
+        );
+        // 内核信号中断 / 数据异常：才是值得人看一眼的那一类
+        assert_eq!(
+            classify_enum_failure(&Error::from_raw_os_error(libc::EINTR)),
+            EnumFailure::Other
+        );
+        assert_eq!(
+            classify_enum_failure(&Error::new(
+                std::io::ErrorKind::InvalidData,
+                "getattrlistbulk 数据异常"
+            )),
+            EnumFailure::Other
+        );
     }
 
     #[test]

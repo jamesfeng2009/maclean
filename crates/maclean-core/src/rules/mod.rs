@@ -174,14 +174,18 @@ impl RuleScanner {
         let mut ok = Vec::new();
         for rule in parsed {
             match rule.validate() {
-                Ok(()) => {
-                    crate::logger::info(&format!("规则已加载: {} ({})", rule.id, source));
-                    ok.push(rule);
-                }
+                Ok(()) => ok.push(rule),
+                // 被拒绝的规则逐条记录：数量少、且是用户需要知道的可行动信息
+                // （自定义规则写错了要能定位到具体原因）。
                 Err(reason) => {
                     crate::logger::info(&format!("规则被拒绝: {} ({})", reason, source));
                 }
             }
+        }
+        // 加载成功只汇总一行：原来每条规则一行，内置 4 条 × 每次扫描 = 主日志
+        // 第二大噪声源（2026-11-12 实测一天 1452 行）。
+        if !ok.is_empty() {
+            crate::logger::info(&format!("规则已加载 {} 条 ({})", ok.len(), source));
         }
         ok
     }

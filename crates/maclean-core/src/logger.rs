@@ -41,8 +41,21 @@ static LOGGER: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 /// 日志目录
 static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// 日志目录环境变量覆盖（测试 / 排障用）
+///
+/// 优先级高于默认目录，且**不写入 `LOG_DIR` 缓存**：CLI 集成测试会派生多个
+/// 子进程，每个进程各自读一次环境变量即可，不会互相污染。
+pub const LOG_DIR_ENV: &str = "MACLEAN_LOG_DIR";
+
 /// 获取日志目录
 pub fn log_dir() -> PathBuf {
+    // 环境变量优先于缓存：让测试能在进程内把日志重定向到临时目录，
+    // 即使更早的调用已经把默认路径缓存进 LOG_DIR 也依然生效。
+    if let Some(custom) = std::env::var_os(LOG_DIR_ENV) {
+        if !custom.is_empty() {
+            return PathBuf::from(custom);
+        }
+    }
     LOG_DIR
         .get_or_init(|| crate::platform::app_data_dir().join("logs"))
         .clone()
@@ -61,6 +74,16 @@ pub fn init() {
 /// 供 CLI 等上层二进制传入自身版本（`env!("CARGO_PKG_VERSION")`），
 /// 避免横幅显示的是本库的版本号。
 pub fn init_with_version(version: &str) {
+    // 幂等：重复调用只保留第一次的横幅与 panic hook。
+    //
+    // 不幂等的代价是双重的：横幅会重复（2026-11-12 实测同一秒内出现 29 条，
+    // 因为 `LOGGER.set` 失败的返回值被 `let _ =` 丢掉，横幅却照写不误）；
+    // 更麻烦的是 `set_panic_hook` 每次 `take_hook` 再 `set_hook`，N 次 init
+    // 叠出 N 层 hook —— 一次 panic 会被记 N 遍、backtrace 抓 N 次。
+    if LOGGER.get().is_some() {
+        return;
+    }
+
     let log_dir = log_dir();
 
     // 创建日志目录
@@ -80,14 +103,21 @@ pub fn init_with_version(version: &str) {
 
     match file {
         Ok(f) => {
-            let mutex = Mutex::new(Some(f));
-            let _ = LOGGER.set(mutex);
+            // 先占位再写横幅：并发 init 时 set 只会成功一次，抢输的线程直接返回，
+            // 不会再写第二份横幅（上面的 is_some 检查只挡得住顺序重复）。
+            if LOGGER.set(Mutex::new(Some(f))).is_err() {
+                return;
+            }
 
-            // 写入启动分隔
-            info(&format!("========== maclean v{} 启动 ==========", version));
-            info(&format!("日志文件: {}", log_file.display()));
-            info(&format!("平台: {}", std::env::consts::OS));
-            info(&format!("架构: {}", std::env::consts::ARCH));
+            // 启动信息压成一行：原来 4 行（横幅 / 日志路径 / 平台 / 架构）在
+            // 每次启动都占 4 行，而真正排障需要的版本、平台、日志位置一个不少。
+            info(&format!(
+                "========== maclean v{} 启动 | {} {} | 日志 {} ==========",
+                version,
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                log_file.display()
+            ));
 
             // 设置 panic hook
             set_panic_hook();
@@ -321,6 +351,9 @@ fn secs_to_time(secs: u64) -> (u32, u32, u32) {
 mod tests {
     use super::*;
 
+    /// 串行化「改 LOG_DIR_ENV 的用例」：env 是进程级共享状态。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_secs_to_date() {
         // 2026-01-01 00:00:00 UTC = 1767225600
@@ -353,5 +386,61 @@ mod tests {
         assert_eq!(date.len(), 10);
         assert_eq!(&date[4..5], "-");
         assert_eq!(&date[7..8], "-");
+    }
+
+    /// 2026-11-12 实测：同一秒内出现 29 条启动横幅。根因是 `LOGGER.set` 的
+    /// 失败被 `let _ =` 丢掉、横幅照写、panic hook 还每轮叠一层。
+    /// 这里用「三次 init 只留一条」把幂等钉住。
+    #[test]
+    fn repeated_init_writes_one_banner_and_one_hook() {
+        // 环境变量是进程级共享状态：串行化，避免与另一个改 env 的用例互相踩。
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("maclean_logger_idem_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        std::env::set_var(LOG_DIR_ENV, &dir);
+
+        init_with_version("9.9.9");
+        init_with_version("9.9.9");
+        init_with_version("9.9.9");
+
+        let file = dir.join(format!("maclean_{}.log", format_date(SystemTime::now())));
+        let text = fs::read_to_string(&file).expect("应当写出日志文件");
+        assert_eq!(
+            text.matches("maclean v9.9.9 启动").count(),
+            1,
+            "重复 init 不得重复写横幅，实际日志:\n{text}"
+        );
+
+        // 横幅压成一行，但排障要的信息一项都不能少：版本 / 平台 / 架构 / 日志位置。
+        let banner = text
+            .lines()
+            .find(|l| l.contains("maclean v9.9.9 启动"))
+            .expect("应有横幅行");
+        assert!(
+            banner.contains(std::env::consts::OS),
+            "横幅缺平台: {banner}"
+        );
+        assert!(
+            banner.contains(std::env::consts::ARCH),
+            "横幅缺架构: {banner}"
+        );
+        assert!(
+            banner.contains(&dir.display().to_string()),
+            "横幅缺日志路径: {banner}"
+        );
+
+        std::env::remove_var(LOG_DIR_ENV);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 环境变量必须能覆盖已经缓存过的默认路径，否则测试无法把日志调离真实目录。
+    #[test]
+    fn log_dir_env_overrides_cached_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = log_dir(); // 先把默认路径缓存进去
+        let dir = std::env::temp_dir().join(format!("maclean_logdir_env_{}", std::process::id()));
+        std::env::set_var(LOG_DIR_ENV, &dir);
+        assert_eq!(log_dir(), dir);
+        std::env::remove_var(LOG_DIR_ENV);
     }
 }
