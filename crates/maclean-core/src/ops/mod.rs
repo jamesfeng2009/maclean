@@ -219,6 +219,9 @@ fn rename_to_staging(path: &std::path::Path) -> Result<std::path::PathBuf, Delet
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => return Err(DeleteFailure::Other),
     };
+    // Layer 2：本次删除开始前，先把这个父目录里「上次留下的 staging」收掉。
+    // 本来也要枚举该目录，边际成本近似 0；不做全盘扫描（代价不可接受）。
+    sweep_stale_staging_cached(parent);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -291,6 +294,190 @@ fn rename_to_staging(path: &std::path::Path) -> Result<std::path::PathBuf, Delet
     Err(DeleteFailure::Other)
 }
 
+/// Layer 2：同目录兜底扫描（方案 §2.2），返回清掉的条数。
+///
+/// 覆盖两种 journal 必然漏掉的情况：
+/// 1. rename 成功、journal 还没落盘就断电（方案里已知的极小窗口）；
+/// 2. journal 出现之前的版本留下的老残留 / journal 被删掉。
+///
+/// 命中条件**三者同时满足**才删：名字严格匹配 staging 格式、
+/// pid 不是当前进程且已退出、mtime 早于 60s（避免和另一个实例正在进行的删除抢）。
+pub fn sweep_stale_staging(parent: &std::path::Path) -> usize {
+    const MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return 0; // 目录不存在 / 无权限：本次没有可收的，不是错误
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(parsed) = crate::staging_journal::parse_staging_name(name) else {
+            continue;
+        };
+        if parsed.pid == std::process::id() {
+            continue; // 自己正在删，绝不碰
+        }
+        if crate::staging_journal::pid_alive(parsed.pid) {
+            continue; // 另一个实例还在删
+        }
+        let p = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue; // 不跟随符号链接
+        };
+        let old_enough = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .map(|age| age >= MIN_AGE)
+            .unwrap_or(false);
+        if !old_enough {
+            continue;
+        }
+        match remove_staging_tree(&p, &p) {
+            Ok(()) => {
+                removed += 1;
+                // 顺手写 done：这条可能已经在 journal 里等着收，避免 GC 二次处理。
+                crate::staging_journal::record_done(&p);
+                crate::logger::warn(&format!("[gc] 兜底扫描清掉陈旧 staging: {}", p.display()));
+            }
+            Err(f) => crate::logger::warn(&format!(
+                "[gc] 兜底扫描删除失败（保留给下次）: {} ({})",
+                p.display(),
+                f.label_key()
+            )),
+        }
+    }
+    removed
+}
+
+/// 同一个父目录 60 秒内只扫一次。
+///
+/// 批量删除里成千上万个兄弟项共用同一父目录，逐个 read_dir 是纯浪费；
+/// 逐项调用的语义不变（第一次扫，其余命中缓存）。
+fn sweep_stale_staging_cached(parent: &std::path::Path) {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(60);
+    static SWEPT: Mutex<Vec<(std::path::PathBuf, Instant)>> = Mutex::new(Vec::new());
+
+    let now = Instant::now();
+    {
+        let Ok(mut guard) = SWEPT.lock() else { return };
+        guard.retain(|(_, at)| now.duration_since(*at) < TTL);
+        if guard.iter().any(|(p, _)| p == parent) {
+            return;
+        }
+        guard.push((parent.to_path_buf(), now));
+        if guard.len() > 256 {
+            guard.remove(0);
+        }
+    }
+    sweep_stale_staging(parent);
+}
+
+/// 崩溃注入（方案 §6.2，review 后补齐三个窗口）。
+///
+/// `MACLEAN_TEST_CRASH_AT=rename|stage|rm` 选择崩点：
+/// - `rename`：staging 已改名成功、journal **还没写** → 只能靠 Layer 2 兜底；
+/// - `stage`：已写开始记录、还没开始删 → 启动 GC replay（原有用例覆盖）；
+/// - `rm`：staging 已删完、done 还没写 → GC 应识别路径不存在并标 done。
+///
+/// 兼容旧变量 `MACLEAN_TEST_CRASH_AFTER_STAGE`（等价于 `stage`）。
+/// 只在 debug 构建生效：release 产物里这些环境变量不产生任何行为变化。
+fn maybe_crash_at(stage: &str) {
+    let _ = stage;
+    #[cfg(debug_assertions)]
+    {
+        // `MACLEAN_TEST_KILL_AT=<stage>` 用真 SIGKILL（不跑 atexit、不 flush
+        // 用户态缓冲），验证 journal 的 write(2) 在 kill -9 后仍然留在内核里。
+        if std::env::var("MACLEAN_TEST_KILL_AT").ok().as_deref() == Some(stage) {
+            crate::logger::warn(&format!("[test] 命中 kill -9 注入 {stage}"));
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(std::process::id() as i32, libc::SIGKILL);
+            }
+            std::process::abort(); // kill 没生效时也要死，别让父进程误判
+        }
+        let explicit = std::env::var("MACLEAN_TEST_CRASH_AT").ok();
+        let hit = explicit.as_deref() == Some(stage)
+            || (stage == "stage" && std::env::var_os("MACLEAN_TEST_CRASH_AFTER_STAGE").is_some());
+        if hit {
+            crate::logger::warn(&format!(
+                "[test] 命中崩溃注入 {stage}，abort 模拟删除中途进程死亡"
+            ));
+            std::process::abort();
+        }
+    }
+}
+
+/// 删除一个**已经是 staging 名**的对象：`rm -rf` → 解除 chflags/chmod → 再 `rm -rf`。
+///
+/// `label` 只用于失败归因（SIP 判断必须基于原路径，而不是 staging 名）。
+/// 抽出独立函数的原因：启动收尾（[`crate::gc`]）手里的路径已经是 staging 名，
+/// 绝不能再 rename 一次，但仍要复用同一套「权限 / immutable 重试」逻辑。
+#[cfg(target_os = "macos")]
+pub fn remove_staging_tree(
+    staging: &std::path::Path,
+    label: &std::path::Path,
+) -> Result<(), DeleteFailure> {
+    use std::os::macos::fs::MetadataExt as MacMeta;
+
+    let path_str = label.to_string_lossy().to_string(); // 归因用原路径（SIP 判断基于原路径）
+    let deleted_str = staging.to_string_lossy().to_string(); // 操作用 staging
+    let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
+    let rm = |p: &str| {
+        std::process::Command::new("/bin/rm")
+            .arg("-rf")
+            .arg(p)
+            .output()
+    };
+
+    // 第一遍：直接 rm staging
+    if let Ok(o) = rm(&deleted_str) {
+        if o.status.success() && gone(staging) {
+            return Ok(());
+        }
+        if let Some(f) = classify_rm_failure(&o.stderr, &path_str) {
+            return Err(f);
+        }
+    }
+
+    // 第二遍：解除 immutable/只读标志后再删
+    let _ = std::process::Command::new("/usr/bin/chflags")
+        .arg("-R")
+        .arg("nouchg")
+        .arg(&deleted_str)
+        .output();
+    let _ = std::process::Command::new("/bin/chmod")
+        .arg("-R")
+        .arg("u+w")
+        .arg(&deleted_str)
+        .output();
+    if let Ok(o) = rm(&deleted_str) {
+        if o.status.success() && gone(staging) {
+            return Ok(());
+        }
+        if let Some(f) = classify_rm_failure(&o.stderr, &path_str) {
+            return Err(f);
+        }
+    }
+
+    // 仍存在且无法归类：检查 immutable 标志（chflags 尝试可能没权限或没生效）
+    {
+        if let Ok(meta) = std::fs::symlink_metadata(staging) {
+            let flags = meta.st_flags();
+            // UF_IMMUTABLE=0x0001, SF_IMMUTABLE=0x8000
+            if flags & 0x0001 != 0 || flags & 0x8000 != 0 {
+                return Err(DeleteFailure::Immutable);
+            }
+        }
+    }
+    Err(DeleteFailure::Other)
+}
+
 /// 尝试删除并归因失败原因（P1）
 ///
 /// 删除逻辑与原 `best_effort_delete` 完全一致（rm -rf → chflags/chmod 重试），
@@ -298,7 +485,6 @@ fn rename_to_staging(path: &std::path::Path) -> Result<std::path::PathBuf, Delet
 /// `best_effort_delete` 保留为兼容包装（返回 bool）。
 #[cfg(target_os = "macos")]
 pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
-    use std::os::macos::fs::MetadataExt as MacMeta;
     use std::os::unix::fs::MetadataExt as UnixMeta;
 
     // ========== TOCTOU 防护（对标 MangoDisk 物理身份比对，流程更稳） ==========
@@ -308,7 +494,7 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
     // 3. 比对 staging 的物理身份与捕获值：不一致说明"验证→删除"之间原路径被换成
     //    新对象 → 恢复原路径并 fail-closed 拒绝删除；
     // 4. 后续 rm/chflags/chmod 只作用于 staging —— 删的始终是验证过的那一个对象。
-    let deleted_path = {
+    let (deleted_path, identity) = {
         let Some(meta) = std::fs::symlink_metadata(path).ok() else {
             return Ok(()); // 目标已消失，视为删除成功
         };
@@ -329,60 +515,23 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
             let _ = std::fs::rename(&staging, path);
             return Err(DeleteFailure::Other);
         }
-        staging
+        (staging, identity)
     };
 
-    let path_str = path.to_string_lossy().to_string(); // 归因用原路径（SIP 判断基于原路径）
-    let deleted_str = deleted_path.to_string_lossy().to_string(); // 操作用 staging
-    let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
-    let rm = |p: &str| {
-        std::process::Command::new("/bin/rm")
-            .arg("-rf")
-            .arg(p)
-            .output()
-    };
+    // 崩点 1：rename 成功、journal 未落盘。这段窗口只能靠 Layer 2 同目录扫描收。
+    maybe_crash_at("rename");
 
-    // 第一遍：直接 rm staging
-    if let Ok(o) = rm(&deleted_str) {
-        if o.status.success() && gone(&deleted_path) {
-            return Ok(());
-        }
-        if let Some(f) = classify_rm_failure(&o.stderr, &path_str) {
-            return Err(f);
-        }
-    }
+    // 启动收尾（GC）的权威线索：rename 成功、真正开删之前落一条 journal 记录。
+    // 写失败只记 warn，绝不影响删除本身。
+    crate::staging_journal::record_staged(&deleted_path, identity.0, identity.1);
+    maybe_crash_at("stage");
 
-    // 第二遍：解除 immutable/只读标志后再删
-    let _ = std::process::Command::new("/usr/bin/chflags")
-        .arg("-R")
-        .arg("nouchg")
-        .arg(&deleted_str)
-        .output();
-    let _ = std::process::Command::new("/bin/chmod")
-        .arg("-R")
-        .arg("u+w")
-        .arg(&deleted_str)
-        .output();
-    if let Ok(o) = rm(&deleted_str) {
-        if o.status.success() && gone(&deleted_path) {
-            return Ok(());
-        }
-        if let Some(f) = classify_rm_failure(&o.stderr, &path_str) {
-            return Err(f);
-        }
+    let res = remove_staging_tree(&deleted_path, path);
+    if res.is_ok() {
+        maybe_crash_at("rm");
+        crate::staging_journal::record_done(&deleted_path);
     }
-
-    // 仍存在且无法归类：检查 immutable 标志（chflags 尝试可能没权限或没生效）
-    {
-        if let Ok(meta) = std::fs::symlink_metadata(&deleted_path) {
-            let flags = meta.st_flags();
-            // UF_IMMUTABLE=0x0001, SF_IMMUTABLE=0x8000
-            if flags & 0x0001 != 0 || flags & 0x8000 != 0 {
-                return Err(DeleteFailure::Immutable);
-            }
-        }
-    }
-    Err(DeleteFailure::Other)
+    res
 }
 
 /// 从 rm 的 stderr 归类失败原因（macOS）
@@ -405,31 +554,20 @@ fn classify_rm_failure(stderr: &[u8], path: &str) -> Option<DeleteFailure> {
     None
 }
 
-/// 尝试删除并归因失败原因（Windows）
+/// 删除 staging 对象（Windows）：目录 `rd /S /Q`、文件 `del /F /Q`，
+/// 失败再退回 Rust API。与 macOS 分支对称，供启动收尾复用。
 #[cfg(target_os = "windows")]
-pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
-    // ========== TOCTOU 防护（Windows 版） ==========
-    // 先原子 rename 到同目录不可预测 staging（Windows 上 rename 目标存在即失败，
-    // 天然不覆盖外部文件），随后所有删除只作用于 staging —— 删的始终是验证过
-    // 的那一个对象，路径在验证后被替换也无法命中。
-    // 限制：Windows 端未做物理身份(st_dev/st_ino)比对，依赖 staging 名不可预测
-    //  + rename 原子性缩短竞态窗口；如需更强可引入 windows crate 取 FileIndex。
-    let deleted_path = {
-        if !path.exists() && path.symlink_metadata().is_err() {
-            return Ok(());
-        }
-        rename_to_staging(path)?
-    };
-
-    let deleted_str = deleted_path.to_string_lossy().to_string();
+pub fn remove_staging_tree(
+    staging: &std::path::Path,
+    _label: &std::path::Path,
+) -> Result<(), DeleteFailure> {
+    let deleted_str = staging.to_string_lossy().to_string();
     let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
-    // 与 macOS 分支对称：源对象在存在性检查与 rename 之间被并发删除时，
-    // deleted_path 就是原路径且已不存在，目标状态已达成。
-    if gone(&deleted_path) {
+    if gone(staging) {
         return Ok(());
     }
 
-    let cmd_out = if deleted_path.is_dir() {
+    let cmd_out = if staging.is_dir() {
         std::process::Command::new("cmd")
             .arg("/C")
             .arg("rd")
@@ -447,7 +585,7 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
             .output()
     };
     if let Ok(o) = &cmd_out {
-        if o.status.success() && gone(&deleted_path) {
+        if o.status.success() && gone(staging) {
             return Ok(());
         }
         let text = String::from_utf8_lossy(&o.stderr).to_lowercase();
@@ -460,16 +598,16 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
     }
 
     // Rust API fallback
-    let res = if deleted_path.is_dir() {
-        std::fs::remove_dir_all(&deleted_path)
+    let res = if staging.is_dir() {
+        std::fs::remove_dir_all(staging)
     } else {
-        std::fs::remove_file(&deleted_path)
+        std::fs::remove_file(staging)
     };
     match res {
-        Ok(()) if gone(&deleted_path) => Ok(()),
+        Ok(()) if gone(staging) => Ok(()),
         // 与 macOS / Linux 分支对称：cmd 与 Rust API 都可能拿到竞态错误
         // （ENOENT / 共享冲突），只要目标确实已消失就不能误报「失败 1 项」。
-        Err(_) if gone(&deleted_path) => Ok(()),
+        Err(_) if gone(staging) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Err(DeleteFailure::PermissionDenied)
         }
@@ -478,30 +616,78 @@ pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), Dele
     }
 }
 
-/// 尝试删除并归因失败原因（其他平台）
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// 尝试删除并归因失败原因（Windows）
+#[cfg(target_os = "windows")]
 pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
+    // ========== TOCTOU 防护（Windows 版） ==========
+    // 先原子 rename 到同目录不可预测 staging（Windows 上 rename 目标存在即失败，
+    // 天然不覆盖外部文件），随后所有删除只作用于 staging —— 删的始终是验证过
+    // 的那一个对象，路径在验证后被替换也无法命中。
+    // 限制：Windows 端未做物理身份(st_dev/st_ino)比对，依赖 staging 名不可预测
+    //  + rename 原子性缩短竞态窗口；如需更强可引入 windows crate 取 FileIndex。
+    let deleted_path = {
+        if !path.exists() && path.symlink_metadata().is_err() {
+            return Ok(());
+        }
+        rename_to_staging(path)?
+    };
+
+    // 与 macOS 分支对称：源对象在存在性检查与 rename 之间被并发删除时，
+    // deleted_path 就是原路径且已不存在，目标状态已达成。
+    if !deleted_path.exists() && deleted_path.symlink_metadata().is_err() {
+        return Ok(());
+    }
+
+    maybe_crash_at("rename");
+
+    // Windows 拿不到跨重启稳定的 (dev, ino)，journal 记 0/0：
+    // 启动收尾只按「名字格式 + pid 已退出」校验，不做物理身份比对。
+    crate::staging_journal::record_staged(&deleted_path, 0, 0);
+    maybe_crash_at("stage");
+
+    let res = remove_staging_tree(&deleted_path, path);
+    if res.is_ok() {
+        maybe_crash_at("rm");
+        crate::staging_journal::record_done(&deleted_path);
+    }
+    res
+}
+
+/// 删除 staging 对象（其他平台）：直接走 Rust API。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn remove_staging_tree(
+    staging: &std::path::Path,
+    _label: &std::path::Path,
+) -> Result<(), DeleteFailure> {
     // 与 macOS / Windows 分支的 gone(&deleted_path) 同一口径：路径本体与其
     // symlink 元数据都不存在，才叫「目标状态已达成」。
     let gone = |p: &std::path::Path| !p.exists() && p.symlink_metadata().is_err();
-    if gone(path) {
+    if gone(staging) {
         return Ok(());
     }
-    let res = if path.is_dir() {
-        std::fs::remove_dir_all(path)
+    let res = if staging.is_dir() {
+        std::fs::remove_dir_all(staging)
     } else {
-        std::fs::remove_file(path)
+        std::fs::remove_file(staging)
     };
     match res {
         Ok(()) => Ok(()),
         // 定时清理与手动清理同时删同一目录时，后到的一方可能拿到 ENOENT、
         // ENOTDIR 等任一竞态错误；只要目标确实已消失就不能误报「失败 1 项」。
-        Err(_) if gone(path) => Ok(()),
+        Err(_) if gone(staging) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Err(DeleteFailure::PermissionDenied)
         }
         Err(_) => Err(DeleteFailure::Other),
     }
+}
+
+/// 尝试删除并归因失败原因（其他平台）
+///
+/// 该平台暂不做 staging 改名与 journal（不是发行目标），行为与旧实现一致。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn best_effort_delete_with_reason(path: &std::path::Path) -> Result<(), DeleteFailure> {
+    remove_staging_tree(path, path)
 }
 
 /// 查找占用指定路径的进程名（Windows，P1）
@@ -1966,6 +2152,10 @@ pub fn start_delete(
                 ""
             }
         ));
+        // 一批结束：落盘 + 压缩（方案 §2.1「每批结束 fsync」＋ §6.4
+        // 「正常清理一轮 journal 最终为 0 行」）。压缩只保留未完成项，
+        // 删失败的条目继续留着等下次启动收尾。
+        crate::staging_journal::compact_finished();
 
         // M-2：落清单。写盘失败只记日志、绝不影响删除结果 ——
         // 清单是事后追溯手段，不能因为它存不进去就把已删掉的东西说成没删。
@@ -5237,5 +5427,167 @@ mod tests {
         let script = build_uac_delete_script(&[], "C:\\r");
         assert!(script.contains("$paths = @(\n)"));
         assert!(script.contains("WriteAllLines"));
+    }
+
+    // -------------------------------------------------------------
+    //  清理中断残留的启动收尾（GC）· P0 / P1
+    // -------------------------------------------------------------
+
+    /// 临时目录 + 独占 journal 钩子：删除链路现在会写 journal，
+    /// 测试必须把它重定向到临时文件，绝不碰 `~/.maclean/staging.journal`。
+    struct GcTestDir {
+        root: std::path::PathBuf,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl GcTestDir {
+        fn new(tag: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let root = std::env::temp_dir().join(format!(
+                "maclean-ops-gc-{tag}-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let guard = crate::staging_journal::TEST_FS_GUARD
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            crate::staging_journal::set_test_journal_path(Some(root.join("staging.journal")));
+            Self {
+                root,
+                _guard: guard,
+            }
+        }
+
+        fn staging(&self, name: &str) -> std::path::PathBuf {
+            let p = self.root.join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("payload.bin"), b"x").unwrap();
+            p
+        }
+    }
+
+    impl Drop for GcTestDir {
+        fn drop(&mut self) {
+            crate::staging_journal::set_test_journal_path(None);
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(unix)]
+    fn age_path(p: &std::path::Path, secs: u64) {
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+        let f = std::fs::File::open(p).expect("打开路径以改 mtime");
+        f.set_modified(t).expect("改 mtime 应成功");
+    }
+
+    /// P0：真实删除必须留下「开始 + 完成」两条 journal 记录，且不留未完成项。
+    #[test]
+    fn p0_real_delete_writes_start_and_done_to_journal() {
+        let d = GcTestDir::new("journal-lifecycle");
+        let victim = d.root.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("f.txt"), b"payload").unwrap();
+
+        let r = best_effort_delete_with_reason(&victim);
+        assert!(r.is_ok(), "普通目录应删除成功: {r:?}");
+        crate::staging_journal::flush();
+
+        let lines = crate::staging_journal::read_lines();
+        assert_eq!(lines.len(), 2, "应恰好一条 start + 一条 done: {lines:?}");
+        let start = &lines[0];
+        assert!(
+            start
+                .path
+                .as_deref()
+                .unwrap_or("")
+                .contains(".maclean_stage_"),
+            "start 记录必须指向 staging 名: {start:?}"
+        );
+        assert!(
+            start.dev.is_some() && start.ino.is_some(),
+            "start 必须带物理身份"
+        );
+        assert_eq!(
+            lines[1].done.as_deref(),
+            start.path.as_deref(),
+            "done 必须指向同一条 staging"
+        );
+        assert!(
+            crate::staging_journal::unfinished().is_empty(),
+            "正常删除后 journal 不该留未完成项"
+        );
+    }
+
+    /// P1：删除同父目录的其它项时，顺带清掉「死进程 + 名字合法 + mtime 够旧」的残留；
+    /// 活进程的、太新的都绝不能被误删。
+    #[cfg(unix)]
+    #[test]
+    fn p1_sweep_removes_only_stale_dead_staging_siblings() {
+        let d = GcTestDir::new("layer2");
+        let stale_dead = d.staging(".maclean_stage_999999_abc_0");
+        age_path(&stale_dead, 120);
+        let stale_own = d.staging(&format!(".maclean_stage_{}_abc_0", std::process::id()));
+        age_path(&stale_own, 120);
+        let fresh_dead = d.staging(".maclean_stage_999999_def_1");
+        let victim = d.root.join("victim.txt");
+        std::fs::write(&victim, b"x").unwrap();
+
+        // 删一个兄弟项 → 触发同目录兜底扫描
+        let r = best_effort_delete_with_reason(&victim);
+        assert!(r.is_ok(), "兄弟项本身应删除成功: {r:?}");
+
+        assert!(
+            !stale_dead.exists(),
+            "死进程 + 老 mtime 的残留必须被兜底清掉"
+        );
+        assert!(stale_own.exists(), "当前进程的 staging 绝不能碰");
+        assert!(
+            fresh_dead.exists(),
+            "mtime 太新的不能被抢删（可能另一个实例正在删）"
+        );
+        assert!(!victim.exists());
+    }
+
+    /// 兜底扫描直接调用时幂等、且不会因为父目录不存在而报错/panic。
+    #[test]
+    fn p1_sweep_is_silent_on_missing_directory() {
+        assert_eq!(
+            sweep_stale_staging(std::path::Path::new("/nonexistent/maclean/x")),
+            0
+        );
+    }
+
+    /// 收尾用的删除函数：目录、单文件都能删；重复调用是幂等的。
+    #[test]
+    fn remove_staging_tree_handles_dirs_files_and_repeats() {
+        let d = GcTestDir::new("remove-tree");
+        let dir = d.staging(".maclean_stage_1_aa_0");
+        assert!(remove_staging_tree(&dir, &dir).is_ok());
+        assert!(dir.symlink_metadata().is_err(), "目录应被删除");
+        assert!(
+            remove_staging_tree(&dir, &dir).is_ok(),
+            "再次调用应视为已达成"
+        );
+
+        let file = d.root.join(".maclean_stage_1_bb_1");
+        std::fs::write(&file, b"payload").unwrap();
+        assert!(remove_staging_tree(&file, &file).is_ok());
+        assert!(file.symlink_metadata().is_err(), "文件应被删除");
+    }
+
+    /// 方案 §6.4 的**接线检查**：批结束必须调 `compact_finished()`。
+    /// 不接上的话「正常清理一轮 journal 最终 0 行」永远不成立，得等到
+    /// 下次启动 GC 才压。按 "\nmod tests" 切出生产段，避免本测试自命中。
+    #[test]
+    fn p3_start_delete_compacts_journal_at_batch_end() {
+        let src = include_str!("mod.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            prod.contains("crate::staging_journal::compact_finished()"),
+            "start_delete 批结束必须压缩 journal"
+        );
     }
 }

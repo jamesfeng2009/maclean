@@ -238,6 +238,47 @@ pub fn finalize_pending(id: &str) {
     }
 }
 
+/// 启动 GC 对账（方案 §2.3 第 6 步）：把中断留下的 `<id>.pending.json`
+/// 改名为 `<id>.interrupted.json`。
+///
+/// **只改名，不删除** —— 它是"上次清理中断"的审计证据，删掉就再也还原不出
+/// 「当时打算删什么、删到哪一步」。改名后 `list()` 不再把它当待还原清单。
+/// 已改名过（目标已存在）的跳过，重复启动是幂等的。
+pub fn mark_interrupted_pending() -> usize {
+    mark_interrupted_pending_in(&backup_dir())
+}
+
+/// 与 [`mark_interrupted_pending`] 相同，但显式指定清单目录。
+///
+/// 抽出来是为了让 GC 的单测能把「对账」指向临时目录，而不是去动（或依赖）
+/// 进程级的备份目录测试钩子 —— 后者会被并行的备份用例改来改去。
+pub fn mark_interrupted_pending_in(dir: &std::path::Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut marked = 0usize;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".pending.json") else {
+            continue;
+        };
+        if id.is_empty() || id.contains('/') || id.contains('\\') {
+            continue;
+        }
+        let target = dir.join(format!("{id}.interrupted.json"));
+        if target.exists() {
+            continue;
+        }
+        if std::fs::rename(e.path(), &target).is_ok() {
+            marked += 1;
+            crate::logger::warn(&format!(
+                "[gc] 上次清理未完成，待删快照留证为 {id}.interrupted.json"
+            ));
+        }
+    }
+    marked
+}
+
 /// 列出所有清单（按时间倒序，最近的在前）
 pub fn list() -> Vec<BackupManifest> {
     let dir = backup_dir();
@@ -251,7 +292,9 @@ pub fn list() -> Vec<BackupManifest> {
         .filter(|e| {
             let fname = e.file_name();
             let name = fname.to_string_lossy();
-            name.ends_with(".json") && !name.ends_with(".pending.json")
+            name.ends_with(".json")
+                && !name.ends_with(".pending.json")
+                && !name.ends_with(".interrupted.json")
         })
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| serde_json::from_str::<BackupManifest>(&s).ok())
