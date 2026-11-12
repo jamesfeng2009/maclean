@@ -107,9 +107,13 @@ pub fn finalize_scan_result(mut items: Vec<ScanItem>, scan_time_ms: u64) -> Scan
 /// 一次全盘 75 条、一天 1601 条，占主日志 32%，其中 80% 是永远读不到的 TCC 目录。
 /// 体积被低计这件事仍然可见（权限 N 个），只是不再刷屏。
 ///
-/// 扫描编排的收尾处（CLI `scan`/`clean`、App 的扫描与磁盘分析）都应调用一次；
-/// 由于是「取走并清零」，重复调用安全。`finalize_scan_result` 里也调了一次，
-/// 这样只走单个 Scanner 的路径（不经过编排层）同样能收口。
+/// 扫描编排的收尾处调用一次，目前两处：
+/// - CLI：`apps/maclean-cli` 的 `main()` 在进程退出前调（唯一必经点，
+///   scan / clean / list 都覆盖，不用逐条命令接线）；
+/// - App：`scan` 命令收尾，接在既有的 `sizecache::flush()` 之后。
+///
+/// `finalize_scan_result` 里也调了一次，覆盖只走单个 Scanner、不经过编排层的路径。
+/// 由于是「取走并清零」，重复调用安全。
 pub fn flush_enum_failures() {
     if let Some(summary) = bulkdir::take_enum_failures() {
         crate::logger::info(&format!("[dir_size] {summary}"));
