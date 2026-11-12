@@ -1029,8 +1029,10 @@ pub fn t_lang(lang_en: bool, key: &str) -> &'static str {
                 "settings_language" => "Language",
                 "setting_menubar_icon" => "Show menu bar icon on launch",
                 "setting_menubar_icon_desc" => "Display disk usage indicator in the macOS menu bar",
-                "setting_keep_sudo" => "Keep sudo session alive",
-                "setting_keep_sudo_desc" => "Avoid repeated administrator password prompts",
+                "setting_keep_sudo" => "Ask for admin rights only when needed",
+                "setting_keep_sudo_desc" => {
+                    "macOS asks once via its own panel (Touch ID / password), and only after a delete really fails on permissions; off = never request root"
+                }
                 "setting_scan_cache" => "Cache scan results locally",
                 "setting_scan_cache_desc" => "Avoid re-scanning within 7 days for faster startup",
                 "setting_scan_all_disks" => "Scan all disks",
@@ -1523,8 +1525,8 @@ pub fn t_lang(lang_en: bool, key: &str) -> &'static str {
                 "settings_language" => "语言",
                 "setting_menubar_icon" => "启动时显示菜单栏图标",
                 "setting_menubar_icon_desc" => "在 macOS 菜单栏常驻磁盘用量指示器",
-                "setting_keep_sudo" => "自动保持 sudo 会话",
-                "setting_keep_sudo_desc" => "避免重复输入管理员密码",
+                "setting_keep_sudo" => "需要管理员权限时请求授权",
+                "setting_keep_sudo_desc" => "仅在删除确实因权限不足失败后，由 macOS 弹系统授权（Touch ID / 密码）；关闭则直接记为失败，绝不申请 root",
                 "setting_scan_cache" => "扫描结果本地缓存",
                 "setting_scan_cache_desc" => "7 天内避免重复扫描，加速启动",
                 "setting_scan_all_disks" => "扫描全部磁盘",
