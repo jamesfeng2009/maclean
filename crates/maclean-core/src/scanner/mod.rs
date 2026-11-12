@@ -134,16 +134,20 @@ pub fn check_deletable(path: &str) -> (bool, String) {
 
 /// 格式化字节大小为人类可读字符串
 ///
-/// 返回格式如:
-/// - "189.3G" (吉字节)
+/// 返回格式如（1000 进制 SI，与 macOS Finder / 前端 `fmt` 一致）:
+/// - "189.3G"
 /// - "7.2G"
-/// - "345.6M" (兆字节)
-/// - "12.3K" (千字节)
-/// - "512B"  (字节)
+/// - "345.6M"
+/// - "12.3K"
+/// - "512B"
+///
+/// 曾经这里用 1024 制而前端用 1000 制，同一个 `size_bytes` 在列表里显示
+/// `11.4 GB`、在 `ScanItem.description` 里显示 `10.6G`（11.4e9 / 2³⁰ = 10.6），
+/// 用户会以为是两个不同的数。两边统一到 1000 制后同一个字节数只有一种显示。
 pub fn format_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
-    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const KB: f64 = 1_000.0;
+    const MB: f64 = 1_000.0 * 1_000.0;
+    const GB: f64 = 1_000.0 * 1_000.0 * 1_000.0;
 
     let size = bytes as f64;
     if size >= GB {
@@ -548,11 +552,13 @@ mod tests {
     fn format_size_units() {
         assert_eq!(format_size(0), "0B");
         assert_eq!(format_size(512), "512B");
-        assert_eq!(format_size(1024), "1.0K");
-        assert_eq!(format_size(1024 * 1024), "1.0M");
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.0G");
+        assert_eq!(format_size(1_000), "1.0K");
+        assert_eq!(format_size(1_000_000), "1.0M");
+        assert_eq!(format_size(1_000_000_000), "1.0G");
         // 边界：不因浮点误差串位
-        assert_eq!(format_size(1536 * 1024 * 1024), "1.5G");
+        assert_eq!(format_size(1_500_000_000), "1.5G");
+        // 与前端 fmt 同口径：11.4 GB 的字节数在这里也是 11.4G（不是 10.6G）。
+        assert_eq!(format_size(11_400_000_000), "11.4G");
     }
 
     #[test]

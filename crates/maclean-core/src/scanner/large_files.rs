@@ -61,7 +61,13 @@ const DEP_CACHE_DIRS: &[&str] = &[
     ".npm",
 ];
 
-/// 主目录第一层下整体跳过的目录：系统 / 应用数据与 TCC 保护、非个人大文件区
+/// 主目录第一层下整体跳过的目录：系统 / 应用数据与 TCC 保护、非个人大文件区。
+///
+/// 「大文件」递归与「大目录」顶层排行**必须共用这一份规则**。曾经大目录视图
+/// 额外排除 Downloads / Documents / Desktop / Movies / Pictures / Music，结果
+/// 132.9 GB 的 AI 模型文件（全在 `~/Downloads/...`）能在大文件视图里列出，
+/// 其所在的 `~/Downloads`（实测 282G）却连大目录候选都进不去 —— 于是
+/// 「大目录合计」比「大文件合计」还小，用户完全找不到占用最大的目录。
 fn skip_top_level_dir(name: &str) -> bool {
     matches!(name, "Library" | "Public" | "Applications" | "Sites")
 }
@@ -285,21 +291,11 @@ fn is_problematic_path(name: &str) -> bool {
         || lower.ends_with(".iso")
 }
 
-/// 主目录下应跳过的目录名（TCC 保护，访问会触发权限弹窗）
+/// 「大目录」顶层排行的剪枝规则，直接复用大文件递归那份（见
+/// [`skip_top_level_dir`] 的注释）。个人数据目录是占用分析的主角，**只读统计**
+/// 不触发 TCC 弹窗、也不删除任何东西，没有理由把它们从排行里踢掉。
 fn should_skip_home_dir(name: &str) -> bool {
-    matches!(
-        name,
-        "Library"
-            | "Pictures"
-            | "Music"
-            | "Movies"
-            | "Public"
-            | "Applications"
-            | "Sites"
-            | "Documents"
-            | "Desktop"
-            | "Downloads"
-    )
+    skip_top_level_dir(name)
 }
 
 /// 磁盘分析器扫描器
@@ -465,7 +461,7 @@ fn scan_directory_impl(path: &Path) -> ScanResult {
                     format_size(size)
                 )
             } else {
-                format!("📁 {} — {}（可进入查看详情）", name, format_size(size))
+                format!("📁 {} — {}（展开可查看下级占用）", name, format_size(size))
             }
         } else {
             format!("📄 {} — {}", name, format_size(size))
@@ -771,6 +767,65 @@ mod tests {
         assert!(
             prod.contains("crate::provenance::register_large_file_roots(&home)"),
             "LargeFileScanner::scan 没有按需声明用户数据准入根"
+        );
+    }
+
+    #[test]
+    fn both_views_share_the_same_top_level_pruning() {
+        // 回归：大目录视图曾额外排除 Downloads / Documents / Desktop /
+        // Movies / Pictures / Music，与大文件递归的剪枝规则漂移 —— 于是
+        // ~/Downloads 下 132.9 GB 的 AI 模型在大文件视图可见，其所在的
+        // ~/Downloads（实测 282G）却连大目录候选都进不去。
+        // 反向 mutation：把 "Downloads" 加回 should_skip_home_dir 的
+        // matches! 列表，本用例必须变红。
+        for name in [
+            "Downloads",
+            "Documents",
+            "Desktop",
+            "Movies",
+            "Pictures",
+            "Music",
+            "Library",
+            "Public",
+            "Applications",
+            "Sites",
+            "Projects",
+            "go",
+            "tmp",
+        ] {
+            assert_eq!(
+                should_skip_home_dir(name),
+                skip_top_level_dir(name),
+                "两个视图对顶层目录 {name} 的剪枝必须一致"
+            );
+        }
+        assert!(
+            !should_skip_home_dir("Downloads"),
+            "Downloads 必须参与占用排行"
+        );
+        assert!(should_skip_home_dir("Library"), "系统/应用数据仍归智能清理");
+    }
+
+    #[test]
+    fn large_files_parent_directory_is_in_ranking_and_not_smaller() {
+        // 行为级不变量：同一棵树下，大文件所在的顶层目录必须出现在大目录
+        // 排行里，且目录占用不小于其中任何一个大文件。
+        let tmp = TmpDir::new();
+        tmp.put("Downloads/models/big.bin", 3 * 1024 * 1024);
+        tmp.put("Downloads/small.txt", 16);
+        let files = collect_large_files_under_with(tmp.path(), 1024 * 1024, logical_size);
+        assert_eq!(files.len(), 1, "应只收集到 1 个大文件: {files:?}");
+        let dirs = scan_directory(tmp.path());
+        let parent = dirs
+            .items
+            .iter()
+            .find(|i| i.path.ends_with("Downloads"))
+            .unwrap_or_else(|| panic!("大文件所在目录必须出现在排行里: {:?}", dirs.items));
+        assert!(
+            parent.size_bytes >= files[0].1,
+            "目录占用 {} 不应小于其中的大文件 {}",
+            parent.size_bytes,
+            files[0].1
         );
     }
 }
