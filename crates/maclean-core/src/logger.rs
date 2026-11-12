@@ -76,10 +76,10 @@ pub fn init() {
 pub fn init_with_version(version: &str) {
     // 幂等：重复调用只保留第一次的横幅与 panic hook。
     //
-    // 不幂等的代价是双重的：横幅会重复（2026-11-12 实测同一秒内出现 29 条，
-    // 因为 `LOGGER.set` 失败的返回值被 `let _ =` 丢掉，横幅却照写不误）；
-    // 更麻烦的是 `set_panic_hook` 每次 `take_hook` 再 `set_hook`，N 次 init
-    // 叠出 N 层 hook —— 一次 panic 会被记 N 遍、backtrace 抓 N 次。
+    // 旧实现把 `LOGGER.set` 失败的返回值丢掉（`let _ =`），却照写横幅、照装
+    // panic hook：库被多次 init 时横幅会重复；更麻烦的是 `set_panic_hook`
+    // 每次 `take_hook` 再 `set_hook`，N 次 init 叠出 N 层 hook —— 一次 panic
+    // 会被记 N 遍、backtrace 抓 N 次。
     if LOGGER.get().is_some() {
         return;
     }
@@ -388,9 +388,11 @@ mod tests {
         assert_eq!(&date[7..8], "-");
     }
 
-    /// 2026-11-12 实测：同一秒内出现 29 条启动横幅。根因是 `LOGGER.set` 的
-    /// 失败被 `let _ =` 丢掉、横幅照写、panic hook 还每轮叠一层。
-    /// 这里用「三次 init 只留一条」把幂等钉住。
+    /// 幂等契约：`init_with_version` 被调多次也只留一条横幅、一套 panic hook。
+    ///
+    /// 真实触发场景不是 App 启动（那是每次进程一次），而是库被上层重复初始化：
+    /// 旧实现把 `LOGGER.set` 失败的返回值丢掉、横幅照写，于是每次多余的 init
+    /// 都会多一条横幅，并多叠一层 panic hook（一次 panic 记 N 遍）。
     #[test]
     fn repeated_init_writes_one_banner_and_one_hook() {
         // 环境变量是进程级共享状态：串行化，避免与另一个改 env 的用例互相踩。
