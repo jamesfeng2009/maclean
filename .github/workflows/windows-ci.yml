@@ -42,7 +42,10 @@ jobs:
         # H-03：此前 Windows runner 是 check → build → --help，全程零 cargo test，
         # Windows 专属逻辑只编译不执行（假覆盖）。这里让全部单测在 Windows 上
         # 真正跑一遍，失败即阻塞（无 continue-on-error）。
-        run: cargo test --workspace --target x86_64-pc-windows-msvc
+        # 2026-11-12：加 --no-fail-fast。首个测试目标失败时 cargo 会直接中止，
+        # 后面所有 crate 的单测一次都跑不到（曾因 cli_integration 1 红，把
+        # core 的 510 个用例全挡住）。一次拿全失败清单，少一轮 CI 往返。
+        run: cargo test --workspace --target x86_64-pc-windows-msvc --no-fail-fast
 
   windows-build:
     name: Windows release build

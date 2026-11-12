@@ -1,7 +1,7 @@
 # 清理中断残留的启动收尾（GC）方案
 
 > 目标：删除过程中 App 被杀 / 崩溃 / 断电后，不留「看不见但占空间」的残留；
-> 下次启动自动收尾，并把结果如实告诉用户。
+> 下次启动自动收尾，结果如实落到日志页，不主动打扰用户。
 > 状态：**已实现 · 测试通过 · 已提交并推送两仓 main，未发版**（2026-11-12 同步；实现现状见 §0）
 
 ## 0. 实现现状（2026-11-12 补记）
@@ -13,7 +13,7 @@
 | ---- | ---- | ---------- |
 | P0 | ✅ | `core/staging_journal.rs`（journal + flock + 20k 截断）、`core/gc.rs`（启动 replay / 状态 / 预算）、`ops` 三处埋点；core 单测全绿 |
 | P1 | ✅ | `ops::sweep_stale_staging` + 60s 父目录缓存；「rename 成功但无 journal 线索」的窗口有专门崩溃注入用例，证明靠 Layer 2 兜住 |
-| P2 | ✅ | pro 侧 `gc_status` / `cleanup-recovered` / setup 后台 spawn / toast / 概览「收尾中…」全部接线；事件进 `EVENT_CONTRACT` 并纳入 `check:contract` |
+| P2 | ✅ | pro 侧 `gc_status` / `cleanup-recovered` / setup 后台 spawn / 概览「收尾中…」全部接线；事件进 `EVENT_CONTRACT` 并纳入 `check:contract`；**收尾全程静默，不弹 toast**（见 §3 决策变更） |
 | P3 | ✅ | 崩溃注入 4 轮（rename / stage-abort / stage-kill9 / rm）、跨进程并发、真机 SIGKILL + `df` 校验、macOS/Linux/Windows 三平台验证、Windows 原生 runner 实跑 |
 
 补充完成、但原方案未列的：
@@ -28,12 +28,12 @@
 
 * 公开仓 `maclean`：`e8dcab1 feat(core)` + `8f90791 test(gc)` 已提交并推送 `origin/main` / `gitee/main`，`gc` / `staging_journal` 模块、CLI 同步收尾与全部测试资产都在 HEAD 上。工作区仍有 3 个代码文件未暂存：`windows-ci.yml`（加 `--no-fail-fast`）、`gc.rs` / `ops/mod.rs`（Linux cfg 分支的断言收紧）。
 * pro 仓：`bca52cf feat(ui)` + `a21751a test(ui)` 已提交并推送 main。
-* **当前 main 是红的，修复还没提交**：pro 仓 HEAD 的 `Cargo.toml` 仍是本地 `path = "../../../maclean/crates/maclean-core"`，CI runner 上没有同级 `maclean/` 目录 → `cargo metadata` 直接失败（run `43136050719` 实证：`failed to read .../maclean/crates/maclean-core/Cargo.toml`）。改成 `git = "https://github.com/jamesfeng2009/maclean.git", branch = "main"` 的修复**只在工作区、未提交**；具体 commit 由 `Cargo.lock` 锁定，主仓后续提交不会漂移。
+* **依赖形态（12:05 已修，CI 转绿）**：pro 仓 `Cargo.toml` 一度用本地 `path = "../../../maclean/crates/maclean-core"`，CI runner 上没有同级 `maclean/` 目录 → `cargo metadata` 失败（run `43136050719` 实证，两条 run 全红）。已改为 `git = "https://github.com/jamesfeng2009/maclean.git", branch = "main"`（`Cargo.lock` 锁 commit），提交 `fix(ci)` 后 run `43138934885` 绿。
 * **发版顺序**：crates.io 的 `0.4.4` 不含 `gc` / `staging_journal`。正式发版前必须**先发布 core `0.4.5`，再把 pro 改回 `version = "=0.4.5"`**；反过来必然 unresolved。
 
 **已知限制（不冒充已解决）**：
 
-* Windows 拿不到跨重启稳定的 `(dev, ino)`：journal 记 `0/0`，防误删降级为「名字严格格式 + pid 已退出」；`volume_available` 返回 `None`，`bytes` 恒 0（toast 会显示「释放 0 B」）。
+* Windows 拿不到跨重启稳定的 `(dev, ino)`：journal 记 `0/0`，防误删降级为「名字严格格式 + pid 已退出」；`volume_available` 返回 `None`，`bytes` 恒 0（日志页汇总里显示 0 B）。
 * 真机 `mdfind` **不做硬断言**：Spotlight 默认不索引 `.maclean_stage_*` 且索引异步，「查不到」是恒真；硬断言用 `read_dir` + `symlink_metadata` + `df -k`。
 * root 拥有项（需免密 sudo）与 TCC 目录（需给终端完全磁盘访问权限）依赖运行环境，验证脚本标 SKIP；它们与 immutable 走同一条 `remove_staging_tree` 失败分支，代码路径已覆盖。
 
@@ -158,15 +158,19 @@ flowchart TD
 | 位置     | 行为                                               |
 | ------ | ------------------------------------------------ |
 | 启动     | GC 在后台跑，不弹窗、不遮罩                                  |
-| 真回收到空间 | toast 一次：`上次清理未完成，已收尾释放 3.2 GB`（0 条命中则**完全不打扰**） |
+| 真回收到空间 | **完全静默**：不弹 toast，只收掉「收尾中…」并重拉一次概览磁盘数字；明细写日志页 |
 | 收尾仍在跑  | 概览磁盘卡副标题追加「收尾中…」（与「清理中」同一处样式）                    |
-| 收尾失败   | 只在日志页可见，不 toast（避免每次启动都骚扰）                       |
+| 收尾失败   | 同样静默，只在日志页可见（含 `failed` 计数），不打扰用户                 |
 
 新增 IPC：`gc_status() -> GcStatus { running, cleaned, failed, bytes, took_ms }`；
 
 事件：`cleanup-recovered`（payload 同 GcStatus）。两者都进 `COMMAND_CONTRACT` 与 `check:contract`。
 
-**实现注**：事件原先只进了 Rust 侧常量、没进契约脚本，现已补上 `EVENT_CONTRACT`（8 个事件，emit ↔ 契约 ↔ 前端 listen 三方对账）。toast 的「一次」也不是靠时序碰运气：事件与 `gcStatus` 快照是两条独立触发路径，抽成纯模块 `gcToast.mjs` 做去重，用 7 个 `node:test` 用例覆盖「GC 早于 / 晚于监听器」「快照晚于事件」三种时序，断言 `cleaned>0` 恰好一次、`cleaned=0` 零打扰、`failed>0` 不弹但日志可见。
+**实现注**：事件原先只进了 Rust 侧常量、没进契约脚本，现已补上 `EVENT_CONTRACT`（8 个事件，emit ↔ 契约 ↔ 前端 listen 三方对账）。原方案的「`cleaned>0` 弹一次 toast」在 2026-11-12 被**整体废弃**，最终口径是完全静默，理由见下方决策变更。
+
+**2026-11-12 决策变更（收尾提示彻底移除）**：演进过两版 —— 先因「组件实例级闸门 + Rust 静态 `STATUS`」导致重挂载 / 刷新反复弹同一轮结果，改成模块级单例 + `sessionStorage` 指纹去重；随后复核发现方向本身错了：通用清理工具（macOS 储存空间管理、CleanMyMac、CCleaner 等）对**隐式后台回收**从不主动告知，用户压根没发起过这次动作，弹「上次清理未完成，已收尾释放 X」会凭空制造因果，让人误以为刚清了东西或上次清理失败。CCleaner v6.27 甚至专门把清理通知减到「只显示最近一条」并允许永久关闭 —— 那还是用户**亲手点过清理**的结果回执。
+
+最终落地：`gcToast.mjs` / `.d.mts` 与 13 个去重用例**一并删除**；`cleanup-recovered` 事件、`gc_status()` 快照、Rust emit 和跨仓契约**全部保留**。收口逻辑抽成零依赖纯模块 `gcStatus.mjs` 的 `createGcStatusSink()`，事件与快照两条路径共用一个 sink，只做状态复位（收掉「收尾中…」+ 用 `refreshed` 挡住重复重拉磁盘数字），不产生任何用户可见提示。抽纯函数不是为了复用，是为了让测试**调用生产逻辑**：源码级断言只能证明「没写 toast 这几个字」，注入 toast spy 才能在运行时证明零提示。静默的兜底是日志页：`[gc] 收尾完成` 汇总带 `failed` 计数、`[gc] 收尾失败` 带明细，真机脚本已断言可见 —— 权限失败项因此仍可追溯，只是不主动推给用户。`test-gc-toast.mjs` 共 **20 个用例**（9 条源码级接线 + 11 条运行时行为，覆盖 running / cleaned=0 / failed>0 / 事件-快照三种时序 / 重挂载 / 空 payload），三组反向 mutation 实证：把 toast 接回生产模块 → 11 红，破坏 `refreshed` 去重 → 3 红，拆掉快照接线 → 2 红；恢复后 20/20 绿、无探针残留。
 
 ## 4. 失败与边界清单
 
@@ -194,8 +198,8 @@ flowchart TD
 | -- | --------------------------- | ----------------------------------------------- | ------------------------------------------ | ---- |
 | P0 | journal 写入 + 启动 replay + 单测 | core 新增 `staging_journal.rs`、`gc.rs`；`ops` 两处埋点 | 单测：正常删除后 journal 空；伪造未完成记录能被清；dev/ino 不符不删 | ✅ 已完成 |
 | P1 | 删除前同目录兜底扫描                  | core `ops`（删路径入口）                               | 模拟残留目录，删除同父目录其它项时被顺带清掉                     | ✅ 已完成 |
-| P2 | IPC + 前端提示                  | pro `commands.rs` / `lib.rs` / store / Overview | 契约检查通过；toast 只在 cleaned>0 出现               | ✅ 已完成 |
-| P3 | 崩溃注入 + 真机验证                 | 测试脚本                                            | `kill -9` 后重启，残留清零、磁盘可用量上升、toast 正确        | ✅ 已完成（真机 2 项 SKIP） |
+| P2 | IPC + 前端状态收口              | pro `commands.rs` / `lib.rs` / store / Overview | 契约检查通过；收尾全程静默，结果在日志页可追溯               | ✅ 已完成 |
+| P3 | 崩溃注入 + 真机验证                 | 测试脚本                                            | `kill -9` 后重启，残留清零、磁盘可用量上升、日志页收尾记录正确   | ✅ 已完成（真机 2 项 SKIP） |
 
 原预估 core ~350 行（含单测）、pro ~80 行；**实际远超预估** —— 并发互斥、跨平台 `pid_alive`、可注入预算、8 维测试场景、真机脚本与 Windows 原生 runner 验证都是方案阶段没算进去的。
 
@@ -244,7 +248,7 @@ flowchart TD
 
    ```bash
    npm run check:contract   # 46 命令 + 8 事件，emit ↔ 契约 ↔ listen 三方对账
-   npm run test:gc-toast    # 7 个时序用例，断言 toast 恰好一次
+   npm run test:gc-toast    # 20 个用例：9 静态接线 + 11 运行时零提示（注入 toast spy）
    npx tsc --noEmit
    ```
 
