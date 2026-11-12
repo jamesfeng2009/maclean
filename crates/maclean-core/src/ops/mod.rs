@@ -1200,6 +1200,28 @@ fn manifest_member_size(is_first_recorded: bool, aggregate: u64) -> u64 {
     }
 }
 
+/// B-10（正式清单侧）：批量项每个**成功成员**在还原清单里应记的体积。
+///
+/// pending 快照写在删除**之前**，那时还不知道哪些成员会成功，只能「父项承载
+/// 聚合体积、成员记 0」（见 [`manifest_member_size`]）。正式清单写的是实际删掉
+/// 的成员，且**没有父项条目**（父路径本身不会被删除），于是旧实现给每个成功
+/// 成员都记父项全量，`BackupManifest::total_bytes` 被放大成 N 倍。
+///
+/// 这里按成功进度差分分摊：第 k 个成功成员记 `aggregate*k/total` 与已记量之差。
+/// 全部成功时累计恰好等于 `aggregate`（不因逐项取整而少字节），部分失败时只记
+/// 成功部分对应的份额 —— 与删除报告 `deleted_bytes` 的口径一致。
+///
+/// 返回 `(本条应记, 新的已记累计)`；调用方必须把新累计存下来传给下一条。
+fn manifest_member_share(aggregate: u64, done: u64, total: usize, credited: u64) -> (u64, u64) {
+    // 空 batch 不会走到这里，但别让 `max(1)` 把「没有成员」算成「记满一整份」。
+    if total == 0 {
+        return (0, 0);
+    }
+    let total = total as u64;
+    let next = aggregate.saturating_mul(done.min(total)) / total;
+    (next.saturating_sub(credited), next)
+}
+
 /// B-04：删除前声明废纸篓落点名（无法确认归属时返回空串）。
 /// 只在「走废纸篓且废纸篓目录可用」时声明；永久删除返回空串。
 fn claim_entry_trash_name(trash_dir: &str, path: &str, use_trash: bool) -> String {
@@ -1697,6 +1719,9 @@ pub fn start_delete(
                         if !batch_paths.is_empty() {
                             let mut success_count = 0;
                             let mut fail_count = 0;
+                            // B-10：本批已写进正式清单的字节累计。父项的聚合体积
+                            // 只能被这一批分一次，成员各记全量会让清单总字节虚高 N 倍。
+                            let mut manifest_credited: u64 = 0;
                             for bp in &batch_paths {
                                 // A-07a：统一闸门（Danger / Warning 一律不放行）
                                 let decision = safety::gate_decision(bp, &category);
@@ -1765,15 +1790,24 @@ pub fn start_delete(
                                         category.clone(),
                                         true,
                                     ));
-                                    // M-2：批量项真删掉也记备份清单
+                                    // M-2：批量项真删掉也记备份清单。
+                                    // 体积按成功进度分摊（见 manifest_member_share）：
+                                    // 旧实现每个成员都记父项全量，清单总字节虚高 N 倍。
                                     let restorable = crate::backup::is_restorable_by_move(
                                         use_trash,
                                         std::env::consts::OS,
                                     );
+                                    let (member_bytes, next_credited) = manifest_member_share(
+                                        size_bytes,
+                                        success_count as u64,
+                                        batch_paths.len(),
+                                        manifest_credited,
+                                    );
+                                    manifest_credited = next_credited;
                                     if let Ok(mut guard) = backup_entries.lock() {
                                     guard.push(crate::backup::BackupEntry {
                                         path: bp.clone(),
-                                        size_bytes,
+                                        size_bytes: member_bytes,
                                         category: category.clone(),
                                         restorable,
                                         // A-02/B-04：删除时记录预测废纸篓落点（basename）；
@@ -5598,6 +5632,71 @@ mod tests {
         assert!(
             prod.contains("crate::staging_journal::compact_finished()"),
             "start_delete 批结束必须压缩 journal"
+        );
+    }
+
+    /// B-10（正式清单侧）：批量成员的体积必须分摊，不能每个成员都记父项全量。
+    ///
+    /// 旧实现 `guard.push(BackupEntry { size_bytes, .. })` 里 `size_bytes` 是父项
+    /// 聚合体积：一个 3 成员、100 MB 的 `__pycache__` 聚合项会让
+    /// `BackupManifest::total_bytes()` 变成 300 MB —— 清单说删了 300 MB，
+    /// 实际只删了 100 MB。pending 快照早就按「只记一次」处理，正式清单漏了。
+    #[test]
+    fn manifest_member_share_never_inflates_batch_total() {
+        const AGG: u64 = 100_000_000;
+
+        // 3 个成员全部成功：累计必须精确回到聚合体积（不是 3 倍，也不差 1 字节）
+        let mut credited = 0u64;
+        let mut summed = 0u64;
+        for done in 1..=3u64 {
+            let (share, next) = manifest_member_share(AGG, done, 3, credited);
+            credited = next;
+            summed += share;
+        }
+        assert_eq!(summed, AGG, "全部成功时清单总量必须等于聚合体积");
+
+        // 只有前 2 个成功：只记 2/3，不许虚高
+        let mut credited = 0u64;
+        let mut summed = 0u64;
+        for done in 1..=2u64 {
+            let (share, next) = manifest_member_share(AGG, done, 3, credited);
+            credited = next;
+            summed += share;
+        }
+        assert_eq!(summed, 66_666_666);
+        assert!(summed <= AGG);
+
+        // 任意成功数都不能超过聚合体积
+        for total in 1..=9usize {
+            for ok in 0..=total {
+                let mut credited = 0u64;
+                let mut summed = 0u64;
+                for done in 1..=ok as u64 {
+                    let (share, next) = manifest_member_share(AGG, done, total, credited);
+                    credited = next;
+                    summed += share;
+                }
+                assert!(summed <= AGG, "total={total} ok={ok} 虚高了: {summed}");
+            }
+        }
+
+        // 空 batch 防御：不能除零，也不能凭空记一整份
+        assert_eq!(manifest_member_share(AGG, 1, 0, 0), (0, 0));
+    }
+
+    /// 接线检查：生产代码的批量清单条目必须用分摊后的体积。
+    /// 只测纯函数不够 —— 调用点仍传父项 `size_bytes` 时，清单照样虚高。
+    #[test]
+    fn batch_manifest_entry_uses_shared_volume() {
+        let src = include_str!("mod.rs");
+        let prod = src.split("\nmod tests").next().unwrap_or(src);
+        assert!(
+            prod.contains("size_bytes: member_bytes"),
+            "批量成员的清单条目必须用分摊后的 member_bytes"
+        );
+        assert!(
+            prod.contains("manifest_credited = next_credited"),
+            "分摊累计必须跨成员保留，否则每个成员都从头算"
         );
     }
 }
