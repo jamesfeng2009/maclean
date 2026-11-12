@@ -15,6 +15,7 @@ pub mod atomic_write;
 pub mod backup;
 pub mod config;
 pub mod design_tokens;
+pub mod gc;
 pub mod i18n;
 pub mod im_data;
 pub mod logger;
@@ -25,6 +26,7 @@ pub mod rules;
 pub mod safety;
 pub mod scanner;
 pub mod scheduler;
+pub mod staging_journal;
 
 /// 写入扫描日志（用于追踪扫描进度，崩溃时定位问题）
 ///
