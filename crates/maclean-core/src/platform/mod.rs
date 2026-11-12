@@ -84,6 +84,7 @@ pub fn app_data_dir() -> PathBuf {
 /// F-07：root 属主且当前进程非 root 时，返回「需提权」原因。
 ///
 /// 抽成无 cfg 的纯函数，让这条判定在本机也能被行为测试覆盖。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn root_owned_needs_privilege(uid: u32, euid: u32) -> Option<&'static str> {
     if uid == 0 && euid != 0 {
         Some("root 属主：需要管理员权限（提权删除）")

@@ -86,6 +86,7 @@ impl UninstallAppReport {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn delegated(message: String) -> Self {
         UninstallAppReport {
             status: "delegated".to_string(),

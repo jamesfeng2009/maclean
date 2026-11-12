@@ -317,6 +317,7 @@ fn scan_rust_caches() -> Vec<ScanItem> {
 ///
 /// 旧实现无 `is_dir` 守卫，一个同名文件/软链会被版本排序当成「最新版」，
 /// 真实版本目录反被标成 `Recommend::Safe`（可删）。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn collect_device_support_versions(device_support: &Path) -> Vec<(String, PathBuf, u64, i64)> {
     let mut versions: Vec<(String, PathBuf, u64, i64)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(device_support) {
@@ -349,6 +350,7 @@ fn collect_device_support_versions(device_support: &Path) -> Vec<(String, PathBu
     versions
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn scan_xcode_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
     let home = home_dir();
@@ -777,6 +779,7 @@ fn scan_go_caches() -> Vec<ScanItem> {
 // =========================================================================
 
 /// 扫描 Homebrew 下载缓存
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn scan_homebrew_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
     let home = home_dir();
@@ -1107,6 +1110,7 @@ fn scan_jetbrains_caches() -> Vec<ScanItem> {
 /// 注：普通 dir_size() 也能遍历该目录，但会跳过无权限子目录，结果可能
 /// 偏大（包含 overlay 文件）或不准确。simctl 提供 Apple 官方的 runtime
 /// 镜像大小统计，更适合展示给用户。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn get_simulator_runtime_size() -> Option<u64> {
     let output = std::process::Command::new("/usr/bin/xcrun")
         .args(["simctl", "runtime", "list"])
@@ -1122,6 +1126,7 @@ fn get_simulator_runtime_size() -> Option<u64> {
 /// 优先使用 /usr/bin/du -sk 获取 Cryptex 真实大小。普通 dir_size() 递归
 /// 遍历该目录也能得到近似值，但部分子目录会触发 Permission denied，
 /// du 在处理 mount point 时更准确且性能更好。失败则返回 None。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn get_simulator_cryptex_size() -> Option<u64> {
     let path = PathBuf::from("/Library/Developer/CoreSimulator/Cryptex");
     let output = std::process::Command::new("/usr/bin/du")
@@ -1985,6 +1990,7 @@ fn scan_k8s_caches() -> Vec<ScanItem> {
 // =========================================================================
 
 /// 检查 Docker 是否安装且 daemon 正在运行
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_docker_available() -> bool {
     Command::new("docker")
         .arg("info")
@@ -1997,6 +2003,7 @@ fn is_docker_available() -> bool {
 ///
 /// 注意：orbctl **没有 --version 标志**（实测 `orbctl --version` 直接报错），
 /// 用 `orbctl status` 检测可用性。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_orbstack_available() -> bool {
     Command::new("orbctl")
         .arg("status")
@@ -2010,6 +2017,7 @@ fn is_orbstack_available() -> bool {
 /// [`parse_orb_size`]；旧实现只把 `cols[5]`（"800"）单独传入，
 /// `parse_orb_size("800")` 因不含单位恒返回 0 → `orbstack:system-clean`
 /// 永不出现。只统计 stopped 的 VM（running 删除会中断服务）。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn orb_reclaimable_line_bytes(line: &str) -> u64 {
     let cols: Vec<&str> = line.split_whitespace().collect();
     // name status distro version arch SIZE UNIT ip
@@ -2022,6 +2030,7 @@ fn orb_reclaimable_line_bytes(line: &str) -> u64 {
 /// C-07：按可回收量构造 `orbstack:system-clean` 清理项（0 不产出）。
 /// 抽成纯函数供 `scan_docker_caches` 与单测共用，便于用真实输出样例
 /// 断言「cleanup 项生成」而无需 spawn orbctl。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn orb_cleanup_item(reclaimable: u64) -> Option<ScanItem> {
     if reclaimable == 0 {
         return None;
@@ -2052,6 +2061,7 @@ fn orb_cleanup_item(reclaimable: u64) -> Option<ScanItem> {
 /// ```
 /// 只有 stopped 的 VM 才能被 `orbctl delete` 安全回收；running 的 VM
 /// 删除会中断服务，绝不统计。拿不到时返回 0（不展示该项，避免虚标）。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn get_orbstack_reclaimable_size() -> u64 {
     let out = Command::new("orbctl").arg("list").output();
     let Ok(out) = out else { return 0 };
@@ -2064,6 +2074,7 @@ fn get_orbstack_reclaimable_size() -> u64 {
 }
 
 /// 解析 OrbStack size 字段（"2.4 GB" / "800 MB"）为字节（1000 进制）
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_orb_size(s: &str) -> u64 {
     let s = s.trim();
     let (num, mult) = if s.ends_with("GB") {
@@ -2091,6 +2102,7 @@ fn parse_orb_size(s: &str) -> u64 {
 /// Local Volumes   2       1       500MB     200MB (40%)
 /// Build Cache     10      0       300MB     300MB
 /// ```
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn get_docker_reclaimable_size() -> u64 {
     let output = Command::new("docker")
         .args([
@@ -2119,6 +2131,7 @@ fn get_docker_reclaimable_size() -> u64 {
 ///    就是为这个留的，这里必须传 true。
 /// 2. **Local Volumes 要排除**。`docker system prune` 默认**不清理**数据卷，
 ///    算进去同样虚高 —— 而 UI 描述里写的是"不会清理数据卷"，自相矛盾。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn sum_docker_reclaimable(stdout: &str) -> u64 {
     let mut total: u64 = 0;
     for line in stdout.lines() {
@@ -2143,6 +2156,7 @@ fn sum_docker_reclaimable(stdout: &str) -> u64 {
 /// Docker（`docker system df`）用的是 Go 的 humanize，是 **1000 进制**；
 /// 之前统一按 1024 解析，1GB 会高估 7.4%、1TB 高估 10%，
 /// 用户看到的"可回收空间"是虚高的。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_size_str(s: &str, si: bool) -> u64 {
     let s = s.trim();
     if s.is_empty() || s == "0B" {
@@ -2176,6 +2190,7 @@ fn parse_size_str(s: &str, si: bool) -> u64 {
 ///
 /// `simctl runtime list` 的**每一行**都可能带括号：`iOS 18.5 (22F77) - ... (Ready)`。
 /// 只取"第一个括号"而不校验内容，就会被 build 号和状态词骗掉。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_size_token(s: &str) -> bool {
     let t = s.trim();
     if t.is_empty() {
@@ -2205,6 +2220,7 @@ fn is_size_token(s: &str) -> bool {
 /// 二进制进制是**实测**结论，不是猜的：本机三份 runtime 的 `sizeBytes`
 /// 精确总和 26,371,017,423 B，对 `24.6G × 1024³` 偏差 -0.16%（四舍五入级），
 /// 对 `24.6G × 1000³` 偏差 +7.2%。所以这里固定用 1024，`si = false`。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_total_disk_image_size(stdout: &str) -> Option<u64> {
     for line in stdout.lines() {
         if !line.contains("Total Disk Images") {
@@ -2231,6 +2247,7 @@ fn parse_total_disk_image_size(stdout: &str) -> Option<u64> {
 /// - 调用 `docker system df` 获取可回收空间（需要 Docker 运行）
 /// - 扫描 ~/.docker/buildx/cache (构建缓存)
 /// - 扫描 ~/Library/Containers/com.docker.docker/Data (Docker Desktop 数据)
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn scan_docker_caches() -> Vec<ScanItem> {
     let mut items = Vec::new();
     let home = home_dir();
@@ -2852,6 +2869,7 @@ fn scan_monorepo_caches() -> Vec<ScanItem> {
 ///
 /// 使用 `plutil -p` 解析 plist，提取 Program 或 ProgramArguments 中的可执行路径，
 /// 若路径指向的程序不存在，则判定为孤儿项。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn scan_orphaned_launchd() -> Vec<ScanItem> {
     let home = home_dir();
     let scan_dirs: Vec<(PathBuf, bool)> = vec![
@@ -2942,6 +2960,7 @@ fn scan_orphaned_launchd() -> Vec<ScanItem> {
 ///     0 => "/usr/bin/foo"
 ///     1 => "-bar"
 ///   ]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn extract_program_from_plist(plist_path: &Path) -> Option<String> {
     let output = Command::new("/usr/bin/plutil")
         .arg("-p")
@@ -2994,6 +3013,7 @@ fn extract_program_from_plist(plist_path: &Path) -> Option<String> {
 }
 
 /// 从 plutil 输出行中提取引号包裹的路径值
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn extract_quoted_value(line: &str) -> Option<String> {
     // 查找 => 后面的引号字符串
     let after_arrow = line.split("=>").nth(1)?;
@@ -3026,6 +3046,7 @@ fn extract_quoted_value(line: &str) -> Option<String> {
 /// Caches / Application Support 这些动辄几十 GB 的目录。
 ///
 /// 抽成自由函数是为了能单测：这条过滤规则错了不会报错，只会默默变慢。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn should_skip_dir_entry(name: &str, path: &std::path::Path, skip_dirs: &[&str]) -> bool {
     for skip in skip_dirs {
         if skip.contains('/') {
@@ -3043,6 +3064,7 @@ fn should_skip_dir_entry(name: &str, path: &std::path::Path, skip_dirs: &[&str])
 
 /// 递归扫描主目录（最大深度 5），跳过系统保护目录和大型缓存目录，
 /// 将所有 .DS_Store 路径聚合为单个 ScanItem，通过 batch_paths 批量删除。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn scan_ds_store_files() -> Vec<ScanItem> {
     let home = home_dir();
     let mut ds_store_paths: Vec<String> = Vec::new();

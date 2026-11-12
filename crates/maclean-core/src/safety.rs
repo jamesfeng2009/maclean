@@ -1262,6 +1262,7 @@ fn is_app_running(app_name: &str) -> bool {
 ///
 /// 判据是命令行里出现 `<name>.app/Contents/MacOS/`：只有进程是从这个
 /// bundle 里拉起来的才算，光出现名字（Xcode 的参数里有 X）不算。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn bundle_in_command_lines(ps_output: &str, app_name: &str) -> bool {
     let needle = format!("/{}.app/Contents/MacOS/", app_name);
     ps_output.lines().any(|line| {

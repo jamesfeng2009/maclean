@@ -1289,9 +1289,9 @@ fn query_app_info(parent_path: &str, key_name: &str) -> Option<WindowsAppInfo> {
     })
 }
 
-/// F-02/C-12 · 解析 reg query 输出行的纯函数来自 `residual_match`（无 cfg，
-/// 开发机可测）：精确比较第一个 token 字段名、DWORD 的 0x 值转十进制，
-/// 不再用 contains 把 QuietUninstallString 吞进 UninstallString 分支。
+// F-02/C-12 · 解析 reg query 输出行的纯函数来自 `residual_match`（无 cfg，
+// 开发机可测）：精确比较第一个 token 字段名、DWORD 的 0x 值转十进制，
+// 不再用 contains 把 QuietUninstallString 吞进 UninstallString 分支。
 
 /// 扫描 UWP/Store 应用（通过 PowerShell）
 fn scan_uwp_apps() -> Vec<WindowsAppInfo> {
@@ -1716,6 +1716,12 @@ impl WindowsAppCacheScanner {
     }
 }
 
+impl Default for WindowsAppCacheScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 缓存目录名模式（%LOCALAPPDATA% / %APPDATA% 下）
 const CACHE_DIR_NAMES: &[&str] = &[
     "Cache",
@@ -1953,6 +1959,12 @@ impl WindowsAppDataScanner {
     }
 }
 
+impl Default for WindowsAppDataScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// App 数据扫描时跳过的系统目录
 const APPDATA_SKIP_DIRS: &[&str] = &[
     "Microsoft",
@@ -2078,6 +2090,12 @@ impl WindowsUninstallScanner {
     }
 }
 
+impl Default for WindowsUninstallScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Scanner for WindowsUninstallScanner {
     fn scan(&self) -> ScanResult {
         let start = std::time::Instant::now();
@@ -2123,7 +2141,7 @@ impl Scanner for WindowsUninstallScanner {
             }
 
             // 记录 bloatware 匹配日志
-            if let Some(ref bw) = bloatware_match {
+            if let Some(bw) = bloatware_match {
                 crate::logger::info(&format!(
                     "Bloatware 匹配: {} -> {} ({})",
                     app.name,
@@ -2189,7 +2207,7 @@ impl Scanner for WindowsUninstallScanner {
 
             // 确定卸载项的推荐等级和描述
             // Bloatware 匹配优先，其次保护级别，默认 Caution
-            let (uninstall_recommend, uninstall_desc) = if let Some(ref bw) = bloatware_match {
+            let (uninstall_recommend, uninstall_desc) = if let Some(bw) = bloatware_match {
                 let desc = format!(
                     "🗑️ {} ({}) - {} | {} | 大小: {}",
                     app.name,
@@ -2380,9 +2398,9 @@ fn scan_windows_app_data_and_cache(app_name: &str) -> (Vec<String>, u64, Vec<Str
     (data_paths, data_size, cache_paths, cache_size)
 }
 
-/// A-04 · 生成 AppData 目录匹配变体的宽松函数已删除：删除方向的匹配统一
-/// 由 `residual_match::is_residual_dir`（折叠相等 + MIN_MATCH_LEN + 共享容器
-/// 保护）负责，保护方向的 `resembles_app_dir` 刻意保持宽松，两者不得复用。
+// A-04 · 生成 AppData 目录匹配变体的宽松函数已删除：删除方向的匹配统一
+// 由 `residual_match::is_residual_dir`（折叠相等 + MIN_MATCH_LEN + 共享容器
+// 保护）负责，保护方向的 `resembles_app_dir` 刻意保持宽松，两者不得复用。
 
 // =========================================================================
 //  应用卸载执行
@@ -2696,7 +2714,7 @@ fn execute_uninstall_command(cmd_str: &str) -> (bool, String) {
     match output {
         Ok(out) if out.status.success() => {
             crate::logger::info(&format!("卸载成功: {}", exe_path));
-            return (true, format!("应用 {} 已卸载", exe_path));
+            (true, format!("应用 {} 已卸载", exe_path))
         }
         Ok(out) => {
             crate::logger::warn(&format!(
@@ -2857,11 +2875,11 @@ fn try_powershell_elevated(exe_path: &str, args: &[String]) -> (bool, String) {
 fn parse_command(cmd: &str) -> (String, Vec<String>) {
     let cmd = cmd.trim();
 
-    if cmd.starts_with('"') {
+    if let Some(quoted) = cmd.strip_prefix('"') {
         // 带引号的路径
-        if let Some(end) = cmd[1..].find('"') {
-            let exe = cmd[1..=end].to_string();
-            let rest = cmd[end + 2..].trim();
+        if let Some(end) = quoted.find('"') {
+            let exe = quoted[..end].to_string();
+            let rest = quoted[end + 1..].trim();
             let args: Vec<String> = if rest.is_empty() {
                 Vec::new()
             } else {
@@ -2897,9 +2915,9 @@ fn parse_command(cmd: &str) -> (String, Vec<String>) {
 //  3. 文件系统残留（%APPDATA%\<AppName> 等）
 // =========================================================================
 
-/// D-01/F-01 · 四个残留数据结构与其计数/辅助方法统一放在无 cfg 的
-/// `residual_match`，本文件顶部 `pub use` 保持了 `windows_apps::*` 公开路径。
-/// 这样 ops 侧的类型引用不变，而纯逻辑与行为测试能在开发机真跑。
+// D-01/F-01 · 四个残留数据结构与其计数/辅助方法统一放在无 cfg 的
+// `residual_match`，本文件顶部 `pub use` 保持了 `windows_apps::*` 公开路径。
+// 这样 ops 侧的类型引用不变，而纯逻辑与行为测试能在开发机真跑。
 
 /// 扫描文件系统残留（只扫描，不删除）
 ///

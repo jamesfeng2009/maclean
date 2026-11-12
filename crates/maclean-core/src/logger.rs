@@ -311,6 +311,7 @@ fn secs_to_date(secs: u64) -> (u32, u32, u32) {
 /// 用户看到的日志会比真实时间慢 8 小时，误以为日志未写入。
 /// 仅非 Unix 平台回退路径与测试引用，Unix 走 localtime_r。
 #[cfg_attr(unix, allow(dead_code))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn secs_to_time(secs: u64) -> (u32, u32, u32) {
     let (_, _, _, hour, minute, second) = localtime_fields(secs);
     (hour, minute, second)

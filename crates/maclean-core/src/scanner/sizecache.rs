@@ -40,6 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 缓存文件格式版本；结构不兼容时 bump，旧文件会被忽略并重建。
 const FORMAT_VERSION: u32 = 1;
 /// 缓存有效期：7 天。到期后即使顶层签名不变也重新统计一次，兜住任何漏检的深层变更。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const CACHE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// 磁盘上的缓存文件结构（版本化）。
@@ -68,6 +69,7 @@ struct Entry {
 
 /// 命中校验所需的目录「当前」元数据快照（由一次 `lstat` 得到）。
 #[derive(Clone, Copy)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 struct DirMeta {
     ino: u64,
     mtime_sec: i64,
@@ -76,6 +78,7 @@ struct DirMeta {
 }
 
 impl DirMeta {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn signature_eq(&self, e: &Entry) -> bool {
         self.ino == e.ino
             && self.mtime_sec == e.mtime_sec
@@ -124,6 +127,7 @@ impl Store {
 
     /// 命中：记录存在、签名一致、未过期。返回缓存的完整占用（incomplete 恒为 false，
     /// 因为不完整结果从不写入）。
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn get(&self, key: &str, now: &DirMeta, now_secs: i64, ttl_secs: i64) -> Option<u64> {
         let e = self.entries.get(key)?;
         if now.signature_eq(e) && now_secs - e.at <= ttl_secs {
@@ -134,6 +138,7 @@ impl Store {
     }
 
     /// 写入一条**完整**统计；incomplete 不缓存。
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn put(&mut self, key: String, meta: DirMeta, bytes: u64, incomplete: bool, now_secs: i64) {
         if incomplete {
             return;
@@ -218,6 +223,7 @@ fn cache_file_path() -> PathBuf {
     base.join(".maclean").join("cache").join("dir_sizes.json")
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

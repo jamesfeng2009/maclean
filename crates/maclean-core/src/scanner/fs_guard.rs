@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 ///
 /// 本地外置盘（apfs / hfs / exfat / fat32 等）不在此列，仍正常扫描；
 /// 通过 macFUSE 挂载的 NTFS/网盘（osxfuse / macfuse）会落入 FUSE 分支被跳过。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const REMOTE_OR_FUSE_TYPES: &[&str] = &[
     // 网络文件系统
     "nfs",

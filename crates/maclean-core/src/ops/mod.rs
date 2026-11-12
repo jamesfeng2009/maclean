@@ -1647,11 +1647,7 @@ pub fn start_delete(
                             logger::info(&format!("开始卸载应用: {}", path));
 
                             // 查找应用信息以支持干净卸载
-                            let key_name = if path.starts_with("uninstall:") {
-                                &path[10..]
-                            } else {
-                                ""
-                            };
+                            let key_name = path.strip_prefix("uninstall:").unwrap_or("");
                             let app_info = scanner::windows_apps::find_app_by_key(key_name);
                             let app_name = app_info.as_ref().map(|a| a.name.as_str()).unwrap_or("");
                             let install_path = app_info.as_ref().and_then(|a| a.install_location.as_deref());
@@ -3710,6 +3706,7 @@ pub fn sudo_remove_app(path: &str, lang_en: bool) -> bool {
 
 /// sudo 是否配置了 Touch ID（pam_tid）：
 /// macOS 用 `/etc/pam.d/sudo_local` 追加，老系统也可能直接写在 `/etc/pam.d/sudo`。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn pam_tid_enabled() -> bool {
     ["/etc/pam.d/sudo_local", "/etc/pam.d/sudo"]
         .iter()
@@ -3718,6 +3715,7 @@ fn pam_tid_enabled() -> bool {
 }
 
 /// 从 pam 配置文本判断是否启用了 pam_tid（注释行不算）。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn pam_tid_declared(content: &str) -> bool {
     content.lines().any(|line| {
         let l = line.trim_start();
@@ -3730,6 +3728,7 @@ fn pam_tid_declared(content: &str) -> bool {
 /// `pam_tid` 只是「启用指纹认证」的配置；如果机器没有 Touch ID 硬件，
 /// 或用户一枚指纹都没录，指纹永远过不了 —— 那种情况应该直接走
 /// osascript 密码弹窗，而不是让用户等一次注定失败的指纹。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn touch_id_enrolled() -> bool {
     std::process::Command::new("/usr/bin/bioutil")
         .arg("-r")
@@ -3739,6 +3738,7 @@ fn touch_id_enrolled() -> bool {
 }
 
 /// 解析 `bioutil -r` 的输出：`Biometrics for unlock: 1` 才代表已录入指纹。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn bioutil_reports_enrolled(stdout: &str) -> bool {
     stdout.lines().any(|line| {
         let l = line.trim();
@@ -3748,6 +3748,7 @@ fn bioutil_reports_enrolled(stdout: &str) -> bool {
 
 /// sudo 需要密码时打印的哨兵串：用来在不可见的 pty 里判断
 /// 「Touch ID 没通过，sudo 退化成要密码了」，好及时转成用户看得见的弹窗。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const SUDO_PASSWORD_SENTINEL: &str = "MACLEAN_SUDO_PASSWORD_PROMPT";
 
 /// 跑一次 `sudo rm -rf -- path`。
@@ -3756,6 +3757,7 @@ const SUDO_PASSWORD_SENTINEL: &str = "MACLEAN_SUDO_PASSWORD_PROMPT";
 /// - `non_interactive = false`：用 `script` 套一个 pty 再跑交互式 sudo，
 ///   pam_tid 才能在 PAM 对话里拉起 Touch ID。pty 里的文本用户看不到，
 ///   所以一旦出现密码哨兵就 kill 并返回错误，由上层改弹系统授权窗口。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn run_sudo_rm(path: &str, non_interactive: bool) -> Result<bool, String> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -3869,6 +3871,7 @@ fn run_sudo_rm(path: &str, non_interactive: bool) -> Result<bool, String> {
 /// AppleScript 字符串里 `\` 与 `"` 必须转义；shell 命令内部的路径已由
 /// 上层用单引号包裹（并拒绝含 `'` 的路径），所以这里只处理 AppleScript 层。
 /// 抽成独立函数是为了能直接单测转义，不必真弹一次系统授权框。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn admin_move_applescript(shell_cmd: &str) -> String {
     let escaped = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
     format!(

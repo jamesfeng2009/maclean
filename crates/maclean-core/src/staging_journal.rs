@@ -560,7 +560,7 @@ pub fn pid_alive(pid: u32) -> bool {
                 return false;
             }
             CloseHandle(handle);
-            return true;
+            true
         }
     }
     #[cfg(not(any(unix, target_os = "windows")))]
