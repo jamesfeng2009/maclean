@@ -18,7 +18,7 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 use super::{dir_size, home_dir, Recommend, ScanItem, ScanResult, Scanner};
-use crate::safety;
+use crate::safety::{self, container_app_installed, ContainerApp};
 
 /// 开发者缓存扫描器
 #[derive(Debug, Default)]
@@ -2242,6 +2242,83 @@ fn parse_total_disk_image_size(stdout: &str) -> Option<u64> {
     None
 }
 
+// ============================================================
+//  容器数据项出口分流（2026-11-13）
+// ============================================================
+//
+// Docker/OrbStack 的镜像与卷是数据库结构，直接删文件会破坏元数据（9-30 事故），
+// 所以「App 仍安装」时只读展示、清理走官方 CLI。
+// 但用户卸载 App 之后，目录里没有任何进程持有，那条 CLI 也不存在了 ——
+// 继续按路径硬拦只会把几十 GB 孤儿数据锁死在磁盘上，并给出一条用户根本
+// 执行不了的建议。这里按文件系统真相分流，和 IM 沙盒容器（app_cache）同一套
+// 口径：装了 → 保护，卸了 → 孤儿残留可清理。
+
+/// 容器数据项种类（决定文案与等级）
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum ContainerKind {
+    DockerVm,
+    DockerCache,
+    OrbStackData,
+    OrbStackContainer,
+}
+
+/// 某一类容器数据在「已安装 / 已卸载」两种状态下的出口策略
+#[derive(Debug, PartialEq, Eq)]
+struct ContainerPolicy {
+    deletable: bool,
+    recommend: Recommend,
+    reason: String,
+    description: String,
+}
+
+fn container_policy(kind: ContainerKind, app_installed: bool) -> ContainerPolicy {
+    if app_installed {
+        let (reason, description, recommend) = match kind {
+            ContainerKind::DockerVm => (
+                "容器数据目录，禁止直接删除；请用 Docker Desktop 或 docker system prune 清理镜像",
+                "Docker Desktop 虚拟机数据（只展示，不直接删除；清理请走 Docker Desktop/CLI）",
+                Recommend::Advanced,
+            ),
+            ContainerKind::DockerCache => (
+                "容器数据目录，禁止直接删除；请用 Docker Desktop 清理",
+                "Docker Desktop 缓存数据（只展示，不直接删除）",
+                Recommend::Caution,
+            ),
+            ContainerKind::OrbStackData => (
+                "容器数据目录，禁止直接删除；请用 orbctl delete/reset 清理",
+                "OrbStack 数据（只展示，不直接删除；清理请用 orbctl）",
+                Recommend::Advanced,
+            ),
+            ContainerKind::OrbStackContainer => (
+                "容器数据目录，禁止直接删除；请用 orbctl delete/reset 清理",
+                "OrbStack 容器/虚拟机数据（只展示，不直接删除；清理请用 orbctl）",
+                Recommend::Advanced,
+            ),
+        };
+        ContainerPolicy {
+            deletable: false,
+            recommend,
+            reason: reason.to_string(),
+            description: description.to_string(),
+        }
+    } else {
+        let description = match kind {
+            ContainerKind::DockerVm => "Docker Desktop 已卸载，残留虚拟机数据（可删除释放空间）",
+            ContainerKind::DockerCache => "Docker Desktop 已卸载，残留缓存数据（可删除释放空间）",
+            ContainerKind::OrbStackData => "OrbStack 已卸载，残留数据（可删除释放空间）",
+            ContainerKind::OrbStackContainer => "OrbStack 已卸载，残留容器数据（可删除释放空间）",
+        };
+        ContainerPolicy {
+            deletable: true,
+            // 孤儿数据仍然不是"随便清"的东西：里面可能有镜像/卷，
+            // 删了要重新 pull，所以给 Caution 而不是 Safe，让用户看见代价。
+            recommend: Recommend::Caution,
+            reason: String::new(),
+            description: description.to_string(),
+        }
+    }
+}
+
 /// 扫描 Docker 相关缓存
 ///
 /// - 调用 `docker system df` 获取可回收空间（需要 Docker 运行）
@@ -2302,16 +2379,21 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     let docker_vms = home.join("Library/Containers/com.docker.docker/Data/vms");
     if let Ok(size) = dir_size_checked(&docker_vms) {
         if size > 0 {
-            items.push(ScanItem { batch_mtimes: vec![],
+            let policy = container_policy(
+                ContainerKind::DockerVm,
+                container_app_installed(ContainerApp::Docker),
+            );
+            items.push(ScanItem {
+                batch_mtimes: vec![],
                 path: docker_vms.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Docker虚拟机".to_string(),
                 selected: false,
-                deletable: false,
-                undeletable_reason: "容器数据目录，禁止直接删除；请用 Docker Desktop 或 docker system prune 清理镜像".to_string(),
+                deletable: policy.deletable,
+                undeletable_reason: policy.reason,
                 batch_paths: Vec::new(),
-                recommend: Recommend::Advanced,
-                description: "Docker Desktop 虚拟机数据（只展示，不直接删除；清理请走 Docker Desktop/CLI）".to_string(),
+                recommend: policy.recommend,
+                description: policy.description,
             });
         }
     }
@@ -2321,18 +2403,21 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     let docker_cache = home.join("Library/Containers/com.docker.docker/Data/cache");
     if let Ok(size) = dir_size_checked(&docker_cache) {
         if size > 0 {
+            let policy = container_policy(
+                ContainerKind::DockerCache,
+                container_app_installed(ContainerApp::Docker),
+            );
             items.push(ScanItem {
                 batch_mtimes: vec![],
                 path: docker_cache.to_string_lossy().to_string(),
                 size_bytes: size,
                 category: "Docker缓存".to_string(),
                 selected: false,
-                deletable: false,
-                undeletable_reason: "容器数据目录，禁止直接删除；请用 Docker Desktop 清理"
-                    .to_string(),
+                deletable: policy.deletable,
+                undeletable_reason: policy.reason,
                 batch_paths: Vec::new(),
-                recommend: Recommend::Caution,
-                description: "Docker Desktop 缓存数据（只展示，不直接删除）".to_string(),
+                recommend: policy.recommend,
+                description: policy.description,
             });
         }
     }
@@ -2340,33 +2425,34 @@ fn scan_docker_caches() -> Vec<ScanItem> {
     // 5. OrbStack（~/.orbstack + Group Containers 容器数据）
     //    直接删文件同样破坏容器镜像（与 Docker 同理），只展示大小；
     //    清理走 orbctl delete / orbctl reset（命令删除通道）。
-    let orbstack_dirs: Vec<(PathBuf, &str)> = vec![
-        (home.join(".orbstack"), "OrbStack数据"),
+    let orbstack_dirs: Vec<(PathBuf, &str, ContainerKind)> = vec![
+        (
+            home.join(".orbstack"),
+            "OrbStack数据",
+            ContainerKind::OrbStackData,
+        ),
         (
             home.join("Library/Group Containers/HUAQ24HBR6.dev.orbstack"),
             "OrbStack容器",
+            ContainerKind::OrbStackContainer,
         ),
     ];
-    for (odir, cat) in orbstack_dirs {
+    let orbstack_installed = container_app_installed(ContainerApp::OrbStack);
+    for (odir, cat, kind) in orbstack_dirs {
         if let Ok(size) = dir_size_checked(&odir) {
             if size > 0 {
-                let desc = if cat == "OrbStack容器" {
-                    "OrbStack 容器/虚拟机数据（只展示，不直接删除；清理请用 orbctl）".to_string()
-                } else {
-                    "OrbStack 数据（只展示，不直接删除；清理请用 orbctl）".to_string()
-                };
+                let policy = container_policy(kind, orbstack_installed);
                 items.push(ScanItem {
                     batch_mtimes: vec![],
                     path: odir.to_string_lossy().to_string(),
                     size_bytes: size,
                     category: cat.to_string(),
                     selected: false,
-                    deletable: false,
-                    undeletable_reason: "容器数据目录，禁止直接删除；请用 orbctl delete/reset 清理"
-                        .to_string(),
+                    deletable: policy.deletable,
+                    undeletable_reason: policy.reason,
                     batch_paths: Vec::new(),
-                    recommend: Recommend::Advanced,
-                    description: desc,
+                    recommend: policy.recommend,
+                    description: policy.description,
                 });
             }
         }
@@ -3381,6 +3467,64 @@ fn scan_docker_windows() -> Vec<ScanItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 容器数据项出口：装了=红线只读展示，卸了=孤儿可删（Caution）。
+    ///
+    /// 这条规则以前是"按路径恒拦截"，用户卸载 Docker 后 57 GB 数据仍被
+    /// 锁死、还提示一条执行不了的 `docker system prune` —— 就是这里要防的回归。
+    #[test]
+    fn container_policy_splits_installed_and_orphan() {
+        for kind in [
+            ContainerKind::DockerVm,
+            ContainerKind::DockerCache,
+            ContainerKind::OrbStackData,
+            ContainerKind::OrbStackContainer,
+        ] {
+            let installed = container_policy(kind, true);
+            assert!(!installed.deletable, "App 仍安装时 {:?} 必须不可删", kind);
+            assert!(
+                !installed.reason.is_empty(),
+                "不可删时必须给出原因（{:?}）",
+                kind
+            );
+
+            let orphan = container_policy(kind, false);
+            assert!(orphan.deletable, "App 已卸载时 {:?} 应可删", kind);
+            assert!(
+                orphan.reason.is_empty(),
+                "可删项不应再带不可删原因（{:?}）",
+                kind
+            );
+            assert!(
+                orphan.description.contains("已卸载"),
+                "孤儿文案必须说明 App 已卸载（{:?}）: {}",
+                kind,
+                orphan.description
+            );
+            assert!(
+                !orphan.description.contains("只展示"),
+                "孤儿文案不该再说只展示（{:?}）: {}",
+                kind,
+                orphan.description
+            );
+            assert_eq!(
+                orphan.recommend,
+                Recommend::Caution,
+                "孤儿数据仍可能有镜像/卷，不能给 Safe（{:?}）",
+                kind
+            );
+        }
+    }
+
+    /// 装了与卸了两种状态的文案必须是**两套**，不能只有等级变、话不变。
+    #[test]
+    fn container_policy_does_not_advise_dead_cli_when_orphan() {
+        let orphan = container_policy(ContainerKind::DockerVm, false);
+        assert!(!orphan.description.contains("docker system prune"));
+        assert!(!orphan.description.contains("Docker Desktop/CLI"));
+        let installed = container_policy(ContainerKind::DockerVm, true);
+        assert!(installed.description.contains("Docker Desktop"));
+    }
 
     fn mk_dev_item(path: &str, size: u64) -> ScanItem {
         ScanItem {

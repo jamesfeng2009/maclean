@@ -895,7 +895,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     // 删容器数据文件。与删除端同源，扫描期由 precheck_deletability 过滤。
     if is_container_data_path(&canonical) {
         return SafetyCheck::Danger(format!(
-            "容器数据目录（Docker/OrbStack 镜像与卷），禁止直接删除，请通过官方命令清理: {}",
+            "容器数据目录（Docker/OrbStack 镜像与卷），App 仍在使用，禁止直接删除，请通过官方命令清理: {}",
             canonical_str
         ));
     }
@@ -1474,18 +1474,75 @@ fn is_windows_critical_path(path: &str) -> bool {
 /// 结构，直接删文件 = 破坏镜像元数据（9-30 事故）。任何类目任何入口一律
 /// Danger，只允许通过官方 CLI（docker prune / orbctl delete）清理。
 /// 与删除端同源：precheck_deletability 扫描期即标不可删。
+///
+/// 2026-11-13 收敛：这层红线**只在容器 App 仍安装时成立**。App 已卸载
+/// （≈ 用户不会再用它，目录里也没有进程持有）时，整目录是孤儿残留，
+/// 放行给上层按普通"注意"项处理；具体判定见 `is_container_data_path_with`。
+///
+/// 与删除端同源：precheck_deletability 扫描期即标不可删。
 pub(crate) fn is_container_data_path(path: &Path) -> bool {
+    is_container_data_path_with(
+        path,
+        container_app_installed(ContainerApp::Docker),
+        container_app_installed(ContainerApp::OrbStack),
+    )
+}
+
+/// 容器 App 类型：决定「容器数据目录」这层红线对谁生效。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ContainerApp {
+    Docker,
+    OrbStack,
+}
+
+/// 容器 App 是否仍安装在本机（`/Applications` 与 `~/Applications` 下是否有 .app）。
+///
+/// 只看文件系统真相：单次 stat，不枚举 bundle、不碰 Spotlight、不需要
+/// 自动化授权。home 走 passwd 库（与 `protected_homes` 同源），不采信
+/// 可被 `$HOME` 改写的 `dirs::home_dir()`。
+///
+/// # 保守义务
+/// 任何一步拿不到 home 候选就按**已安装**返回。方向永远是「保护」：
+/// 一次异常不能把仍在使用的容器数据判成孤儿。
+pub(crate) fn container_app_installed(app: ContainerApp) -> bool {
+    let bundle = match app {
+        ContainerApp::Docker => "Docker.app",
+        ContainerApp::OrbStack => "OrbStack.app",
+    };
+    if Path::new("/Applications").join(bundle).is_dir() {
+        return true;
+    }
+    match real_home_dir() {
+        Some(h) => h.join("Applications").join(bundle).is_dir(),
+        // home 读不到 → 无法判定 → 保守按"仍安装"
+        None => true,
+    }
+}
+
+/// 纯判定（安装状态由调用方注入，便于单测覆盖两种分支）
+///
+/// 关键点：**已卸载的容器数据不是红线**。Docker/OrbStack 都卸了，那份
+/// 目录里没有任何进程在用，"删文件破坏镜像元数据"的前提已经不成立；
+/// 继续按路径硬拦只会把几十 GB 孤儿数据锁死在磁盘上，还让 UI 显示
+/// 「请走 docker system prune / orbctl」——而那条命令根本不存在了。
+fn is_container_data_path_with(
+    path: &Path,
+    docker_installed: bool,
+    orbstack_installed: bool,
+) -> bool {
     let p = path.to_string_lossy();
     for h in protected_homes() {
         let h = h.to_string_lossy();
-        if p.starts_with(&format!("{}/Library/Containers/com.docker.docker/Data", h))
-            || p.starts_with(&format!("{}/.orbstack", h))
+        if p.starts_with(&format!("{}/Library/Containers/com.docker.docker/Data", h)) {
+            return docker_installed;
+        }
+        if p.starts_with(&format!("{}/.orbstack", h))
             || p.starts_with(&format!(
                 "{}/Library/Group Containers/HUAQ24HBR6.dev.orbstack",
                 h
             ))
         {
-            return true;
+            return orbstack_installed;
         }
     }
     false
@@ -2495,10 +2552,12 @@ mod tests {
         }
     }
 
+    /// 容器数据路径在「App 仍安装」时必须是红线。
+    ///
+    /// 用纯判定 + 注入安装状态，保证在完全没装 Docker 的 CI 机器上
+    /// 也测的是规则本身，而不是这台机器的运气。
     #[test]
-    fn container_data_paths_are_never_deletable() {
-        // 容器数据目录（Docker Desktop / OrbStack 镜像与卷）是数据库结构，
-        // 直接删文件破坏镜像元数据（9-30 事故）。任何类目任何入口都 Danger。
+    fn container_data_blocked_while_app_installed() {
         let home = test_home_str();
         for p in [
             format!(
@@ -2512,17 +2571,45 @@ mod tests {
                 home
             ),
         ] {
-            for cat in ["重复文件", "Docker虚拟机", "大文件", "安装包"] {
-                let r = check_path_safety_with_category(&p, cat);
-                assert!(
-                    matches!(r, SafetyCheck::Danger(_)),
-                    "容器数据目录应拒绝删除: {} ({}), got {:?}",
-                    p,
-                    cat,
-                    r
-                );
-            }
+            assert!(
+                is_container_data_path_with(Path::new(&p), true, true),
+                "容器数据目录在 App 仍安装时必须拦截: {}",
+                p
+            );
         }
+    }
+
+    /// App 已卸载 → 同一份目录是孤儿残留，不能再按路径硬拦。
+    #[test]
+    fn container_data_allowed_after_app_uninstalled() {
+        let home = test_home_str();
+        let docker_only = format!(
+            "{}/Library/Containers/com.docker.docker/Data/vms/0/docker.raw",
+            home
+        );
+        assert!(
+            !is_container_data_path_with(Path::new(&docker_only), false, true),
+            "Docker 已卸载，其数据不应再被红线拦截"
+        );
+        let orb = format!("{}/.orbstack/vm/0.img", home);
+        assert!(
+            !is_container_data_path_with(Path::new(&orb), true, false),
+            "OrbStack 已卸载，其数据不应再被红线拦截"
+        );
+        // 两个都没装：都放行
+        assert!(!is_container_data_path_with(
+            Path::new(&docker_only),
+            false,
+            false
+        ));
+        assert!(!is_container_data_path_with(Path::new(&orb), false, false));
+        // 交叉污染：Docker 卸载不影响 OrbStack 的拦截
+        assert!(is_container_data_path_with(Path::new(&orb), false, true));
+    }
+
+    #[test]
+    fn container_gate_keeps_other_paths_untouched() {
+        let home = test_home_str();
         // Docker 构建缓存（~/.docker/buildx/cache）不是容器数据目录，
         // 但即使被更早的用户关键目录层拦截也是既有保护行为，此处只确认
         // 容器闸门本身不误伤普通缓存路径（~/.npm 等常规可删缓存）。
