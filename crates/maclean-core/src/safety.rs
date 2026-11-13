@@ -1143,6 +1143,22 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
     }
 }
 
+/// 沙盒容器内 `Data/Library/Application Support/<缓存目录名>` 是否放行
+///
+/// 只放行**一层**缓存目录（如 iCache / videoCache / Cache），更深层不放：
+/// 扫描器只按一层产出项，闸门跟着同一口径，避免把删除面扩大到任意深层文件。
+fn is_container_app_support_cache(canonical_str: &str) -> bool {
+    const MARK: &str = "/Data/Library/Application Support/";
+    let Some(idx) = canonical_str.rfind(MARK) else {
+        return false;
+    };
+    let rest = &canonical_str[idx + MARK.len()..];
+    if rest.is_empty() || rest.contains('/') {
+        return false;
+    }
+    crate::scanner::app_cache::is_cache_dir_name(rest)
+}
+
 /// 第 6 层：敏感文件名检测（纯函数）
 ///
 /// 抽出来是为了能直接喂 Windows 形态的路径做测试 —— 详见下面
@@ -1699,8 +1715,15 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
         let im_docs_root = crate::im_data::IM_APPS.iter().any(|a| {
             canonical_str.ends_with(&format!("/Library/Containers/{}/Data/Documents", a.bundle))
         });
-        return canonical_str.contains("/Data/Library/Caches/")
+        // 注意：匹配必须同时覆盖"目录本身"与"目录内条目"。
+        // 旧实现只写了 `contains("/Data/Library/Caches/")`（带尾斜杠），
+        // 扫描项恰好是 `.../Data/Library/Caches` 目录本身时不匹配，
+        // 于是缓存目录被判"不在任何已声明扫描根下" → UI 显示"受保护"。
+        // QQMusic / Lark / QQLive 的容器缓存因此长期可扫不可删。
+        return canonical_str.ends_with("/Data/Library/Caches")
+            || canonical_str.contains("/Data/Library/Caches/")
             || canonical_str.contains("/Data/Documents/")
+            || is_container_app_support_cache(&canonical_str)
             || im_docs_root
             || is_direct_child(&canonical_str, &user_containers);
     }
@@ -1709,7 +1732,9 @@ fn check_whitelist(canonical: &Path, home: &Path, category: &str) -> bool {
     if canonical_str.starts_with(&user_group_containers) {
         // 允许删除整个 Group Container 子目录（App 卸载场景）
         // 或其中的 Caches（缓存清理场景）
-        return canonical_str.contains("/Library/Caches/")
+        // 同容器分支：Group Containers 里的 Caches 目录本身也要放行。
+        return canonical_str.ends_with("/Library/Caches")
+            || canonical_str.contains("/Library/Caches/")
             || is_direct_child(&canonical_str, &user_group_containers);
     }
 
@@ -4262,5 +4287,38 @@ mod tests {
         assert!(is_repeat_cache_dir(Path::new(
             "/Users/u/Library/Containers/com.example.app/Data/Library/Caches/a.bin"
         )));
+    }
+
+    /// 沙盒容器缓存必须通过第 8 层来源准入（回归 QQMusic/Lark/QQLive 显示"受保护"）
+    ///
+    /// 根因：白名单只写了带尾斜杠的 `/Data/Library/Caches/`，扫描项恰好是
+    /// `.../Data/Library/Caches` 目录本身 → 不匹配 → 被判"不在任何已声明扫描根下"
+    /// → post_check 标 undeletable → UI 显示"受保护"，明明可清却清不了。
+    #[test]
+    fn sandbox_container_caches_pass_source_admission() {
+        let home = Path::new("/Users/u");
+        for p in [
+            "/Users/u/Library/Containers/com.tencent.qqmusicmac/Data/Library/Caches",
+            "/Users/u/Library/Containers/com.tencent.qqmusicmac/Data/Library/Application Support/iCache",
+            "/Users/u/Library/Containers/com.bytedance.macos.feishu/Data/Library/Caches",
+            "/Users/u/Library/Containers/com.tencent.tenvideo/Data/Library/Application Support/videoCache",
+            "/Users/u/Library/Group Containers/group.com.x/Library/Caches",
+        ] {
+            assert!(
+                check_whitelist(Path::new(p), home, "QQMusic容器缓存"),
+                "容器缓存应通过来源准入: {p}"
+            );
+        }
+        // 同一容器里的非缓存目录，以及缓存目录的更深层，不得因此被放开
+        for p in [
+            "/Users/u/Library/Containers/com.tencent.qqmusicmac/Data/Library/Application Support/QQMusicMac",
+            "/Users/u/Library/Containers/com.tencent.qqmusicmac/Data/Library/Application Support/iCache/sub/file",
+            "/Users/u/Library/Containers/com.tencent.qqmusicmac/Data/Library/Audio",
+        ] {
+            assert!(
+                !check_whitelist(Path::new(p), home, "QQMusic容器缓存"),
+                "非缓存路径不应被放开: {p}"
+            );
+        }
     }
 }
