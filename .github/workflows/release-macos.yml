@@ -26,8 +26,8 @@ name: Release CLI (signed & notarized)
 
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
+  # 2026-11-13 起 tag 不再自动触发：macOS runner 10 倍计费，签名/公证/发布改在
+  # 本机执行（本机就是 macOS）。打 tag 只用于版本标记，需要走 CI 发布时手动触发。
 
 permissions:
   contents: read

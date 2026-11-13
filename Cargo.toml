@@ -52,7 +52,7 @@ default-members = ["apps/maclean-cli"]
 # 故删掉具体版本号：发行历史以 git tag 为准（`git tag -l`）。
 # scripts/bump-version.sh 同步本节与 [workspace.dependencies]，CI 的
 # version-consistency 校验二者及 Makefile 求值 / homebrew formula tag 一致。
-version = "0.4.4"
+version = "0.4.5"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/jamesfeng2009/maclean"
@@ -78,9 +78,9 @@ libc = "0.2"
 #
 # 现在收敛到这里：bump 只需改 [workspace.package] 和本节（scripts/bump-version.sh
 # 一次改完，CI 里 version-consistency 会校验两处必须相等）。
-maclean-types = { path = "crates/maclean-types", version = "0.4.4" }
-maclean-core = { path = "crates/maclean-core", version = "0.4.4" }
-maclean-cli-contract = { path = "crates/maclean-cli", version = "0.4.4" }
+maclean-types = { path = "crates/maclean-types", version = "0.4.5" }
+maclean-core = { path = "crates/maclean-core", version = "0.4.5" }
+maclean-cli-contract = { path = "crates/maclean-cli", version = "0.4.5" }
 
 # 发布优化（workspace 模式下 [profile.release] 必须在根声明，子包声明会被忽略）
 [profile.release]

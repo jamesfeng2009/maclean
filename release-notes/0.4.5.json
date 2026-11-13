@@ -1,0 +1,16 @@
+{
+  "en": [
+    "Container and VM data protection is now table-driven: Docker, OrbStack, Podman, Colima, Lima and other GUI tools have their data roots protected while installed, with CLI tools verified by binary, process and socket evidence",
+    "Fixed container cache misclassification: caches for QQMusic, QQLive and Lark are no longer marked protected just because QQ is installed",
+    "App cache scanning is split into lightweight segments, so a huge directory timing out no longer silently drops an entire segment",
+    "Incomplete size measurements keep the item with a lower-bound estimate instead of discarding it",
+    "CLI ships as 0.4.5 for version alignment; no command-line behaviour changes"
+  ],
+  "zh": [
+    "容器与虚拟机数据保护改为表驱动：Docker、OrbStack、Podman、Colima、Lima 等 GUI 工具在安装期间数据目录受保护，CLI 工具按可执行文件、进程、socket 三路证据判定",
+    "修复容器缓存误判：QQMusic、QQLive、Lark 的缓存不再因为装了 QQ 就被标成「受保护」",
+    "应用缓存扫描拆成轻量段：某个超大目录超时不会再让整段结果被静默丢弃",
+    "体积统计不完整时保留条目并给出下限值，而不是直接丢弃",
+    "CLI 同步至 0.4.5，仅为版本对齐，命令行行为无变更"
+  ]
+}
