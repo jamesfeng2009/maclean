@@ -4301,6 +4301,10 @@ mod tests {
     /// 根因：白名单只写了带尾斜杠的 `/Data/Library/Caches/`，扫描项恰好是
     /// `.../Data/Library/Caches` 目录本身 → 不匹配 → 被判"不在任何已声明扫描根下"
     /// → post_check 标 undeletable → UI 显示"受保护"，明明可清却清不了。
+    ///
+    /// 只跑 macOS：`is_container_app_support_cache` 在非 macOS 恒 false，
+    /// Linux/Windows runner 上这条断言没有意义（2026-11-13 Linux CI 曾因此红）。
+    #[cfg(target_os = "macos")]
     #[test]
     fn sandbox_container_caches_pass_source_admission() {
         let home = Path::new("/Users/u");
