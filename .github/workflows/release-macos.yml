@@ -188,7 +188,7 @@ jobs:
           cat dist/SHA256SUMS.txt
 
       - name: 上传发布产物
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: maclean-cli-release-${{ env.VERSION }}
           path: |

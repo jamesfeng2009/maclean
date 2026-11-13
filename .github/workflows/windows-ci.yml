@@ -139,7 +139,7 @@ jobs:
           ls -la maclean-windows-x86_64-$VERSION.zip maclean-setup-$VERSION.exe maclean-setup-$VERSION.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: maclean-windows-x86_64
           path: |
