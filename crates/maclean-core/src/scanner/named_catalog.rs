@@ -220,12 +220,40 @@ pub fn scan_installed_app_caches() -> Vec<ScanItem> {
             Recommend::CacheOnly,
         );
 
-        // 3) 4) 容器缓存：只对已解析到 bundle id 的应用定点探测，不深挖
-        let Some(b) = bundle else { continue };
+        // 容器缓存（3/4）已拆成独立轻量段 scan_installed_container_caches()：
+        // 这些目录通常几百 MB、毫秒级可枚举，但旧实现和 /Applications 全量枚举
+        // 挤在同一段里，一旦该段被 45s 段预算截断就整批消失（真机复现：
+        // QQMusic/Lark/QQLive 容器缓存从「智能清理」里凭空不见了）。
+    }
+
+    items
+}
+
+/// 已安装应用的**容器缓存**独立扫描段（轻量、先跑）。
+///
+/// 只做 `~/Library/Containers/<bundle>/Data` 内的两层定点探测（Caches 整目录 +
+/// Application Support 下一层缓存目录名），不枚举 Documents、不深挖。单独成段的意义：
+/// 段预算被重段（微信 53GB 的 im_containers）挤爆时，这批几百 MB 的小目录仍能照常返回。
+pub fn scan_installed_container_caches() -> Vec<ScanItem> {
+    let home = home_dir();
+    let mut items = Vec::new();
+    for app_path in collect_app_paths() {
+        let Some(name) = app_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.trim_end_matches(".app").to_string())
+        else {
+            continue;
+        };
+        if name.is_empty() || name.eq_ignore_ascii_case("Safari") {
+            continue;
+        }
+        let Some(b) = get_bundle_id(&app_path) else {
+            continue;
+        };
         let container = home.join("Library/Containers").join(&b).join("Data");
         scan_container_cache_layer(&mut items, &container, &name);
     }
-
     items
 }
 

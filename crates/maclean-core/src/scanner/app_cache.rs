@@ -85,11 +85,18 @@ type Segment = (&'static str, fn() -> Vec<ScanItem>);
 /// 其余段结果照常合并（部分结果），不再因整扫描器到点而全部归零。段函数都是无捕获
 /// 的 `fn`，可安全跨线程移交。分段结果合并后务必调用 [`finish_items`] 做与
 /// [`AppCacheScanner::scan`] 一致的去重 / 排序。
-pub fn scan_segments() -> [Segment; 7] {
+pub fn scan_segments() -> [Segment; 8] {
     [
         // 语义化命名清理项放最前：与通用扫描（system_caches 等）命中同一路径时，
         // dedup 按「保留首次出现项」规则保住带应用语义名 + 风险等级的条目。
         ("named_app_caches", scan_named_app_caches),
+        // 容器缓存单列一段、紧跟其后：这批目录只有几百 MB、枚举成本极低，而
+        // im_containers 里微信 53GB 的 Documents 会吃满 45s 段预算并把整段丢掉。
+        // 拆开后 QQMusic/Lark/QQLive 这类容器缓存不会随重段一起消失。
+        (
+            "container_caches",
+            super::named_catalog::scan_installed_container_caches,
+        ),
         ("im_containers", scan_containers),
         ("group_containers", scan_group_containers),
         ("app_support_caches", scan_app_support_caches),
@@ -369,6 +376,12 @@ fn scan_lark_caches(items: &mut Vec<ScanItem>) {
     }
 }
 
+/// 命名缓存项是否入列：体积达标即入列；体积未达标但**统计不完整**时也入列
+/// （体积只是至少值，直接丢会让整项从界面上消失）。完整统计的小目录照旧丢弃。
+fn keep_named_cache_item(size: u64, incomplete: bool) -> bool {
+    size >= NAMED_CACHE_MIN || incomplete
+}
+
 /// 定点推送一个命名缓存项：目录存在且体积达标才进列表。
 pub(crate) fn push_named_cache_item(
     items: &mut Vec<ScanItem>,
@@ -380,8 +393,11 @@ pub(crate) fn push_named_cache_item(
     if !dir.is_dir() {
         return;
     }
-    let size = dir_size(dir);
-    if size < NAMED_CACHE_MIN {
+    let (size, incomplete) = crate::scanner::dir_size_impl(dir);
+    // 统计不完整（目录枚举超时）时体积只是「至少」值，可能偏小到低于阈值。
+    // 此时仍要保留条目并标注，否则这一整项会从列表里凭空消失（用户无法知道
+    // 本机还有这块可清理数据）；完整统计的小目录仍按阈值丢弃，避免噪音。
+    if !keep_named_cache_item(size, incomplete) {
         return;
     }
     let path_str = dir.to_string_lossy().to_string();
@@ -392,6 +408,11 @@ pub(crate) fn push_named_cache_item(
     // 预检有界（闸门后代遍历深度 ≤8 / 条目 ≤2 万），只作用于达标的语义项。
     // A-07a：统一闸门。旧实现只判 `Danger`，`Warning` 在这里会被当可删，
     // 而 ops 删除链会跳过 Warning —— 同一路径两个出口结论相反。
+    let description = if incomplete {
+        format!("{description}（本轮统计因磁盘繁忙未完成，体积为至少值，可重新扫描）")
+    } else {
+        description.to_string()
+    };
     let decision = crate::safety::gate_decision(&path_str, category);
     let (deletable, undeletable_reason) = if decision.is_safe() {
         (true, String::new())
@@ -1204,6 +1225,38 @@ pub fn cache_children(path: &PathBuf) -> Vec<CacheChild> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn container_caches_segment_runs_before_heavy_im_segment() {
+        let segs = scan_segments();
+        let names: Vec<&str> = segs.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            vec![
+                "named_app_caches",
+                "container_caches",
+                "im_containers",
+                "group_containers",
+                "app_support_caches",
+                "system_caches",
+                "logs",
+                "browser_caches",
+            ],
+            "容器缓存必须排在微信大目录（im_containers）之前，否则重段一超时就整批消失"
+        );
+    }
+
+    #[test]
+    fn incomplete_size_keeps_item_large_and_small() {
+        // 完整统计：小目录照旧丢弃，避免噪音
+        assert!(!keep_named_cache_item(0, false));
+        assert!(!keep_named_cache_item(NAMED_CACHE_MIN - 1, false));
+        assert!(keep_named_cache_item(NAMED_CACHE_MIN, false));
+        // 统计不完整（枚举超时）：哪怕体积为 0 也保留，界面才看得见「至少值」
+        assert!(keep_named_cache_item(0, true));
+        assert!(keep_named_cache_item(1, true));
+    }
+
     use super::*;
     use crate::scanner::Recommend;
 
