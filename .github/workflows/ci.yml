@@ -4,11 +4,11 @@ name: CI
 # Windows 构建与测试仍由 windows-ci.yml 的原生 runner 负责
 # （macOS 本机不做 MSVC 交叉编译：ring 的 C 构建需要 MSVC SDK）
 
+# 2026-11-13 起**不再按 push 触发**：账号 Actions 额度按 2000 分钟/月计，
+# macOS runner 按 10 倍计费，日常 main 提交跑一遍就要烧掉几十分钟额度。
+# 质量门禁改为「发版前手动跑」+ tag 发版流水线自动跑：
+#   gh workflow run ci.yml -R jamesfeng2009/maclean
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 env:

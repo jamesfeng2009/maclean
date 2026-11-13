@@ -1,11 +1,10 @@
 name: Windows Build CI
 
+# 2026-11-13 起不再按 push 触发（Windows runner 按 2 倍计费）：
+# 只在发版 tag 或手动触发时跑，避免日常提交烧额度。
 on:
   push:
-    branches: [main, master]
     tags: ["v*"]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
