@@ -249,17 +249,30 @@ fn scan_large_files(threshold: u64) -> ScanResult {
                 .unwrap_or("unknown")
                 .to_string();
             let category = file_category(&name);
+            let path_str = path.to_string_lossy().to_string();
+            // L3 兜底：未登记的虚拟机 / 容器数据（如 ~/Nodes、*.pvm）不猜归属，
+            // 也不剥夺删除资格，只把等级抬到 Caution 并写明风险，让用户自己决定。
+            let vm_hint = crate::container_tools::vm_like_hint(&path_str);
+            let recommend = if vm_hint.is_some() {
+                Recommend::Caution
+            } else {
+                Recommend::Advanced
+            };
+            let description = match vm_hint {
+                Some(hint) => format!("{hint} · {category}文件 · {}", format_size(size)),
+                None => format!("{category}文件 · {}", format_size(size)),
+            };
             ScanItem {
                 batch_mtimes: vec![],
-                path: path.to_string_lossy().to_string(),
+                path: path_str,
                 size_bytes: size,
                 category: category.to_string(),
                 selected: false,
                 deletable: true,
                 undeletable_reason: String::new(),
                 batch_paths: Vec::new(),
-                recommend: Recommend::Advanced,
-                description: format!("{category}文件 · {}", format_size(size)),
+                recommend,
+                description,
             }
         })
         .collect();
