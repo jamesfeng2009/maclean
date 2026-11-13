@@ -575,12 +575,17 @@ mod tests {
         std::fs::write(dir.join("dead.pid"), b"999999").unwrap();
         assert!(!runtime_evidence(&dir), "死 pid 不算在用");
 
-        std::fs::write(
-            dir.join("instance").join("live.pid"),
-            std::process::id().to_string(),
-        )
-        .unwrap();
-        assert!(runtime_evidence(&dir), "存活 pid 算在用（并验证下探一层）");
+        // 存活 pid 依赖 kill(pid, 0)：只有 unix 有这条路，Windows 上
+        // pid_alive 恒 false（保守方向由 socket 兜住）。
+        #[cfg(unix)]
+        {
+            std::fs::write(
+                dir.join("instance").join("live.pid"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
+            assert!(runtime_evidence(&dir), "存活 pid 算在用（并验证下探一层）");
+        }
 
         std::fs::write(dir.join("serial.sock"), b"").unwrap();
         let _ = std::fs::remove_dir_all(dir.join("instance"));
