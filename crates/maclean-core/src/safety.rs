@@ -1466,95 +1466,19 @@ fn is_windows_critical_path(path: &str) -> bool {
 /// 参考 Mole 的 _mole_is_critical_deletion_path，包含 50+ 保护路径
 ///
 /// 跨平台：POSIX 黑名单（macOS/Linux）之外，先过一遍 Windows 黑名单。
-/// 容器数据目录判定（Docker Desktop / OrbStack）。
 ///
-/// Docker Desktop 的镜像层/容器/卷在 `~/Library/Containers/com.docker.docker/
-/// Data` 下，OrbStack 在 `~/.orbstack` 与
-/// `~/Library/Group Containers/HUAQ24HBR6.dev.orbstack` 下 —— 都是数据库
-/// 结构，直接删文件 = 破坏镜像元数据（9-30 事故）。任何类目任何入口一律
-/// Danger，只允许通过官方 CLI（docker prune / orbctl delete）清理。
-/// 与删除端同源：precheck_deletability 扫描期即标不可删。
+/// 容器 / 虚拟机数据目录的红线在 `container_tools::redline_hit`：
+/// 表驱动登记（Docker / OrbStack / Parallels / VMware / VirtualBox / UTM /
+/// Rancher），**只在对应 App 仍安装时成立**。这些目录是镜像库或虚拟机磁盘包，
 ///
-/// 2026-11-13 收敛：这层红线**只在容器 App 仍安装时成立**。App 已卸载
-/// （≈ 用户不会再用它，目录里也没有进程持有）时，整目录是孤儿残留，
-/// 放行给上层按普通"注意"项处理；具体判定见 `is_container_data_path_with`。
+/// 直接删文件 = 破坏元数据（9-30 事故），App 还在用时只能走官方通道清理；
+/// 而 App 已经卸载时，目录里没有进程持有，整目录只是孤儿残留，放行给上层
+/// 按普通"注意"项处理。
 ///
-/// 与删除端同源：precheck_deletability 扫描期即标不可删。
+/// 与删除端同源：precheck_deletability 扫描期即按同一判定标不可删。
 pub(crate) fn is_container_data_path(path: &Path) -> bool {
-    is_container_data_path_with(
-        path,
-        container_app_installed(ContainerApp::Docker),
-        container_app_installed(ContainerApp::OrbStack),
-    )
-}
-
-/// 容器 App 类型：决定「容器数据目录」这层红线对谁生效。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ContainerApp {
-    Docker,
-    OrbStack,
-}
-
-/// 容器 App 是否仍安装在本机（`/Applications` 与 `~/Applications` 下是否有 .app）。
-///
-/// 只看文件系统真相：单次 stat，不枚举 bundle、不碰 Spotlight、不需要
-/// 自动化授权。home 走 passwd 库（与 `protected_homes` 同源），不采信
-/// 可被 `$HOME` 改写的 `dirs::home_dir()`。
-///
-/// # 保守义务
-/// 任何一步拿不到 home 候选就按**已安装**返回。方向永远是「保护」：
-/// 一次异常不能把仍在使用的容器数据判成孤儿。
-pub(crate) fn container_app_installed(app: ContainerApp) -> bool {
-    let bundle = match app {
-        ContainerApp::Docker => "Docker.app",
-        ContainerApp::OrbStack => "OrbStack.app",
-    };
-    if Path::new("/Applications").join(bundle).is_dir() {
-        return true;
-    }
-    // 平台分支与 protected_homes 同源：unix 走 passwd 库，Windows 走注册表，
-    // 都不采信进程内可改写的 $HOME / %USERPROFILE%。容器数据目录目前只在
-    // macOS 有意义，但这段代码要能在 Windows 上编译通过。
-    #[cfg(unix)]
-    let home = real_home_dir();
-    #[cfg(target_os = "windows")]
-    let home = real_home_dir_windows();
-    #[cfg(not(any(unix, target_os = "windows")))]
-    let home: Option<PathBuf> = None;
-    match home {
-        Some(h) => h.join("Applications").join(bundle).is_dir(),
-        // home 读不到 → 无法判定 → 保守按"仍安装"
-        None => true,
-    }
-}
-
-/// 纯判定（安装状态由调用方注入，便于单测覆盖两种分支）
-///
-/// 关键点：**已卸载的容器数据不是红线**。Docker/OrbStack 都卸了，那份
-/// 目录里没有任何进程在用，"删文件破坏镜像元数据"的前提已经不成立；
-/// 继续按路径硬拦只会把几十 GB 孤儿数据锁死在磁盘上，还让 UI 显示
-/// 「请走 docker system prune / orbctl」——而那条命令根本不存在了。
-fn is_container_data_path_with(
-    path: &Path,
-    docker_installed: bool,
-    orbstack_installed: bool,
-) -> bool {
-    let p = path.to_string_lossy();
-    for h in protected_homes() {
-        let h = h.to_string_lossy();
-        if p.starts_with(&format!("{}/Library/Containers/com.docker.docker/Data", h)) {
-            return docker_installed;
-        }
-        if p.starts_with(&format!("{}/.orbstack", h))
-            || p.starts_with(&format!(
-                "{}/Library/Group Containers/HUAQ24HBR6.dev.orbstack",
-                h
-            ))
-        {
-            return orbstack_installed;
-        }
-    }
-    false
+    let homes = protected_homes();
+    crate::container_tools::redline_hit(&path.to_string_lossy(), &homes)
 }
 
 pub(crate) fn is_critical_system_path(path: &str) -> bool {
@@ -2559,61 +2483,6 @@ mod tests {
                 r
             );
         }
-    }
-
-    /// 容器数据路径在「App 仍安装」时必须是红线。
-    ///
-    /// 用纯判定 + 注入安装状态，保证在完全没装 Docker 的 CI 机器上
-    /// 也测的是规则本身，而不是这台机器的运气。
-    #[test]
-    fn container_data_blocked_while_app_installed() {
-        let home = test_home_str();
-        for p in [
-            format!(
-                "{}/Library/Containers/com.docker.docker/Data/vms/0/docker.raw",
-                home
-            ),
-            format!("{}/Library/Containers/com.docker.docker/Data/cache", home),
-            format!("{}/.orbstack/vm/0.img", home),
-            format!(
-                "{}/Library/Group Containers/HUAQ24HBR6.dev.orbstack/config.json",
-                home
-            ),
-        ] {
-            assert!(
-                is_container_data_path_with(Path::new(&p), true, true),
-                "容器数据目录在 App 仍安装时必须拦截: {}",
-                p
-            );
-        }
-    }
-
-    /// App 已卸载 → 同一份目录是孤儿残留，不能再按路径硬拦。
-    #[test]
-    fn container_data_allowed_after_app_uninstalled() {
-        let home = test_home_str();
-        let docker_only = format!(
-            "{}/Library/Containers/com.docker.docker/Data/vms/0/docker.raw",
-            home
-        );
-        assert!(
-            !is_container_data_path_with(Path::new(&docker_only), false, true),
-            "Docker 已卸载，其数据不应再被红线拦截"
-        );
-        let orb = format!("{}/.orbstack/vm/0.img", home);
-        assert!(
-            !is_container_data_path_with(Path::new(&orb), true, false),
-            "OrbStack 已卸载，其数据不应再被红线拦截"
-        );
-        // 两个都没装：都放行
-        assert!(!is_container_data_path_with(
-            Path::new(&docker_only),
-            false,
-            false
-        ));
-        assert!(!is_container_data_path_with(Path::new(&orb), false, false));
-        // 交叉污染：Docker 卸载不影响 OrbStack 的拦截
-        assert!(is_container_data_path_with(Path::new(&orb), false, true));
     }
 
     #[test]

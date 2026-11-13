@@ -14,6 +14,7 @@ pub mod app_protection;
 pub mod atomic_write;
 pub mod backup;
 pub mod config;
+pub(crate) mod container_tools;
 pub mod design_tokens;
 pub mod gc;
 pub mod i18n;
