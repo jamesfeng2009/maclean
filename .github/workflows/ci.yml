@@ -8,6 +8,10 @@ name: CI
 # macOS runner 按 10 倍计费，日常 main 提交跑一遍就要烧掉几十分钟额度。
 # 质量门禁改为「发版前手动跑」+ tag 发版流水线自动跑：
 #   gh workflow run ci.yml -R jamesfeng2009/maclean
+# 2026-11-13：macOS 质量门禁（fmt/clippy/test）与 macOS release build 已从
+# 远端 CI 移除——本机就是 macOS，跑同一套命令即可，macOS runner 按 10 倍
+# 计费不划算。本地门禁统一入口：scripts/preflight.sh（发版前必跑）。
+# 留在远端的是本机跑不了的部分：Linux 原生编译/测试、版本号一致、安全审计。
 on:
   workflow_dispatch:
 
@@ -15,41 +19,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  quality:
-    name: fmt · clippy · test (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain (pinned 1.99.1)
-        uses: dtolnay/rust-toolchain@1.99.1
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-quality-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-quality-
-
-      - name: 代码格式检查
-        run: cargo fmt --all -- --check
-
-      - name: Clippy 静态检查
-        # 2026-09-18 起阻塞：7 个 static mut 已迁入 GuiState，102 条存量告警
-        # 已清零（含删除 aewp.rs 等整块死代码）。现在 `-D warnings` 能过，
-        # 门禁应当真正生效 —— 否则新告警会一直被静默放行。
-        # H-04：必须 --workspace —— default-members 仅 apps/maclean-cli，漏掉它
-        # 3 个库 crate 就完全不 lint；本机 --workspace --all-targets 已验证干净。
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: 单元测试（workspace = 3 个库 crate + CLI）
-        run: cargo test --workspace
-
   # CORE-06 后续：此前 ci.yml 的两个 ubuntu job（version-consistency / security）
   # 全是 shell 脚本与 cargo audit/deny，没有一个跑 Rust 编译或测试 ——
   # #[cfg(not(any(macos, windows)))] 分支在 CI 上长期 0 编译 0 测试，
@@ -94,35 +63,6 @@ jobs:
       # 环境，只做过 --all-targets 的交叉 clippy，不冒充已验证运行时行为。
       - name: 单元测试（workspace）
         run: cargo test --target x86_64-unknown-linux-gnu --workspace --no-fail-fast
-
-  macos-build:
-    name: macOS release build
-    runs-on: macos-latest
-    needs: quality
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain (pinned 1.99.1)
-        uses: dtolnay/rust-toolchain@1.99.1
-
-      - name: Cache cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-macos-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-macos-
-
-      - name: 构建 release
-        run: cargo build --release
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v5
-        with:
-          name: maclean-macos-${{ runner.arch }}
-          path: target/release/maclean
 
   version-consistency:
     name: 版本号一致性
