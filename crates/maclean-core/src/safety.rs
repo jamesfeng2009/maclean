@@ -1512,7 +1512,16 @@ pub(crate) fn container_app_installed(app: ContainerApp) -> bool {
     if Path::new("/Applications").join(bundle).is_dir() {
         return true;
     }
-    match real_home_dir() {
+    // 平台分支与 protected_homes 同源：unix 走 passwd 库，Windows 走注册表，
+    // 都不采信进程内可改写的 $HOME / %USERPROFILE%。容器数据目录目前只在
+    // macOS 有意义，但这段代码要能在 Windows 上编译通过。
+    #[cfg(unix)]
+    let home = real_home_dir();
+    #[cfg(target_os = "windows")]
+    let home = real_home_dir_windows();
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let home: Option<PathBuf> = None;
+    match home {
         Some(h) => h.join("Applications").join(bundle).is_dir(),
         // home 读不到 → 无法判定 → 保守按"仍安装"
         None => true,
