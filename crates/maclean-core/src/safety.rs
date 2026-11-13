@@ -1147,6 +1147,7 @@ pub fn check_path_safety_with_category(path: &str, category: &str) -> SafetyChec
 ///
 /// 只放行**一层**缓存目录（如 iCache / videoCache / Cache），更深层不放：
 /// 扫描器只按一层产出项，闸门跟着同一口径，避免把删除面扩大到任意深层文件。
+#[cfg(target_os = "macos")]
 fn is_container_app_support_cache(canonical_str: &str) -> bool {
     const MARK: &str = "/Data/Library/Application Support/";
     let Some(idx) = canonical_str.rfind(MARK) else {
@@ -1157,6 +1158,12 @@ fn is_container_app_support_cache(canonical_str: &str) -> bool {
         return false;
     }
     crate::scanner::app_cache::is_cache_dir_name(rest)
+}
+
+/// 非 macOS 平台没有沙盒容器，恒 false（保持编译与行为一致）
+#[cfg(not(target_os = "macos"))]
+fn is_container_app_support_cache(_canonical_str: &str) -> bool {
+    false
 }
 
 /// 第 6 层：敏感文件名检测（纯函数）
