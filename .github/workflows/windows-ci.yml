@@ -12,7 +12,7 @@ jobs:
     name: Windows cargo check
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
@@ -51,7 +51,7 @@ jobs:
     runs-on: windows-latest
     needs: windows-check
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1

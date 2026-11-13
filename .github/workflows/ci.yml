@@ -28,7 +28,7 @@ jobs:
     name: check · clippy · test (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1
@@ -68,7 +68,7 @@ jobs:
     name: 版本号一致性
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: 校验版本号来源唯一（workspace.package）
         run: |
@@ -181,7 +181,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (pinned 1.99.1)
         uses: dtolnay/rust-toolchain@1.99.1

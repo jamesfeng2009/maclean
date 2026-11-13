@@ -47,7 +47,7 @@ jobs:
     name: Update homebrew-maclean Formula
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: 读取目标版本
         id: version
