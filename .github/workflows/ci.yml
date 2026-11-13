@@ -271,7 +271,7 @@ jobs:
       # H-06 / G-4：PR 依赖变更评审，新增有漏洞/受限许可依赖即阻塞（仅 PR 有 diff）
       - name: Dependency review（PR 依赖变更评审）
         if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: low
 
